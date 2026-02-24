@@ -1,0 +1,28 @@
+[Unit]
+Description=Dextrabot Polymarket Bot (paper/live)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dextrabot
+Group=dextrabot
+WorkingDirectory=/home/heathcliff/polymarketbot
+EnvironmentFile=/etc/dextrabot/dextrabot.env
+ExecStart=/home/heathcliff/polymarketbot/target/release/bot-runner
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,105 @@
+# Dextrabot Polymarket Bot (Phase-2 Paper Runtime)
+
+Rust-based paper-trading runtime for BTC 5m Up/Down workflow.
+
+## Prerequisites (Local Server, No Docker)
+- Rust (cargo)
+- PostgreSQL + psql client
+- Redis server
+- systemd
+
+## Quick Start (No Docker)
+```bash
+cd /home/heathcliff/polymarketbot
+DB_APP_PASSWORD='strong-password' ./scripts/setup_server.sh
+```
+
+## Manual Setup (Step-by-Step)
+
+### 1) Install Services (Ubuntu)
+```bash
+./scripts/bootstrap_server_services.sh
+```
+
+### 2) Bootstrap Database/User
+```bash
+DB_APP_PASSWORD='strong-password' ./scripts/bootstrap_db.sh
+```
+
+### 3) Apply Migrations
+```bash
+export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
+./scripts/apply_migrations.sh
+```
+
+### 4) Run (Paper or Live-Dry)
+```bash
+export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
+export BOT_CONFIG_DIR=./config
+cargo run -p bot-runner
+```
+
+### 5) Run as systemd service
+```bash
+cargo build --release -p bot-runner
+sudo useradd --system --create-home --shell /usr/sbin/nologin dextrabot || true
+sudo mkdir -p /etc/dextrabot
+sudo cp deploy/systemd/dextrabot.env.example /etc/dextrabot/dextrabot.env
+sudo cp deploy/systemd/dextrabot.service /etc/systemd/system/dextrabot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now dextrabot
+sudo systemctl status dextrabot --no-pager -l
+```
+
+## Health Check
+```bash
+export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
+./scripts/check_health.sh
+```
+
+## Notes
+- Runtime supports `paper` and `live` mode.
+- `live` mode defaults to safe behavior. Real order placement requires `LIVE_TRADING_ENABLED=true`.
+- `exchange.toml` is required for Gamma/CLOB URLs and encrypted credentials (`api_address`, `api_key`, `api_secret`, `api_passphrase` as `enc:v1:`).
+- Runtime'da `CONFIG_ENCRYPTION_KEY` zorunludur; frontend ile aynı key kullanılmalıdır.
+- Architecture and rollout docs are under `mimari/`.
+- Docker compose file is kept for optional dev-only usage.
+
+## Live Mode
+```bash
+export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
+export BOT_CONFIG_DIR=./config
+export CONFIG_ENCRYPTION_KEY='BASE64_32_BYTE_KEY'
+export LIVE_TRADING_ENABLED=true
+# Optional auto-claim
+export POLYMARKET_ADDRESS='0xYOUR_POLYMARKET_ADDRESS'
+export CLAIMER_PRIVATE_KEY='0xYOUR_PRIVATE_KEY'
+export CLAIM_RPC_URL='https://polygon-rpc.com'
+cargo run -p bot-runner
+```
+
+If `LIVE_TRADING_ENABLED` is not set to `true`, bot works in live-data/dry-order flow.
+
+## Go/No-Go Gate
+```bash
+export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
+./scripts/go_no_go.sh
+```
+
+## First Live Run (Strict)
+1. Gate geç:
+```bash
+export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
+./scripts/go_no_go.sh
+```
+2. Env hazırla:
+```bash
+export BOT_CONFIG_DIR=./config
+export CONFIG_ENCRYPTION_KEY='BASE64_32_BYTE_KEY'
+export LIVE_TRADING_ENABLED=true
+```
+Credentials değerlerini UI'da `Settings -> Exchange` bölümünden gir; dosyada otomatik şifreli saklanır.
+3. Çalıştır:
+```bash
+cargo run -p bot-runner
+```

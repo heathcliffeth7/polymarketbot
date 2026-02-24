@@ -1,0 +1,7 @@
+mode = "live"
+market_scope = "btc_15m_updown"
+market_scopes = ["btc_5m_updown", "btc_15m_updown"]
+loop_interval_ms = 1000
+market_discovery_retry_interval_ms = 5000
+market_discovery_timeout_sec = 0
+market_selection = "latest_by_slug"

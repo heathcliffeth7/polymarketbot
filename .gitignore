@@ -1,0 +1,28 @@
+# Secrets & credentials
+config/exchange.toml
+config/claim.toml
+frontend/.env.local
+.env
+.env.local
+/deploy/systemd/dextrabot.env
+
+# Build artifacts
+/target/
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+frontend/out/
+
+# Runtime
+*.pid
+dev.pid
+
+# Backups
+*.bak.*
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo

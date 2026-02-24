@@ -1,0 +1,24 @@
+gamma_base_url = "https://gamma-api.polymarket.com"
+clob_base_url = "https://clob.polymarket.com"
+clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/"
+chain_id = 137
+api_address = "0xYOUR_API_ADDRESS"
+api_key = "your-api-key-here"
+api_secret = "your-api-secret-here"
+api_passphrase = "your-api-passphrase-here"
+api_address_env = "PM_POLY_ADDRESS"
+api_key_env = "PM_API_KEY"
+api_secret_env = "PM_API_SECRET"
+api_passphrase_env = "PM_API_PASSPHRASE"
+
+# CTF Exchange contract address (EIP-712 domain):
+# Regular markets (negRisk=false): 0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E  <- btc-updown
+# Neg-risk markets (negRisk=true):  0xC5d563A36AE78145C45a50134d48A1215220f80a
+ctf_exchange_address = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+
+signer_private_key = "0xYOUR_PRIVATE_KEY_HERE"
+signer_private_key_env = "PM_SIGNER_PRIVATE_KEY"
+
+# Gnosis Safe proxy wallet (maker=proxy, signer=EOA, signatureType=2)
+gnosis_safe_address = "0xYOUR_GNOSIS_SAFE_ADDRESS"
+gnosis_safe_address_env = "PM_GNOSIS_SAFE_ADDRESS"

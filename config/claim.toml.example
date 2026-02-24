@@ -1,0 +1,21 @@
+enabled = true
+
+rpc_url = "https://polygon-rpc.com"
+rpc_url_env = "CLAIM_RPC_URL"
+data_api_base_url = "https://data-api.polymarket.com"
+
+user_address = "0xYOUR_USER_ADDRESS"
+user_address_env = "POLYMARKET_ADDRESS"
+private_key = "0xYOUR_PRIVATE_KEY_HERE"
+private_key_env = "CLAIMER_PRIVATE_KEY"
+
+chain_id = 137
+ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+collateral_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+
+discovery_interval_sec = 30
+positions_page_size = 200
+positions_max_pages = 5
+process_batch_size = 10
+max_attempts = 5
+retry_backoff_ms = 10000
