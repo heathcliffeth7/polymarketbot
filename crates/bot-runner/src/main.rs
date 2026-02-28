@@ -4444,7 +4444,7 @@ async fn execute_trigger_market_price(
                 (Some("cross_below"), Some(tp)) => previous_price
                     .map(|prev| prev > tp && cur <= tp)
                     .unwrap_or(cur <= tp),
-                _ => true,
+                _ => false,
             }
         };
         set_flow_node_state(context, &node.key, "previous_price", json!(cur));
