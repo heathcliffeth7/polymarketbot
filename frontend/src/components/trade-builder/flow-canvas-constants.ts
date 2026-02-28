@@ -77,6 +77,7 @@ export const NODE_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'action.update_order', label: 'Aksiyon: Emir Guncelle' },
   { value: 'action.set_state', label: 'Aksiyon: Durum Guncelle' },
   { value: 'action.notify', label: 'Aksiyon: Bildirim' },
+  { value: 'action.telegram_notify', label: 'Aksiyon: Telegram Bildirim' },
 ];
 
 export const EDGE_TYPE_OPTIONS: Array<{ value: string; label: string }> = [

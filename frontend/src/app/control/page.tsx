@@ -3,7 +3,7 @@
 import { PageShell } from '@/components/layout/page-shell';
 import { BotControlPanel } from '@/components/control/bot-control-panel';
 import { ModeSwitch } from '@/components/control/mode-switch';
-import { KillSwitchToggle } from '@/components/risk/kill-switch-toggle';
+import { KillSwitchToggle } from '@/components/control/kill-switch-toggle';
 
 export default function ControlPage() {
   return (

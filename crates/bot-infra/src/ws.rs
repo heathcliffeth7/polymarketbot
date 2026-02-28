@@ -2,7 +2,7 @@ use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -53,6 +53,15 @@ impl ClobWsClient {
     }
 
     pub async fn subscribe_once(&self, channel: WsChannel, ids: &[String]) -> Result<Vec<WsEvent>> {
+        // Overall timeout: 30s max per attempt to prevent indefinite blocking
+        let overall_timeout = Duration::from_secs(30);
+        match timeout(overall_timeout, self.subscribe_once_inner(channel, ids)).await {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!("WS subscribe_once overall timeout (30s)")),
+        }
+    }
+
+    async fn subscribe_once_inner(&self, channel: WsChannel, ids: &[String]) -> Result<Vec<WsEvent>> {
         let sub_msg = match channel {
             WsChannel::Market => json!({
                 "type": "market",
@@ -66,6 +75,7 @@ impl ClobWsClient {
             }),
         };
         let connect_url = resolve_ws_channel_url(&self.ws_url, channel);
+        let msg_timeout = Duration::from_secs(5);
 
         for attempt in 0..=self.max_retries {
             let (mut socket, _) = match connect_async(&connect_url).await {
@@ -85,15 +95,14 @@ impl ClobWsClient {
 
             let mut out = Vec::new();
             for _ in 0..8 {
-                if let Some(msg) = socket.next().await {
-                    let msg = msg?;
-                    if let Message::Text(text) = msg {
+                match timeout(msg_timeout, socket.next()).await {
+                    Ok(Some(Ok(Message::Text(text)))) => {
                         if let Ok(v) = serde_json::from_str::<Value>(&text) {
                             out.push(decode_event(channel, v));
                         }
                     }
-                } else {
-                    break;
+                    Ok(Some(Ok(_))) => {} // non-text message, skip
+                    _ => break, // error, stream ended, or timeout
                 }
             }
 

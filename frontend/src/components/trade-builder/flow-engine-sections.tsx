@@ -1,22 +1,16 @@
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   createEmptyKeyValueDraft,
-  safeJsonStringify,
   type ContextFormState,
   type PrimitiveValueType,
 } from '@/lib/trade-flow-config-mappers';
 import type {
   TradeFlowDefinition,
-  TradeFlowEvent,
   TradeFlowGraph,
-  TradeFlowRun,
   TradeFlowValidationResult,
-  TradeFlowVersion,
 } from '@/lib/types';
-import { formatDateTime, formatRunStatus } from './flow-engine-utils';
 
 type BusyAction = 'create' | 'save' | 'validate' | 'publish' | 'archive' | null;
 type TemplateKind = 'starter' | 'sell_buy_if' | 'dca' | 'sl_tp' | 'position_monitor' | 'multi_leg_hedge';
@@ -172,90 +166,6 @@ export function FlowContextEditor({
   );
 }
 
-interface FlowVersionsCardProps {
-  versions: TradeFlowVersion[];
-  versionsLoading: boolean;
-}
-
-export function FlowVersionsCard({ versions, versionsLoading }: FlowVersionsCardProps) {
-  return (
-    <Card className="border-zinc-800 bg-zinc-950/40">
-      <CardHeader>
-        <CardTitle className="text-xs text-zinc-400">Versiyonlar</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {versionsLoading ? (
-          <p className="text-xs text-zinc-500">Versiyonlar yukleniyor...</p>
-        ) : versions.length === 0 ? (
-          <p className="text-xs text-zinc-500">Versiyon yok.</p>
-        ) : (
-          <div className="space-y-2">
-            {versions.map((version) => (
-              <div key={version.id} className="rounded-md border border-zinc-800 bg-zinc-900/60 p-2 text-xs text-zinc-300">
-                <p>v{version.version_no} | {version.status}</p>
-                <p className="text-zinc-500">
-                  created: {formatDateTime(version.created_at)} | published: {formatDateTime(version.published_at)}
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-interface FlowRunEventsCardProps {
-  runs: TradeFlowRun[];
-  runEvents: TradeFlowEvent[];
-  selectedRunId: number | null;
-  onSelectedRunChange: (id: number) => void;
-}
-
-export function FlowRunEventsCard({ runs, runEvents, selectedRunId, onSelectedRunChange }: FlowRunEventsCardProps) {
-  return (
-    <Card className="border-zinc-800 bg-zinc-950/40">
-      <CardHeader>
-        <CardTitle className="text-xs text-zinc-400">Run ve Olaylar</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {runs.length === 0 ? (
-          <p className="text-xs text-zinc-500">Henuz run yok.</p>
-        ) : (
-          <>
-            <select
-              value={selectedRunId ?? ''}
-              onChange={(e) => onSelectedRunChange(Number(e.target.value))}
-              className="h-8 w-full rounded-md border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200"
-            >
-              {runs.map((run) => (
-                <option key={run.id} value={run.id}>
-                  Run #{run.id} | {formatRunStatus(run.status)} | {formatDateTime(run.created_at)}
-                </option>
-              ))}
-            </select>
-            <div className="max-h-64 space-y-2 overflow-auto">
-              {runEvents.length === 0 ? (
-                <p className="text-xs text-zinc-500">Secili run icin olay yok.</p>
-              ) : (
-                runEvents.map((event) => (
-                  <div key={event.id} className="rounded-md border border-zinc-800 bg-zinc-900/60 p-2 text-xs text-zinc-300">
-                    <p>{event.event_type}</p>
-                    <p className="text-zinc-500">{formatDateTime(event.created_at)}</p>
-                    <pre className="mt-1 max-h-28 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-1 text-[10px] text-zinc-400">
-                      {safeJsonStringify(event.payload_json)}
-                    </pre>
-                  </div>
-                ))
-              )}
-            </div>
-          </>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
 interface FlowSummaryBarProps {
   graph: TradeFlowGraph;
   validation: TradeFlowValidationResult | null;
@@ -317,6 +227,16 @@ interface CreateFlowSlotProps {
   onValidate?: () => void;
   onPublish?: () => void;
   onArchiveFlow?: () => void;
+  botActive?: boolean;
+  botControlAvailable?: boolean;
+  onStopBot?: () => void;
+  stoppingBot?: boolean;
+  selectedDefinitionIds?: Set<number>;
+  onToggleDefinitionSelection?: (id: number) => void;
+  onSelectAllDefinitions?: () => void;
+  onDeselectAllDefinitions?: () => void;
+  onBulkArchive?: () => void;
+  bulkArchiving?: boolean;
 }
 
 export function CreateFlowSlot({
@@ -328,6 +248,8 @@ export function CreateFlowSlot({
   onSelectDefinition, onArchiveFromList,
   showWorkflowActions = false, workflowActionsDisabled = false,
   onSaveDraft, onValidate, onPublish, onArchiveFlow,
+  botActive, botControlAvailable, onStopBot, stoppingBot,
+  selectedDefinitionIds, onToggleDefinitionSelection, onSelectAllDefinitions, onDeselectAllDefinitions, onBulkArchive, bulkArchiving,
 }: CreateFlowSlotProps) {
   return (
     <div className="space-y-2 overflow-hidden rounded-md border border-slate-200 bg-white p-2">
@@ -374,6 +296,18 @@ export function CreateFlowSlot({
             >
               Sil (Arsivle)
             </Button>
+            {onStopBot && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className={`h-8 w-full ${botActive ? 'border-orange-300 text-orange-600 hover:bg-orange-50' : 'border-green-300 text-green-600'}`}
+                disabled={workflowActionsDisabled || stoppingBot || !botControlAvailable || !botActive}
+                onClick={onStopBot}
+              >
+                {stoppingBot ? 'Durduruluyor...' : botActive ? 'Botu Durdur' : 'Bot Durmus'}
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -403,6 +337,26 @@ export function CreateFlowSlot({
       {isWorkflowListOpen && (
         <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-2">
           <Input value={workflowListQuery} onChange={(e) => onWorkflowListQueryChange(e.target.value)} placeholder="Workflow ara..." className="h-8 border-slate-300 bg-white text-xs text-slate-900" />
+          {filteredDefinitions.length > 0 && selectedDefinitionIds && onSelectAllDefinitions && onDeselectAllDefinitions && (
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1 text-[10px] text-slate-600 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  className="accent-red-500"
+                  checked={filteredDefinitions.length > 0 && filteredDefinitions.every((d) => selectedDefinitionIds.has(d.id))}
+                  onChange={(e) => { if (e.target.checked) onSelectAllDefinitions(); else onDeselectAllDefinitions(); }}
+                />
+                Tumunu Sec
+              </label>
+              {selectedDefinitionIds.size > 0 && onBulkArchive && (
+                <Button type="button" size="sm" variant="outline"
+                  className="h-6 border-red-300 px-2 text-[10px] text-red-600 hover:bg-red-50"
+                  disabled={bulkArchiving} onClick={onBulkArchive}>
+                  {bulkArchiving ? 'Siliniyor...' : `Secilenleri Sil (${selectedDefinitionIds.size})`}
+                </Button>
+              )}
+            </div>
+          )}
           <div className="max-h-48 space-y-1 overflow-auto pr-1">
             {definitionsLoading ? (
               <p className="text-[11px] text-slate-500">Workflow listesi yukleniyor...</p>
@@ -411,6 +365,14 @@ export function CreateFlowSlot({
             ) : (
               filteredDefinitions.map((def) => (
                 <div key={def.id} className="flex items-stretch gap-1">
+                  {onToggleDefinitionSelection && selectedDefinitionIds && (
+                    <input
+                      type="checkbox"
+                      className="mt-2 accent-red-500"
+                      checked={selectedDefinitionIds.has(def.id)}
+                      onChange={() => onToggleDefinitionSelection(def.id)}
+                    />
+                  )}
                   <button type="button" onClick={() => onSelectDefinition(def.id)}
                     className={`min-w-0 flex-1 rounded-md border px-2 py-1.5 text-left ${selectedDefinitionId === def.id ? 'border-sky-300 bg-sky-100' : 'border-slate-300 bg-white hover:bg-slate-100'}`}>
                     <p className="truncate text-[11px] font-medium text-slate-800">#{def.id} - {def.name}</p>

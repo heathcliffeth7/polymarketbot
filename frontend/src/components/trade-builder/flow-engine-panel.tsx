@@ -15,11 +15,9 @@ import {
   useTradeFlowDefinitionDetail,
   useTradeFlowDefinitions,
   useTradeFlowOpenPositions,
-  useTradeFlowRunEvents,
-  useTradeFlowRuns,
-  useTradeFlowVersions,
   validateTradeFlowDefinition,
 } from '@/hooks/use-trade-flow';
+import { useBotStatus } from '@/hooks/use-bot-status';
 import { formatClientRequestError } from '@/lib/http-client';
 import {
   buildContextFromForm,
@@ -48,9 +46,7 @@ import {
 import {
   CreateFlowSlot,
   FlowContextEditor,
-  FlowRunEventsCard,
   FlowSummaryBar,
-  FlowVersionsCard,
 } from './flow-engine-sections';
 
 type BusyAction = 'create' | 'save' | 'validate' | 'publish' | 'archive' | null;
@@ -91,17 +87,18 @@ function normalizeDualDcaTimeframe(config: Record<string, unknown>): '5m' | '15m
 interface FlowEnginePanelProps {
   defaultMarketSlug: string | null;
   defaultOutcome: { token_id: string; label: string } | null;
-  externalSelectDefinitionId?: number | null;
-  externalCreatedDefinition?: TradeFlowDefinition | null;
 }
 
 export function FlowEnginePanel({
   defaultMarketSlug,
   defaultOutcome,
-  externalSelectDefinitionId = null,
-  externalCreatedDefinition = null,
 }: FlowEnginePanelProps) {
-  const [selectedDefinitionId, setSelectedDefinitionId] = useState<number | null>(null);
+  const [selectedDefinitionId, setSelectedDefinitionId] = useState<number | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const stored = localStorage.getItem('flow-engine-selected-definition');
+    const num = stored ? Number(stored) : null;
+    return num && Number.isFinite(num) && num > 0 ? num : null;
+  });
   const [draftName, setDraftName] = useState('');
   const [draftDescription, setDraftDescription] = useState('');
   const [createName, setCreateName] = useState('');
@@ -110,6 +107,8 @@ export function FlowEnginePanel({
   const [isWorkflowListOpen, setIsWorkflowListOpen] = useState(false);
   const [workflowListQuery, setWorkflowListQuery] = useState('');
   const [archivingDefinitionId, setArchivingDefinitionId] = useState<number | null>(null);
+  const [selectedDefinitionIds, setSelectedDefinitionIds] = useState<Set<number>>(new Set());
+  const [bulkArchiving, setBulkArchiving] = useState(false);
   const [optimisticDefinitions, setOptimisticDefinitions] = useState<
     Array<TradeFlowDefinition & { _addedAt?: number }>
   >([]);
@@ -117,7 +116,6 @@ export function FlowEnginePanel({
   const [contextForm, setContextForm] = useState<ContextFormState>(parseContextToForm({}));
   const [contextTab, setContextTab] = useState<'basic' | 'advanced'>('basic');
   const [validation, setValidation] = useState<TradeFlowValidationResult | null>(null);
-  const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -125,6 +123,16 @@ export function FlowEnginePanel({
   const [isGraphDirty, setIsGraphDirty] = useState(false);
   const [isSwitchingDefinition, setIsSwitchingDefinition] = useState(false);
   const [hasPendingCanvasNodeDraft, setHasPendingCanvasNodeDraft] = useState(false);
+  const [stoppingBot, setStoppingBot] = useState(false);
+  const { data: botStatus, mutate: mutateBotStatus } = useBotStatus();
+
+  useEffect(() => {
+    if (selectedDefinitionId != null) {
+      localStorage.setItem('flow-engine-selected-definition', String(selectedDefinitionId));
+    } else {
+      localStorage.removeItem('flow-engine-selected-definition');
+    }
+  }, [selectedDefinitionId]);
 
   const selectedDefinitionIdRef = useRef<number | null>(selectedDefinitionId);
   const switchLockRef = useRef(false);
@@ -167,6 +175,41 @@ export function FlowEnginePanel({
     if (!query) return visibleDefinitions;
     return visibleDefinitions.filter((d) => `${d.id} ${d.name} ${d.status}`.toLowerCase().includes(query));
   }, [visibleDefinitions, workflowListQuery]);
+
+  const toggleDefinitionSelection = useCallback((id: number) => {
+    setSelectedDefinitionIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const selectAllDefinitions = useCallback(() => {
+    setSelectedDefinitionIds(new Set(filteredDefinitions.map((d) => d.id)));
+  }, [filteredDefinitions]);
+
+  const deselectAllDefinitions = useCallback(() => {
+    setSelectedDefinitionIds(new Set());
+  }, []);
+
+  const bulkArchiveDefinitions = useCallback(async () => {
+    if (selectedDefinitionIds.size === 0) return;
+    if (!confirm(`${selectedDefinitionIds.size} workflow'u silmek (arsivlemek) istediginize emin misiniz?`)) return;
+    setBulkArchiving(true);
+    try {
+      for (const id of selectedDefinitionIds) {
+        try {
+          await archiveTradeFlowDefinition(id);
+        } catch (e) {
+          console.error(`Failed to archive definition ${id}:`, e);
+        }
+      }
+      setSelectedDefinitionIds(new Set());
+      swrMutate((key: string) => typeof key === 'string' && key.includes('/api/trade-flow/definitions'));
+    } finally {
+      setBulkArchiving(false);
+    }
+  }, [selectedDefinitionIds]);
 
   const saveCurrentDraftBeforeSwitch = useCallback(
     async (definitionId: number) => {
@@ -224,36 +267,18 @@ export function FlowEnginePanel({
 
   useEffect(() => {
     if (visibleDefinitions.length === 0) {
+      // SWR loading/revalidation veya busy action sirasinda secimi temizleme
+      if (definitionsLoading || busyAction) return;
       setSelectedDefinitionId(null);
       setIsGraphDirty(false);
       setLastHydratedSnapshotKey(null);
       return;
     }
-    if (externalSelectDefinitionId != null && externalSelectDefinitionId > 0) return;
     const stillExists = visibleDefinitions.some((d) => d.id === selectedDefinitionId);
     if (!selectedDefinitionId || !stillExists) {
       void requestDefinitionSwitch(visibleDefinitions[0].id);
     }
-  }, [externalSelectDefinitionId, requestDefinitionSwitch, selectedDefinitionId, visibleDefinitions]);
-
-  useEffect(() => {
-    if (externalSelectDefinitionId == null || externalSelectDefinitionId <= 0) return;
-    if (selectedDefinitionId === externalSelectDefinitionId) return;
-    void requestDefinitionSwitch(externalSelectDefinitionId);
-  }, [externalSelectDefinitionId, requestDefinitionSwitch, selectedDefinitionId]);
-
-  useEffect(() => {
-    if (!externalCreatedDefinition) return;
-    setOptimisticDefinitions((prev) => {
-      const next = [
-        { ...externalCreatedDefinition, _addedAt: Date.now() },
-        ...prev.filter((d) => d.id !== externalCreatedDefinition.id),
-      ];
-      return next.slice(0, 20);
-    });
-    setIsWorkflowListOpen(true);
-    void requestDefinitionSwitch(externalCreatedDefinition.id);
-  }, [externalCreatedDefinition, requestDefinitionSwitch]);
+  }, [requestDefinitionSwitch, selectedDefinitionId, visibleDefinitions, definitionsLoading, busyAction]);
 
   const { data: detailData, mutate: mutateDetail } = useTradeFlowDefinitionDetail(selectedDefinitionId);
   const detail = useMemo(() => detailData?.data ?? null, [detailData?.data]);
@@ -278,24 +303,6 @@ export function FlowEnginePanel({
     setLastHydratedSnapshotKey(incomingSnapshotKey);
   }, [detail, incomingSnapshotKey, isGraphDirty, lastHydratedSnapshotKey]);
 
-  const { data: versionsData, isLoading: versionsLoading } = useTradeFlowVersions(selectedDefinitionId);
-  const versions = versionsData?.data ?? [];
-  const { data: runsData } = useTradeFlowRuns(1, 15, selectedDefinitionId || undefined);
-  const runs = useMemo(() => runsData?.data ?? [], [runsData?.data]);
-
-  useEffect(() => {
-    if (runs.length === 0) { setSelectedRunId(null); return; }
-    const latestRunning = runs.find((r) => r.status === 'running');
-    if (latestRunning && selectedRunId !== latestRunning.id) {
-      setSelectedRunId(latestRunning.id);
-      return;
-    }
-    const exists = runs.some((r) => r.id === selectedRunId);
-    if (!selectedRunId || !exists) setSelectedRunId(runs[0].id);
-  }, [runs, selectedRunId]);
-
-  const { data: runEventsData } = useTradeFlowRunEvents(selectedRunId, 1, 25, !!selectedRunId);
-  const runEvents = runEventsData?.data ?? [];
   const { data: openPositionsData, isLoading: openPositionsLoading } = useTradeFlowOpenPositions();
   const openPositions = useMemo(() => openPositionsData?.data ?? [], [openPositionsData?.data]);
   const openPositionsMeta = useMemo(() => openPositionsData?.meta ?? null, [openPositionsData?.meta]);
@@ -601,6 +608,29 @@ export function FlowEnginePanel({
     await archiveFlow();
   };
 
+  const handleStopBot = async () => {
+    if (!window.confirm('Botu durdurmak istediginize emin misiniz?')) return;
+    setStoppingBot(true);
+    try {
+      const res = await fetch('/api/bot/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        setError(err.error || 'Bot durdurulamadi');
+        return;
+      }
+      setMessage('Bot durduruldu.');
+      setTimeout(() => mutateBotStatus(), 2000);
+    } catch (err) {
+      setError(formatOperationError(err, 'Bot durdurulamadi.'));
+    } finally {
+      setStoppingBot(false);
+    }
+  };
+
   const updateGraphFromCanvas = (nextGraph: TradeFlowGraph) => {
     setGraph(nextGraph); setIsGraphDirty(true); setValidation(null);
   };
@@ -707,19 +737,21 @@ export function FlowEnginePanel({
               onValidate={() => { void validateGraph(); }}
               onPublish={() => { void publishFlow(); }}
               onArchiveFlow={() => { void confirmAndArchiveCurrentFlow(); }}
+              botActive={botStatus?.serviceActive ?? false}
+              botControlAvailable={botStatus?.controlAvailable ?? false}
+              onStopBot={handleStopBot}
+              stoppingBot={stoppingBot}
+              selectedDefinitionIds={selectedDefinitionIds}
+              onToggleDefinitionSelection={toggleDefinitionSelection}
+              onSelectAllDefinitions={selectAllDefinitions}
+              onDeselectAllDefinitions={deselectAllDefinitions}
+              onBulkArchive={bulkArchiveDefinitions}
+              bulkArchiving={bulkArchiving}
             />
           }
         />
 
         <FlowSummaryBar graph={graph} validation={validation} />
-
-        <div className="grid gap-4 lg:grid-cols-2">
-          <FlowVersionsCard versions={versions} versionsLoading={versionsLoading} />
-          <FlowRunEventsCard
-            runs={runs} runEvents={runEvents}
-            selectedRunId={selectedRunId} onSelectedRunChange={setSelectedRunId}
-          />
-        </div>
 
         {error && <p className="text-sm text-red-400">{error}</p>}
         {message && <p className="text-sm text-emerald-400">{message}</p>}

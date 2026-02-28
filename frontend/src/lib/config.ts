@@ -61,6 +61,45 @@ export async function readConfig(name: string): Promise<Record<string, unknown>>
   return raw;
 }
 
+const STRATEGY_NUMERIC_KEYS = new Set([
+  'entry_price', 'tp_pct', 'base_sl_pct', 'aggressive_sl_pct',
+  'entry_window_sec', 'max_hold_sec', 'sl_renew_interval_ms',
+  'total_notional_usdc', 'per_leg_initial_notional_usdc',
+  'dca_interval_sec', 'dca_step_pct', 'max_dca_levels_per_leg',
+  'leg_tp_pct', 'basket_tp_usdc', 'basket_sl_usdc',
+  'force_flatten_sec_before_close',
+]);
+const STRATEGY_BOOLEAN_KEYS = new Set(['flow_only', 'dual_side_enabled']);
+
+const RISK_NUMERIC_KEYS = new Set([
+  'max_daily_loss_usdc', 'max_consecutive_losses',
+  'max_notional_per_market_usdc', 'max_open_orders',
+  'max_stale_data_ms', 'min_balance_usdc',
+]);
+const RISK_BOOLEAN_KEYS = new Set(['manual_kill_switch_active']);
+
+const BOT_NUMERIC_KEYS = new Set([
+  'loop_interval_ms', 'market_discovery_retry_interval_ms',
+  'market_discovery_timeout_sec',
+]);
+
+function coerceConfigTypes(
+  data: Record<string, unknown>,
+  numericKeys: Set<string>,
+  booleanKeys: Set<string>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...data };
+  for (const [k, v] of Object.entries(out)) {
+    if (numericKeys.has(k)) {
+      const n = Number(v);
+      if (Number.isFinite(n)) out[k] = n;
+    } else if (booleanKeys.has(k)) {
+      if (typeof v === 'string') out[k] = v === 'true';
+    }
+  }
+  return out;
+}
+
 export async function writeConfig(name: string, data: Record<string, unknown>): Promise<void> {
   if (!isWritable(name)) {
     throw new Error(`Config file '${name}' is read-only`);
@@ -74,8 +113,13 @@ export async function writeConfig(name: string, data: Record<string, unknown>): 
     return;
   }
 
-  validateConfig(name, data);
-  await writeRawConfig(name, data);
+  let coerced = data;
+  if (name === 'strategy') coerced = coerceConfigTypes(data, STRATEGY_NUMERIC_KEYS, STRATEGY_BOOLEAN_KEYS);
+  else if (name === 'risk') coerced = coerceConfigTypes(data, RISK_NUMERIC_KEYS, RISK_BOOLEAN_KEYS);
+  else if (name === 'bot') coerced = coerceConfigTypes(data, BOT_NUMERIC_KEYS, new Set());
+
+  validateConfig(name, coerced);
+  await writeRawConfig(name, coerced);
 }
 
 export async function listConfigs(): Promise<string[]> {
@@ -97,6 +141,25 @@ export async function readExchangeApiAddressForServer(): Promise<string> {
   } catch {
     return '';
   }
+}
+
+export async function readPositionWalletAddress(): Promise<string> {
+  const raw = normalizeExchangeShape(await readRawConfig('exchange'));
+
+  const safeEnvName = String(raw.gnosis_safe_address_env ?? '').trim();
+  const safeFromEnv = safeEnvName ? String(process.env[safeEnvName] ?? '').trim() : '';
+  if (safeFromEnv) return safeFromEnv;
+
+  const safeInline = String(raw.gnosis_safe_address ?? '').trim();
+  if (safeInline) {
+    if (!isEncryptedConfigValue(safeInline)) return safeInline;
+    try {
+      const decrypted = decryptConfigValue(safeInline).trim();
+      if (decrypted) return decrypted;
+    } catch {}
+  }
+
+  return readExchangeApiAddressForServer();
 }
 
 async function readRawConfig(name: string): Promise<Record<string, unknown>> {
@@ -219,6 +282,8 @@ function normalizeExchangeShape(source: Record<string, unknown>): Record<string,
     api_key_env: String(source.api_key_env ?? ''),
     api_secret_env: String(source.api_secret_env ?? ''),
     api_passphrase_env: String(source.api_passphrase_env ?? ''),
+    gnosis_safe_address: String(source.gnosis_safe_address ?? ''),
+    gnosis_safe_address_env: String(source.gnosis_safe_address_env ?? ''),
   };
 }
 

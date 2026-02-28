@@ -1,3 +1,5 @@
+mod dca;
+
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result};
@@ -13,7 +15,7 @@ use bot_infra::config::AppConfig;
 use bot_infra::contracts::{OrderExecutor, StateRepository};
 use bot_infra::db::{
     PostgresRepository, TradeBuilderOrder, TradeBuilderWorkflow, TradeBuilderWorkflowLeg,
-    TradeFlowDefinitionRuntime, TradeFlowDualDcaJob, TradeFlowRun, TradeFlowRunStep,
+    TradeFlowDefinitionRuntime, TradeFlowRun, TradeFlowRunStep,
     TradeFlowVersionRuntime,
 };
 use bot_infra::exchange::{
@@ -45,10 +47,6 @@ const MANUAL_ORDER_PROCESS_LIMIT: i64 = 250;
 const WORKFLOW_PROCESS_LIMIT: i64 = 100;
 const FLOW_DEFINITION_PROCESS_LIMIT: i64 = 100;
 const FLOW_STEP_PROCESS_LIMIT: i64 = 250;
-const FLOW_DUAL_DCA_JOB_PROCESS_LIMIT: i64 = 100;
-const FLOW_DUAL_DCA_RETRY_SECONDS: i64 = 30;
-const FLOW_DUAL_DCA_ACTIVE_CHECK_SECONDS: i64 = 20;
-const FLOW_DUAL_DCA_MIN_ORDER_USDC: f64 = 1.0;
 const PRESSURE_DROP_PCT_THRESHOLD: f64 = 1.5;
 const WORKFLOW_MIN_BUY_INCREMENT_USDC: f64 = 1.0;
 const SUPPORTED_UPDOWN_SCOPE_DEFS: [UpdownScopeDef; 8] = [
@@ -103,7 +101,7 @@ const SUPPORTED_UPDOWN_SCOPE_DEFS: [UpdownScopeDef; 8] = [
 ];
 
 #[derive(Debug, Clone, Copy)]
-struct UpdownScopeDef {
+pub(crate) struct UpdownScopeDef {
     scope: &'static str,
     asset: &'static str,
     timeframe: &'static str,
@@ -237,7 +235,7 @@ struct ClobErrorClassification {
 }
 
 #[derive(Debug, Clone)]
-struct SelectedLiveMarket {
+pub(crate) struct SelectedLiveMarket {
     slug: String,
     yes_token_id: Option<String>,
     no_token_id: Option<String>,
@@ -248,7 +246,7 @@ struct SelectedLiveMarket {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LiveMarketSelectionReason {
+pub(crate) enum LiveMarketSelectionReason {
     InWindow,
     NearestFuture,
     LatestBySlugFallback,
@@ -324,6 +322,7 @@ async fn main() -> Result<()> {
                 "entry_window_sec": cfg.strategy.entry_window_sec,
                 "max_hold_sec": cfg.strategy.max_hold_sec,
                 "sl_renew_interval_ms": cfg.strategy.sl_renew_interval_ms,
+                "flow_only": cfg.strategy.flow_only,
                 "dual_side_enabled": cfg.strategy.dual_side_enabled,
                 "total_notional_usdc": cfg.strategy.total_notional_usdc,
                 "per_leg_initial_notional_usdc": cfg.strategy.per_leg_initial_notional_usdc,
@@ -439,6 +438,9 @@ async fn main() -> Result<()> {
 }
 
 async fn run_paper_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) -> Result<()> {
+    if cfg.strategy.flow_only {
+        return run_flow_only_loop(run_id, repo, cfg).await;
+    }
     if cfg.strategy.dual_side_enabled {
         return run_paper_dual_loop(run_id, repo, cfg).await;
     }
@@ -924,7 +926,7 @@ fn find_updown_scope_by_scope(scope: &str) -> Option<UpdownScopeDef> {
         .find(|def| def.scope == normalized)
 }
 
-fn find_updown_scope_by_asset_timeframe(asset: &str, timeframe: &str) -> Option<UpdownScopeDef> {
+pub(crate) fn find_updown_scope_by_asset_timeframe(asset: &str, timeframe: &str) -> Option<UpdownScopeDef> {
     let normalized_asset = asset.trim().to_ascii_lowercase();
     let normalized_timeframe = timeframe.trim().to_ascii_lowercase();
     SUPPORTED_UPDOWN_SCOPE_DEFS
@@ -967,7 +969,7 @@ fn updown_scope_candidate_slugs(scope_def: UpdownScopeDef, now: DateTime<Utc>) -
         .collect()
 }
 
-async fn list_markets_for_scope(gamma: &GammaHttpClient, scope: &str) -> Result<Vec<GammaMarket>> {
+pub(crate) async fn list_markets_for_scope(gamma: &GammaHttpClient, scope: &str) -> Result<Vec<GammaMarket>> {
     let scope_def = find_updown_scope_by_scope(scope).ok_or_else(|| {
         anyhow::anyhow!(
             "unsupported market_scope: {scope} (supported: {})",
@@ -1068,7 +1070,7 @@ fn select_live_market_with_reason(
     }
 }
 
-fn select_preferred_live_market(
+pub(crate) fn select_preferred_live_market(
     markets: Vec<GammaMarket>,
     now: DateTime<Utc>,
 ) -> Option<SelectedLiveMarket> {
@@ -1416,6 +1418,9 @@ async fn discover_live_market(
 }
 
 async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) -> Result<()> {
+    if cfg.strategy.flow_only {
+        return run_flow_only_loop(run_id, repo, cfg).await;
+    }
     if cfg.strategy.dual_side_enabled {
         return run_live_dual_loop(run_id, repo, cfg).await;
     }
@@ -1563,7 +1568,7 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
                     warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
                 }
                 if let Err(e) =
-                    process_trade_flow_dual_dca_jobs(repo, run_id, cfg, client, &ws).await
+                    dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, client, &ws).await
                 {
                     warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
                 }
@@ -1978,6 +1983,84 @@ async fn run_paper_dual_loop(
     Ok(())
 }
 
+async fn run_flow_only_loop(
+    run_id: i64,
+    repo: &PostgresRepository,
+    cfg: &AppConfig,
+) -> Result<()> {
+    let live_enabled = env::var("LIVE_TRADING_ENABLED").ok().as_deref() == Some("true");
+    anyhow::ensure!(
+        live_enabled,
+        "flow_only mode requires LIVE_TRADING_ENABLED=true"
+    );
+
+    // CLOB client init (flows need it for order placement)
+    let (creds, credential_source) = resolve_api_credentials_with_source(cfg)?;
+    log_resolved_api_credentials(run_id, &creds, credential_source);
+    let private_key = cfg
+        .exchange
+        .resolve_signer_private_key()
+        .context("CLOB signer private key")?;
+    let wallet = private_key
+        .parse::<LocalWallet>()
+        .context("parse signer private key")?
+        .with_chain_id(cfg.exchange.chain_id);
+    let exchange_address: Address = cfg
+        .exchange
+        .ctf_exchange_address
+        .parse()
+        .context("parse ctf_exchange_address")?;
+    let gnosis_safe: Option<Address> = cfg
+        .exchange
+        .resolve_gnosis_safe_address()
+        .map(|s| s.parse::<Address>().context("parse gnosis_safe_address"))
+        .transpose()?;
+    let client = ClobHttpClient::from_credentials(
+        cfg.exchange.clob_base_url.clone(),
+        creds.clone(),
+        wallet,
+        exchange_address,
+        cfg.exchange.chain_id,
+        gnosis_safe,
+    );
+    run_clob_auth_preflight(run_id, repo, &client, &creds, credential_source).await;
+    run_daily_pnl_startup_check(run_id, repo, cfg.risk.max_daily_loss_usdc).await?;
+    run_balance_preflight(run_id, repo, &client, cfg.risk.min_balance_usdc).await;
+    let ws = ClobWsClient::new(cfg.exchange.clob_ws_url.clone());
+    let mut auto_claim = match AutoClaimService::from_app_config(cfg) {
+        Ok(service) => service,
+        Err(err) => {
+            warn!(run_id, error = %err, "AUTO_CLAIM_DISABLED");
+            None
+        }
+    };
+
+    info!(run_id, "FLOW_ONLY_LOOP_STARTED");
+
+    // Infinite loop — only processes canvas/flow systems, no automatic trades
+    loop {
+        if let Err(e) = process_trade_builder_orders(repo, run_id, cfg, &client, &ws).await {
+            warn!(run_id, error = %e, "TRADE_BUILDER_PROCESS_FAILED");
+        }
+        if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await {
+            warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
+        }
+        if let Err(e) = dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await {
+            warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
+        }
+        if let Err(e) = process_trade_flows(repo, run_id, cfg, Some(&client), &ws).await {
+            warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED");
+        }
+        if let Some(service) = auto_claim.as_mut() {
+            if let Err(e) = service.maybe_tick(repo).await {
+                warn!(run_id, error = %e, "AUTO_CLAIM_TICK_FAILED");
+            }
+        }
+
+        sleep(Duration::from_millis(cfg.bot.loop_interval_ms)).await;
+    }
+}
+
 async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) -> Result<()> {
     let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
     let live_enabled = env::var("LIVE_TRADING_ENABLED").ok().as_deref() == Some("true");
@@ -2035,7 +2118,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await {
             warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
         }
-        if let Err(e) = process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await {
+        if let Err(e) = dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await {
             warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
         }
         if let Err(e) = process_trade_flows(repo, run_id, cfg, Some(&client), &ws).await {
@@ -2299,6 +2382,45 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
             market = %basket.market_slug,
             "LIVE_DUAL_ENTRY_SUBMIT_FAILED_CONTINUING"
         );
+        // If no orders were placed at all (both legs rejected), settle the empty trade
+        // and wait until the market window closes before returning.
+        // Without this, the scope task immediately starts a new run_live_dual_loop()
+        // creating hundreds of empty trades per market window.
+        if order_meta.is_empty() {
+            persist_leg_snapshots(repo, &basket).await?;
+            if can_transition(basket.state, TradeState::ExitFilled).is_ok() {
+                transition_dual(
+                    repo,
+                    &mut basket,
+                    TradeState::ExitFilled,
+                    "entry-failed-no-fill",
+                )
+                .await?;
+            }
+            if can_transition(basket.state, TradeState::Settled).is_ok() {
+                transition_dual(
+                    repo,
+                    &mut basket,
+                    TradeState::Settled,
+                    "entry-failed-settle",
+                )
+                .await?;
+            }
+            repo.close_trade(basket.trade_id, 0.5, 0.0).await?;
+            let remaining = basket.cycle_ends_at.signed_duration_since(Utc::now());
+            if remaining > ChronoDuration::zero() {
+                let wait_secs = remaining.num_seconds().min(300) as u64;
+                info!(
+                    run_id,
+                    trade_id = basket.trade_id,
+                    market = %basket.market_slug,
+                    wait_secs,
+                    "LIVE_DUAL_ENTRY_FAILED_WAITING_WINDOW_END"
+                );
+                sleep(Duration::from_secs(wait_secs)).await;
+            }
+            return Ok(());
+        }
     } else {
         transition_dual(
             repo,
@@ -2324,7 +2446,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await {
             warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
         }
-        if let Err(e) = process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await {
+        if let Err(e) = dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await {
             warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
         }
         if let Err(e) = process_trade_flows(repo, run_id, cfg, Some(&client), &ws).await {
@@ -3097,14 +3219,14 @@ fn can_dca_now(leg: &DualLegRuntime, cfg: &AppConfig, now: DateTime<Utc>) -> boo
     now.signed_duration_since(last_dca_at).num_seconds() >= cfg.strategy.dca_interval_sec as i64
 }
 
-fn calc_level_size(level_notional: f64, price: f64) -> f64 {
+pub(crate) fn calc_level_size(level_notional: f64, price: f64) -> f64 {
     if price <= 0.0 {
         return 0.0;
     }
     ((level_notional / price) * 100.0).round() / 100.0
 }
 
-fn clamp_probability(value: f64) -> f64 {
+pub(crate) fn clamp_probability(value: f64) -> f64 {
     value.clamp(0.01, 0.99)
 }
 
@@ -3259,34 +3381,80 @@ async fn process_trade_flows(
     Ok(())
 }
 
-fn open_position_ws_price_node_spec(
+fn open_position_ws_price_node_specs(
     node: &TradeFlowNode,
     context: &Value,
-) -> Option<WsOpenPositionPriceNodeSpec> {
-    if node.node_type != "trigger.open_positions" {
-        return None;
+) -> Vec<WsOpenPositionPriceNodeSpec> {
+    if node.node_type != "trigger.open_positions" && node.node_type != "trigger.market_price" {
+        return Vec::new();
     }
-    let trigger_condition = node_config_string(node, "triggerCondition")?;
+    // Multi-outcome path
+    if let Some(conditions) = node.config.get("outcomeConditions").and_then(|v| v.as_array()) {
+        let mut specs = Vec::new();
+        for cond in conditions {
+            let token_id = cond
+                .get("tokenId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let trigger_condition = cond
+                .get("triggerCondition")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let trigger_price = cond
+                .get("triggerPriceCent")
+                .and_then(value_as_f64)
+                .map(|v| v / 100.0)
+                .or_else(|| cond.get("triggerPrice").and_then(value_as_f64));
+            if token_id.is_empty()
+                || !matches!(trigger_condition.as_str(), "cross_above" | "cross_below")
+            {
+                continue;
+            }
+            let tp = match trigger_price {
+                Some(v) if v > 0.0 && v <= 1.0 => v,
+                _ => continue,
+            };
+            specs.push(WsOpenPositionPriceNodeSpec {
+                node_key: node.key.clone(),
+                node_type: node.node_type.clone(),
+                token_id,
+                trigger_condition,
+                trigger_price: tp,
+            });
+        }
+        return specs;
+    }
+    // Legacy single-token path
+    let trigger_condition = match node_config_string(node, "triggerCondition") {
+        Some(tc) => tc,
+        None => return Vec::new(),
+    };
     if !matches!(trigger_condition.as_str(), "cross_above" | "cross_below") {
-        return None;
+        return Vec::new();
     }
-    let trigger_price = node_config_f64(node, "triggerPrice")
-        .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0))?;
-    if !(trigger_price > 0.0 && trigger_price <= 1.0) {
-        return None;
-    }
-    let token_id =
-        node_config_string(node, "tokenId").or_else(|| flow_context_string(context, "tokenId"))?;
-    if token_id.is_empty() {
-        return None;
-    }
-    Some(WsOpenPositionPriceNodeSpec {
+    let trigger_price = match node_config_f64(node, "triggerPrice")
+        .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0))
+    {
+        Some(v) if v > 0.0 && v <= 1.0 => v,
+        _ => return Vec::new(),
+    };
+    let token_id = match node_config_string(node, "tokenId")
+        .or_else(|| flow_context_string(context, "tokenId"))
+    {
+        Some(id) if !id.is_empty() => id,
+        _ => return Vec::new(),
+    };
+    vec![WsOpenPositionPriceNodeSpec {
         node_key: node.key.clone(),
         node_type: node.node_type.clone(),
         token_id,
         trigger_condition,
         trigger_price,
-    })
+    }]
 }
 
 async fn enqueue_trade_flow_ws_open_position_price_steps(
@@ -3315,10 +3483,8 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
         let context = normalize_trade_flow_context(run.context_json.clone(), &graph.context);
         let mut nodes = Vec::new();
         for node in &graph.nodes {
-            let Some(spec) = open_position_ws_price_node_spec(node, &context) else {
-                continue;
-            };
-            nodes.push(spec);
+            let specs = open_position_ws_price_node_specs(node, &context);
+            nodes.extend(specs);
         }
         if nodes.is_empty() {
             continue;
@@ -3377,9 +3543,16 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
                 continue;
             };
 
+            // Use per-token state key for multi-outcome nodes
+            let prev_key = format!("previous_price_{}", node_spec.token_id);
             let previous_price =
-                flow_node_state(&run_spec.context, &node_spec.node_key, "previous_price")
-                    .and_then(value_as_f64);
+                flow_node_state(&run_spec.context, &node_spec.node_key, &prev_key)
+                    .and_then(value_as_f64)
+                    .or_else(|| {
+                        // Fallback to legacy key for backward compat
+                        flow_node_state(&run_spec.context, &node_spec.node_key, "previous_price")
+                            .and_then(value_as_f64)
+                    });
             let crossed = match node_spec.trigger_condition.as_str() {
                 "cross_above" => previous_price
                     .map(|prev| {
@@ -3403,7 +3576,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
             set_flow_node_state(
                 &mut run_spec.context,
                 &node_spec.node_key,
-                "previous_price",
+                &prev_key,
                 json!(current_price),
             );
             run_spec.context_dirty = true;
@@ -3416,6 +3589,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
                 "triggerSource": "ws_market_price",
                 "tokenId": token_id,
                 "wsPrice": current_price,
+                "wsPrices": { token_id.clone(): current_price },
                 "wsEventTs": event_ts
             });
             let dedupe_ts = event_ts.unwrap_or_else(|| Utc::now().timestamp_millis());
@@ -4061,6 +4235,7 @@ async fn execute_trade_flow_node(
         "action.update_order" => execute_action_update_order(repo, node, context).await,
         "action.set_state" => execute_action_set_state(node, context),
         "action.notify" => execute_action_notify(repo, run, node, context).await,
+        "action.telegram_notify" => execute_action_telegram_notify(repo, run, node, context).await,
         _ => Err(anyhow::anyhow!(
             "unsupported flow node type: {}",
             node.node_type
@@ -4073,46 +4248,252 @@ async fn execute_trigger_market_price(
     client: Option<&dyn OrderExecutor>,
     ws: &ClobWsClient,
     run: &TradeFlowRun,
-    _step: &TradeFlowRunStep,
+    step: &TradeFlowRunStep,
     node: &TradeFlowNode,
     context: &mut Value,
 ) -> Result<TradeFlowNodeExecution> {
     let market_slug = node_config_string(node, "marketSlug")
         .or_else(|| flow_context_string(context, "marketSlug"))
         .ok_or_else(|| anyhow::anyhow!("trigger.market_price requires marketSlug"))?;
-    let token_id =
-        node_config_string(node, "tokenId").or_else(|| flow_context_string(context, "tokenId"));
-
-    let current_price =
-        fetch_trade_flow_market_price(ws, client, &market_slug, token_id.as_deref()).await?;
-    let var_key = node_config_string(node, "varKey").unwrap_or_else(|| "market_price".to_string());
-
-    set_flow_var(context, &var_key, json!(current_price));
-    set_flow_node_state(context, &node.key, "last_price", json!(current_price));
-
-    let trigger_condition = node_config_string(node, "triggerCondition");
-    let trigger_price = node_config_f64(node, "triggerPrice")
-        .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
-
-    let previous_price =
-        flow_node_state(context, &node.key, "previous_price").and_then(value_as_f64);
-    let pass = match (trigger_condition.as_deref(), trigger_price) {
-        (Some("cross_above"), Some(tp)) => previous_price
-            .map(|prev| prev < tp && current_price >= tp)
-            .unwrap_or(current_price >= tp),
-        (Some("cross_below"), Some(tp)) => previous_price
-            .map(|prev| prev > tp && current_price <= tp)
-            .unwrap_or(current_price <= tp),
-        _ => true,
-    };
-
-    set_flow_node_state(context, &node.key, "previous_price", json!(current_price));
+    let var_key = node_config_string(node, "varKey").unwrap_or_else(|| node.key.clone());
     let interval_ms = node_config_i64(node, "minIntervalMs")
         .or_else(|| node_config_i64(node, "pollIntervalMs"))
-        .unwrap_or(1000)
+        .unwrap_or(10000)
         .max(250) as i64;
-    let repeat_at = Utc::now() + ChronoDuration::milliseconds(interval_ms);
+    let repeat_mode = node.config
+        .get("repeatMode")
+        .and_then(Value::as_str)
+        .unwrap_or("loop");
 
+    // --- WS-sourced step detection ---
+    let trigger_source = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("triggerSource"))
+        .and_then(|v| v.as_str());
+    let ws_sourced = trigger_source == Some("ws_market_price");
+    let ws_prices_map: Option<&serde_json::Map<String, Value>> = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPrices"))
+        .and_then(|v| v.as_object());
+    let ws_price_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPrice"))
+        .and_then(value_as_f64)
+        .map(clamp_probability);
+
+    // --- Multi-outcome conditions (outcomeConditions array) ---
+    let outcome_conditions = node
+        .config
+        .get("outcomeConditions")
+        .and_then(|v| v.as_array())
+        .cloned();
+
+    let mut triggered_token_id = String::new();
+    let mut triggered_outcome_label = String::new();
+    let mut triggered_condition = String::new();
+    let mut triggered_price: Option<f64> = None;
+    let mut current_price: Option<f64> = None;
+    let mut pass: bool;
+
+    if let Some(ref conditions) = outcome_conditions {
+        // Multi-outcome: OR logic
+        pass = false;
+        for cond in conditions {
+            let cond_token_id = cond
+                .get("tokenId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let cond_outcome_label = cond
+                .get("outcomeLabel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let cond_trigger_condition = cond
+                .get("triggerCondition")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let cond_trigger_price = cond
+                .get("triggerPriceCent")
+                .and_then(value_as_f64)
+                .map(|v| v / 100.0)
+                .or_else(|| cond.get("triggerPrice").and_then(value_as_f64));
+            if cond_token_id.is_empty() || cond_trigger_condition.is_empty() {
+                continue;
+            }
+            let tp = match cond_trigger_price {
+                Some(v) => v,
+                None => continue,
+            };
+            let prev_state_key = format!("previous_price_{}", cond_token_id);
+            let prev = flow_node_state(context, &node.key, &prev_state_key)
+                .and_then(value_as_f64);
+            let cur_result = if let Some(sp) = ws_prices_map
+                .and_then(|m| m.get(&cond_token_id))
+                .and_then(value_as_f64)
+                .map(clamp_probability)
+            {
+                Ok(sp)
+            } else {
+                fetch_trade_flow_market_price(
+                    ws,
+                    client,
+                    &market_slug,
+                    Some(cond_token_id.as_str()),
+                )
+                .await
+            };
+            let cur = match cur_result {
+                Ok(price) => price,
+                Err(err) => {
+                    let retry_ms = interval_ms.max(5000);
+                    let repeat_at = Utc::now() + ChronoDuration::milliseconds(retry_ms);
+                    return Ok(TradeFlowNodeExecution {
+                        output: json!({
+                            "run_id": run.id,
+                            "node_key": node.key,
+                            "market_slug": market_slug,
+                            "error": err.to_string(),
+                            "retry": true,
+                            "retry_at": repeat_at.to_rfc3339()
+                        }),
+                        routes: Vec::new(),
+                        repeat_at: Some(repeat_at),
+                        repeat_idempotency_key: None,
+                    });
+                }
+            };
+            // Store per-token previous price
+            set_flow_node_state(context, &node.key, &prev_state_key, json!(cur));
+            let pass_this = if ws_sourced {
+                // WS batch already confirmed the cross
+                true
+            } else {
+                match cond_trigger_condition.as_str() {
+                    "cross_above" => prev
+                        .map(|pv| pv < tp && cur >= tp)
+                        .unwrap_or(cur >= tp),
+                    "cross_below" => prev
+                        .map(|pv| pv > tp && cur <= tp)
+                        .unwrap_or(cur <= tp),
+                    _ => false,
+                }
+            };
+            if pass_this && !pass {
+                pass = true;
+                triggered_token_id = cond_token_id;
+                triggered_outcome_label = cond_outcome_label;
+                triggered_condition = cond_trigger_condition;
+                triggered_price = Some(cur);
+                current_price = Some(cur);
+            }
+        }
+    } else {
+        // Legacy single-token path
+        let token_id = node_config_string(node, "tokenId")
+            .or_else(|| flow_context_string(context, "tokenId"));
+        let cur_result = if let Some(sp) = ws_price_from_step {
+            Ok(sp)
+        } else {
+            fetch_trade_flow_market_price(ws, client, &market_slug, token_id.as_deref()).await
+        };
+        let cur = match cur_result {
+            Ok(price) => price,
+            Err(err) => {
+                let retry_ms = interval_ms.max(5000);
+                let repeat_at = Utc::now() + ChronoDuration::milliseconds(retry_ms);
+                return Ok(TradeFlowNodeExecution {
+                    output: json!({
+                        "run_id": run.id,
+                        "node_key": node.key,
+                        "market_slug": market_slug,
+                        "error": err.to_string(),
+                        "retry": true,
+                        "retry_at": repeat_at.to_rfc3339()
+                    }),
+                    routes: Vec::new(),
+                    repeat_at: Some(repeat_at),
+                    repeat_idempotency_key: None,
+                });
+            }
+        };
+        current_price = Some(cur);
+        set_flow_var(context, &var_key, json!(cur));
+        set_flow_node_state(context, &node.key, "last_price", json!(cur));
+
+        let trigger_condition = node_config_string(node, "triggerCondition");
+        let trigger_price = node_config_f64(node, "triggerPrice")
+            .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
+        let previous_price =
+            flow_node_state(context, &node.key, "previous_price").and_then(value_as_f64);
+        pass = if ws_sourced {
+            // WS batch already confirmed the cross
+            true
+        } else {
+            match (trigger_condition.as_deref(), trigger_price) {
+                (Some("cross_above"), Some(tp)) => previous_price
+                    .map(|prev| prev < tp && cur >= tp)
+                    .unwrap_or(cur >= tp),
+                (Some("cross_below"), Some(tp)) => previous_price
+                    .map(|prev| prev > tp && cur <= tp)
+                    .unwrap_or(cur <= tp),
+                _ => true,
+            }
+        };
+        set_flow_node_state(context, &node.key, "previous_price", json!(cur));
+        triggered_token_id = token_id.unwrap_or_default();
+        triggered_condition = trigger_condition.unwrap_or_default();
+        triggered_price = Some(cur);
+    }
+
+    // Write triggered outcome info to context
+    if let Some(price) = current_price {
+        set_flow_node_state(context, &node.key, "last_price", json!(price));
+        set_flow_var(context, &format!("{var_key}_price"), json!(price));
+    }
+    if !triggered_token_id.is_empty() {
+        set_flow_var(
+            context,
+            &format!("{var_key}_token_id"),
+            json!(triggered_token_id),
+        );
+    }
+    if !triggered_outcome_label.is_empty() {
+        set_flow_var(
+            context,
+            &format!("{var_key}_outcome_label"),
+            json!(triggered_outcome_label),
+        );
+    }
+    if !triggered_condition.is_empty() {
+        set_flow_var(
+            context,
+            &format!("{var_key}_triggered_condition"),
+            json!(triggered_condition),
+        );
+    }
+    if let Some(tp) = triggered_price {
+        set_flow_var(
+            context,
+            &format!("{var_key}_triggered_price"),
+            json!(tp),
+        );
+    }
+
+    let repeat_at = if ws_sourced {
+        None
+    } else if repeat_mode == "once" {
+        None // once modu: sadece 1 kere çalış, tekrar etme
+    } else {
+        Some(Utc::now() + ChronoDuration::milliseconds(interval_ms))
+    };
     let routes = if pass {
         vec![TradeFlowRouteDecision {
             edge_type: "default".to_string(),
@@ -4126,15 +4507,20 @@ async fn execute_trigger_market_price(
         "run_id": run.id,
         "node_key": node.key,
         "market_slug": market_slug,
-        "token_id": token_id,
+        "triggered_token_id": triggered_token_id,
+        "triggered_outcome_label": triggered_outcome_label,
+        "triggered_condition": triggered_condition,
+        "triggered_price": triggered_price,
         "price": current_price,
         "pass": pass,
-        "var_key": var_key
+        "var_key": var_key,
+        "multi_outcome": outcome_conditions.is_some(),
+        "ws_sourced": ws_sourced
     });
     Ok(TradeFlowNodeExecution {
         output,
         routes,
-        repeat_at: Some(repeat_at),
+        repeat_at,
         repeat_idempotency_key: None,
     })
 }
@@ -4231,111 +4617,243 @@ async fn execute_trigger_open_positions(
     let var_prefix = node_config_string(node, "varPrefix")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "position".to_string());
+        .unwrap_or_else(|| node.key.clone());
 
     let market_slug = node_config_string(node, "marketSlug")
         .or_else(|| flow_context_string(context, "marketSlug"))
         .unwrap_or_default();
-    let token_id = node_config_string(node, "tokenId")
-        .or_else(|| flow_context_string(context, "tokenId"))
-        .unwrap_or_default();
-    let outcome_label = node_config_string(node, "outcomeLabel")
-        .or_else(|| flow_context_string(context, "outcomeLabel"))
-        .unwrap_or_default();
 
-    let trigger_condition = node_config_string(node, "triggerCondition");
-    let trigger_price = node_config_f64(node, "triggerPrice")
-        .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
-    let websocket_price_mode = matches!(
-        trigger_condition.as_deref(),
-        Some("cross_above" | "cross_below")
-    ) && trigger_price.is_some();
+    // --- Multi-outcome conditions (outcomeConditions array) ---
+    let outcome_conditions = node
+        .config
+        .get("outcomeConditions")
+        .and_then(|v| v.as_array())
+        .cloned();
+
     let ws_price_from_step = step
         .input_json
         .as_ref()
         .and_then(|input| input.get("wsPrice"))
         .and_then(value_as_f64)
         .map(clamp_probability);
-    if trigger_condition.is_some() {
+    // Multi-outcome ws prices: input may carry wsPrices: { "tokenId": price, ... }
+    let ws_prices_map: Option<&serde_json::Map<String, Value>> = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPrices"))
+        .and_then(|v| v.as_object());
+
+    // Shared mutable state for triggered outcome
+    let mut triggered_token_id = String::new();
+    let mut triggered_outcome_label = String::new();
+    let mut triggered_condition = String::new();
+    let mut triggered_price: Option<f64> = None;
+    let mut current_price: Option<f64> = None;
+    let mut price_pass = false;
+    let mut websocket_price_mode = false;
+
+    if let Some(ref conditions) = outcome_conditions {
+        // Multi-outcome path: OR logic
         anyhow::ensure!(
             !market_slug.is_empty(),
-            "trigger.open_positions with triggerCondition requires marketSlug"
+            "trigger.open_positions with outcomeConditions requires marketSlug"
         );
-        anyhow::ensure!(
-            !token_id.is_empty(),
-            "trigger.open_positions with triggerCondition requires tokenId"
-        );
-    }
-    let previous_price =
-        flow_node_state(context, &node.key, "previous_price").and_then(value_as_f64);
-    let token_id_ref = if token_id.is_empty() {
-        None
+        for cond in conditions {
+            let cond_token_id = cond
+                .get("tokenId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let cond_outcome_label = cond
+                .get("outcomeLabel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let cond_trigger_condition = cond
+                .get("triggerCondition")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let cond_trigger_price = cond
+                .get("triggerPriceCent")
+                .and_then(value_as_f64)
+                .map(|v| v / 100.0)
+                .or_else(|| cond.get("triggerPrice").and_then(value_as_f64));
+            if cond_token_id.is_empty() || cond_trigger_condition.is_empty() {
+                continue;
+            }
+            let tp = match cond_trigger_price {
+                Some(v) => v,
+                None => continue,
+            };
+            let is_ws_mode = matches!(
+                cond_trigger_condition.as_str(),
+                "cross_above" | "cross_below"
+            );
+            if is_ws_mode {
+                websocket_price_mode = true;
+            }
+            let prev_state_key = format!("previous_price_{}", cond_token_id);
+            let prev = flow_node_state(context, &node.key, &prev_state_key)
+                .and_then(value_as_f64);
+            // Get current price for this token
+            let step_ws_price = ws_prices_map
+                .and_then(|m| m.get(&cond_token_id))
+                .and_then(value_as_f64)
+                .map(clamp_probability);
+            let cur = if let Some(sp) = step_ws_price {
+                Some(sp)
+            } else if is_ws_mode {
+                fetch_price_from_market_ws(ws, &cond_token_id)
+                    .await
+                    .map(clamp_probability)
+            } else {
+                Some(
+                    fetch_trade_flow_market_price(
+                        ws,
+                        client,
+                        &market_slug,
+                        Some(cond_token_id.as_str()),
+                    )
+                    .await?,
+                )
+            };
+            // Store previous_price per token
+            if let Some(p) = cur {
+                set_flow_node_state(context, &node.key, &prev_state_key, json!(p));
+            }
+            let pass_this = match cond_trigger_condition.as_str() {
+                "cross_above" => cur
+                    .map(|v| prev.map(|pv| pv < tp && v >= tp).unwrap_or(v >= tp))
+                    .unwrap_or(false),
+                "cross_below" => cur
+                    .map(|v| prev.map(|pv| pv > tp && v <= tp).unwrap_or(v <= tp))
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if pass_this && !price_pass {
+                price_pass = true;
+                triggered_token_id = cond_token_id.clone();
+                triggered_outcome_label = cond_outcome_label;
+                triggered_condition = cond_trigger_condition;
+                triggered_price = cur;
+                current_price = cur;
+            }
+        }
     } else {
-        Some(token_id.as_str())
-    };
-    let (current_price, price_pass) = match (trigger_condition.as_deref(), trigger_price) {
-        (Some("cross_above"), Some(tp)) => {
-            let current = if let Some(step_price) = ws_price_from_step {
-                Some(step_price)
-            } else if websocket_price_mode {
-                if let Some(token) = token_id_ref {
-                    fetch_price_from_market_ws(ws, token)
-                        .await
-                        .map(clamp_probability)
+        // Legacy single-token path (backward compatibility)
+        let token_id = node_config_string(node, "tokenId")
+            .or_else(|| flow_context_string(context, "tokenId"))
+            .unwrap_or_default();
+        let outcome_label = node_config_string(node, "outcomeLabel")
+            .or_else(|| flow_context_string(context, "outcomeLabel"))
+            .unwrap_or_default();
+        let trigger_condition = node_config_string(node, "triggerCondition");
+        let trigger_price = node_config_f64(node, "triggerPrice")
+            .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
+        websocket_price_mode = matches!(
+            trigger_condition.as_deref(),
+            Some("cross_above" | "cross_below")
+        ) && trigger_price.is_some();
+        if trigger_condition.is_some() {
+            anyhow::ensure!(
+                !market_slug.is_empty(),
+                "trigger.open_positions with triggerCondition requires marketSlug"
+            );
+            anyhow::ensure!(
+                !token_id.is_empty(),
+                "trigger.open_positions with triggerCondition requires tokenId"
+            );
+        }
+        let previous_price =
+            flow_node_state(context, &node.key, "previous_price").and_then(value_as_f64);
+        let token_id_ref = if token_id.is_empty() {
+            None
+        } else {
+            Some(token_id.as_str())
+        };
+        let (cur, pass_single) = match (trigger_condition.as_deref(), trigger_price) {
+            (Some("cross_above"), Some(tp)) => {
+                let cur_val = if let Some(step_price) = ws_price_from_step {
+                    Some(step_price)
+                } else if websocket_price_mode {
+                    if let Some(token) = token_id_ref {
+                        fetch_price_from_market_ws(ws, token)
+                            .await
+                            .map(clamp_probability)
+                    } else {
+                        None
+                    }
                 } else {
-                    None
-                }
-            } else {
-                Some(fetch_trade_flow_market_price(ws, client, &market_slug, token_id_ref).await?)
-            };
-            let pass = current
-                .map(|value| {
-                    previous_price
-                        .map(|prev| prev < tp && value >= tp)
-                        .unwrap_or(value >= tp)
-                })
-                .unwrap_or(false);
-            (current, pass)
-        }
-        (Some("cross_below"), Some(tp)) => {
-            let current = if let Some(step_price) = ws_price_from_step {
-                Some(step_price)
-            } else if websocket_price_mode {
-                if let Some(token) = token_id_ref {
-                    fetch_price_from_market_ws(ws, token)
-                        .await
-                        .map(clamp_probability)
+                    Some(
+                        fetch_trade_flow_market_price(ws, client, &market_slug, token_id_ref)
+                            .await?,
+                    )
+                };
+                let p = cur_val
+                    .map(|value| {
+                        previous_price
+                            .map(|prev| prev < tp && value >= tp)
+                            .unwrap_or(value >= tp)
+                    })
+                    .unwrap_or(false);
+                (cur_val, p)
+            }
+            (Some("cross_below"), Some(tp)) => {
+                let cur_val = if let Some(step_price) = ws_price_from_step {
+                    Some(step_price)
+                } else if websocket_price_mode {
+                    if let Some(token) = token_id_ref {
+                        fetch_price_from_market_ws(ws, token)
+                            .await
+                            .map(clamp_probability)
+                    } else {
+                        None
+                    }
                 } else {
-                    None
-                }
-            } else {
-                Some(fetch_trade_flow_market_price(ws, client, &market_slug, token_id_ref).await?)
-            };
-            let pass = current
-                .map(|value| {
-                    previous_price
-                        .map(|prev| prev > tp && value <= tp)
-                        .unwrap_or(value <= tp)
-                })
-                .unwrap_or(false);
-            (current, pass)
+                    Some(
+                        fetch_trade_flow_market_price(ws, client, &market_slug, token_id_ref)
+                            .await?,
+                    )
+                };
+                let p = cur_val
+                    .map(|value| {
+                        previous_price
+                            .map(|prev| prev > tp && value <= tp)
+                            .unwrap_or(value <= tp)
+                    })
+                    .unwrap_or(false);
+                (cur_val, p)
+            }
+            (Some(other), Some(_)) => {
+                return Err(anyhow::anyhow!(
+                    "trigger.open_positions triggerCondition must be cross_above/cross_below (got {other})"
+                ));
+            }
+            (Some(_), None) => {
+                return Err(anyhow::anyhow!(
+                    "trigger.open_positions triggerCondition requires triggerPrice or triggerPriceCent"
+                ));
+            }
+            _ => (None, true),
+        };
+        current_price = cur;
+        price_pass = pass_single;
+        triggered_token_id = token_id;
+        triggered_outcome_label = outcome_label;
+        triggered_condition = trigger_condition.unwrap_or_default();
+        triggered_price = cur;
+        if let Some(p) = cur {
+            set_flow_node_state(context, &node.key, "previous_price", json!(p));
         }
-        (Some(other), Some(_)) => {
-            return Err(anyhow::anyhow!(
-                "trigger.open_positions triggerCondition must be cross_above/cross_below (got {other})"
-            ));
-        }
-        (Some(_), None) => {
-            return Err(anyhow::anyhow!(
-                "trigger.open_positions triggerCondition requires triggerPrice or triggerPriceCent"
-            ));
-        }
-        _ => (None, true),
-    };
+    }
+
     let pass = exists && qty_pass && price_pass;
     if let Some(price) = current_price {
         set_flow_node_state(context, &node.key, "last_price", json!(price));
-        set_flow_node_state(context, &node.key, "previous_price", json!(price));
         set_flow_var(context, &format!("{var_prefix}_price"), json!(price));
     }
 
@@ -4357,12 +4875,30 @@ async fn execute_trigger_open_positions(
         &format!("{var_prefix}_market_slug"),
         json!(market_slug),
     );
-    set_flow_var(context, &format!("{var_prefix}_token_id"), json!(token_id));
+    set_flow_var(
+        context,
+        &format!("{var_prefix}_token_id"),
+        json!(triggered_token_id),
+    );
     set_flow_var(
         context,
         &format!("{var_prefix}_outcome_label"),
-        json!(outcome_label),
+        json!(triggered_outcome_label),
     );
+    if !triggered_condition.is_empty() {
+        set_flow_var(
+            context,
+            &format!("{var_prefix}_triggered_condition"),
+            json!(triggered_condition),
+        );
+    }
+    if let Some(tp) = triggered_price {
+        set_flow_var(
+            context,
+            &format!("{var_prefix}_triggered_price"),
+            json!(tp),
+        );
+    }
     set_flow_node_state(
         context,
         &node.key,
@@ -4389,15 +4925,16 @@ async fn execute_trigger_open_positions(
         "qty_total": qty_total,
         "min_position_qty": min_position_qty,
         "qty_pass": qty_pass,
-        "trigger_condition": trigger_condition,
-        "trigger_price": trigger_price,
+        "triggered_condition": triggered_condition,
+        "triggered_token_id": triggered_token_id,
+        "triggered_outcome_label": triggered_outcome_label,
+        "triggered_price": triggered_price,
         "websocket_price_mode": websocket_price_mode,
-        "ws_price_from_step": ws_price_from_step,
-        "previous_price": previous_price,
         "price": current_price,
         "price_pass": price_pass,
         "exists": exists,
-        "pass": pass
+        "pass": pass,
+        "multi_outcome": outcome_conditions.is_some()
     });
     let repeat_at = if websocket_price_mode {
         None
@@ -5430,6 +5967,112 @@ async fn execute_action_notify(
     })
 }
 
+fn resolve_template_vars(template: &str, context: &Value) -> String {
+    let mut result = template.to_string();
+    if let Some(vars) = context.get("vars").and_then(|v| v.as_object()) {
+        for (k, v) in vars {
+            let placeholder = format!("{{{{vars.{}}}}}", k);
+            let value_str = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            result = result.replace(&placeholder, &value_str);
+        }
+    }
+    if let Some(state) = context.get("state").and_then(|v| v.as_object()) {
+        for (k, v) in state {
+            let placeholder = format!("{{{{state.{}}}}}", k);
+            let value_str = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            result = result.replace(&placeholder, &value_str);
+        }
+    }
+    result
+}
+
+async fn execute_action_telegram_notify(
+    repo: &PostgresRepository,
+    run: &TradeFlowRun,
+    node: &TradeFlowNode,
+    context: &Value,
+) -> Result<TradeFlowNodeExecution> {
+    let bot_token = node_config_string(node, "botToken")
+        .ok_or_else(|| anyhow::anyhow!("action.telegram_notify requires botToken"))?;
+    let chat_id = node_config_string(node, "chatId")
+        .ok_or_else(|| anyhow::anyhow!("action.telegram_notify requires chatId"))?;
+    let message_template = node_config_string(node, "message")
+        .unwrap_or_else(|| "Trade flow notification".to_string());
+
+    let message = resolve_template_vars(&message_template, context);
+
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML",
+        }))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+
+    let (edge_type, output) = match resp {
+        Ok(r) if r.status().is_success() => (
+            "on_success".to_string(),
+            json!({
+                "node_key": node.key,
+                "status": "sent",
+                "chat_id": chat_id,
+                "message": message,
+            }),
+        ),
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let body = r.text().await.unwrap_or_default();
+            (
+                "on_error".to_string(),
+                json!({
+                    "node_key": node.key,
+                    "status": "error",
+                    "http_status": status,
+                    "error": body,
+                }),
+            )
+        }
+        Err(e) => (
+            "on_error".to_string(),
+            json!({
+                "node_key": node.key,
+                "status": "error",
+                "error": e.to_string(),
+            }),
+        ),
+    };
+
+    repo.append_trade_flow_event(
+        Some(run.id),
+        run.definition_id,
+        Some(run.version_id),
+        "telegram_notify",
+        &output,
+    )
+    .await?;
+
+    Ok(TradeFlowNodeExecution {
+        output,
+        routes: vec![TradeFlowRouteDecision {
+            edge_type,
+            available_at: Utc::now(),
+        }],
+        repeat_at: None,
+        repeat_idempotency_key: None,
+    })
+}
+
 async fn fetch_trade_flow_market_price(
     ws: &ClobWsClient,
     client: Option<&dyn OrderExecutor>,
@@ -5876,769 +6519,9 @@ async fn process_trade_builder_orders(
     Ok(())
 }
 
-async fn process_trade_flow_dual_dca_jobs(
-    repo: &PostgresRepository,
-    run_id: i64,
-    cfg: &AppConfig,
-    client: &dyn OrderExecutor,
-    ws: &ClobWsClient,
-) -> Result<()> {
-    let jobs = repo
-        .list_trade_flow_dual_dca_jobs_for_processing(FLOW_DUAL_DCA_JOB_PROCESS_LIMIT)
-        .await?;
-    if jobs.is_empty() {
-        return Ok(());
-    }
 
-    let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
-    let limits = to_risk_limits(cfg);
-    let policy = DefaultRiskPolicy;
+// DCA functions moved to dca.rs — direct market order approach.
 
-    for job in jobs {
-        if let Err(err) = process_trade_flow_dual_dca_job(
-            repo, run_id, cfg, &limits, &policy, client, ws, &gamma, &job,
-        )
-        .await
-        {
-            let next_check = Utc::now() + ChronoDuration::seconds(FLOW_DUAL_DCA_RETRY_SECONDS);
-            let _ = repo
-                .schedule_trade_flow_dual_dca_job_check(job.id, next_check, Some(&err.to_string()))
-                .await;
-            let _ = repo
-                .append_trade_flow_dual_dca_event(
-                    job.id,
-                    None,
-                    "processing_error",
-                    &json!({
-                        "error": err.to_string(),
-                        "next_check_at": next_check
-                    }),
-                )
-                .await;
-            warn!(
-                run_id,
-                dual_dca_job_id = job.id,
-                error = %err,
-                "TRADE_FLOW_DUAL_DCA_JOB_ERROR"
-            );
-        }
-    }
-
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn process_trade_flow_dual_dca_job(
-    repo: &PostgresRepository,
-    run_id: i64,
-    cfg: &AppConfig,
-    limits: &RiskLimits,
-    policy: &impl RiskPolicy,
-    client: &dyn OrderExecutor,
-    ws: &ClobWsClient,
-    gamma: &GammaHttpClient,
-    job: &TradeFlowDualDcaJob,
-) -> Result<()> {
-    let run = repo.get_trade_flow_run(job.flow_run_id).await?;
-    let Some(run) = run else {
-        let canceled_pending_count =
-            cancel_dual_dca_conditional_orders(repo, job, None, "flow_run_missing").await?;
-        repo.set_trade_flow_dual_dca_job_status(job.id, "canceled", Some("flow_run_missing"))
-            .await?;
-        repo.append_trade_flow_dual_dca_event(
-            job.id,
-            None,
-            "job_canceled",
-            &json!({
-                "reason": "flow_run_missing",
-                "canceled_pending_conditionals": canceled_pending_count
-            }),
-        )
-        .await?;
-        return Ok(());
-    };
-    if run.status != "running" {
-        let canceled_pending_count =
-            cancel_dual_dca_conditional_orders(repo, job, None, "flow_run_not_running").await?;
-        repo.set_trade_flow_dual_dca_job_status(job.id, "completed", Some("flow_run_not_running"))
-            .await?;
-        repo.append_trade_flow_dual_dca_event(
-            job.id,
-            None,
-            "job_completed",
-            &json!({
-                "reason": "flow_run_not_running",
-                "run_status": run.status,
-                "canceled_pending_conditionals": canceled_pending_count
-            }),
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let scope_def = find_updown_scope_by_asset_timeframe(&job.market_asset, &job.market_timeframe)
-        .ok_or_else(|| anyhow::anyhow!("dual_dca job has unsupported market asset/timeframe"))?;
-    let mut markets = match list_markets_for_scope(gamma, scope_def.scope).await {
-        Ok(markets) => markets,
-        Err(err) => {
-            let next_check = Utc::now() + ChronoDuration::seconds(FLOW_DUAL_DCA_RETRY_SECONDS);
-            repo.schedule_trade_flow_dual_dca_job_check(job.id, next_check, None)
-                .await?;
-            repo.append_trade_flow_dual_dca_event(
-                job.id,
-                None,
-                "not_buy_decision",
-                &json!({
-                    "reason_code": "market_discovery_fetch_failed",
-                    "reason_message": "Failed to fetch market list for dual_dca job.",
-                    "market_scope": scope_def.scope,
-                    "asset": job.market_asset,
-                    "timeframe": job.market_timeframe,
-                    "error": err.to_string(),
-                    "next_check_at": next_check
-                }),
-            )
-            .await?;
-            warn!(
-                run_id,
-                dual_dca_job_id = job.id,
-                market_scope = scope_def.scope,
-                reason_code = "market_discovery_fetch_failed",
-                error = %err,
-                "TRADE_FLOW_DUAL_DCA_NOT_BUY_DECISION"
-            );
-            return Ok(());
-        }
-    };
-    markets.retain(|market| market.yes_token_id.is_some() && market.no_token_id.is_some());
-
-    if markets.is_empty() {
-        let next_check = Utc::now() + ChronoDuration::seconds(FLOW_DUAL_DCA_RETRY_SECONDS);
-        repo.update_trade_flow_dual_dca_job_market_state(job.id, None, None, None, next_check, 0)
-            .await?;
-        repo.append_trade_flow_dual_dca_event(
-            job.id,
-            None,
-            "not_buy_decision",
-            &json!({
-                "reason_code": "market_missing_token_ids",
-                "reason_message": "No active market with YES/NO token ids for dual_dca.",
-                "market_scope": scope_def.scope,
-                "asset": job.market_asset,
-                "timeframe": job.market_timeframe,
-                "next_check_at": next_check
-            }),
-        )
-        .await?;
-        info!(
-            run_id,
-            dual_dca_job_id = job.id,
-            market_scope = scope_def.scope,
-            reason_code = "market_missing_token_ids",
-            next_check_at = %next_check,
-            "TRADE_FLOW_DUAL_DCA_NOT_BUY_DECISION"
-        );
-        return Ok(());
-    }
-
-    let now = Utc::now();
-    let selected = select_preferred_live_market(markets, now)
-        .ok_or_else(|| anyhow::anyhow!("no active market with YES/NO token ids for dual_dca"))?;
-    let market_slug = selected.slug.clone();
-    let market_started_at = selected.starts_at.as_ref().cloned();
-    let market_ends_at = selected.ends_at.as_ref().cloned();
-    let market_selection_reason = selected.selection_reason.as_str();
-    info!(
-        run_id,
-        dual_dca_job_id = job.id,
-        market = %market_slug,
-        selection_reason = market_selection_reason,
-        market_start_at = ?market_started_at,
-        market_end_at = ?market_ends_at,
-        now_utc = %now,
-        "TRADE_FLOW_DUAL_DCA_MARKET_SELECTED"
-    );
-
-    let source_trade_id = job.source_trade_id.ok_or_else(|| {
-        anyhow::anyhow!("dual_dca job missing source_trade_id; republish node with sourceTradeId")
-    })?;
-    let yes_token_id = selected
-        .yes_token_id
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("selected market missing yes token id"))?;
-    let no_token_id = selected
-        .no_token_id
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("selected market missing no token id"))?;
-    let (yes_price, no_price) =
-        resolve_dual_dca_outcome_prices(ws, client, &market_slug, &yes_token_id, &no_token_id)
-            .await?;
-    let active_next_check = dual_dca_active_next_check(now, market_ends_at.as_ref().cloned());
-    let rollover_next_check =
-        dual_dca_rollover_next_check(now, market_ends_at.as_ref().cloned(), &job.market_timeframe);
-
-    if let Some((unrealized_pnl_usdc, token_breakdown)) = evaluate_dual_dca_unrealized_pnl_usdc(
-        repo,
-        source_trade_id,
-        &yes_token_id,
-        &no_token_id,
-        yes_price,
-        no_price,
-    )
-    .await?
-    {
-        let tp_hit = job.tp_profit_pct > 0.0 && unrealized_pnl_usdc >= job.tp_profit_pct;
-        let sl_hit = job.sl_loss_pct > 0.0 && unrealized_pnl_usdc <= -job.sl_loss_pct;
-        if tp_hit || sl_hit {
-            let reason = if tp_hit {
-                "tp_profit_hit"
-            } else {
-                "sl_loss_hit"
-            };
-            let canceled_pending_count =
-                cancel_dual_dca_conditional_orders(repo, job, Some(&market_slug), reason).await?;
-            repo.update_trade_flow_dual_dca_job_market_state(
-                job.id,
-                Some(&market_slug),
-                market_started_at.as_ref().cloned(),
-                market_ends_at.as_ref().cloned(),
-                rollover_next_check,
-                0,
-            )
-            .await?;
-            repo.append_trade_flow_dual_dca_event(
-                job.id,
-                None,
-                "risk_guard_triggered",
-                &json!({
-                    "market_slug": market_slug,
-                    "mode": if job.side_mode == "all" { "all" } else { "single_side" },
-                    "side_mode": job.side_mode,
-                    "resolved_outcomes_count": if job.side_mode == "all" { 2 } else { 1 },
-                    "reason": reason,
-                    "market_selection_reason": market_selection_reason,
-                    "market_started_at": market_started_at.as_ref().cloned(),
-                    "unrealized_pnl_usdc": unrealized_pnl_usdc,
-                    "tp_profit_usdc": job.tp_profit_pct,
-                    "sl_loss_usdc": job.sl_loss_pct,
-                    "sl_spread_usdc": job.sl_spread_pct,
-                    "yes_price": yes_price,
-                    "no_price": no_price,
-                    "token_breakdown": token_breakdown,
-                    "canceled_pending_conditionals": canceled_pending_count,
-                    "next_check_at": rollover_next_check
-                }),
-            )
-            .await?;
-            return Ok(());
-        }
-    }
-
-    if let Some(ends_at) = market_ends_at.as_ref().cloned() {
-        let cutoff_at = ends_at - ChronoDuration::minutes(job.cutoff_min.max(0) as i64);
-        if now >= cutoff_at {
-            let canceled_pending_count =
-                cancel_dual_dca_conditional_orders(repo, job, Some(&market_slug), "cutoff_window")
-                    .await?;
-            repo.update_trade_flow_dual_dca_job_market_state(
-                job.id,
-                Some(&market_slug),
-                market_started_at.as_ref().cloned(),
-                Some(ends_at),
-                rollover_next_check,
-                0,
-            )
-            .await?;
-            repo.append_trade_flow_dual_dca_event(
-                job.id,
-                None,
-                "market_cutoff_window",
-                &json!({
-                    "market_slug": market_slug,
-                    "mode": if job.side_mode == "all" { "all" } else { "single_side" },
-                    "side_mode": job.side_mode,
-                    "resolved_outcomes_count": if job.side_mode == "all" { 2 } else { 1 },
-                    "market_selection_reason": market_selection_reason,
-                    "market_started_at": market_started_at.as_ref().cloned(),
-                    "cutoff_min": job.cutoff_min,
-                    "market_ends_at": ends_at,
-                    "canceled_pending_conditionals": canceled_pending_count,
-                    "next_check_at": rollover_next_check
-                }),
-            )
-            .await?;
-            return Ok(());
-        }
-    }
-
-    if job
-        .last_market_slug
-        .as_ref()
-        .map(|prev| prev == &market_slug)
-        .unwrap_or(false)
-    {
-        repo.update_trade_flow_dual_dca_job_market_state(
-            job.id,
-            Some(&market_slug),
-            market_started_at.as_ref().cloned(),
-            market_ends_at.as_ref().cloned(),
-            active_next_check,
-            0,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let outcomes = resolve_dual_dca_outcomes(
-        &job.side_mode,
-        &yes_token_id,
-        yes_price,
-        &no_token_id,
-        no_price,
-    );
-    anyhow::ensure!(
-        !outcomes.is_empty(),
-        "dual_dca side_mode resolved to no outcomes"
-    );
-    let resolved_outcomes_count = outcomes.len();
-    let dual_dca_mode = if job.side_mode == "all" {
-        "all"
-    } else {
-        "single_side"
-    };
-
-    let mut created_order_count = 0i32;
-    for (outcome_label, token_id, outcome_price) in outcomes {
-        let level_reference_price = clamp_probability(job.base_price_usdc.unwrap_or(outcome_price));
-        for level in 0..=job.dca_levels {
-            let level_f64 = level as f64;
-            let step_distance = dual_dca_level_step_distance(job.near_step, job.step_mult, level);
-            let trigger_price = if level == 0 {
-                job.base_price_usdc.map(|_| level_reference_price)
-            } else {
-                Some(clamp_probability(level_reference_price - step_distance))
-            };
-
-            let size_multiplier = job.size_mult.powf(level_f64);
-            let (size_usdc, planned_shares) = if job.base_sizing == "usdc" {
-                let base_usdc = job.base_usdc.unwrap_or(0.0);
-                (base_usdc * size_multiplier, None)
-            } else {
-                let base_shares = job.base_shares.unwrap_or(0.0);
-                let shares = base_shares * size_multiplier;
-                let price_for_notional = trigger_price.unwrap_or(level_reference_price);
-                (shares * price_for_notional, Some(shares))
-            };
-            if !size_usdc.is_finite() || size_usdc < FLOW_DUAL_DCA_MIN_ORDER_USDC {
-                info!(
-                    run_id,
-                    dual_dca_job_id = job.id,
-                    market = %market_slug,
-                    outcome = outcome_label,
-                    level,
-                    reason_code = "below_min_order_usdc",
-                    size_usdc,
-                    "TRADE_FLOW_DUAL_DCA_NOT_BUY_DECISION"
-                );
-                repo.append_trade_flow_dual_dca_event(
-                    job.id,
-                    None,
-                    "level_skipped_small_size",
-                    &json!({
-                        "reason_code": "below_min_order_usdc",
-                        "reason_message": "Planned order size is below minimum USDC threshold.",
-                        "market_slug": market_slug,
-                        "mode": dual_dca_mode,
-                        "side_mode": job.side_mode,
-                        "resolved_outcomes_count": resolved_outcomes_count,
-                        "outcome_label": outcome_label,
-                        "level_index": level,
-                        "reference_price": level_reference_price,
-                        "planned_shares": planned_shares,
-                        "size_usdc": size_usdc
-                    }),
-                )
-                .await?;
-                continue;
-            }
-
-            let risk = risk_gate_manual_order(
-                repo,
-                run_id,
-                cfg,
-                source_trade_id,
-                size_usdc,
-                limits,
-                policy,
-            )
-            .await?;
-            if !matches!(risk, RiskDecision::Allow) {
-                warn!(
-                    run_id,
-                    dual_dca_job_id = job.id,
-                    market = %market_slug,
-                    outcome = outcome_label,
-                    level,
-                    reason_code = "risk_blocked",
-                    decision = %format!("{risk:?}"),
-                    size_usdc,
-                    "TRADE_FLOW_DUAL_DCA_NOT_BUY_DECISION"
-                );
-                repo.append_trade_flow_dual_dca_event(
-                    job.id,
-                    None,
-                    "level_blocked_by_risk",
-                    &json!({
-                        "reason_code": "risk_blocked",
-                        "reason_message": "Dual DCA level blocked by risk policy.",
-                        "market_slug": market_slug,
-                        "mode": dual_dca_mode,
-                        "side_mode": job.side_mode,
-                        "resolved_outcomes_count": resolved_outcomes_count,
-                        "outcome_label": outcome_label,
-                        "level_index": level,
-                        "size_usdc": size_usdc,
-                        "decision": format!("{risk:?}")
-                    }),
-                )
-                .await?;
-                continue;
-            }
-
-            let kind = if trigger_price.is_some() {
-                "conditional"
-            } else {
-                "immediate"
-            };
-            let trigger_condition = trigger_price.map(|_| "cross_below");
-            // Idempotency: if a leg already exists with a builder_order_id for this
-            // (job, market, outcome, level), reuse it instead of creating a duplicate order.
-            let existing_order_id = repo
-                .get_trade_flow_dual_dca_leg(job.id, &market_slug, outcome_label, level)
-                .await?
-                .and_then(|l| l.builder_order_id);
-            let builder_order_id = if let Some(oid) = existing_order_id {
-                info!(
-                    run_id,
-                    dual_dca_job_id = job.id,
-                    market = %market_slug,
-                    outcome = outcome_label,
-                    level,
-                    builder_order_id = oid,
-                    "TRADE_FLOW_DUAL_DCA_LEG_ALREADY_EXISTS_SKIP_CREATE"
-                );
-                oid
-            } else {
-                repo.create_trade_builder_order(
-                    source_trade_id,
-                    kind,
-                    "pending",
-                    &market_slug,
-                    &token_id,
-                    outcome_label,
-                    "buy",
-                    trigger_condition,
-                    trigger_price,
-                    size_usdc,
-                    job.min_price_distance_cent,
-                    market_ends_at.as_ref().cloned(),
-                    1,
-                )
-                .await?
-            };
-            repo.append_trade_builder_order_event(
-                builder_order_id,
-                "dual_dca_created",
-                &json!({
-                    "dual_dca_job_id": job.id,
-                    "flow_run_id": job.flow_run_id,
-                    "flow_node_key": job.node_key,
-                    "market_slug": market_slug,
-                    "mode": dual_dca_mode,
-                    "side_mode": job.side_mode,
-                    "resolved_outcomes_count": resolved_outcomes_count,
-                    "outcome_label": outcome_label,
-                    "level_index": level,
-                    "level_reference_price": level_reference_price,
-                    "level_step_distance": step_distance,
-                    "trigger_condition": trigger_condition,
-                    "trigger_price": trigger_price
-                }),
-            )
-            .await?;
-
-            let leg = repo
-                .upsert_trade_flow_dual_dca_leg(
-                    job.id,
-                    &market_slug,
-                    &token_id,
-                    outcome_label,
-                    "buy",
-                    level,
-                    trigger_condition,
-                    trigger_price,
-                    size_usdc,
-                    Some(level_reference_price),
-                    Some(builder_order_id),
-                    "submitted",
-                )
-                .await?;
-            repo.append_trade_flow_dual_dca_event(
-                job.id,
-                Some(leg.id),
-                "leg_submitted",
-                &json!({
-                    "market_slug": market_slug,
-                    "mode": dual_dca_mode,
-                    "side_mode": job.side_mode,
-                    "resolved_outcomes_count": resolved_outcomes_count,
-                    "token_id": token_id,
-                    "outcome_label": outcome_label,
-                    "level_index": level,
-                    "kind": kind,
-                    "trigger_condition": trigger_condition,
-                    "trigger_price": trigger_price,
-                    "reference_price": level_reference_price,
-                    "planned_shares": planned_shares,
-                    "size_usdc": size_usdc,
-                    "builder_order_id": builder_order_id
-                }),
-            )
-            .await?;
-            created_order_count += 1;
-        }
-    }
-
-    repo.update_trade_flow_dual_dca_job_market_state(
-        job.id,
-        Some(&market_slug),
-        market_started_at.as_ref().cloned(),
-        market_ends_at.as_ref().cloned(),
-        active_next_check,
-        created_order_count,
-    )
-    .await?;
-    repo.append_trade_flow_dual_dca_event(
-        job.id,
-        None,
-        "market_cycle_initialized",
-        &json!({
-            "market_slug": market_slug,
-            "mode": dual_dca_mode,
-            "side_mode": job.side_mode,
-            "resolved_outcomes_count": resolved_outcomes_count,
-            "market_selection_reason": market_selection_reason,
-            "market_started_at": market_started_at.as_ref().cloned(),
-            "market_ends_at": market_ends_at.as_ref().cloned(),
-            "orders_created": created_order_count,
-            "next_check_at": active_next_check
-        }),
-    )
-    .await?;
-
-    Ok(())
-}
-
-async fn cancel_dual_dca_conditional_orders(
-    repo: &PostgresRepository,
-    job: &TradeFlowDualDcaJob,
-    market_slug: Option<&str>,
-    reason: &str,
-) -> Result<usize> {
-    let orders = repo
-        .list_active_dual_dca_conditional_orders(job.id, market_slug)
-        .await?;
-    let mut canceled_count = 0usize;
-
-    for order in orders {
-        repo.set_trade_builder_order_status(order.id, "canceled_requested", None)
-            .await?;
-        repo.append_trade_builder_order_event(
-            order.id,
-            "dual_dca_cancel_requested",
-            &json!({
-                "dual_dca_job_id": job.id,
-                "flow_run_id": job.flow_run_id,
-                "flow_node_key": job.node_key,
-                "reason": reason
-            }),
-        )
-        .await?;
-        canceled_count = canceled_count.saturating_add(1);
-    }
-
-    Ok(canceled_count)
-}
-
-fn resolve_dual_dca_outcomes(
-    side_mode: &str,
-    yes_token_id: &str,
-    yes_price: f64,
-    no_token_id: &str,
-    no_price: f64,
-) -> Vec<(&'static str, String, f64)> {
-    let mut outcomes: Vec<(&'static str, String, f64)> = Vec::new();
-    if matches!(side_mode, "up" | "all") {
-        outcomes.push(("Yes", yes_token_id.to_string(), yes_price));
-    }
-    if matches!(side_mode, "down" | "all") {
-        outcomes.push(("No", no_token_id.to_string(), no_price));
-    }
-    outcomes
-}
-
-async fn resolve_dual_dca_outcome_prices(
-    ws: &ClobWsClient,
-    client: &dyn OrderExecutor,
-    market_slug: &str,
-    yes_token_id: &str,
-    no_token_id: &str,
-) -> Result<(f64, f64)> {
-    let midpoint_price = match client.midpoint(yes_token_id).await {
-        Ok(snapshot) => clamp_probability(snapshot.price),
-        Err(err) => {
-            let fallback = 0.5;
-            warn!(
-                market = market_slug,
-                error = %err,
-                fallback_yes = fallback,
-                "TRADE_FLOW_DUAL_DCA_MIDPOINT_FAILED_USING_FALLBACK"
-            );
-            fallback
-        }
-    };
-    let fallback_yes = midpoint_price;
-    let fallback_no = clamp_probability(1.0 - midpoint_price);
-
-    let yes_ws_price = fetch_price_from_market_ws(ws, yes_token_id)
-        .await
-        .map(clamp_probability);
-    let no_ws_price = fetch_price_from_market_ws(ws, no_token_id)
-        .await
-        .map(clamp_probability);
-
-    let yes_price = yes_ws_price
-        .or_else(|| no_ws_price.map(|value| clamp_probability(1.0 - value)))
-        .unwrap_or(fallback_yes);
-    let no_price = no_ws_price
-        .or_else(|| yes_ws_price.map(|value| clamp_probability(1.0 - value)))
-        .unwrap_or(fallback_no);
-
-    Ok((clamp_probability(yes_price), clamp_probability(no_price)))
-}
-
-async fn evaluate_dual_dca_unrealized_pnl_usdc(
-    repo: &PostgresRepository,
-    source_trade_id: i64,
-    yes_token_id: &str,
-    no_token_id: &str,
-    yes_price: f64,
-    no_price: f64,
-) -> Result<Option<(f64, Value)>> {
-    let token_ids = vec![yes_token_id.to_string(), no_token_id.to_string()];
-    let aggregates = repo
-        .aggregate_trade_fill_by_token(source_trade_id, &token_ids)
-        .await?;
-    if aggregates.is_empty() {
-        return Ok(None);
-    }
-
-    let mut by_token: HashMap<String, (f64, f64, f64, f64)> = HashMap::new();
-    for item in aggregates {
-        by_token.insert(
-            item.token_id,
-            (
-                item.buy_qty,
-                item.buy_notional_usdc,
-                item.sell_qty,
-                item.sell_notional_usdc,
-            ),
-        );
-    }
-
-    let mut has_open_position = false;
-    let mut total_unrealized_pnl_usdc = 0.0f64;
-    let mut breakdown_rows = Vec::new();
-
-    for (outcome_label, token_id, current_price) in [
-        ("Yes", yes_token_id, yes_price),
-        ("No", no_token_id, no_price),
-    ] {
-        let (buy_qty, buy_notional_usdc, sell_qty, sell_notional_usdc) =
-            by_token.remove(token_id).unwrap_or((0.0, 0.0, 0.0, 0.0));
-        let net_qty = (buy_qty - sell_qty).max(0.0);
-        let net_cost_usdc = (buy_notional_usdc - sell_notional_usdc).max(0.0);
-        let mark_value_usdc = net_qty * current_price;
-        let unrealized_pnl_usdc = if net_qty > 0.0 {
-            mark_value_usdc - net_cost_usdc
-        } else {
-            0.0
-        };
-
-        if net_qty > 0.0000001 {
-            has_open_position = true;
-            total_unrealized_pnl_usdc += unrealized_pnl_usdc;
-        }
-
-        breakdown_rows.push(json!({
-            "outcome_label": outcome_label,
-            "token_id": token_id,
-            "buy_qty": buy_qty,
-            "buy_notional_usdc": buy_notional_usdc,
-            "sell_qty": sell_qty,
-            "sell_notional_usdc": sell_notional_usdc,
-            "net_qty": net_qty,
-            "net_cost_usdc": net_cost_usdc,
-            "current_price": current_price,
-            "mark_value_usdc": mark_value_usdc,
-            "unrealized_pnl_usdc": unrealized_pnl_usdc
-        }));
-    }
-
-    if !has_open_position {
-        return Ok(None);
-    }
-
-    Ok(Some((
-        total_unrealized_pnl_usdc,
-        Value::Array(breakdown_rows),
-    )))
-}
-
-fn dual_dca_level_step_distance(near_step: f64, step_mult: f64, level_index: i32) -> f64 {
-    if level_index <= 0 {
-        return 0.0;
-    }
-    let n = level_index as f64;
-    if (step_mult - 1.0).abs() < 1e-9 {
-        return near_step * n;
-    }
-    near_step * (step_mult.powf(n) - 1.0) / (step_mult - 1.0)
-}
-
-fn dual_dca_active_next_check(
-    now: DateTime<Utc>,
-    market_ends_at: Option<DateTime<Utc>>,
-) -> DateTime<Utc> {
-    let heartbeat = now + ChronoDuration::seconds(FLOW_DUAL_DCA_ACTIVE_CHECK_SECONDS);
-    let candidate = market_ends_at
-        .map(|ends_at| std::cmp::min(heartbeat, ends_at + ChronoDuration::seconds(3)))
-        .unwrap_or(heartbeat);
-    // Geçmiş timestamp → en az 3s bekle
-    std::cmp::max(candidate, now + ChronoDuration::seconds(3))
-}
-
-fn dual_dca_rollover_next_check(
-    now: DateTime<Utc>,
-    market_ends_at: Option<DateTime<Utc>>,
-    timeframe: &str,
-) -> DateTime<Utc> {
-    let base = market_ends_at
-        .map(|ends_at| ends_at + ChronoDuration::seconds(3))
-        .unwrap_or(now + dual_dca_timeframe_duration(timeframe));
-    // Geçmiş timestamp → tight loop'u önle
-    std::cmp::max(base, now + ChronoDuration::seconds(5))
-}
 
 #[cfg(test)]
 mod dual_dca_tests {
@@ -6721,37 +6604,6 @@ mod dual_dca_tests {
         let err = select_trade_flow_initial_seed_nodes(&graph).expect_err("should fail");
         assert_eq!(err, "flow_missing_trigger");
     }
-
-    #[test]
-    fn cumulative_step_distance_grows_as_expected() {
-        let near_step = 0.1;
-        let step_mult = 1.1;
-        let l1 = dual_dca_level_step_distance(near_step, step_mult, 1);
-        let l2 = dual_dca_level_step_distance(near_step, step_mult, 2);
-        assert!((l1 - 0.1).abs() < 1e-9);
-        assert!((l2 - 0.21).abs() < 1e-9);
-    }
-
-    #[test]
-    fn cumulative_step_distance_handles_unit_multiplier() {
-        let near_step = 0.1;
-        let step_mult = 1.0;
-        let l2 = dual_dca_level_step_distance(near_step, step_mult, 2);
-        let l3 = dual_dca_level_step_distance(near_step, step_mult, 3);
-        assert!((l2 - 0.2).abs() < 1e-9);
-        assert!((l3 - 0.3).abs() < 1e-9);
-    }
-
-    #[test]
-    fn active_next_check_is_clamped_to_market_end_buffer() {
-        let now = DateTime::parse_from_rfc3339("2026-02-22T12:00:00Z")
-            .expect("valid datetime")
-            .with_timezone(&Utc);
-        let market_ends_at = now + ChronoDuration::seconds(10);
-        let next_check = dual_dca_active_next_check(now, Some(market_ends_at));
-        assert_eq!(next_check, market_ends_at + ChronoDuration::seconds(3));
-    }
-
     #[test]
     fn candidate_slugs_cover_prev_current_and_future_15m_windows() {
         let scope_def = find_updown_scope_by_scope("btc_15m_updown").expect("scope should exist");
@@ -6858,31 +6710,6 @@ mod dual_dca_tests {
             LiveMarketSelectionReason::LatestBySlugFallback
         );
     }
-
-    #[test]
-    fn resolves_up_mode_to_yes_only() {
-        let outcomes = resolve_dual_dca_outcomes("up", "yes-token", 0.41, "no-token", 0.59);
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(outcomes[0].0, "Yes");
-        assert_eq!(outcomes[0].1, "yes-token");
-    }
-
-    #[test]
-    fn resolves_down_mode_to_no_only() {
-        let outcomes = resolve_dual_dca_outcomes("down", "yes-token", 0.41, "no-token", 0.59);
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(outcomes[0].0, "No");
-        assert_eq!(outcomes[0].1, "no-token");
-    }
-
-    #[test]
-    fn resolves_all_mode_to_both_outcomes() {
-        let outcomes = resolve_dual_dca_outcomes("all", "yes-token", 0.41, "no-token", 0.59);
-        assert_eq!(outcomes.len(), 2);
-        assert_eq!(outcomes[0].0, "Yes");
-        assert_eq!(outcomes[1].0, "No");
-    }
-
     fn make_leg(levels_filled: u32, last_fill_price: Option<f64>) -> DualLegRuntime {
         DualLegRuntime {
             side: LegSide::Yes,
@@ -6977,7 +6804,7 @@ fn parse_rfc3339_utc(raw: &str) -> Option<DateTime<Utc>> {
         .ok()
 }
 
-fn dual_dca_timeframe_duration(timeframe: &str) -> ChronoDuration {
+pub(crate) fn dual_dca_timeframe_duration(timeframe: &str) -> ChronoDuration {
     match timeframe.trim().to_ascii_lowercase().as_str() {
         "15m" => ChronoDuration::minutes(15),
         _ => ChronoDuration::minutes(5),
@@ -7463,7 +7290,7 @@ async fn refresh_workflow_leg_fill_metrics(
     Ok(())
 }
 
-async fn sync_recent_trade_builder_fills(
+pub(crate) async fn sync_recent_trade_builder_fills(
     repo: &PostgresRepository,
     client: &dyn OrderExecutor,
 ) -> Result<usize> {
@@ -7529,6 +7356,16 @@ async fn process_trade_builder_order(
             }),
         )
         .await?;
+        if let Ok(Some(unblocked_id)) = repo
+            .unblock_next_trade_builder_order(order.trade_id, &order.token_id)
+            .await
+        {
+            info!(
+                builder_order_id = order.id,
+                unblocked_order_id = unblocked_id,
+                "TRADE_BUILDER_DCA_NEXT_LEVEL_UNBLOCKED"
+            );
+        }
         return Ok(());
     }
 
@@ -8010,6 +7847,20 @@ async fn finalize_builder_fill(
         }),
     )
     .await?;
+
+    // Unblock next DCA level for the same trade + token
+    if let Ok(Some(unblocked_id)) = repo
+        .unblock_next_trade_builder_order(order.trade_id, &order.token_id)
+        .await
+    {
+        info!(
+            builder_order_id = order.id,
+            unblocked_order_id = unblocked_id,
+            trade_id = order.trade_id,
+            "TRADE_BUILDER_DCA_NEXT_LEVEL_UNBLOCKED"
+        );
+    }
+
     Ok(())
 }
 
@@ -8054,7 +7905,7 @@ async fn fetch_current_token_price(
     Ok(clamp_probability(fallback.price))
 }
 
-async fn fetch_price_from_market_ws(ws: &ClobWsClient, token_id: &str) -> Option<f64> {
+pub(crate) async fn fetch_price_from_market_ws(ws: &ClobWsClient, token_id: &str) -> Option<f64> {
     let events = ws
         .subscribe_once(WsChannel::Market, &[token_id.to_string()])
         .await
@@ -8115,7 +7966,7 @@ fn parse_json_number(value: Option<&serde_json::Value>) -> Option<f64> {
     }
 }
 
-fn normalize_exchange_status(status: &str) -> &'static str {
+pub(crate) fn normalize_exchange_status(status: &str) -> &'static str {
     let normalized = status.to_lowercase();
     if normalized.contains("partial") {
         return "partially_filled";
@@ -8138,11 +7989,11 @@ fn normalize_exchange_status(status: &str) -> &'static str {
     "open"
 }
 
-fn min_price_distance_to_probability(min_price_distance_cent: f64) -> f64 {
+pub(crate) fn min_price_distance_to_probability(min_price_distance_cent: f64) -> f64 {
     (min_price_distance_cent / 100.0).max(0.0001)
 }
 
-fn aggressive_price_for_side(side: &str, current_price: f64, min_price_distance_cent: f64) -> f64 {
+pub(crate) fn aggressive_price_for_side(side: &str, current_price: f64, min_price_distance_cent: f64) -> f64 {
     let distance = min_price_distance_to_probability(min_price_distance_cent);
     if side == "sell" {
         return clamp_probability(current_price - distance);
@@ -8166,7 +8017,7 @@ fn estimate_remaining_usdc(
     order.remaining_size.unwrap_or(order.size_usdc).max(0.0)
 }
 
-async fn risk_gate_manual_order(
+pub(crate) async fn risk_gate_manual_order(
     repo: &PostgresRepository,
     run_id: i64,
     cfg: &AppConfig,
@@ -8739,7 +8590,7 @@ async fn create_runtime(
     })
 }
 
-fn to_risk_limits(cfg: &AppConfig) -> RiskLimits {
+pub(crate) fn to_risk_limits(cfg: &AppConfig) -> RiskLimits {
     RiskLimits {
         max_daily_loss_usdc: cfg.risk.max_daily_loss_usdc,
         max_consecutive_losses: cfg.risk.max_consecutive_losses,

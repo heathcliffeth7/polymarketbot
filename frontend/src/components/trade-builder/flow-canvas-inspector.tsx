@@ -15,12 +15,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   NODE_FIELD_SCHEMAS,
   jsonLogicToNestedExprGroup,
+  createEmptyOutcomeConditionRow,
   type ConditionDraft,
   type EdgeConditionFormState,
   type NodeConfigFormState,
+  type OutcomeConditionRow,
   type PrimitiveValueType,
 } from '@/lib/trade-flow-config-mappers';
-import type { ExpressionGroup, TradeFlowOpenPositionOption, TradeFlowOpenPositionsMeta } from '@/lib/types';
+import type { ExpressionGroup, TradeBuilderOutcome, TradeFlowOpenPositionOption, TradeFlowOpenPositionsMeta } from '@/lib/types';
 import {
   EDGE_TYPE_OPTIONS,
   NODE_FIELD_HELP_CONTENT,
@@ -64,6 +66,9 @@ export interface NodeInspectorActions {
   ) => void;
   onAddStatePatchRow: () => void;
   onRemoveStatePatchRow: (rowId: string) => void;
+  onAddOutcomeCondition: (tokenId: string, outcomeLabel: string) => void;
+  onRemoveOutcomeCondition: (rowId: string) => void;
+  onUpdateOutcomeCondition: (rowId: string, patch: Partial<OutcomeConditionRow>) => void;
 }
 
 export interface EdgeInspectorActions {
@@ -87,6 +92,8 @@ interface NodeInspectorPanelProps {
   openPositionsLoading: boolean;
   openPositionApplyingKey: string | null;
   canApplyOpenPosition: (p: TradeFlowOpenPositionOption) => boolean;
+  marketOutcomes: TradeBuilderOutcome[];
+  marketOutcomesLoading: boolean;
   actions: NodeInspectorActions;
 }
 
@@ -107,6 +114,8 @@ export function NodeInspectorPanel({
   openPositionsLoading,
   openPositionApplyingKey,
   canApplyOpenPosition,
+  marketOutcomes,
+  marketOutcomesLoading,
   actions,
 }: NodeInspectorPanelProps) {
   const [openFieldHelpKey, setOpenFieldHelpKey] = useState<string | null>(null);
@@ -229,7 +238,33 @@ export function NodeInspectorPanel({
                     </button>
                   )}
                 </div>
-                {field.input === 'select' ? (
+                {field.key === 'outcomeLabel' &&
+                  marketOutcomes.length > 0 &&
+                  (nodeTypeDraft === 'trigger.open_positions' || nodeTypeDraft === 'trigger.market_price') ? (
+                  <Select
+                    value={(form.fields[field.key] ?? '') || EMPTY_SELECT_SENTINEL}
+                    onValueChange={(v) => {
+                      const label = v === EMPTY_SELECT_SENTINEL ? '' : v;
+                      actions.onUpdateField(field.key, label);
+                      const matched = marketOutcomes.find((o) => o.label === label);
+                      if (matched) {
+                        actions.onUpdateField('tokenId', matched.token_id);
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="h-8 w-full border-slate-200 bg-white text-xs text-slate-900" size="sm">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={EMPTY_SELECT_SENTINEL}>Sec...</SelectItem>
+                      {marketOutcomes.map((o) => (
+                        <SelectItem key={o.token_id} value={o.label}>
+                          {o.label}{o.price != null ? ` ($${o.price.toFixed(2)})` : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : field.input === 'select' ? (
                   <Select
                     value={(form.fields[field.key] ?? '') || EMPTY_SELECT_SENTINEL}
                     onValueChange={(v) =>
@@ -474,6 +509,115 @@ export function NodeInspectorPanel({
                             ? 'Uygulaniyor...'
                             : 'Bu Pozisyonu Kullan'}
                         </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {(nodeTypeDraft === 'trigger.open_positions' || nodeTypeDraft === 'trigger.market_price') && (
+              <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
+                <div className="flex items-center gap-1.5">
+                  <Zap className="h-3.5 w-3.5 text-amber-500" />
+                  <p className="text-[11px] font-semibold text-slate-700">
+                    Market Outcome Kosullari
+                  </p>
+                </div>
+                <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                  Outcome&apos;a tiklayarak ekle, sonra kosulu (yukari/asagi) ve tetik fiyatini belirle. Birden fazla eklenirse herhangi biri saglaninca tetiklenir (OR).
+                </p>
+
+                {marketOutcomesLoading ? (
+                  <p className="text-[10px] text-slate-500">Outcome&apos;lar yukleniyor...</p>
+                ) : marketOutcomes.length === 0 ? (
+                  <p className="text-[10px] text-slate-500">
+                    Market slug girilince outcome&apos;lar otomatik yuklenecek.
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5">
+                    {marketOutcomes.map((outcome) => {
+                      const alreadyAdded = form.outcomeConditionRows.some(
+                        (r) => r.tokenId === outcome.token_id
+                      );
+                      return (
+                        <button
+                          key={outcome.token_id}
+                          type="button"
+                          disabled={alreadyAdded}
+                          className={`rounded-full border px-2.5 py-1 text-[10px] font-medium transition ${
+                            alreadyAdded
+                              ? 'border-sky-300 bg-sky-50 text-sky-600 cursor-default'
+                              : 'border-slate-300 bg-white text-slate-700 hover:border-sky-300 hover:bg-sky-50'
+                          }`}
+                          onClick={() => actions.onAddOutcomeCondition(outcome.token_id, outcome.label)}
+                        >
+                          {outcome.label}
+                          {outcome.price != null && (
+                            <span className="ml-1 text-slate-400">${outcome.price.toFixed(2)}</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {form.outcomeConditionRows.length > 0 && (
+                  <div className="space-y-2">
+                    {form.outcomeConditionRows.map((row) => (
+                      <div
+                        key={row.id}
+                        className="space-y-1.5 rounded-md border border-slate-200 bg-white p-2.5"
+                      >
+                        <div className="flex items-center justify-between">
+                          <Badge variant="secondary" className="text-[10px]">
+                            {row.outcomeLabel || row.tokenId.slice(0, 12)}
+                          </Badge>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 w-6 p-0 text-red-400 hover:text-red-600"
+                            onClick={() => actions.onRemoveOutcomeCondition(row.id)}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <div className="space-y-0.5">
+                            <Label className="text-[10px] font-medium text-slate-600">Tetik Kosulu</Label>
+                            <Select
+                              value={row.triggerCondition || '__none__'}
+                              onValueChange={(v) =>
+                                actions.onUpdateOutcomeCondition(row.id, {
+                                  triggerCondition: v === '__none__' ? '' : v,
+                                })
+                              }
+                            >
+                              <SelectTrigger className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900" size="sm">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__none__">Seciniz...</SelectItem>
+                                <SelectItem value="cross_above">Yukari Gecerse ↑</SelectItem>
+                                <SelectItem value="cross_below">Asagi Gecerse ↓</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-0.5">
+                            <Label className="text-[10px] font-medium text-slate-600">Tetik Fiyati (cent)</Label>
+                            <Input
+                              type="number"
+                              value={row.triggerPriceCent}
+                              onChange={(e) =>
+                                actions.onUpdateOutcomeCondition(row.id, {
+                                  triggerPriceCent: e.target.value,
+                                })
+                              }
+                              placeholder="ör: 30"
+                              className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
+                            />
+                          </div>
+                        </div>
                       </div>
                     ))}
                   </div>

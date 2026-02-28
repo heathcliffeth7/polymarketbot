@@ -103,22 +103,6 @@ export function createSellBuyIfElseTemplate(
   };
 }
 
-export function formatDateTime(ts: string | null): string {
-  if (!ts) return '-';
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return ts;
-  return date.toLocaleString();
-}
-
-export function formatRunStatus(status: string): string {
-  if (status === 'queued') return 'Kuyrukta';
-  if (status === 'running') return 'Calisiyor';
-  if (status === 'completed') return 'Tamamlandi';
-  if (status === 'failed') return 'Hata';
-  if (status === 'canceled') return 'Iptal';
-  return status;
-}
-
 export function buildDetailSnapshotKey(detail: TradeFlowDefinitionDetail | null): string | null {
   if (!detail?.draftVersion) return null;
   return `${detail.definition.id}:${detail.draftVersion.id}:${detail.definition.updated_at}`;

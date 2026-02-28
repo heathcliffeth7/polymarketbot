@@ -62,6 +62,8 @@ pub struct StrategyConfig {
     #[serde(default = "default_sl_renew_interval_ms")]
     pub sl_renew_interval_ms: u64,
     #[serde(default)]
+    pub flow_only: bool,
+    #[serde(default)]
     pub dual_side_enabled: bool,
     #[serde(default = "default_total_notional_usdc")]
     pub total_notional_usdc: f64,
@@ -491,15 +493,17 @@ fn validate(
         risk.max_notional_per_market_usdc > 0.0,
         "max_notional_per_market_usdc must be > 0"
     );
-    for scope in bot.resolve_scopes() {
-        anyhow::ensure!(
-            SUPPORTED_MARKET_SCOPE_SLUG_PREFIXES
-                .iter()
-                .any(|(s, _)| *s == scope),
-            "market_scope '{}' must be one of: {}",
-            scope,
-            supported_market_scope_names_csv()
-        );
+    if !strategy.flow_only {
+        for scope in bot.resolve_scopes() {
+            anyhow::ensure!(
+                SUPPORTED_MARKET_SCOPE_SLUG_PREFIXES
+                    .iter()
+                    .any(|(s, _)| *s == scope),
+                "market_scope '{}' must be one of: {}",
+                scope,
+                supported_market_scope_names_csv()
+            );
+        }
     }
     if !bot.market_slug_override.trim().is_empty() {
         let override_lower = bot.market_slug_override.to_ascii_lowercase();

@@ -19,7 +19,7 @@ import type {
   TradeFlowValidationResult,
   TradeFlowVersion,
 } from '@/lib/types';
-import { readExchangeApiAddressForServer } from '@/lib/config';
+import { readPositionWalletAddress } from '@/lib/config';
 import { getTradeBuilderWorkflowById } from './trade-builder';
 
 type Queryable = {
@@ -46,7 +46,7 @@ const SUPPORTED_NODE_TYPES = new Set([
 
 const POLYMARKET_DATA_API_BASE =
   process.env.POLYMARKET_DATA_API_BASE || 'https://data-api.polymarket.com';
-const OPEN_POSITIONS_MIN_CURRENT_VALUE_USD = 5;
+const OPEN_POSITIONS_MIN_CURRENT_VALUE_USD = 1;
 
 const DEFAULT_GRAPH: TradeFlowGraph = {
   context: {},
@@ -452,7 +452,7 @@ export async function ensureDualDcaSourceTrade(
 }
 
 export async function getTradeFlowOpenPositions(): Promise<TradeFlowOpenPositionsResponse> {
-  const walletAddress = (await readExchangeApiAddressForServer()).trim();
+  const walletAddress = (await readPositionWalletAddress()).trim();
   if (!walletAddress) {
     throw new Error(
       'Open positions için cüzdan adresi bulunamadı. exchange.api_address_env veya exchange.api_address tanımlayın.'

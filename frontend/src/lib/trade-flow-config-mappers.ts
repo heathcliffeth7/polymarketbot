@@ -17,9 +17,18 @@ export interface ConditionDraft {
   rightValue: string;
 }
 
+export interface OutcomeConditionRow {
+  id: string;
+  tokenId: string;
+  outcomeLabel: string;
+  triggerCondition: string;
+  triggerPriceCent: string;
+}
+
 export interface NodeConfigFormState {
   fields: Record<string, string>;
   triggerSizeRows: string[];
+  outcomeConditionRows: OutcomeConditionRow[];
   expressionRows: ConditionDraft[];
   expressionJoin: ExpressionJoin;
   expressionSupported: boolean;
@@ -147,24 +156,23 @@ export function createEmptyKeyValueDraft(): KeyValueDraft {
   };
 }
 
+export function createEmptyOutcomeConditionRow(): OutcomeConditionRow {
+  return { id: createId('oc'), tokenId: '', outcomeLabel: '', triggerCondition: '', triggerPriceCent: '' };
+}
+
 export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
   'trigger.market_price': [
     { key: 'marketSlug', label: 'Market Slug', input: 'text' },
-    { key: 'tokenId', label: 'Token ID', input: 'text' },
-    { key: 'varKey', label: 'Değişken Anahtarı', input: 'text', placeholder: 'market_price' },
-    { key: 'pollIntervalMs', label: 'Poll Interval (ms)', input: 'number' },
-    { key: 'minIntervalMs', label: 'Minimum Interval (ms)', input: 'number' },
     {
-      key: 'triggerCondition',
-      label: 'Tetik Koşulu',
+      key: 'repeatMode',
+      label: 'Tetik Modu',
       input: 'select',
       options: [
-        { label: 'Yok', value: '' },
-        { label: 'cross_above', value: 'cross_above' },
-        { label: 'cross_below', value: 'cross_below' },
+        { label: '1 Kere (once)', value: 'once' },
+        { label: 'Döngü (loop)', value: 'loop' },
       ],
     },
-    { key: 'triggerPrice', label: 'Tetik Fiyatı', input: 'number' },
+    { key: 'minIntervalMs', label: 'Kontrol Aralığı (ms)', input: 'number', help: 'Varsayılan: 10000 (10sn). Minimum: 250ms.' },
   ],
   'trigger.sell_progress': [
     { key: 'sourceTradeId', label: 'Source Trade ID', input: 'number' },
@@ -193,13 +201,6 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       input: 'number',
       help: 'Örn: 70 girersen 70c.',
     },
-    {
-      key: 'minPositionQty',
-      label: 'Minimum Pozisyon Miktarı',
-      input: 'number',
-      help: 'Önce toplam qty > 0 olmalı; bu alan ek alt sınırdır.',
-    },
-    { key: 'varPrefix', label: 'Değişken Prefix', input: 'text', placeholder: 'position' },
     {
       key: 'minIntervalMs',
       label: 'Minimum Interval (ms)',
@@ -418,6 +419,11 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
   'action.notify': [
     { key: 'channel', label: 'Kanal', input: 'text' },
     { key: 'message', label: 'Mesaj', input: 'textarea' },
+  ],
+  'action.telegram_notify': [
+    { key: 'botToken', label: 'Bot Token', input: 'text', placeholder: '123456:ABC-DEF...' },
+    { key: 'chatId', label: 'Chat ID', input: 'text', placeholder: '-1001234567890' },
+    { key: 'message', label: 'Mesaj', input: 'textarea', placeholder: 'Tetik: {{vars.trigger_1_price}}' },
   ],
 };
 
@@ -687,12 +693,37 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
   }
 
+  let outcomeConditionRows: OutcomeConditionRow[] = [];
+  if (nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') {
+    if (Array.isArray(cfg.outcomeConditions)) {
+      for (const item of cfg.outcomeConditions as Record<string, unknown>[]) {
+        if (!isRecord(item)) continue;
+        outcomeConditionRows.push({
+          id: createId('oc'),
+          tokenId: toStringValue(item.tokenId),
+          outcomeLabel: toStringValue(item.outcomeLabel),
+          triggerCondition: toStringValue(item.triggerCondition),
+          triggerPriceCent: toStringValue(item.triggerPriceCent),
+        });
+      }
+    } else if (toStringValue(cfg.tokenId).trim() && toStringValue(cfg.triggerCondition).trim()) {
+      outcomeConditionRows.push({
+        id: createId('oc'),
+        tokenId: toStringValue(cfg.tokenId),
+        outcomeLabel: toStringValue(cfg.outcomeLabel),
+        triggerCondition: toStringValue(cfg.triggerCondition),
+        triggerPriceCent: toStringValue(cfg.triggerPriceCent),
+      });
+    }
+  }
+
   const expression = parseExpressionDraft(cfg.expression);
   const patchRows = objectToRows(cfg.statePatch ?? cfg.state);
 
   return {
     fields,
     triggerSizeRows,
+    outcomeConditionRows,
     expressionRows: expression.rows,
     expressionJoin: expression.join,
     expressionSupported: expression.supported,
@@ -857,6 +888,26 @@ export function buildNodeConfigFromForm(
 
     if (!toStringValue(config.refKey).trim()) {
       delete config.refKey;
+    }
+  }
+
+  if ((nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') && form.outcomeConditionRows.length > 0) {
+    const conditions = form.outcomeConditionRows
+      .filter((row) => row.tokenId.trim() && row.triggerCondition.trim())
+      .map((row) => {
+        const priceCent = Number(row.triggerPriceCent.trim());
+        return {
+          tokenId: row.tokenId.trim(),
+          outcomeLabel: row.outcomeLabel.trim(),
+          triggerCondition: row.triggerCondition.trim(),
+          triggerPriceCent: Number.isFinite(priceCent) ? priceCent : 0,
+        };
+      });
+    if (conditions.length > 0) {
+      config.outcomeConditions = conditions;
+      delete config.tokenId;
+      delete config.triggerCondition;
+      delete config.triggerPriceCent;
     }
   }
 

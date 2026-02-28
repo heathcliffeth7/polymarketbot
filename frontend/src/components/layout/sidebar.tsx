@@ -5,22 +5,14 @@ import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import {
   LayoutDashboard,
-  ArrowLeftRight,
-  ClipboardList,
-  ShieldAlert,
   Settings,
   Power,
-  BarChart3,
   Zap,
   LogOut,
 } from 'lucide-react';
 
 const navItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/trades', label: 'Trades', icon: ArrowLeftRight },
-  { href: '/orders', label: 'Orders & Fills', icon: ClipboardList },
-  { href: '/risk', label: 'Risk Events', icon: ShieldAlert },
-  { href: '/market', label: 'Market', icon: BarChart3 },
   { href: '/trade-builder', label: 'İşlem Oluşturucu', icon: Zap },
   { href: '/settings', label: 'Settings', icon: Settings },
   { href: '/control', label: 'Bot Control', icon: Power },

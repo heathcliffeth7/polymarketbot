@@ -1,21 +1,11 @@
 'use client';
 
+import { useCallback, useEffect, useState } from 'react';
 import { usePolling } from './use-polling';
 import type {
-  PaginatedResponse,
   TradeBuilderMarketSearchItem,
-  TradeBuilderOrder,
-  TradeBuilderOrderEvent,
   TradeBuilderOutcome,
-  TradeBuilderWorkflowDetail,
-  TradeBuilderWorkflowEvent,
 } from '@/lib/types';
-
-export function useTradeBuilderOrders(page = 1, limit = 20, status?: string) {
-  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
-  if (status) params.set('status', status);
-  return usePolling<PaginatedResponse<TradeBuilderOrder>>(`/api/trade-builder/orders?${params}`, 3000);
-}
 
 export function useTradeBuilderMarketSearch(query: string) {
   const q = query.trim();
@@ -25,108 +15,54 @@ export function useTradeBuilderMarketSearch(query: string) {
 
 export function useTradeBuilderOutcomes(slug: string | null) {
   const endpoint = slug ? `/api/trade-builder/markets/${encodeURIComponent(slug)}/outcomes` : null;
-  return usePolling<{ data: TradeBuilderOutcome[] }>(endpoint, 10000);
+  return usePolling<{ data: TradeBuilderOutcome[] }>(endpoint, 60000);
 }
 
-export function useTradeBuilderOrderEvents(
-  orderId: number | null,
-  page = 1,
-  limit = 25,
-  eventType?: string,
-  enabled = true
-) {
-  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
-  if (eventType) params.set('eventType', eventType);
-  const endpoint =
-    enabled && orderId != null
-      ? `/api/trade-builder/orders/${orderId}/events?${params}`
-      : null;
-  return usePolling<PaginatedResponse<TradeBuilderOrderEvent>>(endpoint, 3000);
-}
+const LIVE_PRICE_INTERVAL = 60_000;
 
-export function useTradeBuilderWorkflows(page = 1, limit = 20, status?: string) {
-  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
-  if (status) params.set('status', status);
-  return usePolling<PaginatedResponse<TradeBuilderWorkflowDetail>>(
-    `/api/trade-builder/workflows?${params}`,
-    3000
-  );
-}
+export function useCanvasLivePrices(slugs: string[]): Record<string, number> {
+  const [prices, setPrices] = useState<Record<string, number>>({});
+  const slugsKey = slugs.slice().sort().join(',');
 
-export function useTradeBuilderWorkflowEvents(
-  workflowId: number | null,
-  page = 1,
-  limit = 25,
-  eventType?: string,
-  enabled = true
-) {
-  const params = new URLSearchParams({ page: String(page), limit: String(limit) });
-  if (eventType) params.set('eventType', eventType);
-  const endpoint =
-    enabled && workflowId != null
-      ? `/api/trade-builder/workflows/${workflowId}/events?${params}`
-      : null;
-  return usePolling<PaginatedResponse<TradeBuilderWorkflowEvent>>(endpoint, 3000);
-}
+  const fetchAll = useCallback(async () => {
+    if (slugs.length === 0) return;
+    try {
+      const results = await Promise.all(
+        slugs.map(async (slug) => {
+          try {
+            const res = await fetch(
+              `/api/trade-builder/markets/${encodeURIComponent(slug)}/outcomes`,
+              { cache: 'no-store' }
+            );
+            if (!res.ok) return [];
+            const json = (await res.json()) as { data?: TradeBuilderOutcome[] };
+            return json.data ?? [];
+          } catch {
+            return [];
+          }
+        })
+      );
+      const next: Record<string, number> = {};
+      for (const outcomes of results) {
+        for (const o of outcomes) {
+          if (o.token_id && o.price != null) {
+            next[o.token_id] = o.price;
+          }
+        }
+      }
+      setPrices(next);
+    } catch {
+      // keep existing prices on error
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slugsKey]);
 
-export async function createTradeBuilderOrder(payload: Record<string, unknown>) {
-  const res = await fetch('/api/trade-builder/orders', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-  return data;
-}
+  useEffect(() => {
+    fetchAll();
+    if (slugs.length === 0) return;
+    const id = setInterval(fetchAll, LIVE_PRICE_INTERVAL);
+    return () => clearInterval(id);
+  }, [fetchAll, slugs.length]);
 
-export async function patchTradeBuilderOrder(id: number, payload: Record<string, unknown>) {
-  const res = await fetch(`/api/trade-builder/orders/${id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-  return data;
-}
-
-export async function cancelTradeBuilderOrder(id: number) {
-  const res = await fetch(`/api/trade-builder/orders/${id}`, {
-    method: 'DELETE',
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-  return data;
-}
-
-export async function createTradeBuilderWorkflow(payload: Record<string, unknown>) {
-  const res = await fetch('/api/trade-builder/workflows', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-  return data;
-}
-
-export async function patchTradeBuilderWorkflow(id: number, payload: Record<string, unknown>) {
-  const res = await fetch(`/api/trade-builder/workflows/${id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-  return data;
-}
-
-export async function cancelTradeBuilderWorkflow(id: number) {
-  const res = await fetch(`/api/trade-builder/workflows/${id}`, {
-    method: 'DELETE',
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
-  return data;
+  return prices;
 }

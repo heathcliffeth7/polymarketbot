@@ -192,6 +192,7 @@ pub struct TradeFlowDualDcaJob {
     pub last_market_ends_at: Option<DateTime<Utc>>,
     pub next_check_at: DateTime<Utc>,
     pub created_order_count: i32,
+    pub consecutive_errors: i32,
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -212,6 +213,12 @@ pub struct TradeFlowDualDcaLeg {
     pub reference_price: Option<f64>,
     pub builder_order_id: Option<i64>,
     pub status: String,
+    pub active_exchange_order_id: Option<String>,
+    pub client_order_id: Option<String>,
+    pub filled_price: Option<f64>,
+    pub filled_size: Option<f64>,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub filled_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1005,6 +1012,25 @@ impl PostgresRepository {
         .fetch_one(&self.pool)
         .await?;
         Ok(id)
+    }
+
+    pub async fn unblock_next_trade_builder_order(
+        &self,
+        trade_id: i64,
+        token_id: &str,
+    ) -> Result<Option<i64>> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "UPDATE trade_builder_orders SET status = 'pending', updated_at = NOW() \
+             WHERE id = (SELECT id FROM trade_builder_orders \
+                         WHERE trade_id = $1 AND token_id = $2 AND status = 'blocked' \
+                         ORDER BY id ASC LIMIT 1) \
+             RETURNING id",
+        )
+        .bind(trade_id)
+        .bind(token_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(id,)| id))
     }
 
     pub async fn list_trade_builder_orders_for_processing(
@@ -2083,7 +2109,7 @@ impl PostgresRepository {
                     market_asset, market_timeframe, side_mode, base_sizing, base_shares, base_usdc, base_price_usdc, \
                     dca_levels, near_step, step_mult, size_mult, min_price_distance_cent, cutoff_min, \
                     tp_profit_pct, sl_loss_pct, sl_spread_pct, last_market_slug, last_market_started_at, \
-                    last_market_ends_at, next_check_at, created_order_count, last_error, created_at, updated_at \
+                    last_market_ends_at, next_check_at, created_order_count, consecutive_errors, last_error, created_at, updated_at \
              FROM trade_flow_dual_dca_jobs \
              WHERE status = 'active' AND next_check_at <= NOW() \
              ORDER BY next_check_at ASC, id ASC \
@@ -2124,6 +2150,7 @@ impl PostgresRepository {
                 last_market_ends_at: row.get("last_market_ends_at"),
                 next_check_at: row.get("next_check_at"),
                 created_order_count: row.get("created_order_count"),
+                consecutive_errors: row.get("consecutive_errors"),
                 last_error: row.get("last_error"),
                 created_at: row.get("created_at"),
                 updated_at: row.get("updated_at"),
@@ -2147,6 +2174,7 @@ impl PostgresRepository {
                  last_market_ends_at = $4, \
                  next_check_at = $5, \
                  created_order_count = GREATEST(0, created_order_count + $6), \
+                 consecutive_errors = 0, \
                  last_error = NULL, \
                  updated_at = NOW() \
              WHERE id = $1",
@@ -2172,6 +2200,7 @@ impl PostgresRepository {
             "UPDATE trade_flow_dual_dca_jobs \
              SET next_check_at = $2, \
                  last_error = $3, \
+                 consecutive_errors = consecutive_errors + 1, \
                  updated_at = NOW() \
              WHERE id = $1",
         )
@@ -2200,6 +2229,33 @@ impl PostgresRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    fn row_to_dual_dca_leg(r: &sqlx::postgres::PgRow) -> TradeFlowDualDcaLeg {
+        use sqlx::Row;
+        TradeFlowDualDcaLeg {
+            id: r.get("id"),
+            job_id: r.get("job_id"),
+            market_slug: r.get("market_slug"),
+            token_id: r.get("token_id"),
+            outcome_label: r.get("outcome_label"),
+            side: r.get("side"),
+            level_index: r.get("level_index"),
+            trigger_condition: r.get("trigger_condition"),
+            trigger_price: r.get("trigger_price"),
+            size_usdc: r.get("size_usdc"),
+            reference_price: r.get("reference_price"),
+            builder_order_id: r.get("builder_order_id"),
+            status: r.get("status"),
+            active_exchange_order_id: r.get("active_exchange_order_id"),
+            client_order_id: r.get("client_order_id"),
+            filled_price: r.get("filled_price"),
+            filled_size: r.get("filled_size"),
+            submitted_at: r.get("submitted_at"),
+            filled_at: r.get("filled_at"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2235,7 +2291,9 @@ impl PostgresRepository {
                status = EXCLUDED.status, \
                updated_at = NOW() \
              RETURNING id, job_id, market_slug, token_id, outcome_label, side, level_index, trigger_condition, \
-                       trigger_price, size_usdc, reference_price, builder_order_id, status, created_at, updated_at",
+                       trigger_price, size_usdc, reference_price, builder_order_id, status, \
+                       active_exchange_order_id, client_order_id, filled_price, filled_size, \
+                       submitted_at, filled_at, created_at, updated_at",
         )
         .bind(job_id)
         .bind(market_slug)
@@ -2252,23 +2310,7 @@ impl PostgresRepository {
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(TradeFlowDualDcaLeg {
-            id: row.get("id"),
-            job_id: row.get("job_id"),
-            market_slug: row.get("market_slug"),
-            token_id: row.get("token_id"),
-            outcome_label: row.get("outcome_label"),
-            side: row.get("side"),
-            level_index: row.get("level_index"),
-            trigger_condition: row.get("trigger_condition"),
-            trigger_price: row.get("trigger_price"),
-            size_usdc: row.get("size_usdc"),
-            reference_price: row.get("reference_price"),
-            builder_order_id: row.get("builder_order_id"),
-            status: row.get("status"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        })
+        Ok(Self::row_to_dual_dca_leg(&row))
     }
 
     pub async fn get_trade_flow_dual_dca_leg(
@@ -2281,7 +2323,8 @@ impl PostgresRepository {
         let row = sqlx::query(
             "SELECT id, job_id, market_slug, token_id, outcome_label, side, level_index, \
              trigger_condition, trigger_price, size_usdc, reference_price, builder_order_id, \
-             status, created_at, updated_at \
+             status, active_exchange_order_id, client_order_id, filled_price, filled_size, \
+             submitted_at, filled_at, created_at, updated_at \
              FROM trade_flow_dual_dca_legs \
              WHERE job_id = $1 AND market_slug = $2 AND outcome_label = $3 AND level_index = $4 \
              LIMIT 1",
@@ -2293,23 +2336,165 @@ impl PostgresRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| TradeFlowDualDcaLeg {
-            id: r.get("id"),
-            job_id: r.get("job_id"),
-            market_slug: r.get("market_slug"),
-            token_id: r.get("token_id"),
-            outcome_label: r.get("outcome_label"),
-            side: r.get("side"),
-            level_index: r.get("level_index"),
-            trigger_condition: r.get("trigger_condition"),
-            trigger_price: r.get("trigger_price"),
-            size_usdc: r.get("size_usdc"),
-            reference_price: r.get("reference_price"),
-            builder_order_id: r.get("builder_order_id"),
-            status: r.get("status"),
-            created_at: r.get("created_at"),
-            updated_at: r.get("updated_at"),
-        }))
+        Ok(row.map(|r| Self::row_to_dual_dca_leg(&r)))
+    }
+
+    /// Returns all legs for a given job + market, ordered by outcome then level.
+    pub async fn list_dual_dca_legs_for_job(
+        &self,
+        job_id: i64,
+        market_slug: &str,
+    ) -> Result<Vec<TradeFlowDualDcaLeg>> {
+        let rows = sqlx::query(
+            "SELECT id, job_id, market_slug, token_id, outcome_label, side, level_index, \
+             trigger_condition, trigger_price, size_usdc, reference_price, builder_order_id, \
+             status, active_exchange_order_id, client_order_id, filled_price, filled_size, \
+             submitted_at, filled_at, created_at, updated_at \
+             FROM trade_flow_dual_dca_legs \
+             WHERE job_id = $1 AND market_slug = $2 \
+             ORDER BY outcome_label ASC, level_index ASC",
+        )
+        .bind(job_id)
+        .bind(market_slug)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(Self::row_to_dual_dca_leg).collect())
+    }
+
+    /// Returns the lowest-level pending leg for a specific outcome.
+    pub async fn next_pending_dual_dca_leg(
+        &self,
+        job_id: i64,
+        market_slug: &str,
+        outcome_label: &str,
+    ) -> Result<Option<TradeFlowDualDcaLeg>> {
+        let row = sqlx::query(
+            "SELECT id, job_id, market_slug, token_id, outcome_label, side, level_index, \
+             trigger_condition, trigger_price, size_usdc, reference_price, builder_order_id, \
+             status, active_exchange_order_id, client_order_id, filled_price, filled_size, \
+             submitted_at, filled_at, created_at, updated_at \
+             FROM trade_flow_dual_dca_legs \
+             WHERE job_id = $1 AND market_slug = $2 AND outcome_label = $3 AND status = 'pending' \
+             ORDER BY level_index ASC \
+             LIMIT 1",
+        )
+        .bind(job_id)
+        .bind(market_slug)
+        .bind(outcome_label)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| Self::row_to_dual_dca_leg(&r)))
+    }
+
+    /// Marks a leg as submitted with the CLOB exchange order ID.
+    pub async fn set_dual_dca_leg_submitted(
+        &self,
+        leg_id: i64,
+        exchange_order_id: &str,
+        client_order_id: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_flow_dual_dca_legs \
+             SET status = 'submitted', active_exchange_order_id = $2, client_order_id = $3, \
+                 submitted_at = NOW(), updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(leg_id)
+        .bind(exchange_order_id)
+        .bind(client_order_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Marks a leg as filled with execution details.
+    pub async fn set_dual_dca_leg_filled(
+        &self,
+        leg_id: i64,
+        filled_price: f64,
+        filled_size: f64,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_flow_dual_dca_legs \
+             SET status = 'filled', filled_price = $2, filled_size = $3, \
+                 filled_at = NOW(), active_exchange_order_id = NULL, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(leg_id)
+        .bind(filled_price)
+        .bind(filled_size)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Cancels all active legs (pending/submitted/open) for a job+market.
+    /// Returns (leg_id, exchange_order_id) for legs that had active CLOB orders.
+    pub async fn cancel_dual_dca_active_legs(
+        &self,
+        job_id: i64,
+        market_slug: Option<&str>,
+    ) -> Result<Vec<(i64, Option<String>)>> {
+        let rows = sqlx::query(
+            "UPDATE trade_flow_dual_dca_legs \
+             SET status = 'canceled', active_exchange_order_id = NULL, updated_at = NOW() \
+             WHERE job_id = $1 \
+               AND ($2::text IS NULL OR market_slug = $2) \
+               AND status IN ('pending', 'submitted', 'open') \
+             RETURNING id, active_exchange_order_id",
+        )
+        .bind(job_id)
+        .bind(market_slug)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                use sqlx::Row;
+                (r.get::<i64, _>("id"), r.get::<Option<String>, _>("active_exchange_order_id"))
+            })
+            .collect())
+    }
+
+    /// Returns all legs with active CLOB orders (submitted or open).
+    pub async fn list_dual_dca_legs_with_active_orders(
+        &self,
+        job_id: i64,
+        market_slug: &str,
+    ) -> Result<Vec<TradeFlowDualDcaLeg>> {
+        let rows = sqlx::query(
+            "SELECT id, job_id, market_slug, token_id, outcome_label, side, level_index, \
+             trigger_condition, trigger_price, size_usdc, reference_price, builder_order_id, \
+             status, active_exchange_order_id, client_order_id, filled_price, filled_size, \
+             submitted_at, filled_at, created_at, updated_at \
+             FROM trade_flow_dual_dca_legs \
+             WHERE job_id = $1 AND market_slug = $2 \
+               AND active_exchange_order_id IS NOT NULL \
+               AND status IN ('submitted', 'open') \
+             ORDER BY level_index ASC",
+        )
+        .bind(job_id)
+        .bind(market_slug)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(Self::row_to_dual_dca_leg).collect())
+    }
+
+    /// Resets a leg back to pending (for retry after cancel/error).
+    pub async fn reset_dual_dca_leg_to_pending(
+        &self,
+        leg_id: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_flow_dual_dca_legs \
+             SET status = 'pending', active_exchange_order_id = NULL, client_order_id = NULL, \
+                 submitted_at = NULL, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(leg_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn append_trade_flow_dual_dca_event(

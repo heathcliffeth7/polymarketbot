@@ -20,6 +20,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ensureTradeFlowSourceTrade } from '@/hooks/use-trade-flow';
+import { useTradeBuilderOutcomes, useCanvasLivePrices } from '@/hooks/use-trade-builder';
 import { useCanvasHistory } from '@/hooks/use-canvas-history';
 import type { NodeExecutionState, TradeFlowOpenPositionOption } from '@/lib/types';
 import {
@@ -27,11 +28,13 @@ import {
   buildNodeConfigFromForm,
   createEmptyConditionDraft,
   createEmptyKeyValueDraft,
+  createEmptyOutcomeConditionRow,
   parseEdgeConditionToForm,
   parseNodeConfigToForm,
   type ConditionDraft,
   type EdgeConditionFormState,
   type NodeConfigFormState,
+  type OutcomeConditionRow,
   type PrimitiveValueType,
 } from '@/lib/trade-flow-config-mappers';
 import {
@@ -159,18 +162,31 @@ function FlowCanvasEditorBody({
     );
   }, [executionMap]);
 
+  // Collect unique market slugs from all trigger nodes for live price polling
+  const allTriggerSlugs = useMemo(() => {
+    const slugs = new Set<string>();
+    for (const n of canvasNodes) {
+      if (!n.data.nodeType.startsWith('trigger.')) continue;
+      const slug = toTrimmedStringValue(n.data.config.marketSlug);
+      if (slug) slugs.add(slug);
+    }
+    return Array.from(slugs);
+  }, [canvasNodes]);
+  const canvasLivePrices = useCanvasLivePrices(allTriggerSlugs);
+
   useEffect(() => {
-    if (!livePrices) return;
+    const prices = livePrices ?? (Object.keys(canvasLivePrices).length > 0 ? canvasLivePrices : null);
+    if (!prices) return;
     setCanvasNodes((prev) =>
       prev.map((n) => {
         if (!n.data.nodeType.startsWith('trigger.')) return n;
         const tokenId = toTrimmedStringValue(n.data.config.tokenId);
-        const price = tokenId ? (livePrices[tokenId] ?? null) : null;
+        const price = tokenId ? (prices[tokenId] ?? null) : null;
         if (n.data.livePrice === price) return n;
         return { ...n, data: { ...n.data, livePrice: price } };
       })
     );
-  }, [livePrices]);
+  }, [livePrices, canvasLivePrices]);
 
   const searchMatchedNodes = useMemo(() => {
     if (!nodeSearchQuery.trim()) return canvasNodes;
@@ -513,6 +529,48 @@ function FlowCanvasEditorBody({
     });
   };
 
+  // Outcome conditions for trigger.open_positions and trigger.market_price
+  const outcomeMarketSlug = (nodeTypeDraft === 'trigger.open_positions' || nodeTypeDraft === 'trigger.market_price')
+    ? (nodeForm?.fields.marketSlug ?? '').trim() || null
+    : null;
+  const { data: outcomeData, isLoading: outcomesLoading } = useTradeBuilderOutcomes(outcomeMarketSlug);
+  const marketOutcomes = useMemo(() => outcomeData?.data ?? [], [outcomeData?.data]);
+
+  // Clear stale outcome conditions when market slug changes
+  const prevOutcomeSlugRef = useRef(outcomeMarketSlug);
+  useEffect(() => {
+    if (prevOutcomeSlugRef.current !== outcomeMarketSlug) {
+      prevOutcomeSlugRef.current = outcomeMarketSlug;
+      setNodeForm((prev) => {
+        if (!prev || prev.outcomeConditionRows.length === 0) return prev;
+        return { ...prev, outcomeConditionRows: [] };
+      });
+      setHasPendingNodeDraft(true);
+    }
+  }, [outcomeMarketSlug]);
+
+  const addOutcomeCondition = (tokenId: string, outcomeLabel: string) => {
+    setHasPendingNodeDraft(true);
+    setNodeForm((prev) => {
+      if (!prev) return prev;
+      if (prev.outcomeConditionRows.some((r) => r.tokenId === tokenId)) return prev;
+      const row: OutcomeConditionRow = { ...createEmptyOutcomeConditionRow(), tokenId, outcomeLabel };
+      return { ...prev, outcomeConditionRows: [...prev.outcomeConditionRows, row] };
+    });
+  };
+
+  const removeOutcomeCondition = (rowId: string) => {
+    setHasPendingNodeDraft(true);
+    setNodeForm((prev) => prev ? { ...prev, outcomeConditionRows: prev.outcomeConditionRows.filter((r) => r.id !== rowId) } : prev);
+  };
+
+  const updateOutcomeCondition = (rowId: string, patch: Partial<OutcomeConditionRow>) => {
+    setHasPendingNodeDraft(true);
+    setNodeForm((prev) => prev ? {
+      ...prev, outcomeConditionRows: prev.outcomeConditionRows.map((r) => r.id === rowId ? { ...r, ...patch } : r),
+    } : prev);
+  };
+
   const handleNodeTypeChange = (nextType: string) => {
     const previousType = nodeTypeDraft;
     setNodeTypeDraft(nextType);
@@ -751,6 +809,9 @@ function FlowCanvasEditorBody({
     onUpdateStatePatchRow: updateStatePatchRow,
     onAddStatePatchRow: addStatePatchRow,
     onRemoveStatePatchRow: removeStatePatchRow,
+    onAddOutcomeCondition: addOutcomeCondition,
+    onRemoveOutcomeCondition: removeOutcomeCondition,
+    onUpdateOutcomeCondition: updateOutcomeCondition,
   };
 
   const edgeInspectorActions: EdgeInspectorActions = {
@@ -929,6 +990,8 @@ function FlowCanvasEditorBody({
               openPositionsLoading={openPositionsLoading}
               openPositionApplyingKey={openPositionApplyingKey}
               canApplyOpenPosition={canApplyOpenPosition}
+              marketOutcomes={marketOutcomes}
+              marketOutcomesLoading={outcomesLoading}
               actions={nodeInspectorActions}
             />
           ) : selectedEdge && edgeForm ? (
