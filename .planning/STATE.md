@@ -58,6 +58,7 @@ Recent decisions affecting current work:
 - [v1.1]: confirmation_secs gate now resets on zone exit — remove_flow_node_state clears all three pending keys (TRIG-01 FIXED)
 - [v1.1]: first_tick_threshold already enters confirmation gate correctly — same confirmation_secs applies (TRIG-02 VERIFIED)
 - [v1.1]: TRIG-03 — confirmation gate tests exercise building blocks (not extracted function) since gate logic is inline in the event loop
+- [v1.1]: PRCE-01 — Bare previous_price read/write removed from all three lookup sites; per-token key is now the exclusive source to prevent cross-token contamination
 - [v1.1]: PRCE-02 — WS wins at equal timestamps (>= comparison) — documented inline in reconcile.rs with multi-line PRCE-02 comment and three boundary-covering unit tests
 
 ### Pending Todos
@@ -71,5 +72,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-03
-Stopped at: Completed 07-02-PLAN.md — equal-timestamp tie-break test and PRCE-02 documentation committed (c5ad4f6)
-Resume file: .planning/phases/07-price-data-integrity-fixes/07-02-SUMMARY.md
+Stopped at: Completed 07-01-PLAN.md — PRCE-01 legacy previous_price fallback removed, three PRCE-01 unit tests committed (c0bf02e)
+Resume file: .planning/phases/07-price-data-integrity-fixes/07-01-SUMMARY.md

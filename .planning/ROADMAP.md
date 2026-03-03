@@ -62,4 +62,4 @@ Shipped:
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 6. Trigger Evaluation Fixes | v1.1 | 2/2 Complete | 2026-03-03 | 2026-03-03 |
-| 7. Price Data Integrity Fixes | v1.1 | 2/2 Complete | 2026-03-03 | 2026-03-03 |
+| 7. Price Data Integrity Fixes | 2/2 | Complete   | 2026-03-03 | 2026-03-03 |
