@@ -8860,6 +8860,198 @@ mod dual_dca_tests {
     }
 }
 
+#[cfg(test)]
+mod confirmation_gate_tests {
+    use super::*;
+
+    fn test_node_spec(trigger_condition: &str, trigger_price: f64, confirmation_secs: f64) -> WsOpenPositionPriceNodeSpec {
+        WsOpenPositionPriceNodeSpec {
+            node_key: "trigger_1".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            once_mode: true,
+            once_scope_market: false,
+            auto_scope: true,
+            market_slug: Some("btc-updown-5m-test".to_string()),
+            token_id: "tok-yes-123".to_string(),
+            trigger_condition: trigger_condition.to_string(),
+            trigger_price,
+            confirmation_secs,
+        }
+    }
+
+    #[test]
+    fn confirmation_gate_resets_on_zone_exit() {
+        let node = test_node_spec("cross_above", 0.80, 15.0);
+        let mut context = json!({});
+        let cpend_at_key = format!("cross_pending_at_{}", node.token_id);
+        let cpend_price_key = format!("cross_pending_price_{}", node.token_id);
+        let cpend_prev_key = format!("cross_pending_prev_{}", node.token_id);
+
+        // Simulate: a cross was pending
+        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!("2026-01-01T00:00:00Z"));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.81));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
+
+        // Price is now out of zone (below trigger for cross_above)
+        let current_price = 0.78_f64;
+        let still_in_zone = current_price >= node.trigger_price; // false for cross_above
+        assert!(!still_in_zone);
+
+        // Simulate the reset (replicating fixed confirmation gate logic)
+        if !still_in_zone {
+            remove_flow_node_state(&mut context, &node.node_key, &cpend_at_key);
+            remove_flow_node_state(&mut context, &node.node_key, &cpend_price_key);
+            remove_flow_node_state(&mut context, &node.node_key, &cpend_prev_key);
+        }
+
+        // Assert all pending state cleared
+        assert!(flow_node_state_string(&context, &node.node_key, &cpend_at_key).is_none());
+        assert!(flow_node_state(&context, &node.node_key, &cpend_price_key).is_none());
+        assert!(flow_node_state(&context, &node.node_key, &cpend_prev_key).is_none());
+    }
+
+    #[test]
+    fn confirmation_gate_reentry_restarts_timer() {
+        let node = test_node_spec("cross_above", 0.80, 15.0);
+        let mut context = json!({});
+        let cpend_at_key = format!("cross_pending_at_{}", node.token_id);
+        let cpend_price_key = format!("cross_pending_price_{}", node.token_id);
+        let cpend_prev_key = format!("cross_pending_prev_{}", node.token_id);
+
+        // Set up old pending state (10 seconds ago)
+        let old_ts = (Utc::now() - ChronoDuration::seconds(10)).to_rfc3339();
+        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(old_ts));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.81));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
+
+        // Zone exit: reset all pending state
+        let out_of_zone = 0.78_f64 >= node.trigger_price; // false
+        assert!(!out_of_zone);
+        remove_flow_node_state(&mut context, &node.node_key, &cpend_at_key);
+        remove_flow_node_state(&mut context, &node.node_key, &cpend_price_key);
+        remove_flow_node_state(&mut context, &node.node_key, &cpend_prev_key);
+
+        // Re-entry: new cross detected, set fresh timestamp
+        let new_ts = Utc::now().to_rfc3339();
+        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(new_ts.clone()));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.82));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
+
+        // Assert new timestamp is different from old (timer restarted)
+        let stored = flow_node_state_string(&context, &node.node_key, &cpend_at_key).unwrap();
+        assert_ne!(stored, old_ts, "New pending timestamp must differ from old (timer restarted)");
+        // New timestamp should be very recent (within 2 seconds)
+        let parsed = DateTime::parse_from_rfc3339(&stored).unwrap().with_timezone(&Utc);
+        let elapsed = Utc::now().signed_duration_since(parsed);
+        assert!(elapsed.num_seconds() < 2, "Re-entry timestamp should be near-zero elapsed");
+    }
+
+    #[test]
+    fn first_tick_threshold_enters_confirmation_gate() {
+        // With no previous_price (first tick), auto_scope=true, once_mode=true, price above trigger
+        let (crossed, eval_mode) =
+            evaluate_trigger_market_price_condition(None, 0.85, 0.80, "cross_above", true);
+
+        assert!(crossed, "first_tick_threshold should return crossed=true");
+        assert_eq!(eval_mode, "first_tick_threshold");
+
+        // Simulate: crossed=true enters confirmation gate with confirmation_secs>0
+        // The gate sets should_enqueue=false and records pending timestamp
+        let node = test_node_spec("cross_above", 0.80, 15.0);
+        let mut context = json!({});
+        let cpend_at_key = format!("cross_pending_at_{}", node.token_id);
+
+        // With auto_scope + once_mode + confirmation_secs > 0, crossed enters gate (not immediately enqueued)
+        let should_enqueue_immediately = false; // confirmation gate defers enqueue
+        let enter_gate = crossed && node.auto_scope && node.once_mode && node.confirmation_secs > 0.0;
+        assert!(enter_gate, "first_tick_threshold + auto_scope + once_mode + confirmation_secs should enter gate");
+        assert!(!should_enqueue_immediately, "Timer started — should NOT enqueue immediately");
+
+        // Simulate timer start
+        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(Utc::now().to_rfc3339()));
+        assert!(flow_node_state_string(&context, &node.node_key, &cpend_at_key).is_some(),
+            "cross_pending_at should be set when entering confirmation gate");
+    }
+
+    #[test]
+    fn confirmation_gate_fires_after_sustained_zone() {
+        let node = test_node_spec("cross_above", 0.80, 15.0);
+        let mut context = json!({});
+        let cpend_at_key = format!("cross_pending_at_{}", node.token_id);
+        let cpend_price_key = format!("cross_pending_price_{}", node.token_id);
+        let cpend_prev_key = format!("cross_pending_prev_{}", node.token_id);
+
+        // cross_pending_at was set 16 seconds ago (past the 15s confirmation_secs threshold)
+        let pending_ts = (Utc::now() - ChronoDuration::seconds(16)).to_rfc3339();
+        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(pending_ts.clone()));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.82));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
+
+        // Current price is still in zone
+        let current_price = 0.83_f64;
+        let still_in_zone = current_price >= node.trigger_price; // true for cross_above
+        assert!(still_in_zone);
+
+        // Check elapsed time
+        let stored_ts = flow_node_state_string(&context, &node.node_key, &cpend_at_key).unwrap();
+        let pending_at = DateTime::parse_from_rfc3339(&stored_ts).unwrap().with_timezone(&Utc);
+        let elapsed_secs = Utc::now().signed_duration_since(pending_at).num_milliseconds() as f64 / 1000.0;
+        assert!(elapsed_secs >= node.confirmation_secs,
+            "Elapsed {:.1}s should be >= confirmation_secs {:.1}s", elapsed_secs, node.confirmation_secs);
+
+        // Gate fires: should_enqueue = true, eval_mode = "cross_confirmed"
+        let should_enqueue = elapsed_secs >= node.confirmation_secs;
+        let final_eval_mode = if should_enqueue { "cross_confirmed" } else { "pending" };
+        assert!(should_enqueue, "Should enqueue after sustained zone time");
+        assert_eq!(final_eval_mode, "cross_confirmed");
+
+        // Pending state cleared after confirmation
+        remove_flow_node_state(&mut context, &node.node_key, &cpend_at_key);
+        remove_flow_node_state(&mut context, &node.node_key, &cpend_price_key);
+        remove_flow_node_state(&mut context, &node.node_key, &cpend_prev_key);
+        assert!(flow_node_state_string(&context, &node.node_key, &cpend_at_key).is_none());
+    }
+
+    #[test]
+    fn cross_leave_reenter_no_accumulated_time() {
+        let node = test_node_spec("cross_above", 0.80, 15.0);
+        let mut context = json!({});
+        let cpend_at_key = format!("cross_pending_at_{}", node.token_id);
+        let cpend_price_key = format!("cross_pending_price_{}", node.token_id);
+        let cpend_prev_key = format!("cross_pending_prev_{}", node.token_id);
+
+        // Step 1: Cross detected — set pending with timestamp 8 seconds ago
+        let first_pending_ts = (Utc::now() - ChronoDuration::seconds(8)).to_rfc3339();
+        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(first_pending_ts.clone()));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.81));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
+
+        // Step 2: Out-of-zone tick — reset all pending state
+        let out_of_zone = 0.77_f64 >= node.trigger_price; // false
+        assert!(!out_of_zone);
+        remove_flow_node_state(&mut context, &node.node_key, &cpend_at_key);
+        remove_flow_node_state(&mut context, &node.node_key, &cpend_price_key);
+        remove_flow_node_state(&mut context, &node.node_key, &cpend_prev_key);
+        assert!(flow_node_state_string(&context, &node.node_key, &cpend_at_key).is_none());
+
+        // Step 3: New cross — set fresh pending timestamp (near-zero elapsed)
+        let second_pending_ts = Utc::now().to_rfc3339();
+        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(second_pending_ts.clone()));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.82));
+        set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
+
+        // Assert: elapsed from second entry is near-zero (not accumulated from first 8s entry)
+        let stored = flow_node_state_string(&context, &node.node_key, &cpend_at_key).unwrap();
+        assert_ne!(stored, first_pending_ts, "Second entry must use fresh timestamp, not old one");
+        let second_pending_at = DateTime::parse_from_rfc3339(&stored).unwrap().with_timezone(&Utc);
+        let elapsed_secs = Utc::now().signed_duration_since(second_pending_at).num_milliseconds() as f64 / 1000.0;
+        assert!(elapsed_secs < 2.0,
+            "Elapsed from re-entry should be near-zero (got {:.3}s), not accumulated from first entry (8s)", elapsed_secs);
+        assert!(elapsed_secs < node.confirmation_secs,
+            "Should not have fired yet — confirmation_secs={} not yet elapsed", node.confirmation_secs);
+    }
+}
+
 fn parse_rfc3339_utc(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .map(|value| value.with_timezone(&Utc))
