@@ -4168,14 +4168,11 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
             }
 
             // Use per-token state key for multi-outcome nodes
+            // PRCE-01: Only use per-token key. No fallback to bare "previous_price" —
+            // that key may hold a stale price from a different token.
             let prev_key = format!("previous_price_{}", node_spec.token_id);
             let previous_price = flow_node_state(&run_spec.context, &node_spec.node_key, &prev_key)
-                .and_then(value_as_f64)
-                .or_else(|| {
-                    // Fallback to legacy key for backward compat
-                    flow_node_state(&run_spec.context, &node_spec.node_key, "previous_price")
-                        .and_then(value_as_f64)
-                });
+                .and_then(value_as_f64);
             // once modunda first_tick_threshold devre dışı: gerçek bir cross (geçiş) gereksin
             // ANCAK auto_scope + once'da yeni market açıldığında previous_price temizleniyor,
             // bu yüzden fiyat zaten trigger üstündeyse asla cross algılanamaz.
@@ -5496,8 +5493,15 @@ async fn execute_trigger_market_price(
         let trigger_condition = node_config_string(node, "triggerCondition");
         let trigger_price = node_config_f64(node, "triggerPrice")
             .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
-        let state_previous_price =
-            flow_node_state(context, &node.key, "previous_price").and_then(value_as_f64);
+        // PRCE-01: Use per-token key to avoid cross-token price contamination.
+        // Returns None when token_id is empty/missing — safe because resolve_ws_previous_price
+        // handles None state_previous_price correctly (falls through to ws payload or returns None).
+        let state_previous_price = token_id
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .map(|tid| format!("previous_price_{}", tid))
+            .and_then(|key| flow_node_state(context, &node.key, &key))
+            .and_then(value_as_f64);
         let expected_token_id = token_id.as_deref().filter(|value| !value.is_empty());
         let previous_price = resolve_ws_previous_price(
             ws_sourced,
@@ -5543,7 +5547,8 @@ async fn execute_trigger_market_price(
             false
         };
         if let Some(cur_price) = cur {
-            set_flow_node_state(context, &node.key, "previous_price", json!(cur_price));
+            // PRCE-01: Write only per-token key. Bare "previous_price" write removed —
+            // nothing reads it after the per-token read-side fix.
             if let Some(ref tid) = token_id {
                 if !tid.is_empty() {
                     let per_token_key = format!("previous_price_{}", tid);
@@ -6098,8 +6103,13 @@ async fn execute_trigger_open_positions(
                 "trigger.open_positions with triggerCondition requires tokenId"
             );
         }
-        let state_previous_price =
-            flow_node_state(context, &node.key, "previous_price").and_then(value_as_f64);
+        // PRCE-01: Use per-token key to avoid cross-token price contamination
+        let state_previous_price = if !token_id.is_empty() {
+            let key = format!("previous_price_{}", token_id);
+            flow_node_state(context, &node.key, &key).and_then(value_as_f64)
+        } else {
+            None
+        };
         let token_id_ref = if token_id.is_empty() {
             None
         } else {
@@ -6179,7 +6189,8 @@ async fn execute_trigger_open_positions(
         triggered_condition = trigger_condition.unwrap_or_default();
         triggered_price = cur;
         if let Some(p) = cur {
-            set_flow_node_state(context, &node.key, "previous_price", json!(p));
+            // PRCE-01: Write only per-token key. Bare "previous_price" write removed —
+            // nothing reads it after the per-token read-side fix.
             if !triggered_token_id.is_empty() {
                 let per_token_key = format!("previous_price_{}", triggered_token_id);
                 set_flow_node_state(context, &node.key, &per_token_key, json!(p));
@@ -9049,6 +9060,78 @@ mod confirmation_gate_tests {
             "Elapsed from re-entry should be near-zero (got {:.3}s), not accumulated from first entry (8s)", elapsed_secs);
         assert!(elapsed_secs < node.confirmation_secs,
             "Should not have fired yet — confirmation_secs={} not yet elapsed", node.confirmation_secs);
+    }
+}
+
+#[cfg(test)]
+mod price_integrity_tests {
+    use super::*;
+
+    #[test]
+    fn prce01_no_legacy_fallback_for_previous_price() {
+        // Build a context with only bare "previous_price" key, no per-token key.
+        // The lookup must return None — not the legacy bare-key value.
+        let node_key = "trigger_node_1";
+        let token_id = "tok-yes";
+        let prev_key = format!("previous_price_{}", token_id);
+        let mut context = json!({
+            "nodeStates": {
+                node_key: {
+                    "previous_price": 0.55
+                }
+            }
+        });
+        // Per-token key absent — lookup must return None (PRCE-01 guarantee)
+        let result = flow_node_state(&context, node_key, &prev_key).and_then(value_as_f64);
+        assert!(result.is_none(), "Must not fall back to bare previous_price; got {:?}", result);
+
+        // Now set per-token key — lookup must return its value
+        set_flow_node_state(&mut context, node_key, &prev_key, json!(0.42));
+        let result2 = flow_node_state(&context, node_key, &prev_key).and_then(value_as_f64);
+        assert_eq!(result2, Some(0.42), "Per-token key must be returned when present");
+    }
+
+    #[test]
+    fn prce01_per_token_key_works_independently() {
+        // When flow node state has "previous_price_tok-yes" set to 0.42,
+        // the per-token lookup returns Some(0.42).
+        let node_key = "trigger_node_1";
+        let token_id = "tok-yes";
+        let prev_key = format!("previous_price_{}", token_id);
+        let mut context = json!({
+            "nodeStates": {
+                node_key: {}
+            }
+        });
+        set_flow_node_state(&mut context, node_key, &prev_key, json!(0.42));
+        let result = flow_node_state(&context, node_key, &prev_key).and_then(value_as_f64);
+        assert_eq!(result, Some(0.42), "Per-token key lookup must return stored value");
+    }
+
+    #[test]
+    fn prce01_no_cross_token_contamination() {
+        // Core PRCE-01 safety guarantee:
+        // When flow node state has "previous_price_tok-A" = 0.60 but no "previous_price_tok-B",
+        // looking up previous price for tok-B must return None (not 0.60).
+        let node_key = "trigger_node_1";
+        let token_a = "tok-A";
+        let token_b = "tok-B";
+        let key_a = format!("previous_price_{}", token_a);
+        let key_b = format!("previous_price_{}", token_b);
+        let mut context = json!({
+            "nodeStates": {
+                node_key: {}
+            }
+        });
+        set_flow_node_state(&mut context, node_key, &key_a, json!(0.60));
+
+        // tok-A lookup works
+        let result_a = flow_node_state(&context, node_key, &key_a).and_then(value_as_f64);
+        assert_eq!(result_a, Some(0.60), "tok-A lookup must return 0.60");
+
+        // tok-B lookup must return None — no cross-token contamination
+        let result_b = flow_node_state(&context, node_key, &key_b).and_then(value_as_f64);
+        assert!(result_b.is_none(), "tok-B must not get tok-A's price; got {:?}", result_b);
     }
 }
 
