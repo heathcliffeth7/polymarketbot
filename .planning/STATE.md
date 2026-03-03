@@ -56,5 +56,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-03
-Stopped at: Roadmap written, requirements traced. Ready to plan Phase 6.
-Resume file: None
+Stopped at: Phase 6 context gathered
+Resume file: .planning/phases/06-trigger-evaluation-fixes/06-CONTEXT.md
