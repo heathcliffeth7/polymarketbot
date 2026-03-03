@@ -41,7 +41,8 @@ Shipped:
   2. In auto_scope+once mode, if price is already above threshold at market open, the confirmation gate reliably rejects the false trigger without race conditions
   3. Unit tests pass for: out-of-zone reset, re-entry timing after reset, and first_tick+confirmation interaction
   4. No false trigger fires in the scenario: price crosses, leaves zone, re-enters — confirmation must restart from zero on re-entry
-**Plans**: TBD
+**Plans**: 06-01 (DONE: confirmation gate reset), 06-02 (DONE: confirmation gate tests)
+**Status**: COMPLETE — all 2 plans executed, TRIG-01/TRIG-02/TRIG-03 satisfied
 
 ### Phase 7: Price Data Integrity Fixes
 **Goal**: Price lookups never silently return stale data from a different token, and WS/REST tie-break behavior is deterministic and tested
