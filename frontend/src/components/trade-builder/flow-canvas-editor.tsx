@@ -17,6 +17,7 @@ import {
   type EdgeChange,
   type NodeChange,
 } from '@xyflow/react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ensureTradeFlowSourceTrade } from '@/hooks/use-trade-flow';
@@ -27,11 +28,13 @@ import {
   buildEdgeConditionFromForm,
   buildNodeConfigFromForm,
   createEmptyConditionDraft,
+  createEmptyDrawdownRuleRow,
   createEmptyKeyValueDraft,
   createEmptyOutcomeConditionRow,
   parseEdgeConditionToForm,
   parseNodeConfigToForm,
   type ConditionDraft,
+  type DrawdownRuleRow,
   type EdgeConditionFormState,
   type NodeConfigFormState,
   type OutcomeConditionRow,
@@ -271,7 +274,19 @@ function FlowCanvasEditorBody({
     setNodeInspectorTab('basic');
     setNodeKeyDraft(node.id);
     setNodeTypeDraft(node.data.nodeType);
-    setNodeForm(parseNodeConfigToForm(node.data.nodeType, node.data.config));
+    const form = parseNodeConfigToForm(node.data.nodeType, node.data.config);
+    setNodeForm(form);
+    const nt = node.data.nodeType;
+    if (
+      nt === 'trigger.open_positions' ||
+      nt === 'trigger.market_price' ||
+      nt === 'trigger.position_drawdown'
+    ) {
+      prevOutcomeSlugRef.current =
+        (form.fields.marketSlug ?? '').trim() || (form.fields.marketScope ?? '').trim() || null;
+    } else {
+      prevOutcomeSlugRef.current = null;
+    }
     setEdgeForm(null);
     setHasPendingNodeDraft(false);
   }, []);
@@ -356,7 +371,9 @@ function FlowCanvasEditorBody({
 
   const addPresetPlaceOrderNode = (kind: PlaceOrderPresetKind) => {
     const fromSel: PlaceOrderPresetSeed | null =
-      selectedNode && selectedNode.data.nodeType === 'trigger.open_positions'
+      selectedNode &&
+      (selectedNode.data.nodeType === 'trigger.open_positions' ||
+        selectedNode.data.nodeType === 'trigger.position_drawdown')
         ? {
             sourceTradeId: toFiniteNumberValue(selectedNode.data.config.sourceTradeId),
             marketSlug: toTrimmedStringValue(selectedNode.data.config.marketSlug),
@@ -529,12 +546,20 @@ function FlowCanvasEditorBody({
     });
   };
 
-  // Outcome conditions for trigger.open_positions and trigger.market_price
-  const outcomeMarketSlug = (nodeTypeDraft === 'trigger.open_positions' || nodeTypeDraft === 'trigger.market_price')
-    ? (nodeForm?.fields.marketSlug ?? '').trim() || null
+  // Outcome lookup for trigger nodes that can use market outcome selection.
+  const outcomeMarketSlug = (
+    nodeTypeDraft === 'trigger.open_positions' ||
+    nodeTypeDraft === 'trigger.market_price' ||
+    nodeTypeDraft === 'trigger.position_drawdown'
+  )
+    ? (nodeForm?.fields.marketSlug ?? '').trim() || (nodeForm?.fields.marketScope ?? '').trim() || null
     : null;
   const { data: outcomeData, isLoading: outcomesLoading } = useTradeBuilderOutcomes(outcomeMarketSlug);
   const marketOutcomes = useMemo(() => outcomeData?.data ?? [], [outcomeData?.data]);
+  const marketOutcomeTokenIdSet = useMemo(
+    () => new Set(marketOutcomes.map((outcome) => outcome.token_id)),
+    [marketOutcomes]
+  );
 
   // Clear stale outcome conditions when market slug changes
   const prevOutcomeSlugRef = useRef(outcomeMarketSlug);
@@ -542,19 +567,40 @@ function FlowCanvasEditorBody({
     if (prevOutcomeSlugRef.current !== outcomeMarketSlug) {
       prevOutcomeSlugRef.current = outcomeMarketSlug;
       setNodeForm((prev) => {
-        if (!prev || prev.outcomeConditionRows.length === 0) return prev;
-        return { ...prev, outcomeConditionRows: [] };
+        if (!prev) return prev;
+        let next = prev;
+        if (prev.outcomeConditionRows.length > 0) {
+          next = { ...next, outcomeConditionRows: [] };
+        }
+        if (nodeTypeDraft === 'trigger.position_drawdown') {
+          const tokenId = (next.fields.tokenId ?? '').trim();
+          const outcomeLabel = (next.fields.outcomeLabel ?? '').trim();
+          if (tokenId || outcomeLabel) {
+            next = {
+              ...next,
+              fields: { ...next.fields, tokenId: '', outcomeLabel: '' },
+            };
+          }
+        }
+        return next;
       });
       setHasPendingNodeDraft(true);
     }
-  }, [outcomeMarketSlug]);
+  }, [outcomeMarketSlug, nodeTypeDraft]);
 
   const addOutcomeCondition = (tokenId: string, outcomeLabel: string) => {
+    const normalizedTokenId = tokenId.trim();
+    const normalizedOutcomeLabel = outcomeLabel.trim();
+    if (!normalizedTokenId || !normalizedOutcomeLabel) return;
     setHasPendingNodeDraft(true);
     setNodeForm((prev) => {
       if (!prev) return prev;
-      if (prev.outcomeConditionRows.some((r) => r.tokenId === tokenId)) return prev;
-      const row: OutcomeConditionRow = { ...createEmptyOutcomeConditionRow(), tokenId, outcomeLabel };
+      if (prev.outcomeConditionRows.some((r) => r.tokenId === normalizedTokenId)) return prev;
+      const row: OutcomeConditionRow = {
+        ...createEmptyOutcomeConditionRow(),
+        tokenId: normalizedTokenId,
+        outcomeLabel: normalizedOutcomeLabel,
+      };
       return { ...prev, outcomeConditionRows: [...prev.outcomeConditionRows, row] };
     });
   };
@@ -569,6 +615,44 @@ function FlowCanvasEditorBody({
     setNodeForm((prev) => prev ? {
       ...prev, outcomeConditionRows: prev.outcomeConditionRows.map((r) => r.id === rowId ? { ...r, ...patch } : r),
     } : prev);
+  };
+
+  const addDrawdownRule = () => {
+    setHasPendingNodeDraft(true);
+    setNodeForm((prev) =>
+      prev
+        ? {
+            ...prev,
+            drawdownRuleRows: [...(prev.drawdownRuleRows || []), createEmptyDrawdownRuleRow()],
+          }
+        : prev
+    );
+  };
+
+  const removeDrawdownRule = (rowId: string) => {
+    setHasPendingNodeDraft(true);
+    setNodeForm((prev) => {
+      if (!prev) return prev;
+      const next = (prev.drawdownRuleRows || []).filter((row) => row.id !== rowId);
+      return {
+        ...prev,
+        drawdownRuleRows: next.length > 0 ? next : [createEmptyDrawdownRuleRow()],
+      };
+    });
+  };
+
+  const updateDrawdownRule = (rowId: string, patch: Partial<DrawdownRuleRow>) => {
+    setHasPendingNodeDraft(true);
+    setNodeForm((prev) =>
+      prev
+        ? {
+            ...prev,
+            drawdownRuleRows: (prev.drawdownRuleRows || []).map((row) =>
+              row.id === rowId ? { ...row, ...patch } : row
+            ),
+          }
+        : prev
+    );
   };
 
   const handleNodeTypeChange = (nextType: string) => {
@@ -597,6 +681,23 @@ function FlowCanvasEditorBody({
     const nextKey = nodeKeyDraft.trim();
     const nextType = nodeTypeDraft.trim();
     if (!nextKey || !nextType) { onError('Node key ve type bos olamaz.'); return; }
+    const isAutoScope = nodeForm?.fields.marketMode === 'auto_scope';
+    const outcomeRequired =
+      (
+        nextType === 'trigger.open_positions' ||
+        nextType === 'trigger.market_price' ||
+        nextType === 'trigger.position_drawdown'
+      ) && !isAutoScope;
+    if (outcomeRequired) {
+      if (outcomesLoading) {
+        onError('Outcome listesi yukleniyor. Lutfen birkac saniye sonra tekrar dene.');
+        return;
+      }
+      if (marketOutcomes.length === 0) {
+        onError('Outcome secimi zorunlu. Bu market icin outcome listesi bulunamadi.');
+        return;
+      }
+    }
 
     let parsedConfig: Record<string, unknown>;
     if (source === 'advanced') {
@@ -607,6 +708,66 @@ function FlowCanvasEditorBody({
       if (!nodeForm) return;
       parsedConfig = buildNodeConfigFromForm(nextType, nodeForm);
     }
+    if (outcomeRequired) {
+      const outcomeConditions = Array.isArray(parsedConfig.outcomeConditions)
+        ? parsedConfig.outcomeConditions.filter((item): item is Record<string, unknown> => isRecord(item))
+        : [];
+      const validOutcomeConditions = outcomeConditions.filter((item) => {
+        const tokenId = toTrimmedStringValue(item.tokenId);
+        const outcomeLabel = toTrimmedStringValue(item.outcomeLabel);
+        const triggerCondition = toTrimmedStringValue(item.triggerCondition);
+        const triggerPriceCent = toFiniteNumberValue(item.triggerPriceCent);
+        const hasValidPriceCent =
+          triggerPriceCent != null && triggerPriceCent > 0 && triggerPriceCent <= 100;
+        return (
+          !!tokenId &&
+          !!outcomeLabel &&
+          (triggerCondition === 'cross_above' || triggerCondition === 'cross_below') &&
+          hasValidPriceCent
+        );
+      });
+
+      if (validOutcomeConditions.length === 0) {
+        onError('En az bir gecerli outcome kosulu secmelisin.');
+        return;
+      }
+
+      const hasUnknownOutcome = validOutcomeConditions.some(
+        (item) => !marketOutcomeTokenIdSet.has(toTrimmedStringValue(item.tokenId))
+      );
+      if (hasUnknownOutcome) {
+        onError('Outcome secimi sadece marketten gelen outcome listesinden yapilabilir.');
+        return;
+      }
+    }
+    if (nextType === 'trigger.position_drawdown') {
+      const selectedOutcomeLabel = toTrimmedStringValue(parsedConfig.outcomeLabel);
+      const selectedTokenId = toTrimmedStringValue(parsedConfig.tokenId);
+      if (!selectedOutcomeLabel || !selectedTokenId) {
+        onError('Drawdown node icin marketten bir outcome secmelisin.');
+        return;
+      }
+      if (!marketOutcomeTokenIdSet.has(selectedTokenId)) {
+        onError('Secilen outcome bu market listesinde bulunmuyor. Outcome secimini yenile.');
+        return;
+      }
+      const entryPriceCent = toFiniteNumberValue(parsedConfig.entryPriceCent);
+      if (entryPriceCent == null || entryPriceCent <= 0 || entryPriceCent > 100) {
+        onError('Entry fiyati zorunlu. 0-100 arasinda cent degeri gir.');
+        return;
+      }
+      const drawdownRules = Array.isArray(parsedConfig.lossRules)
+        ? parsedConfig.lossRules.filter((item): item is Record<string, unknown> => isRecord(item))
+        : [];
+      const hasInvalidDirection = drawdownRules.some((item) => {
+        const direction = toTrimmedStringValue(item.direction).toLowerCase();
+        return direction !== '' && direction !== 'down' && direction !== 'up';
+      });
+      if (hasInvalidDirection) {
+        onError('Drawdown kural yonu sadece down veya up olabilir.');
+        return;
+      }
+    }
 
     if (mode === 'create') {
       if (canvasNodes.some((n) => n.id === nextKey)) { onError(`Ayni key ile baska node var: ${nextKey}`); return; }
@@ -615,6 +776,7 @@ function FlowCanvasEditorBody({
       hydrateNodeDraft(nextNode);
       queueNodeFocus(nextNode.id);
       setHasPendingNodeDraft(false);
+      toast.success('Node eklendi');
     } else {
       if (!selectedNode) { onError('Guncellemek icin once bir node secin.'); return; }
       if (nextKey !== selectedNode.id && canvasNodes.some((n) => n.id === nextKey)) { onError(`Ayni key ile baska node var: ${nextKey}`); return; }
@@ -624,6 +786,7 @@ function FlowCanvasEditorBody({
       setSelectedNodeId(nextKey);
       setNodeForm(parseNodeConfigToForm(nextType, parsedConfig));
       setHasPendingNodeDraft(false);
+      toast.success('Node guncellendi');
     }
     onError(null);
   };
@@ -812,6 +975,9 @@ function FlowCanvasEditorBody({
     onAddOutcomeCondition: addOutcomeCondition,
     onRemoveOutcomeCondition: removeOutcomeCondition,
     onUpdateOutcomeCondition: updateOutcomeCondition,
+    onAddDrawdownRule: addDrawdownRule,
+    onRemoveDrawdownRule: removeDrawdownRule,
+    onUpdateDrawdownRule: updateDrawdownRule,
   };
 
   const edgeInspectorActions: EdgeInspectorActions = {
@@ -981,7 +1147,7 @@ function FlowCanvasEditorBody({
         </div>
 
         {/* Right Panel */}
-        <div className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white/95 p-3">
+        <div className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white/95 p-3 h-[calc(100vh-12rem)]">
           {selectedNode && nodeForm ? (
             <NodeInspectorPanel
               node={selectedNode} form={nodeForm} nodeKeyDraft={nodeKeyDraft}

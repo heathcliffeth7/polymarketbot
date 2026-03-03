@@ -18,6 +18,7 @@ import {
   validateTradeFlowDefinition,
 } from '@/hooks/use-trade-flow';
 import { useBotStatus } from '@/hooks/use-bot-status';
+import { toast } from 'sonner';
 import { formatClientRequestError } from '@/lib/http-client';
 import {
   buildContextFromForm,
@@ -525,7 +526,7 @@ export function FlowEnginePanel({
     const publishName = draftName.trim() || selectedDefinition?.name || `Workflow ${publishDefinitionId}`;
     const publishLabel = `#${publishDefinitionId} - ${publishName}`;
     if (hasPendingCanvasNodeDraft) {
-      setError("Node formunda uygulanmamis degisiklik var. Once 'Node Guncelle' veya 'JSON ile Guncelle' kullan.");
+      toast.error("Node formunda uygulanmamis degisiklik var. Once 'Node Guncelle' kullanin.");
       return;
     }
     const publishConfirmed = window.confirm(
@@ -556,14 +557,15 @@ export function FlowEnginePanel({
       } else {
         setMessage(`${publishLabel} publish edildi.`);
       }
+      toast.success(`${publishLabel} publish edildi.`);
       await mutateDefinitions(); await mutateDetail();
     } catch (err) {
       const reason = formatOperationError(err, 'Flow publish edilemedi.');
-      setError(
-        draftSaved
-          ? `Draft kaydedildi ama publish basarisiz (${publishLabel}). Neden: ${reason}`
-          : `Publish basarisiz (${publishLabel}). Neden: ${reason}`
-      );
+      const errMsg = draftSaved
+        ? `Draft kaydedildi ama publish basarisiz (${publishLabel}). Neden: ${reason}`
+        : `Publish basarisiz (${publishLabel}). Neden: ${reason}`;
+      setError(errMsg);
+      toast.error(errMsg);
     }
     finally { setBusyAction(null); }
   };
@@ -633,6 +635,22 @@ export function FlowEnginePanel({
 
   const updateGraphFromCanvas = (nextGraph: TradeFlowGraph) => {
     setGraph(nextGraph); setIsGraphDirty(true); setValidation(null);
+    if (selectedDefinitionId) {
+      const ctx = resolveContext();
+      if (ctx) {
+        const fallbackName = draftName.trim() || 'Untitled';
+        const payload = {
+          name: fallbackName,
+          description: draftDescription.trim() || null,
+          graphJson: { ...nextGraph, context: ctx },
+        };
+        void patchTradeFlowDefinitionDraft(selectedDefinitionId, payload).then(() => {
+          setIsGraphDirty(false);
+        }).catch((err) => {
+          console.warn('[auto-save] PATCH failed:', err);
+        });
+      }
+    }
   };
 
   const isActionBusy = busyAction !== null || isSwitchingDefinition;
@@ -709,6 +727,9 @@ export function FlowEnginePanel({
               Sil (Arsivle)
             </Button>
           </div>
+
+          {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
+          {message && <p className="mt-2 text-sm text-emerald-400">{message}</p>}
         </div>
 
         <FlowCanvasEditor
@@ -752,9 +773,6 @@ export function FlowEnginePanel({
         />
 
         <FlowSummaryBar graph={graph} validation={validation} />
-
-        {error && <p className="text-sm text-red-400">{error}</p>}
-        {message && <p className="text-sm text-emerald-400">{message}</p>}
       </CardContent>
     </Card>
   );

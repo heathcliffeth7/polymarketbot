@@ -20,6 +20,16 @@ dev.pid
 # Backups
 *.bak.*
 
+# Logs
+*.log
+frontend/dev.log
+
+# Claude Code local files
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/
+.planning/
+
 # IDE & OS
 .vscode/
 .idea/

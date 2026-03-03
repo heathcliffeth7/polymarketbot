@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -15,8 +15,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   NODE_FIELD_SCHEMAS,
   jsonLogicToNestedExprGroup,
-  createEmptyOutcomeConditionRow,
   type ConditionDraft,
+  type DrawdownRuleRow,
   type EdgeConditionFormState,
   type NodeConfigFormState,
   type OutcomeConditionRow,
@@ -69,6 +69,9 @@ export interface NodeInspectorActions {
   onAddOutcomeCondition: (tokenId: string, outcomeLabel: string) => void;
   onRemoveOutcomeCondition: (rowId: string) => void;
   onUpdateOutcomeCondition: (rowId: string, patch: Partial<OutcomeConditionRow>) => void;
+  onAddDrawdownRule: () => void;
+  onRemoveDrawdownRule: (rowId: string) => void;
+  onUpdateDrawdownRule: (rowId: string, patch: Partial<DrawdownRuleRow>) => void;
 }
 
 export interface EdgeInspectorActions {
@@ -123,6 +126,8 @@ export function NodeInspectorPanel({
   const nodeFieldHelp = NODE_FIELD_HELP_CONTENT[nodeTypeDraft] || {};
   const placeOrderSizeMode = (form.fields.sizeMode ?? '').trim().toLowerCase();
   const dualDcaBaseSizing = (form.fields.baseSizing ?? '').trim().toLowerCase();
+  const triggerMarketMode = (form.fields.marketMode ?? '').trim().toLowerCase();
+  const triggerRepeatMode = (form.fields.repeatMode ?? '').trim().toLowerCase();
   const placeOrderMaxTriggersRaw = Number(form.fields.maxTriggers ?? '');
   const placeOrderMaxTriggers =
     Number.isFinite(placeOrderMaxTriggersRaw) && placeOrderMaxTriggersRaw > 0
@@ -149,6 +154,10 @@ export function NodeInspectorPanel({
     placeOrderSizeMode === 'pct' &&
     placeOrderTriggerRows.some((row) => row.trim().length > 0) &&
     placeOrderTriggerSum > 100.000001;
+  const marketOutcomeByTokenId = useMemo(
+    () => new Map(marketOutcomes.map((outcome) => [outcome.token_id, outcome])),
+    [marketOutcomes]
+  );
   const visibleNodeSchema = nodeSchema.filter((field) => {
     if (nodeTypeDraft === 'action.place_order') {
       if (field.key === 'sizePct') return placeOrderSizeMode === 'pct';
@@ -159,6 +168,20 @@ export function NodeInspectorPanel({
     if (nodeTypeDraft === 'action.dual_dca') {
       if (field.key === 'baseShares') return dualDcaBaseSizing !== 'usdc';
       if (field.key === 'baseUsdc') return dualDcaBaseSizing === 'usdc';
+    }
+    if (nodeTypeDraft === 'trigger.market_price') {
+      if (field.key === 'marketScope' || field.key === 'marketSelection') {
+        return triggerMarketMode === 'auto_scope';
+      }
+      if (field.key === 'marketSlug') {
+        return triggerMarketMode !== 'auto_scope';
+      }
+      if (field.key === 'onceScope') {
+        return triggerRepeatMode === 'once';
+      }
+      if (field.key === 'confirmationSeconds') {
+        return triggerMarketMode === 'auto_scope' && triggerRepeatMode === 'once';
+      }
     }
     return true;
   });
@@ -175,7 +198,7 @@ export function NodeInspectorPanel({
   }, [openFieldHelpKey, visibleNodeSchema]);
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col overflow-hidden">
       <div className="flex items-center gap-2 pb-1">
         <Settings2 className="h-4 w-4 text-sky-500" />
         <h3 className="text-sm font-semibold text-slate-800">Node Ayarlari</h3>
@@ -239,8 +262,9 @@ export function NodeInspectorPanel({
                   )}
                 </div>
                 {field.key === 'outcomeLabel' &&
-                  marketOutcomes.length > 0 &&
-                  (nodeTypeDraft === 'trigger.open_positions' || nodeTypeDraft === 'trigger.market_price') ? (
+                  (nodeTypeDraft === 'trigger.open_positions' ||
+                    nodeTypeDraft === 'trigger.market_price' ||
+                    nodeTypeDraft === 'trigger.position_drawdown') ? (
                   <Select
                     value={(form.fields[field.key] ?? '') || EMPTY_SELECT_SENTINEL}
                     onValueChange={(v) => {
@@ -432,8 +456,8 @@ export function NodeInspectorPanel({
             {nodeTypeDraft !== 'trigger.open_positions' && (
               <p className="text-[10px] leading-relaxed text-slate-400 italic">
                 Acik pozisyon listesi yalnizca{' '}
-                <span className="text-slate-700">Tetik: Mevcut Pozisyonlar</span> node&apos;u
-                secildiginde gorunur.
+                <span className="text-slate-700">Tetik: Mevcut Pozisyonlar</span>{' '}
+                node&apos;lari secildiginde gorunur.
               </p>
             )}
 
@@ -516,6 +540,116 @@ export function NodeInspectorPanel({
               </div>
             )}
 
+            {nodeTypeDraft === 'trigger.position_drawdown' && (
+              <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
+                <div className="flex items-center gap-1.5">
+                  <Zap className="h-3.5 w-3.5 text-rose-500" />
+                  <p className="text-[11px] font-semibold text-slate-700">Drawdown Kurallari</p>
+                </div>
+                <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                  Slug gir, outcome sec, entry fiyatini yaz. Yon sec; loss % o yone gore tetikler.
+                  Sure opsiyonel.
+                </p>
+                <div className="space-y-2">
+                  {(form.drawdownRuleRows || []).map((row, index) => (
+                    <div key={row.id} className="space-y-1.5 rounded-md border border-slate-200 bg-white p-2.5">
+                      <div className="flex items-center justify-between">
+                        <Badge variant="secondary" className="text-[10px]">
+                          Kural #{index + 1}
+                        </Badge>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 w-6 p-0 text-red-400 hover:text-red-600"
+                          disabled={(form.drawdownRuleRows || []).length <= 1}
+                          onClick={() => actions.onRemoveDrawdownRule(row.id)}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        <div className="space-y-0.5">
+                          <Label className="text-[10px] font-medium text-slate-600">Yon</Label>
+                          <Select
+                            value={row.direction === 'up' ? 'up' : 'down'}
+                            onValueChange={(v) =>
+                              actions.onUpdateDrawdownRule(row.id, {
+                                direction: v === 'up' ? 'up' : 'down',
+                              })
+                            }
+                          >
+                            <SelectTrigger className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900" size="sm">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="down">Asagi (down)</SelectItem>
+                              <SelectItem value="up">Yukari (up)</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-0.5">
+                          <Label className="text-[10px] font-medium text-slate-600">Loss (%)</Label>
+                          <Input
+                            type="number"
+                            value={row.lossPct}
+                            onChange={(e) =>
+                              actions.onUpdateDrawdownRule(row.id, { lossPct: e.target.value })
+                            }
+                            placeholder="ör: 10"
+                            className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
+                          />
+                        </div>
+                        <div className="space-y-0.5">
+                          <Label className="text-[10px] font-medium text-slate-600">
+                            Sure (ops.)
+                          </Label>
+                          <Input
+                            type="number"
+                            value={row.durationValue}
+                            onChange={(e) =>
+                              actions.onUpdateDrawdownRule(row.id, {
+                                durationValue: e.target.value,
+                              })
+                            }
+                            placeholder="ör: 5"
+                            className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
+                          />
+                        </div>
+                        <div className="space-y-0.5">
+                          <Label className="text-[10px] font-medium text-slate-600">Birim</Label>
+                          <Select
+                            value={row.durationUnit}
+                            onValueChange={(v) =>
+                              actions.onUpdateDrawdownRule(row.id, {
+                                durationUnit: v === 'min' ? 'min' : 'sec',
+                              })
+                            }
+                          >
+                            <SelectTrigger className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900" size="sm">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="sec">sn</SelectItem>
+                              <SelectItem value="min">dk</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 border-slate-300 px-2 text-[11px] text-slate-700"
+                  onClick={actions.onAddDrawdownRule}
+                >
+                  <Plus className="mr-1 h-3 w-3" />
+                  Kural Ekle
+                </Button>
+              </div>
+            )}
+
             {(nodeTypeDraft === 'trigger.open_positions' || nodeTypeDraft === 'trigger.market_price') && (
               <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
                 <div className="flex items-center gap-1.5">
@@ -525,7 +659,8 @@ export function NodeInspectorPanel({
                   </p>
                 </div>
                 <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                  Outcome&apos;a tiklayarak ekle, sonra kosulu (yukari/asagi) ve tetik fiyatini belirle. Birden fazla eklenirse herhangi biri saglaninca tetiklenir (OR).
+                  Outcome secimi zorunlu ve sadece marketten gelen listeden secilir.
+                  Sonrasinda kosulu (yukari/asagi) ve tetik fiyatini belirle.
                 </p>
 
                 {marketOutcomesLoading ? (
@@ -561,7 +696,6 @@ export function NodeInspectorPanel({
                     })}
                   </div>
                 )}
-
                 {form.outcomeConditionRows.length > 0 && (
                   <div className="space-y-2">
                     {form.outcomeConditionRows.map((row) => (
@@ -571,7 +705,7 @@ export function NodeInspectorPanel({
                       >
                         <div className="flex items-center justify-between">
                           <Badge variant="secondary" className="text-[10px]">
-                            {row.outcomeLabel || row.tokenId.slice(0, 12)}
+                            {marketOutcomeByTokenId.get(row.tokenId)?.label || row.outcomeLabel || row.tokenId.slice(0, 12) || 'Kosul'}
                           </Badge>
                           <Button
                             size="sm"
@@ -886,8 +1020,7 @@ export function NodeInspectorPanel({
         </div>
       </Tabs>
 
-      <Separator className="mt-2" />
-      <div className="flex gap-2 pt-2">
+      <div className="shrink-0 border-t bg-white py-2 flex gap-2">
         {tab === 'basic' ? (
           <>
             <Button size="sm" className="flex-1" onClick={actions.onCreateNode}>

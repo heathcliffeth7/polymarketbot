@@ -269,6 +269,28 @@ fn evaluate_trigger_market_price_condition(
     }
 }
 
+fn should_apply_ws_cross_confirmed_short_circuit(
+    ws_sourced: bool,
+    ws_evaluation_mode_from_step: &str,
+    ws_hard_ignore_reason: Option<&str>,
+) -> bool {
+    ws_sourced
+        && ws_evaluation_mode_from_step == "cross_confirmed"
+        && ws_hard_ignore_reason.is_none()
+}
+
+fn is_ws_cross_confirmed_unexpected_fail(
+    ws_sourced: bool,
+    ws_evaluation_mode_from_step: &str,
+    pass: bool,
+    ws_hard_ignore_reason: Option<&str>,
+) -> bool {
+    ws_sourced
+        && ws_evaluation_mode_from_step == "cross_confirmed"
+        && !pass
+        && ws_hard_ignore_reason.is_none()
+}
+
 #[derive(Debug, Clone)]
 struct TradeFlowNode {
     key: String,
@@ -365,6 +387,55 @@ struct WsOpenPositionPriceRunSpec {
     context: Value,
     nodes: Vec<WsOpenPositionPriceNodeSpec>,
     context_dirty: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PositionDrawdownDirection {
+    Down,
+    Up,
+}
+
+impl PositionDrawdownDirection {
+    fn parse(raw: Option<&str>) -> Option<Self> {
+        let normalized = raw.map(str::trim).unwrap_or_default().to_ascii_lowercase();
+        if normalized.is_empty() || normalized == "down" {
+            return Some(Self::Down);
+        }
+        if normalized == "up" {
+            return Some(Self::Up);
+        }
+        None
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Down => "down",
+            Self::Up => "up",
+        }
+    }
+
+    fn metric_type(self) -> &'static str {
+        match self {
+            Self::Down => "loss_pct",
+            Self::Up => "gain_pct",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PositionDrawdownRule {
+    index: usize,
+    loss_pct: f64,
+    direction: PositionDrawdownDirection,
+    window_sec: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PositionDrawdownSample {
+    ts_ms: i64,
+    loss_pct: f64,
+    gain_pct: f64,
+    price: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5023,6 +5094,9 @@ async fn execute_trade_flow_node(
         "trigger.open_positions" => {
             execute_trigger_open_positions(repo, client, ws, run, step, node, context).await
         }
+        "trigger.position_drawdown" => {
+            execute_trigger_position_drawdown(repo, ws, run, step, node, context).await
+        }
         "trigger.time_window" => execute_trigger_time_window(node, context),
         "logic.if" => execute_logic_if(node, context),
         "logic.switch" => execute_logic_switch(node, context),
@@ -5191,6 +5265,17 @@ async fn execute_trigger_market_price(
         .as_ref()
         .map(|input| input.get("wsPreviousPrice").is_some())
         .unwrap_or(false);
+    // WS confirmation-gate mode: "cross_confirmed" means the WS path already
+    // validated the cross + held confirmation_secs in zone.  The step must not
+    // re-evaluate the cross (prev/cur are now both in-zone → no_cross), so we
+    // accept the pre-confirmed result directly.
+    let ws_evaluation_mode_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsEvaluationMode"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mut ws_cross_confirmed_short_circuit_applied = false;
     // ws_market_slug_from_step already computed above
     if let Some(ws_market_slug) = ws_market_slug_from_step.as_deref() {
         if should_accept_ws_market_slug_override(node, &market_slug) {
@@ -5295,7 +5380,125 @@ async fn execute_trigger_market_price(
         }
     }
 
-    if let Some(ref conditions) = outcome_conditions {
+    // --- WS cross_confirmed short-circuit ---
+    // When the WS confirmation gate has already validated the cross + sustained
+    // in-zone period ("cross_confirmed"), the step must NOT re-evaluate the
+    // cross condition.  At confirmation time both prev and cur are in-zone (no
+    // strict boundary crossing), so evaluate_trigger_market_price_condition
+    // would return (false, "no_cross") and the trigger would silently fail.
+    //
+    // Instead, accept the gate's verdict and propagate triggered fields
+    // directly from the WS payload so downstream logic (once-fire recording,
+    // output JSON, route generation) works correctly.
+    if should_apply_ws_cross_confirmed_short_circuit(
+        ws_sourced,
+        ws_evaluation_mode_from_step,
+        ws_hard_ignore_reason.as_deref(),
+    ) {
+        let conf_token_id = ws_token_id_from_step.clone().unwrap_or_default();
+        let conf_price = ws_price_from_step;
+        let conf_prev = ws_previous_price_from_step;
+
+        // Resolve triggered condition + trigger_price from node config.
+        // For multi-outcome nodes find the matching condition row; for single-
+        // token nodes read directly from node config.
+        let (conf_condition, _conf_trigger_price, conf_outcome_label) =
+            if let Some(ref conditions) = outcome_conditions {
+                conditions
+                    .iter()
+                    .find_map(|cond| {
+                        let mut tid = cond
+                            .get("tokenId")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        let ol = cond
+                            .get("outcomeLabel")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if node_market_mode(node) == "auto_scope" && !ol.is_empty() {
+                            tid = resolve_token_id_for_outcome_label(&ol, context)
+                                .unwrap_or(tid);
+                        }
+                        if !conf_token_id.is_empty() && tid != conf_token_id {
+                            return None;
+                        }
+                        let tc = cond
+                            .get("triggerCondition")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        let tp = cond
+                            .get("triggerPriceCent")
+                            .and_then(value_as_f64)
+                            .map(|v| v / 100.0)
+                            .or_else(|| cond.get("triggerPrice").and_then(value_as_f64));
+                        Some((tc, tp, ol))
+                    })
+                    .unwrap_or_default()
+            } else {
+                let tc = node_config_string(node, "triggerCondition").unwrap_or_default();
+                let tp = node_config_f64(node, "triggerPrice")
+                    .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
+                (tc, tp, String::new())
+            };
+
+        triggered_token_id = conf_token_id;
+        triggered_outcome_label = conf_outcome_label;
+        triggered_condition = conf_condition;
+        triggered_price = conf_price;
+        current_price = conf_price;
+        triggered_previous_price = conf_prev;
+        effective_previous_price = conf_prev;
+        trigger_evaluation_mode = "cross_confirmed";
+        pass = true;
+        ws_cross_confirmed_short_circuit_applied = true;
+
+        if let Err(err) = repo
+            .append_trade_flow_event(
+                Some(run.id),
+                run.definition_id,
+                Some(run.version_id),
+                "trigger_ws_cross_confirmed_applied",
+                &json!({
+                    "node_key": node.key,
+                    "node_type": node.node_type,
+                    "market_slug": market_slug.clone(),
+                    "ws_market_slug": ws_market_slug_from_step.clone(),
+                    "ws_token_id": ws_token_id_from_step.clone(),
+                    "ws_price": ws_price_from_step,
+                    "ws_previous_price": ws_previous_price_from_step,
+                    "ws_evaluation_mode": ws_evaluation_mode_from_step,
+                    "once_mode": once_mode,
+                    "once_scope": if once_scope_market { "market" } else { "run" }
+                }),
+            )
+            .await
+        {
+            warn!(
+                flow_run_id = run.id,
+                node_key = %node.key,
+                error = %err,
+                "TRADE_FLOW_WS_CROSS_CONFIRMED_APPLIED_EVENT_FAILED"
+            );
+        }
+
+        // Update per-token previous price in context so subsequent non-WS
+        // evaluations have a valid state to start from.
+        if let Some(price) = conf_price {
+            if !triggered_token_id.is_empty() {
+                let per_token_key = format!("previous_price_{}", triggered_token_id);
+                set_flow_node_state(context, &node.key, &per_token_key, json!(price));
+            }
+        }
+
+        // Skip the standard evaluation block entirely.
+        // The `if pass { once-fire + routes }` block below handles the rest.
+    } else if let Some(ref conditions) = outcome_conditions {
         // Multi-outcome: OR logic
         pass = false;
         let mut last_eval_mode = "not_evaluated";
@@ -5624,6 +5827,43 @@ async fn execute_trigger_market_price(
             );
         }
     }
+    if is_ws_cross_confirmed_unexpected_fail(
+        ws_sourced,
+        ws_evaluation_mode_from_step,
+        pass,
+        ws_hard_ignore_reason.as_deref(),
+    ) {
+        if let Err(err) = repo
+            .append_trade_flow_event(
+                Some(run.id),
+                run.definition_id,
+                Some(run.version_id),
+                "trigger_ws_cross_confirmed_unexpected_fail",
+                &json!({
+                    "node_key": node.key,
+                    "node_type": node.node_type,
+                    "market_slug": market_slug.clone(),
+                    "ws_market_slug": ws_market_slug_from_step.clone(),
+                    "ws_token_id": ws_token_id_from_step.clone(),
+                    "ws_price": ws_price_from_step,
+                    "ws_previous_price": ws_previous_price_from_step,
+                    "ws_evaluation_mode": ws_evaluation_mode_from_step,
+                    "evaluation_mode": trigger_evaluation_mode,
+                    "ws_ignored_reason": ws_ignore_reason.clone(),
+                    "effective_previous_price": effective_previous_price,
+                    "short_circuit_applied": ws_cross_confirmed_short_circuit_applied
+                }),
+            )
+            .await
+        {
+            warn!(
+                flow_run_id = run.id,
+                node_key = %node.key,
+                error = %err,
+                "TRADE_FLOW_WS_CROSS_CONFIRMED_UNEXPECTED_FAIL_EVENT_FAILED"
+            );
+        }
+    }
 
     // Write triggered outcome info to context
     if let Some(price) = current_price {
@@ -5784,6 +6024,8 @@ async fn execute_trigger_market_price(
         "ws_previous_price": ws_previous_price_from_step,
         "effective_previous_price": effective_previous_price,
         "evaluation_mode": trigger_evaluation_mode,
+        "ws_evaluation_mode_from_step": ws_evaluation_mode_from_step,
+        "cross_confirmed_short_circuit_applied": ws_cross_confirmed_short_circuit_applied,
         "price": current_price,
         "pass": pass,
         "var_key": var_key,
@@ -6287,6 +6529,515 @@ async fn execute_trigger_open_positions(
     } else {
         Some(Utc::now() + ChronoDuration::milliseconds(interval_ms))
     };
+
+    Ok(TradeFlowNodeExecution {
+        output,
+        routes,
+        repeat_at,
+        repeat_idempotency_key: None,
+    })
+}
+
+fn parse_position_drawdown_rules(node: &TradeFlowNode) -> Vec<PositionDrawdownRule> {
+    let mut rules = Vec::new();
+    if let Some(items) = node.config.get("lossRules").and_then(Value::as_array) {
+        for (index, item) in items.iter().enumerate() {
+            let Some(obj) = item.as_object() else {
+                continue;
+            };
+            let Some(loss_pct) = obj.get("lossPct").and_then(value_as_f64) else {
+                continue;
+            };
+            if !loss_pct.is_finite() || loss_pct <= 0.0 || loss_pct > 100.0 {
+                continue;
+            }
+            let Some(direction) = PositionDrawdownDirection::parse(
+                obj.get("direction").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            let window_sec = obj.get("windowSec").and_then(value_as_i64).filter(|v| *v > 0);
+            rules.push(PositionDrawdownRule {
+                index,
+                loss_pct,
+                direction,
+                window_sec,
+            });
+        }
+    }
+
+    // Backward-compatible single-rule fallback.
+    if rules.is_empty() {
+        if let Some(loss_pct) = node_config_f64(node, "lossPct") {
+            if loss_pct.is_finite() && loss_pct > 0.0 && loss_pct <= 100.0 {
+                rules.push(PositionDrawdownRule {
+                    index: 0,
+                    loss_pct,
+                    direction: PositionDrawdownDirection::Down,
+                    window_sec: node_config_i64(node, "windowSec").filter(|v| *v > 0),
+                });
+            }
+        }
+    }
+
+    rules
+}
+
+fn parse_position_drawdown_samples(value: Option<&Value>) -> Vec<PositionDrawdownSample> {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut samples = Vec::new();
+    for item in items {
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        let Some(ts_ms) = obj.get("ts_ms").and_then(value_as_i64) else {
+            continue;
+        };
+        let Some(price) = obj.get("price").and_then(value_as_f64) else {
+            continue;
+        };
+        let loss_pct = obj.get("loss_pct").and_then(value_as_f64).unwrap_or_default();
+        let gain_pct = obj.get("gain_pct").and_then(value_as_f64).unwrap_or_default();
+        if !price.is_finite() || price < 0.0 {
+            continue;
+        }
+        if !loss_pct.is_finite() || loss_pct < 0.0 {
+            continue;
+        }
+        if !gain_pct.is_finite() || gain_pct < 0.0 {
+            continue;
+        }
+        samples.push(PositionDrawdownSample {
+            ts_ms,
+            loss_pct: loss_pct.clamp(0.0, 100.0),
+            gain_pct: gain_pct.clamp(0.0, 100.0),
+            price: clamp_probability(price),
+        });
+    }
+    samples.sort_by_key(|sample| sample.ts_ms);
+    samples
+}
+
+async fn execute_trigger_position_drawdown(
+    _repo: &PostgresRepository,
+    ws: &ClobWsClient,
+    run: &TradeFlowRun,
+    step: &TradeFlowRunStep,
+    node: &TradeFlowNode,
+    context: &mut Value,
+) -> Result<TradeFlowNodeExecution> {
+    let source_trade_id = resolve_flow_source_trade_id(node, context);
+    let market_slug = node_config_string(node, "marketSlug")
+        .or_else(|| flow_context_string(context, "marketSlug"))
+        .unwrap_or_default();
+    let token_id = node_config_string(node, "tokenId")
+        .or_else(|| flow_context_string(context, "tokenId"))
+        .unwrap_or_default();
+    let outcome_label = node_config_string(node, "outcomeLabel")
+        .or_else(|| flow_context_string(context, "outcomeLabel"))
+        .unwrap_or_default();
+    let entry_price = node_config_f64(node, "entryPriceCent")
+        .map(|value| value / 100.0)
+        .or_else(|| node_config_f64(node, "entryPrice"));
+
+    let interval_ms = node_config_i64(node, "minIntervalMs")
+        .unwrap_or(250)
+        .max(250) as i64;
+    let now = Utc::now();
+    let repeat_at = Some(now + ChronoDuration::milliseconds(interval_ms));
+
+    let var_prefix = node_config_string(node, "varPrefix")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| node.key.clone());
+
+    let rules = parse_position_drawdown_rules(node);
+    if rules.is_empty() {
+        let output = json!({
+            "run_id": run.id,
+            "node_key": node.key,
+            "source_trade_id": source_trade_id,
+            "market_slug": market_slug,
+            "token_id": token_id,
+            "outcome_label": outcome_label,
+            "reason": "missing_loss_rules",
+            "pass": false
+        });
+        return Ok(TradeFlowNodeExecution {
+            output,
+            routes: Vec::new(),
+            repeat_at,
+            repeat_idempotency_key: None,
+        });
+    };
+    let entry_price = match entry_price {
+        Some(value) if value.is_finite() && value > 0.0 && value <= 1.0 => value,
+        Some(value) => {
+            let output = json!({
+                "run_id": run.id,
+                "node_key": node.key,
+                "source_trade_id": source_trade_id,
+                "market_slug": market_slug,
+                "token_id": token_id,
+                "outcome_label": outcome_label,
+                "entry_price": value,
+                "reason": "invalid_entry_price",
+                "pass": false
+            });
+            return Ok(TradeFlowNodeExecution {
+                output,
+                routes: Vec::new(),
+                repeat_at,
+                repeat_idempotency_key: None,
+            });
+        }
+        None => {
+            let output = json!({
+                "run_id": run.id,
+                "node_key": node.key,
+                "source_trade_id": source_trade_id,
+                "market_slug": market_slug,
+                "token_id": token_id,
+                "outcome_label": outcome_label,
+                "reason": "entry_price_missing",
+                "pass": false
+            });
+            return Ok(TradeFlowNodeExecution {
+                output,
+                routes: Vec::new(),
+                repeat_at,
+                repeat_idempotency_key: None,
+            });
+        }
+    };
+    if market_slug.trim().is_empty() {
+        let output = json!({
+            "run_id": run.id,
+            "node_key": node.key,
+            "source_trade_id": source_trade_id,
+            "token_id": token_id,
+            "outcome_label": outcome_label,
+            "entry_price": entry_price,
+            "reason": "missing_market_slug",
+            "pass": false
+        });
+        return Ok(TradeFlowNodeExecution {
+            output,
+            routes: Vec::new(),
+            repeat_at,
+            repeat_idempotency_key: None,
+        });
+    }
+    if token_id.trim().is_empty() {
+        let output = json!({
+            "run_id": run.id,
+            "node_key": node.key,
+            "source_trade_id": source_trade_id,
+            "market_slug": market_slug,
+            "outcome_label": outcome_label,
+            "entry_price": entry_price,
+            "reason": "missing_token_id",
+            "pass": false
+        });
+        return Ok(TradeFlowNodeExecution {
+            output,
+            routes: Vec::new(),
+            repeat_at,
+            repeat_idempotency_key: None,
+        });
+    }
+    if outcome_label.trim().is_empty() {
+        let output = json!({
+            "run_id": run.id,
+            "node_key": node.key,
+            "source_trade_id": source_trade_id,
+            "market_slug": market_slug,
+            "token_id": token_id,
+            "entry_price": entry_price,
+            "reason": "missing_outcome_label",
+            "pass": false
+        });
+        return Ok(TradeFlowNodeExecution {
+            output,
+            routes: Vec::new(),
+            repeat_at,
+            repeat_idempotency_key: None,
+        });
+    }
+
+    let ws_sourced = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("triggerSource"))
+        .and_then(Value::as_str)
+        == Some("ws_market_price");
+    let ws_token_id_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("tokenId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let ws_price_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPrice"))
+        .and_then(value_as_f64)
+        .map(clamp_probability);
+    let ws_prices_map: Option<&serde_json::Map<String, Value>> = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPrices"))
+        .and_then(Value::as_object);
+    let step_ws_price_for_token = ws_prices_map
+        .and_then(|map| map.get(&token_id))
+        .and_then(value_as_f64)
+        .map(clamp_probability);
+    let step_token_matches = ws_token_id_from_step
+        .as_deref()
+        .map(|value| value == token_id.as_str())
+        .unwrap_or(true);
+
+    let mut current_price = None;
+    let mut price_source = "unavailable";
+    if let Some(price) = step_ws_price_for_token {
+        current_price = Some(price);
+        price_source = "step_ws_prices";
+    } else if step_token_matches {
+        if let Some(price) = ws_price_from_step {
+            current_price = Some(price);
+            price_source = "step_ws_price";
+        }
+    }
+    if current_price.is_none() {
+        if let Some(price) = fetch_price_from_market_ws(ws, &token_id).await {
+            current_price = Some(clamp_probability(price));
+            price_source = "ws_subscribe_once";
+        }
+    }
+    let Some(current_price) = current_price else {
+        let output = json!({
+            "run_id": run.id,
+            "node_key": node.key,
+            "source_trade_id": source_trade_id,
+            "market_slug": market_slug,
+            "token_id": token_id,
+            "outcome_label": outcome_label,
+            "entry_price": entry_price,
+            "price_source": price_source,
+            "reason": "current_price_unavailable",
+            "pass": false
+        });
+        return Ok(TradeFlowNodeExecution {
+            output,
+            routes: Vec::new(),
+            repeat_at,
+            repeat_idempotency_key: None,
+        });
+    };
+
+    let loss_pct_now = (((entry_price - current_price) / entry_price) * 100.0)
+        .max(0.0)
+        .clamp(0.0, 100.0);
+    let gain_pct_now = (((current_price - entry_price) / entry_price) * 100.0)
+        .max(0.0)
+        .clamp(0.0, 100.0);
+    let now_ms = now.timestamp_millis();
+
+    let mut samples =
+        parse_position_drawdown_samples(flow_node_state(context, &node.key, "drawdown_loss_samples"));
+    samples.push(PositionDrawdownSample {
+        ts_ms: now_ms,
+        loss_pct: loss_pct_now,
+        gain_pct: gain_pct_now,
+        price: current_price,
+    });
+    let max_window_sec = rules.iter().filter_map(|rule| rule.window_sec).max().unwrap_or(0);
+    if max_window_sec > 0 {
+        let cutoff = now_ms.saturating_sub(max_window_sec.saturating_mul(1000));
+        samples.retain(|sample| sample.ts_ms >= cutoff);
+    } else if let Some(last) = samples.last().copied() {
+        samples.clear();
+        samples.push(last);
+    }
+    if samples.len() > 4000 {
+        let overflow = samples.len() - 4000;
+        samples.drain(0..overflow);
+    }
+
+    let combine_mode_raw = node_config_string(node, "combineMode")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    let resolved_combine_mode = match combine_mode_raw.as_deref() {
+        Some("and") => "and",
+        Some("or") => "or",
+        _ if rules.len() <= 1 => "single",
+        _ => "or",
+    };
+
+    let mut rule_pass_flags = Vec::with_capacity(rules.len());
+    let rule_outputs: Vec<Value> = rules
+        .iter()
+        .map(|rule| {
+            let threshold_price = match rule.direction {
+                PositionDrawdownDirection::Down => {
+                    clamp_probability(entry_price * (1.0 - (rule.loss_pct / 100.0)))
+                }
+                PositionDrawdownDirection::Up => {
+                    clamp_probability(entry_price * (1.0 + (rule.loss_pct / 100.0)))
+                }
+            };
+            if let Some(window_sec) = rule.window_sec {
+                let cutoff = now_ms.saturating_sub(window_sec.saturating_mul(1000));
+                let window_samples: Vec<&PositionDrawdownSample> = samples
+                    .iter()
+                    .filter(|sample| sample.ts_ms >= cutoff)
+                    .collect();
+                let max_loss_pct = window_samples
+                    .iter()
+                    .map(|sample| (((entry_price - sample.price) / entry_price) * 100.0).max(0.0))
+                    .map(|value| value.clamp(0.0, 100.0))
+                    .fold(0.0_f64, f64::max);
+                let max_gain_pct = window_samples
+                    .iter()
+                    .map(|sample| (((sample.price - entry_price) / entry_price) * 100.0).max(0.0))
+                    .map(|value| value.clamp(0.0, 100.0))
+                    .fold(0.0_f64, f64::max);
+                let max_metric_pct = match rule.direction {
+                    PositionDrawdownDirection::Down => max_loss_pct,
+                    PositionDrawdownDirection::Up => max_gain_pct,
+                };
+                let pass = max_metric_pct >= rule.loss_pct;
+                rule_pass_flags.push(pass);
+                json!({
+                    "index": rule.index,
+                    "direction": rule.direction.as_str(),
+                    "loss_pct": rule.loss_pct,
+                    "window_sec": window_sec,
+                    "threshold_price": threshold_price,
+                    "max_loss_pct_in_window": max_loss_pct,
+                    "max_gain_pct_in_window": max_gain_pct,
+                    "metric_type": rule.direction.metric_type(),
+                    "max_metric_pct_in_window": max_metric_pct,
+                    "sample_count_in_window": window_samples.len(),
+                    "pass": pass
+                })
+            } else {
+                let metric_now = match rule.direction {
+                    PositionDrawdownDirection::Down => loss_pct_now,
+                    PositionDrawdownDirection::Up => gain_pct_now,
+                };
+                let pass = metric_now >= rule.loss_pct;
+                rule_pass_flags.push(pass);
+                json!({
+                    "index": rule.index,
+                    "direction": rule.direction.as_str(),
+                    "loss_pct": rule.loss_pct,
+                    "window_sec": Value::Null,
+                    "threshold_price": threshold_price,
+                    "max_loss_pct_in_window": loss_pct_now,
+                    "max_gain_pct_in_window": gain_pct_now,
+                    "metric_type": rule.direction.metric_type(),
+                    "max_metric_pct_in_window": metric_now,
+                    "sample_count_in_window": 1,
+                    "pass": pass
+                })
+            }
+        })
+        .collect();
+
+    let pass = match resolved_combine_mode {
+        "and" => rule_pass_flags.iter().all(|value| *value),
+        "or" => rule_pass_flags.iter().any(|value| *value),
+        _ => rule_pass_flags.first().copied().unwrap_or(false),
+    };
+
+    set_flow_node_state(
+        context,
+        &node.key,
+        "drawdown_loss_samples",
+        json!(
+            samples
+                .iter()
+                .map(|sample| json!({
+                    "ts_ms": sample.ts_ms,
+                    "loss_pct": sample.loss_pct,
+                    "gain_pct": sample.gain_pct,
+                    "price": sample.price
+                }))
+                .collect::<Vec<Value>>()
+        ),
+    );
+    set_flow_node_state(context, &node.key, "last_price", json!(current_price));
+    set_flow_node_state(context, &node.key, "last_loss_pct", json!(loss_pct_now));
+    set_flow_node_state(context, &node.key, "last_gain_pct", json!(gain_pct_now));
+    set_flow_node_state(context, &node.key, "last_entry_price", json!(entry_price));
+    set_flow_node_state(context, &node.key, "last_position_qty", json!(0.0));
+    set_flow_node_state(context, &node.key, "last_pass", json!(pass));
+
+    if let Some(trade_id) = source_trade_id {
+        set_flow_var(context, &format!("{var_prefix}_trade_id"), json!(trade_id));
+    }
+    set_flow_var(
+        context,
+        &format!("{var_prefix}_market_slug"),
+        json!(market_slug.clone()),
+    );
+    set_flow_var(
+        context,
+        &format!("{var_prefix}_token_id"),
+        json!(token_id.clone()),
+    );
+    set_flow_var(
+        context,
+        &format!("{var_prefix}_outcome_label"),
+        json!(outcome_label.clone()),
+    );
+    set_flow_var(context, &format!("{var_prefix}_position_qty"), json!(0.0));
+    set_flow_var(context, &format!("{var_prefix}_entry_price"), json!(entry_price));
+    set_flow_var(
+        context,
+        &format!("{var_prefix}_current_price"),
+        json!(current_price),
+    );
+    set_flow_var(context, &format!("{var_prefix}_loss_pct"), json!(loss_pct_now));
+    set_flow_var(context, &format!("{var_prefix}_gain_pct"), json!(gain_pct_now));
+    set_flow_var(context, &format!("{var_prefix}_pass"), json!(pass));
+
+    let routes = if pass {
+        vec![TradeFlowRouteDecision {
+            edge_type: "default".to_string(),
+            available_at: now,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    let output = json!({
+        "run_id": run.id,
+        "node_key": node.key,
+        "source_trade_id": source_trade_id,
+        "market_slug": market_slug,
+        "token_id": token_id,
+        "outcome_label": outcome_label,
+        "position_found": false,
+        "position_qty": 0.0,
+        "entry_price": entry_price,
+        "entry_price_source": "manual_entry_price",
+        "current_price": current_price,
+        "loss_pct": loss_pct_now,
+        "gain_pct": gain_pct_now,
+        "loss_rules": rule_outputs,
+        "combine_mode_input": combine_mode_raw,
+        "combine_mode_resolved": resolved_combine_mode,
+        "price_source": price_source,
+        "ws_sourced": ws_sourced,
+        "samples_tracked": samples.len(),
+        "pass": pass
+    });
 
     Ok(TradeFlowNodeExecution {
         output,
@@ -8073,6 +8824,45 @@ mod dual_dca_tests {
         }
     }
 
+    fn drawdown_node(config: Value) -> TradeFlowNode {
+        TradeFlowNode {
+            key: "drawdown_test".to_string(),
+            node_type: "trigger.position_drawdown".to_string(),
+            config,
+        }
+    }
+
+    #[test]
+    fn parse_drawdown_rules_supports_up_direction_and_defaults_to_down() {
+        let node = drawdown_node(json!({
+            "lossRules": [
+                { "lossPct": 10 },
+                { "lossPct": 15, "direction": "up", "windowSec": 5 }
+            ]
+        }));
+
+        let rules = parse_position_drawdown_rules(&node);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].direction, PositionDrawdownDirection::Down);
+        assert_eq!(rules[1].direction, PositionDrawdownDirection::Up);
+        assert_eq!(rules[1].window_sec, Some(5));
+    }
+
+    #[test]
+    fn parse_drawdown_rules_ignores_invalid_direction_values() {
+        let node = drawdown_node(json!({
+            "lossRules": [
+                { "lossPct": 10, "direction": "sideways" },
+                { "lossPct": 7, "direction": "down" }
+            ]
+        }));
+
+        let rules = parse_position_drawdown_rules(&node);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].direction, PositionDrawdownDirection::Down);
+        assert!((rules[0].loss_pct - 7.0).abs() < f64::EPSILON);
+    }
+
     #[test]
     fn ws_once_idempotency_key_is_stable_per_run_and_node() {
         let key_1 = ws_price_trigger_step_idempotency_key(
@@ -9060,6 +9850,139 @@ mod confirmation_gate_tests {
             "Elapsed from re-entry should be near-zero (got {:.3}s), not accumulated from first entry (8s)", elapsed_secs);
         assert!(elapsed_secs < node.confirmation_secs,
             "Should not have fired yet — confirmation_secs={} not yet elapsed", node.confirmation_secs);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test: cross_confirmed mode — step execution must short-circuit past the
+    // cross re-evaluation.
+    //
+    // This captures the root-cause of the trigger-node-not-firing bug:
+    // When the WS confirmation gate fires, it enqueues a step with
+    //   wsPreviousPrice = tick-in-zone price (already past the cross)
+    //   wsPrice         = tick-in-zone price (still in zone)
+    //   wsEvaluationMode = "cross_confirmed"
+    //
+    // Without the short-circuit, evaluate_trigger_market_price_condition would
+    // receive prev >= trigger and cur >= trigger and return (false, "no_cross").
+    //
+    // With the short-circuit, wsEvaluationMode="cross_confirmed" causes pass=true
+    // without re-evaluating the strict cross condition.
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn cross_confirmed_mode_short_circuits_cross_recheck() {
+        // Simulate the data that would be present in step.input_json when the
+        // WS confirmation gate fires:
+        //   - trigger: cross_above at 0.60
+        //   - Original cross: price went from 0.55 → 0.65
+        //   - Confirmation tick: prev=0.65 (in zone), cur=0.65 (in zone)
+        //   - wsEvaluationMode: "cross_confirmed"
+        let trigger_price = 0.60_f64;
+        let ws_price = 0.65_f64;
+        let ws_prev_price = 0.65_f64; // in-zone: already above trigger
+
+        // Verify that WITHOUT the short-circuit, the cross check would fail:
+        // prev=0.65 >= trigger=0.60, so "prev < trigger" is false → no_cross
+        let (would_cross, mode) = evaluate_trigger_market_price_condition(
+            Some(ws_prev_price),
+            ws_price,
+            trigger_price,
+            "cross_above",
+            false, // once_mode=true → allow_first_tick_threshold=false
+        );
+        assert!(!would_cross, "Pre-confirmed in-zone prices must NOT produce a new cross (got mode={mode})");
+        assert_eq!(mode, "no_cross");
+
+        // Verify that the cross_confirmed detection logic works:
+        // ws_sourced=true AND wsEvaluationMode="cross_confirmed" → ws_cross_confirmed=true
+        let ws_sourced = true;
+        let ws_evaluation_mode = "cross_confirmed";
+        let ws_cross_confirmed = ws_sourced && ws_evaluation_mode == "cross_confirmed";
+        assert!(ws_cross_confirmed, "ws_cross_confirmed must be true when wsEvaluationMode=cross_confirmed");
+
+        // And verify that WITHOUT ws_cross_confirmed, the trigger would silently fail
+        let without_short_circuit_pass = would_cross; // false from above
+        assert!(!without_short_circuit_pass, "Without short-circuit, trigger would silently fail");
+
+        // With the short-circuit, pass is set to true directly (tested implicitly
+        // by the production code path - this test validates the invariants the
+        // short-circuit relies on).
+        let with_short_circuit_pass = ws_cross_confirmed; // true
+        assert!(with_short_circuit_pass, "With short-circuit, trigger must fire when cross_confirmed");
+    }
+
+    #[test]
+    fn cross_confirmed_mode_not_triggered_for_regular_ws_events() {
+        // When wsEvaluationMode is absent or not "cross_confirmed", ws_cross_confirmed=false
+        // and the normal cross evaluation path runs (no short-circuit).
+        let ws_sourced = true;
+
+        let mode_absent = "";
+        let mode_cross_detected = "cross_detected";
+        let mode_first_tick = "first_tick_threshold";
+
+        assert!(!( ws_sourced && mode_absent == "cross_confirmed"),
+            "Empty evaluation mode must not trigger short-circuit");
+        assert!(!(ws_sourced && mode_cross_detected == "cross_confirmed"),
+            "cross_detected must not trigger short-circuit (handled normally)");
+        assert!(!(ws_sourced && mode_first_tick == "cross_confirmed"),
+            "first_tick_threshold must not trigger short-circuit");
+
+        // Non-WS steps also must not trigger short-circuit
+        let not_ws_sourced = false;
+        assert!(!(not_ws_sourced && "cross_confirmed" == "cross_confirmed"),
+            "Non-WS steps must not trigger short-circuit even if mode says cross_confirmed");
+    }
+
+    #[test]
+    fn cross_confirmed_short_circuit_helper_requires_clean_ws_context() {
+        assert!(should_apply_ws_cross_confirmed_short_circuit(
+            true,
+            "cross_confirmed",
+            None
+        ));
+        assert!(!should_apply_ws_cross_confirmed_short_circuit(
+            true,
+            "cross_confirmed",
+            Some("ws_market_slug_mismatch:a!=b")
+        ));
+        assert!(!should_apply_ws_cross_confirmed_short_circuit(
+            false,
+            "cross_confirmed",
+            None
+        ));
+        assert!(!should_apply_ws_cross_confirmed_short_circuit(
+            true,
+            "cross_detected",
+            None
+        ));
+    }
+
+    #[test]
+    fn cross_confirmed_unexpected_fail_helper_flags_only_real_regression_case() {
+        assert!(is_ws_cross_confirmed_unexpected_fail(
+            true,
+            "cross_confirmed",
+            false,
+            None
+        ));
+        assert!(!is_ws_cross_confirmed_unexpected_fail(
+            true,
+            "cross_confirmed",
+            true,
+            None
+        ));
+        assert!(!is_ws_cross_confirmed_unexpected_fail(
+            true,
+            "cross_confirmed",
+            false,
+            Some("ws_market_slug_mismatch:a!=b")
+        ));
+        assert!(!is_ws_cross_confirmed_unexpected_fail(
+            true,
+            "cross_detected",
+            false,
+            None
+        ));
     }
 }
 

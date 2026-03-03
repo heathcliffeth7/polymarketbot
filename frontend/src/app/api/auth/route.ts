@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createSession, getSessionCookieName } from '@/lib/auth';
+import { createSession, getSessionCookieName, shouldUseSecureAuthCookie } from '@/lib/auth';
 
 export async function POST(req: NextRequest) {
   try {
@@ -12,10 +12,11 @@ export async function POST(req: NextRequest) {
 
     const token = await createSession();
     const response = NextResponse.json({ success: true });
+    const secureCookie = shouldUseSecureAuthCookie();
 
     response.cookies.set(getSessionCookieName(), token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
+      secure: secureCookie,
       sameSite: 'lax',
       maxAge: 60 * 60 * 24,
       path: '/',
@@ -29,9 +30,10 @@ export async function POST(req: NextRequest) {
 
 export async function DELETE() {
   const response = NextResponse.json({ success: true });
+  const secureCookie = shouldUseSecureAuthCookie();
   response.cookies.set(getSessionCookieName(), '', {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    secure: secureCookie,
     sameSite: 'lax',
     maxAge: 0,
     path: '/',

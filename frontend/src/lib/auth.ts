@@ -3,6 +3,8 @@ import { cookies } from 'next/headers';
 
 const SECRET = new TextEncoder().encode(process.env.AUTH_SECRET || 'fallback-secret');
 const COOKIE_NAME = 'polybot-session';
+const TRUE_ENV_VALUES = new Set(['1', 'true', 'yes', 'on']);
+const FALSE_ENV_VALUES = new Set(['0', 'false', 'no', 'off']);
 
 export async function createSession(): Promise<string> {
   const token = await new SignJWT({ authenticated: true })
@@ -31,4 +33,19 @@ export async function getSession(): Promise<boolean> {
 
 export function getSessionCookieName(): string {
   return COOKIE_NAME;
+}
+
+export function shouldUseSecureAuthCookie(): boolean {
+  const raw = process.env.AUTH_COOKIE_SECURE;
+  if (raw) {
+    const normalized = raw.trim().toLowerCase();
+    if (TRUE_ENV_VALUES.has(normalized)) {
+      return true;
+    }
+    if (FALSE_ENV_VALUES.has(normalized)) {
+      return false;
+    }
+  }
+
+  return process.env.NODE_ENV === 'production';
 }

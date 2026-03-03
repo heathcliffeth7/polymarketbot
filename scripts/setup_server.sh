@@ -62,8 +62,12 @@ ok "Environment file installed at $ENV_FILE"
 step "Install systemd service"
 sudo cp "$UNIT_SRC" "$UNIT_DST"
 sudo systemctl daemon-reload
-sudo systemctl enable --now dextrabot
-ok "dextrabot service enabled and started"
+sudo systemctl enable dextrabot
+sudo systemctl restart dextrabot
+if ! sudo systemctl is-active --quiet dextrabot; then
+  fail "dextrabot service failed to start after restart"
+fi
+ok "dextrabot service enabled and restarted with latest binary"
 
 step "Print service status"
 sudo systemctl --no-pager -l status dextrabot || true

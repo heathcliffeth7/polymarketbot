@@ -47,9 +47,38 @@ sudo mkdir -p /etc/dextrabot
 sudo cp deploy/systemd/dextrabot.env.example /etc/dextrabot/dextrabot.env
 sudo cp deploy/systemd/dextrabot.service /etc/systemd/system/dextrabot.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now dextrabot
+sudo systemctl enable dextrabot
+sudo systemctl restart dextrabot
 sudo systemctl status dextrabot --no-pager -l
 ```
+
+Important: after every `cargo build --release -p bot-runner`, always run `sudo systemctl restart dextrabot` so runtime behavior matches the latest binary.
+If you see `trigger_ws_price_enqueued (cross_confirmed)` followed by `step_completed(triggered=false, evaluation_mode=no_cross)`, assume stale process/binary mismatch and restart service.
+
+### 6) Frontend on Server IP (`http://<SERVER_IP>:3000`)
+```bash
+cd /home/heathcliff/polymarketbot
+./scripts/setup_frontend_service.sh
+```
+
+If build-time internet access is restricted:
+```bash
+cd /home/heathcliff/polymarketbot
+SKIP_FRONTEND_BUILD=true ./scripts/setup_frontend_service.sh
+```
+
+Then:
+```bash
+sudo systemctl status dextrabot-frontend --no-pager -l
+```
+
+If port `3000` is currently used by dev mode, stop it first:
+```bash
+pkill -f '/home/heathcliff/polymarketbot/frontend/node_modules/.bin/next dev --webpack' || true
+```
+
+Important: for HTTP-only server IP deployments keep `AUTH_COOKIE_SECURE=false` in `/etc/dextrabot/dextrabot-frontend.env`.
+Login is mandatory and uses `AUTH_SECRET` as password.
 
 ## Health Check
 ```bash

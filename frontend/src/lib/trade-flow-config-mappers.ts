@@ -25,10 +25,19 @@ export interface OutcomeConditionRow {
   triggerPriceCent: string;
 }
 
+export interface DrawdownRuleRow {
+  id: string;
+  direction: 'down' | 'up';
+  lossPct: string;
+  durationValue: string;
+  durationUnit: 'sec' | 'min';
+}
+
 export interface NodeConfigFormState {
   fields: Record<string, string>;
   triggerSizeRows: string[];
   outcomeConditionRows: OutcomeConditionRow[];
+  drawdownRuleRows: DrawdownRuleRow[];
   expressionRows: ConditionDraft[];
   expressionJoin: ExpressionJoin;
   expressionSupported: boolean;
@@ -160,9 +169,43 @@ export function createEmptyOutcomeConditionRow(): OutcomeConditionRow {
   return { id: createId('oc'), tokenId: '', outcomeLabel: '', triggerCondition: '', triggerPriceCent: '' };
 }
 
+export function createEmptyDrawdownRuleRow(): DrawdownRuleRow {
+  return { id: createId('dr'), direction: 'down', lossPct: '', durationValue: '', durationUnit: 'sec' };
+}
+
 export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
   'trigger.market_price': [
+    {
+      key: 'marketMode',
+      label: 'Market Modu',
+      input: 'select',
+      options: [
+        { label: 'Sabit (fixed)', value: 'fixed' },
+        { label: 'Otomatik Scope (auto_scope)', value: 'auto_scope' },
+      ],
+    },
     { key: 'marketSlug', label: 'Market Slug', input: 'text' },
+    {
+      key: 'marketScope',
+      label: 'Market Scope',
+      input: 'select',
+      options: [
+        { label: 'BTC 5m', value: 'btc_5m_updown' },
+        { label: 'BTC 15m', value: 'btc_15m_updown' },
+        { label: 'ETH 5m', value: 'eth_5m_updown' },
+        { label: 'ETH 15m', value: 'eth_15m_updown' },
+        { label: 'SOL 5m', value: 'sol_5m_updown' },
+        { label: 'SOL 15m', value: 'sol_15m_updown' },
+        { label: 'XRP 5m', value: 'xrp_5m_updown' },
+        { label: 'XRP 15m', value: 'xrp_15m_updown' },
+      ],
+    },
+    {
+      key: 'marketSelection',
+      label: 'Secim Stratejisi',
+      input: 'select',
+      options: [{ label: 'latest_by_slug', value: 'latest_by_slug' }],
+    },
     {
       key: 'repeatMode',
       label: 'Tetik Modu',
@@ -172,7 +215,17 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'Döngü (loop)', value: 'loop' },
       ],
     },
+    {
+      key: 'onceScope',
+      label: 'Once Scope',
+      input: 'select',
+      options: [
+        { label: 'Run', value: 'run' },
+        { label: 'Market', value: 'market' },
+      ],
+    },
     { key: 'minIntervalMs', label: 'Kontrol Aralığı (ms)', input: 'number', help: 'Varsayılan: 10000 (10sn). Minimum: 250ms.' },
+    { key: 'confirmationSeconds', label: 'Onay Süresi (sn)', input: 'number', help: 'Cross sonrası fiyatın eşik altında kalması gereken süre. 0 = anında tetik.' },
   ],
   'trigger.sell_progress': [
     { key: 'sourceTradeId', label: 'Source Trade ID', input: 'number' },
@@ -207,6 +260,34 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       input: 'number',
       help: 'Fiyat tetik koşulu aktifse kullanılmaz; websocket event tetikler.',
     },
+  ],
+  'trigger.position_drawdown': [
+    { key: 'marketSlug', label: 'Market Slug', input: 'text' },
+    { key: 'outcomeLabel', label: 'Outcome Label', input: 'text' },
+    {
+      key: 'entryPriceCent',
+      label: 'Entry Fiyati (cent)',
+      input: 'number',
+      help: 'Pozisyona bakmadan drawdown hesabi bu entry fiyatina gore yapilir. Ornek: 80 => $0.80',
+    },
+    {
+      key: 'combineMode',
+      label: 'Kural Birlesimi',
+      input: 'select',
+      options: [
+        { label: 'Otomatik', value: '' },
+        { label: 'AND (hepsi)', value: 'and' },
+        { label: 'OR (herhangi biri)', value: 'or' },
+      ],
+      help: 'Bos birakirsan: tek kural varsa tek kural, birden fazla kural varsa OR uygulanir.',
+    },
+    {
+      key: 'minIntervalMs',
+      label: 'Minimum Interval (ms)',
+      input: 'number',
+      help: 'Varsayilan 250ms. Minimum 250ms.',
+    },
+    { key: 'varPrefix', label: 'Degisken Prefix', input: 'text', placeholder: 'drawdown' },
   ],
   'trigger.time_window': [
     { key: 'startAt', label: 'Başlangıç Zamanı', input: 'datetime-local' },
@@ -454,6 +535,8 @@ const NUMERIC_KEYS = new Set([
   'tpProfitPct',
   'slLossPct',
   'slSpreadPct',
+  'confirmationSeconds',
+  'entryPriceCent',
 ]);
 
 const BOOLEAN_KEYS = new Set(['failOnMissingMarket', 'requireYesNoTokens', 'requireTokenId']);
@@ -693,7 +776,33 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
   }
 
+  if (nodeType === 'trigger.market_price') {
+    const marketModeRaw = toStringValue(cfg.marketMode).trim().toLowerCase();
+    const marketMode = marketModeRaw === 'auto_scope' ? 'auto_scope' : 'fixed';
+    fields.marketMode = marketMode;
+
+    const scopeRaw = toStringValue(cfg.marketScope).trim().toLowerCase();
+    if (scopeRaw && RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[scopeRaw]) {
+      fields.marketScope = scopeRaw;
+    }
+
+    const selectionRaw = toStringValue(cfg.marketSelection).trim().toLowerCase();
+    fields.marketSelection = selectionRaw || 'latest_by_slug';
+
+    if (!fields.repeatMode.trim()) {
+      fields.repeatMode = 'loop';
+    }
+
+    const onceScopeRaw = toStringValue(cfg.onceScope).trim().toLowerCase();
+    fields.onceScope = onceScopeRaw === 'market' ? 'market' : 'run';
+
+    if (!fields.confirmationSeconds?.trim()) {
+      fields.confirmationSeconds = '15';
+    }
+  }
+
   let outcomeConditionRows: OutcomeConditionRow[] = [];
+  let drawdownRuleRows: DrawdownRuleRow[] = [];
   if (nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') {
     if (Array.isArray(cfg.outcomeConditions)) {
       for (const item of cfg.outcomeConditions as Record<string, unknown>[]) {
@@ -716,6 +825,69 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
       });
     }
   }
+  if (nodeType === 'trigger.position_drawdown') {
+    fields.tokenId = toStringValue(cfg.tokenId).trim();
+    if (!fields.entryPriceCent?.trim()) {
+      const legacyEntry = Number(toStringValue(cfg.entryPrice).trim());
+      if (Number.isFinite(legacyEntry) && legacyEntry > 0) {
+        fields.entryPriceCent = String(legacyEntry * 100);
+      }
+    }
+    if (Array.isArray(cfg.lossRules)) {
+      for (const item of cfg.lossRules as Record<string, unknown>[]) {
+        if (!isRecord(item)) continue;
+        const lossPctRaw = toStringValue(item.lossPct).trim();
+        const directionRaw = toStringValue(item.direction).trim().toLowerCase();
+        const direction: 'down' | 'up' = directionRaw === 'up' ? 'up' : 'down';
+        const windowSecValue = Number(toStringValue(item.windowSec).trim());
+        let durationValue = '';
+        let durationUnit: 'sec' | 'min' = 'sec';
+        if (Number.isFinite(windowSecValue) && windowSecValue > 0) {
+          if (windowSecValue % 60 === 0) {
+            durationValue = String(windowSecValue / 60);
+            durationUnit = 'min';
+          } else {
+            durationValue = String(windowSecValue);
+            durationUnit = 'sec';
+          }
+        }
+        drawdownRuleRows.push({
+          id: createId('dr'),
+          direction,
+          lossPct: lossPctRaw,
+          durationValue,
+          durationUnit,
+        });
+      }
+    }
+    if (drawdownRuleRows.length === 0) {
+      const fallbackLossPct = toStringValue(cfg.lossPct).trim();
+      const fallbackWindowSec = Number(toStringValue(cfg.windowSec).trim());
+      let durationValue = '';
+      let durationUnit: 'sec' | 'min' = 'sec';
+      if (Number.isFinite(fallbackWindowSec) && fallbackWindowSec > 0) {
+        if (fallbackWindowSec % 60 === 0) {
+          durationValue = String(fallbackWindowSec / 60);
+          durationUnit = 'min';
+        } else {
+          durationValue = String(fallbackWindowSec);
+          durationUnit = 'sec';
+        }
+      }
+      if (fallbackLossPct) {
+        drawdownRuleRows.push({
+          id: createId('dr'),
+          direction: 'down',
+          lossPct: fallbackLossPct,
+          durationValue,
+          durationUnit,
+        });
+      }
+    }
+    if (drawdownRuleRows.length === 0) {
+      drawdownRuleRows = [createEmptyDrawdownRuleRow()];
+    }
+  }
 
   const expression = parseExpressionDraft(cfg.expression);
   const patchRows = objectToRows(cfg.statePatch ?? cfg.state);
@@ -724,6 +896,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     fields,
     triggerSizeRows,
     outcomeConditionRows,
+    drawdownRuleRows,
     expressionRows: expression.rows,
     expressionJoin: expression.join,
     expressionSupported: expression.supported,
@@ -891,9 +1064,106 @@ export function buildNodeConfigFromForm(
     }
   }
 
+  if (nodeType === 'trigger.market_price') {
+    const marketModeRaw = toStringValue(config.marketMode).trim().toLowerCase();
+    const marketMode = marketModeRaw === 'auto_scope' ? 'auto_scope' : 'fixed';
+    config.marketMode = marketMode;
+
+    const repeatModeRaw = toStringValue(config.repeatMode).trim().toLowerCase();
+    config.repeatMode = repeatModeRaw === 'once' ? 'once' : 'loop';
+
+    const onceScopeRaw = toStringValue(config.onceScope).trim().toLowerCase();
+    config.onceScope = onceScopeRaw === 'market' ? 'market' : 'run';
+
+    const selectionRaw = toStringValue(config.marketSelection).trim().toLowerCase();
+    config.marketSelection = selectionRaw || 'latest_by_slug';
+
+    const scopeRaw = toStringValue(config.marketScope).trim().toLowerCase();
+    if (marketMode === 'auto_scope') {
+      if (scopeRaw && RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[scopeRaw]) {
+        config.marketScope = scopeRaw;
+      } else {
+        delete config.marketScope;
+      }
+      // auto_scope resolves market slug at runtime.
+      delete config.marketSlug;
+    } else {
+      delete config.marketScope;
+      delete config.marketSelection;
+    }
+
+    if (config.repeatMode !== 'once') {
+      delete config.onceScope;
+      delete config.confirmationSeconds;
+    }
+  }
+
+  if (nodeType === 'trigger.position_drawdown') {
+    const combineModeRaw = toStringValue(config.combineMode).trim().toLowerCase();
+    if (combineModeRaw === 'and' || combineModeRaw === 'or') {
+      config.combineMode = combineModeRaw;
+    } else {
+      delete config.combineMode;
+    }
+    const tokenIdRaw = toStringValue(form.fields.tokenId).trim();
+    if (tokenIdRaw) {
+      config.tokenId = tokenIdRaw;
+    } else {
+      delete config.tokenId;
+    }
+
+    const entryPriceCentRaw = Number(form.fields.entryPriceCent?.trim() ?? '');
+    if (Number.isFinite(entryPriceCentRaw) && entryPriceCentRaw > 0 && entryPriceCentRaw <= 100) {
+      config.entryPriceCent = entryPriceCentRaw;
+    } else {
+      delete config.entryPriceCent;
+    }
+
+    const rules = (form.drawdownRuleRows || [])
+      .map((row) => {
+        const lossPct = Number(row.lossPct.trim());
+        if (!Number.isFinite(lossPct) || lossPct <= 0 || lossPct > 100) return null;
+        const direction = row.direction === 'up' ? 'up' : 'down';
+
+        const durationRaw = row.durationValue.trim();
+        let windowSec: number | undefined;
+        if (durationRaw) {
+          const durationValue = Number(durationRaw);
+          if (!Number.isFinite(durationValue) || durationValue <= 0) return null;
+          const unit = row.durationUnit === 'min' ? 'min' : 'sec';
+          const computed = unit === 'min' ? durationValue * 60 : durationValue;
+          if (!Number.isFinite(computed) || computed <= 0) return null;
+          windowSec = Math.floor(computed);
+        }
+
+        const item: Record<string, unknown> = { lossPct, direction };
+        if (windowSec != null) item.windowSec = windowSec;
+        return item;
+      })
+      .filter((item): item is Record<string, unknown> => item != null);
+
+    if (rules.length > 0) {
+      config.lossRules = rules;
+    } else {
+      delete config.lossRules;
+    }
+    delete config.sourceTradeId;
+    delete config.entryPrice;
+    delete config.lossPct;
+    delete config.windowSec;
+  }
+
   if ((nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') && form.outcomeConditionRows.length > 0) {
     const conditions = form.outcomeConditionRows
-      .filter((row) => row.tokenId.trim() && row.triggerCondition.trim())
+      .filter((row) => {
+        const tokenId = row.tokenId.trim();
+        const outcomeLabel = row.outcomeLabel.trim();
+        const triggerCondition = row.triggerCondition.trim();
+        const triggerPriceCent = Number(row.triggerPriceCent.trim());
+        if (!tokenId || !outcomeLabel) return false;
+        if (triggerCondition !== 'cross_above' && triggerCondition !== 'cross_below') return false;
+        return Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100;
+      })
       .map((row) => {
         const priceCent = Number(row.triggerPriceCent.trim());
         return {

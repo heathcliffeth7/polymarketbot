@@ -13,12 +13,10 @@ use bot_infra::exchange::{GammaHttpClient, PlaceOrderRequest};
 use bot_infra::ws::ClobWsClient;
 
 use crate::{
-    aggressive_price_for_side, calc_level_size, clamp_probability,
-    dual_dca_timeframe_duration, fetch_price_from_market_ws,
-    find_updown_scope_by_asset_timeframe, list_markets_for_scope,
-    normalize_exchange_status, risk_gate_manual_order,
-    select_preferred_live_market, sync_recent_trade_builder_fills,
-    to_risk_limits,
+    aggressive_price_for_side, calc_level_size, clamp_probability, dual_dca_timeframe_duration,
+    fetch_price_from_market_ws, find_updown_scope_by_asset_timeframe, list_markets_for_scope,
+    normalize_exchange_status, risk_gate_manual_order, select_preferred_live_market,
+    sync_recent_trade_builder_fills, to_risk_limits,
 };
 
 const FLOW_DUAL_DCA_JOB_PROCESS_LIMIT: i64 = 100;
@@ -26,6 +24,13 @@ const FLOW_DUAL_DCA_RETRY_SECONDS: i64 = 30;
 const FLOW_DUAL_DCA_ACTIVE_CHECK_SECONDS: i64 = 20;
 const FLOW_DUAL_DCA_MAX_CONSECUTIVE_ERRORS: i32 = 20;
 const FLOW_DUAL_DCA_MIN_ORDER_USDC: f64 = 1.0;
+
+fn dual_dca_trigger_crossed_below_strict(current_price: f64, trigger_price: Option<f64>) -> bool {
+    match trigger_price {
+        None => true,
+        Some(trigger) => current_price <= trigger,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Top-level job loop
@@ -105,9 +110,12 @@ async fn process_trade_flow_dual_dca_job(
         repo.set_trade_flow_dual_dca_job_status(job.id, "canceled", Some("flow_run_missing"))
             .await?;
         repo.append_trade_flow_dual_dca_event(
-            job.id, None, "job_canceled",
+            job.id,
+            None,
+            "job_canceled",
             &json!({ "reason": "flow_run_missing" }),
-        ).await?;
+        )
+        .await?;
         return Ok(());
     };
     if run.status != "running" {
@@ -115,23 +123,33 @@ async fn process_trade_flow_dual_dca_job(
         repo.set_trade_flow_dual_dca_job_status(job.id, "completed", Some("flow_run_not_running"))
             .await?;
         repo.append_trade_flow_dual_dca_event(
-            job.id, None, "job_completed",
+            job.id,
+            None,
+            "job_completed",
             &json!({ "reason": "flow_run_not_running", "run_status": run.status }),
-        ).await?;
+        )
+        .await?;
         return Ok(());
     }
     if job.consecutive_errors >= FLOW_DUAL_DCA_MAX_CONSECUTIVE_ERRORS {
         cancel_dual_dca_active_orders(repo, client, job, None, "max_consecutive_errors").await?;
-        repo.set_trade_flow_dual_dca_job_status(job.id, "paused", Some("max_consecutive_errors_reached"))
-            .await?;
+        repo.set_trade_flow_dual_dca_job_status(
+            job.id,
+            "paused",
+            Some("max_consecutive_errors_reached"),
+        )
+        .await?;
         repo.append_trade_flow_dual_dca_event(
-            job.id, None, "job_paused",
+            job.id,
+            None,
+            "job_paused",
             &json!({
                 "reason": "max_consecutive_errors_reached",
                 "consecutive_errors": job.consecutive_errors,
                 "last_error": job.last_error
             }),
-        ).await?;
+        )
+        .await?;
         warn!(
             run_id,
             dual_dca_job_id = job.id,
@@ -148,15 +166,19 @@ async fn process_trade_flow_dual_dca_job(
         Ok(m) => m,
         Err(err) => {
             let next_check = Utc::now() + ChronoDuration::seconds(FLOW_DUAL_DCA_RETRY_SECONDS);
-            repo.schedule_trade_flow_dual_dca_job_check(job.id, next_check, None).await?;
+            repo.schedule_trade_flow_dual_dca_job_check(job.id, next_check, None)
+                .await?;
             repo.append_trade_flow_dual_dca_event(
-                job.id, None, "not_buy_decision",
+                job.id,
+                None,
+                "not_buy_decision",
                 &json!({
                     "reason_code": "market_discovery_fetch_failed",
                     "error": err.to_string(),
                     "next_check_at": next_check
                 }),
-            ).await?;
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -166,9 +188,12 @@ async fn process_trade_flow_dual_dca_job(
         repo.update_trade_flow_dual_dca_job_market_state(job.id, None, None, None, next_check, 0)
             .await?;
         repo.append_trade_flow_dual_dca_event(
-            job.id, None, "not_buy_decision",
+            job.id,
+            None,
+            "not_buy_decision",
             &json!({ "reason_code": "market_missing_token_ids", "next_check_at": next_check }),
-        ).await?;
+        )
+        .await?;
         return Ok(());
     }
 
@@ -189,12 +214,16 @@ async fn process_trade_flow_dual_dca_job(
         "TRADE_FLOW_DUAL_DCA_MARKET_SELECTED"
     );
 
-    let source_trade_id = job.source_trade_id.ok_or_else(|| {
-        anyhow::anyhow!("dual_dca job missing source_trade_id")
-    })?;
-    let yes_token_id = selected.yes_token_id.clone()
+    let source_trade_id = job
+        .source_trade_id
+        .ok_or_else(|| anyhow::anyhow!("dual_dca job missing source_trade_id"))?;
+    let yes_token_id = selected
+        .yes_token_id
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("selected market missing yes token id"))?;
-    let no_token_id = selected.no_token_id.clone()
+    let no_token_id = selected
+        .no_token_id
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("selected market missing no token id"))?;
     let (yes_price, no_price) =
         resolve_dual_dca_outcome_prices(ws, client, &market_slug, &yes_token_id, &no_token_id)
@@ -205,19 +234,37 @@ async fn process_trade_flow_dual_dca_job(
 
     // --- Phase 2: TP/SL check ---
     if let Some((unrealized_pnl_usdc, token_breakdown)) = evaluate_dual_dca_unrealized_pnl_usdc(
-        repo, source_trade_id, &yes_token_id, &no_token_id, yes_price, no_price,
-    ).await? {
+        repo,
+        source_trade_id,
+        &yes_token_id,
+        &no_token_id,
+        yes_price,
+        no_price,
+    )
+    .await?
+    {
         let tp_hit = job.tp_profit_pct > 0.0 && unrealized_pnl_usdc >= job.tp_profit_pct;
         let sl_hit = job.sl_loss_pct > 0.0 && unrealized_pnl_usdc <= -job.sl_loss_pct;
         if tp_hit || sl_hit {
-            let reason = if tp_hit { "tp_profit_hit" } else { "sl_loss_hit" };
+            let reason = if tp_hit {
+                "tp_profit_hit"
+            } else {
+                "sl_loss_hit"
+            };
             cancel_dual_dca_active_orders(repo, client, job, Some(&market_slug), reason).await?;
             repo.update_trade_flow_dual_dca_job_market_state(
-                job.id, Some(&market_slug), market_started_at, market_ends_at,
-                rollover_next_check, 0,
-            ).await?;
+                job.id,
+                Some(&market_slug),
+                market_started_at,
+                market_ends_at,
+                rollover_next_check,
+                0,
+            )
+            .await?;
             repo.append_trade_flow_dual_dca_event(
-                job.id, None, "risk_guard_triggered",
+                job.id,
+                None,
+                "risk_guard_triggered",
                 &json!({
                     "market_slug": market_slug,
                     "reason": reason,
@@ -225,7 +272,8 @@ async fn process_trade_flow_dual_dca_job(
                     "token_breakdown": token_breakdown,
                     "next_check_at": rollover_next_check
                 }),
-            ).await?;
+            )
+            .await?;
             return Ok(());
         }
     }
@@ -234,32 +282,46 @@ async fn process_trade_flow_dual_dca_job(
     if let Some(ends_at) = market_ends_at {
         let cutoff_at = ends_at - ChronoDuration::minutes(job.cutoff_min.max(0) as i64);
         if now >= cutoff_at {
-            cancel_dual_dca_active_orders(repo, client, job, Some(&market_slug), "cutoff_window").await?;
+            cancel_dual_dca_active_orders(repo, client, job, Some(&market_slug), "cutoff_window")
+                .await?;
             repo.update_trade_flow_dual_dca_job_market_state(
-                job.id, Some(&market_slug), market_started_at, Some(ends_at),
-                rollover_next_check, 0,
-            ).await?;
+                job.id,
+                Some(&market_slug),
+                market_started_at,
+                Some(ends_at),
+                rollover_next_check,
+                0,
+            )
+            .await?;
             repo.append_trade_flow_dual_dca_event(
-                job.id, None, "market_cutoff_window",
+                job.id,
+                None,
+                "market_cutoff_window",
                 &json!({
                     "market_slug": market_slug,
                     "cutoff_min": job.cutoff_min,
                     "market_ends_at": ends_at,
                     "next_check_at": rollover_next_check
                 }),
-            ).await?;
+            )
+            .await?;
             return Ok(());
         }
     }
 
     // --- Phase 4: Initialize legs if new market ---
-    let is_new_market = job.last_market_slug
+    let is_new_market = job
+        .last_market_slug
         .as_ref()
         .map(|prev| prev != &market_slug)
         .unwrap_or(true);
 
     let outcomes = resolve_dual_dca_outcomes(
-        &job.side_mode, &yes_token_id, yes_price, &no_token_id, no_price,
+        &job.side_mode,
+        &yes_token_id,
+        yes_price,
+        &no_token_id,
+        no_price,
     );
 
     if is_new_market {
@@ -276,9 +338,8 @@ async fn process_trade_flow_dual_dca_job(
 
             for level in 0..job.dca_levels {
                 let level_f64 = level as f64;
-                let step_distance = dual_dca_level_step_distance(
-                    job.near_step, job.step_mult, level,
-                );
+                let step_distance =
+                    dual_dca_level_step_distance(job.near_step, job.step_mult, level);
                 let trigger_price = if level == 0 && job.base_price_usdc.is_none() {
                     None
                 } else {
@@ -302,30 +363,53 @@ async fn process_trade_flow_dual_dca_job(
 
                 // Risk gate
                 let risk = risk_gate_manual_order(
-                    repo, run_id, cfg, source_trade_id, size_usdc, limits, policy,
-                ).await?;
+                    repo,
+                    run_id,
+                    cfg,
+                    source_trade_id,
+                    size_usdc,
+                    limits,
+                    policy,
+                )
+                .await?;
                 if !matches!(risk, RiskDecision::Allow) {
                     repo.append_trade_flow_dual_dca_event(
-                        job.id, None, "level_blocked_by_risk",
+                        job.id,
+                        None,
+                        "level_blocked_by_risk",
                         &json!({
                             "outcome_label": outcome_label,
                             "level_index": level,
                             "size_usdc": size_usdc,
                             "decision": format!("{risk:?}")
                         }),
-                    ).await?;
+                    )
+                    .await?;
                     continue;
                 }
 
                 // Create leg as pending (no builder order)
-                let leg = repo.upsert_trade_flow_dual_dca_leg(
-                    job.id, &market_slug, token_id, outcome_label, "buy", level,
-                    trigger_condition, trigger_price, size_usdc,
-                    Some(level_reference_price), None, "pending",
-                ).await?;
+                let leg = repo
+                    .upsert_trade_flow_dual_dca_leg(
+                        job.id,
+                        &market_slug,
+                        token_id,
+                        outcome_label,
+                        "buy",
+                        level,
+                        trigger_condition,
+                        trigger_price,
+                        size_usdc,
+                        Some(level_reference_price),
+                        None,
+                        "pending",
+                    )
+                    .await?;
 
                 repo.append_trade_flow_dual_dca_event(
-                    job.id, Some(leg.id), "leg_created",
+                    job.id,
+                    Some(leg.id),
+                    "leg_created",
                     &json!({
                         "market_slug": market_slug,
                         "outcome_label": outcome_label,
@@ -334,27 +418,38 @@ async fn process_trade_flow_dual_dca_job(
                         "size_usdc": size_usdc,
                         "reference_price": level_reference_price
                     }),
-                ).await?;
+                )
+                .await?;
                 created_count += 1;
             }
         }
 
         repo.update_trade_flow_dual_dca_job_market_state(
-            job.id, Some(&market_slug), market_started_at, market_ends_at,
-            active_next_check, created_count,
-        ).await?;
+            job.id,
+            Some(&market_slug),
+            market_started_at,
+            market_ends_at,
+            active_next_check,
+            created_count,
+        )
+        .await?;
         repo.append_trade_flow_dual_dca_event(
-            job.id, None, "market_cycle_initialized",
+            job.id,
+            None,
+            "market_cycle_initialized",
             &json!({
                 "market_slug": market_slug,
                 "orders_created": created_count,
                 "next_check_at": active_next_check
             }),
-        ).await?;
+        )
+        .await?;
     }
 
     // --- Phase 5: Check fills on active orders ---
-    let active_legs = repo.list_dual_dca_legs_with_active_orders(job.id, &market_slug).await?;
+    let active_legs = repo
+        .list_dual_dca_legs_with_active_orders(job.id, &market_slug)
+        .await?;
     for leg in &active_legs {
         if let Some(exchange_oid) = leg.active_exchange_order_id.as_deref() {
             if let Ok(order_info) = client.status(exchange_oid).await {
@@ -362,10 +457,15 @@ async fn process_trade_flow_dual_dca_job(
                 match status {
                     "filled" => {
                         let fill_price = order_info.price.unwrap_or(0.0);
-                        let fill_size = order_info.filled_size.unwrap_or(order_info.size.unwrap_or(0.0));
-                        repo.set_dual_dca_leg_filled(leg.id, fill_price, fill_size).await?;
+                        let fill_size = order_info
+                            .filled_size
+                            .unwrap_or(order_info.size.unwrap_or(0.0));
+                        repo.set_dual_dca_leg_filled(leg.id, fill_price, fill_size)
+                            .await?;
                         repo.append_trade_flow_dual_dca_event(
-                            job.id, Some(leg.id), "leg_filled",
+                            job.id,
+                            Some(leg.id),
+                            "leg_filled",
                             &json!({
                                 "market_slug": market_slug,
                                 "outcome_label": leg.outcome_label,
@@ -374,7 +474,8 @@ async fn process_trade_flow_dual_dca_job(
                                 "filled_price": fill_price,
                                 "filled_size": fill_size
                             }),
-                        ).await?;
+                        )
+                        .await?;
                         info!(
                             run_id,
                             dual_dca_job_id = job.id,
@@ -389,13 +490,16 @@ async fn process_trade_flow_dual_dca_job(
                     "canceled" | "expired" | "rejected" => {
                         repo.reset_dual_dca_leg_to_pending(leg.id).await?;
                         repo.append_trade_flow_dual_dca_event(
-                            job.id, Some(leg.id), "leg_order_canceled_retry",
+                            job.id,
+                            Some(leg.id),
+                            "leg_order_canceled_retry",
                             &json!({
                                 "exchange_order_id": exchange_oid,
                                 "exchange_status": status,
                                 "action": "reset_to_pending"
                             }),
-                        ).await?;
+                        )
+                        .await?;
                     }
                     _ => {} // still open, wait
                 }
@@ -418,18 +522,22 @@ async fn process_trade_flow_dual_dca_job(
         };
 
         // Level 0 (no trigger): fire immediately. Level 1+: check trigger.
-        let should_fire = match leg.trigger_price {
-            None => true,
-            Some(trigger) => *current_price <= trigger,
-        };
+        let should_fire = dual_dca_trigger_crossed_below_strict(*current_price, leg.trigger_price);
         if !should_fire {
             continue;
         }
 
         // Risk gate
         let risk = risk_gate_manual_order(
-            repo, run_id, cfg, source_trade_id, leg.size_usdc, limits, policy,
-        ).await?;
+            repo,
+            run_id,
+            cfg,
+            source_trade_id,
+            leg.size_usdc,
+            limits,
+            policy,
+        )
+        .await?;
         if !matches!(risk, RiskDecision::Allow) {
             info!(
                 run_id,
@@ -442,16 +550,19 @@ async fn process_trade_flow_dual_dca_job(
         }
 
         // Compute order price and size
-        let desired_price = aggressive_price_for_side(
-            "buy", *current_price, job.min_price_distance_cent,
-        );
+        let desired_price =
+            aggressive_price_for_side("buy", *current_price, job.min_price_distance_cent);
         let size = calc_level_size(leg.size_usdc, desired_price);
         if size <= 0.0 {
             continue;
         }
 
         let client_order_id = format!("dca-{}", Uuid::new_v4());
-        let fee_rate = if maker_base_fee > 0 { maker_base_fee } else { 1000 };
+        let fee_rate = if maker_base_fee > 0 {
+            maker_base_fee
+        } else {
+            1000
+        };
         let req = PlaceOrderRequest {
             market: market_slug.clone(),
             token_id: Some(token_id.clone()),
@@ -498,14 +609,19 @@ async fn process_trade_flow_dual_dca_job(
             ack.exchange_ts,
             ack.reject_reason.as_deref(),
             &raw,
-        ).await?;
+        )
+        .await?;
 
         // Update leg status
         if normalized_status == "filled" {
-            repo.set_dual_dca_leg_submitted(leg.id, &exchange_order_id, &client_order_id).await?;
-            repo.set_dual_dca_leg_filled(leg.id, desired_price, size).await?;
+            repo.set_dual_dca_leg_submitted(leg.id, &exchange_order_id, &client_order_id)
+                .await?;
+            repo.set_dual_dca_leg_filled(leg.id, desired_price, size)
+                .await?;
             repo.append_trade_flow_dual_dca_event(
-                job.id, Some(leg.id), "leg_filled_immediately",
+                job.id,
+                Some(leg.id),
+                "leg_filled_immediately",
                 &json!({
                     "market_slug": market_slug,
                     "outcome_label": outcome_label,
@@ -514,7 +630,8 @@ async fn process_trade_flow_dual_dca_job(
                     "filled_price": desired_price,
                     "filled_size": size
                 }),
-            ).await?;
+            )
+            .await?;
             info!(
                 run_id,
                 dual_dca_job_id = job.id,
@@ -527,13 +644,16 @@ async fn process_trade_flow_dual_dca_job(
             );
         } else if normalized_status == "rejected" {
             repo.append_trade_flow_dual_dca_event(
-                job.id, Some(leg.id), "leg_order_rejected",
+                job.id,
+                Some(leg.id),
+                "leg_order_rejected",
                 &json!({
                     "exchange_order_id": exchange_order_id,
                     "reject_reason": ack.reject_reason,
                     "status": ack.status
                 }),
-            ).await?;
+            )
+            .await?;
             warn!(
                 run_id,
                 dual_dca_job_id = job.id,
@@ -545,9 +665,12 @@ async fn process_trade_flow_dual_dca_job(
             );
         } else {
             // Order is open on the book
-            repo.set_dual_dca_leg_submitted(leg.id, &exchange_order_id, &client_order_id).await?;
+            repo.set_dual_dca_leg_submitted(leg.id, &exchange_order_id, &client_order_id)
+                .await?;
             repo.append_trade_flow_dual_dca_event(
-                job.id, Some(leg.id), "leg_order_placed",
+                job.id,
+                Some(leg.id),
+                "leg_order_placed",
                 &json!({
                     "market_slug": market_slug,
                     "outcome_label": outcome_label,
@@ -558,7 +681,8 @@ async fn process_trade_flow_dual_dca_job(
                     "current_price": current_price,
                     "trigger_price": leg.trigger_price
                 }),
-            ).await?;
+            )
+            .await?;
             info!(
                 run_id,
                 dual_dca_job_id = job.id,
@@ -575,9 +699,14 @@ async fn process_trade_flow_dual_dca_job(
 
     // --- Phase 7: Schedule next check ---
     repo.update_trade_flow_dual_dca_job_market_state(
-        job.id, Some(&market_slug), market_started_at, market_ends_at,
-        active_next_check, 0,
-    ).await?;
+        job.id,
+        Some(&market_slug),
+        market_started_at,
+        market_ends_at,
+        active_next_check,
+        0,
+    )
+    .await?;
 
     Ok(())
 }
@@ -593,7 +722,9 @@ async fn cancel_dual_dca_active_orders(
     market_slug: Option<&str>,
     reason: &str,
 ) -> Result<usize> {
-    let legs = repo.cancel_dual_dca_active_legs(job.id, market_slug).await?;
+    let legs = repo
+        .cancel_dual_dca_active_legs(job.id, market_slug)
+        .await?;
     let mut canceled_count = 0usize;
 
     for (leg_id, exchange_oid) in &legs {
@@ -613,13 +744,16 @@ async fn cancel_dual_dca_active_orders(
 
     if canceled_count > 0 {
         repo.append_trade_flow_dual_dca_event(
-            job.id, None, "legs_canceled",
+            job.id,
+            None,
+            "legs_canceled",
             &json!({
                 "reason": reason,
                 "market_slug": market_slug,
                 "canceled_count": canceled_count
             }),
-        ).await?;
+        )
+        .await?;
     }
 
     Ok(canceled_count)
@@ -706,7 +840,12 @@ async fn evaluate_dual_dca_unrealized_pnl_usdc(
     for item in aggregates {
         by_token.insert(
             item.token_id,
-            (item.buy_qty, item.buy_notional_usdc, item.sell_qty, item.sell_notional_usdc),
+            (
+                item.buy_qty,
+                item.buy_notional_usdc,
+                item.sell_qty,
+                item.sell_notional_usdc,
+            ),
         );
     }
 
@@ -753,7 +892,10 @@ async fn evaluate_dual_dca_unrealized_pnl_usdc(
         return Ok(None);
     }
 
-    Ok(Some((total_unrealized_pnl_usdc, Value::Array(breakdown_rows))))
+    Ok(Some((
+        total_unrealized_pnl_usdc,
+        Value::Array(breakdown_rows),
+    )))
 }
 
 fn dual_dca_level_step_distance(near_step: f64, step_mult: f64, level_index: i32) -> f64 {
@@ -845,5 +987,12 @@ mod tests {
     fn resolves_all_mode_to_both_outcomes() {
         let outcomes = resolve_dual_dca_outcomes("all", "yes-token", 0.41, "no-token", 0.59);
         assert_eq!(outcomes.len(), 2);
+    }
+
+    #[test]
+    fn cross_below_fires_at_or_below_threshold() {
+        assert!(dual_dca_trigger_crossed_below_strict(0.40, Some(0.40)));
+        assert!(dual_dca_trigger_crossed_below_strict(0.39, Some(0.40)));
+        assert!(!dual_dca_trigger_crossed_below_strict(0.41, Some(0.40)));
     }
 }

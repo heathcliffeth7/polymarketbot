@@ -30,6 +30,7 @@ const SUPPORTED_NODE_TYPES = new Set([
   'trigger.market_price',
   'trigger.sell_progress',
   'trigger.open_positions',
+  'trigger.position_drawdown',
   'trigger.time_window',
   'logic.if',
   'logic.switch',
@@ -96,6 +97,31 @@ function toFiniteNumber(value: unknown): number | null {
     if (Number.isFinite(parsed)) return parsed;
   }
   return null;
+}
+
+function countValidOutcomeConditions(config: Record<string, unknown>): number {
+  const raw = config.outcomeConditions;
+  if (!Array.isArray(raw)) return 0;
+
+  let validCount = 0;
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const tokenId = toTrimmedString(item.tokenId);
+    const outcomeLabel = toTrimmedString(item.outcomeLabel);
+    const triggerCondition = toTrimmedString(item.triggerCondition);
+    const triggerPriceCent = toFiniteNumber(item.triggerPriceCent);
+    const triggerPrice = toFiniteNumber(item.triggerPrice);
+    const hasValidTriggerPriceCent =
+      triggerPriceCent != null && triggerPriceCent > 0 && triggerPriceCent <= 100;
+    const hasValidTriggerPrice =
+      triggerPrice != null && triggerPrice > 0 && triggerPrice <= 1;
+    if (!tokenId || !outcomeLabel) continue;
+    if (!isSupportedTriggerCondition(triggerCondition)) continue;
+    if (!hasValidTriggerPriceCent && !hasValidTriggerPrice) continue;
+    validCount += 1;
+  }
+
+  return validCount;
 }
 
 function toBooleanish(value: unknown): boolean | null {
@@ -684,12 +710,49 @@ function validateNodeConfig(
   const hasResolveMarketNode = graph.nodes.some((candidate) => candidate.type === 'action.resolve_market');
 
   if (node.type === 'trigger.market_price') {
-    if (!String(config.marketSlug ?? graphMarketSlug).trim()) {
+    const marketMode = toTrimmedString(config.marketMode).toLowerCase();
+    const autoScope = marketMode === 'auto_scope';
+    if (autoScope) {
+      const marketScope = toTrimmedString(config.marketScope).toLowerCase();
+      if (!marketScope) {
+        pushNodeError(
+          issues,
+          node,
+          'missing_market_scope',
+          'trigger.market_price auto_scope requires marketScope.'
+        );
+      } else if (!RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[marketScope]) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_market_scope',
+          'trigger.market_price marketScope is unsupported.'
+        );
+      }
+      const marketSelection = toTrimmedString(config.marketSelection).toLowerCase();
+      if (marketSelection && marketSelection !== 'latest_by_slug') {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_market_selection',
+          'trigger.market_price marketSelection must be latest_by_slug.'
+        );
+      }
+    } else if (!String(config.marketSlug ?? graphMarketSlug).trim()) {
       pushNodeError(
         issues,
         node,
         'missing_market_slug',
         'trigger.market_price requires marketSlug in node config or graph context.'
+      );
+    }
+
+    if (countValidOutcomeConditions(config) <= 0) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_outcome_conditions',
+        'trigger.market_price requires at least one valid outcome condition.'
       );
     }
   }
@@ -714,6 +777,14 @@ function validateNodeConfig(
         node,
         'missing_source_trade_id',
         'trigger.open_positions requires sourceTradeId in node config or graph context.'
+      );
+    }
+    if (countValidOutcomeConditions(config) <= 0) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_outcome_conditions',
+        'trigger.open_positions requires at least one valid outcome condition.'
       );
     }
 
@@ -791,6 +862,135 @@ function validateNodeConfig(
         node,
         'invalid_min_interval',
         'trigger.open_positions minIntervalMs must be >= 250.'
+      );
+    }
+  }
+
+  if (node.type === 'trigger.position_drawdown') {
+    const marketSlug = String(config.marketSlug ?? graphMarketSlug).trim();
+    if (!marketSlug) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_market_slug',
+        'trigger.position_drawdown requires marketSlug in node config or graph context.'
+      );
+    }
+
+    const tokenId = String(config.tokenId ?? graphTokenId).trim();
+    if (!tokenId) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_token_id',
+        'trigger.position_drawdown requires tokenId in node config or graph context.'
+      );
+    }
+    const outcomeLabel = String(config.outcomeLabel ?? graphOutcomeLabel).trim();
+    if (!outcomeLabel) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_outcome_label',
+        'trigger.position_drawdown requires outcomeLabel in node config or graph context.'
+      );
+    }
+
+    const entryPriceCent = toFiniteNumber(config.entryPriceCent);
+    const entryPrice = toFiniteNumber(config.entryPrice);
+    if (entryPriceCent == null && entryPrice == null) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_entry_price',
+        'trigger.position_drawdown requires entryPriceCent (or legacy entryPrice).'
+      );
+    }
+    if (entryPriceCent != null && (entryPriceCent <= 0 || entryPriceCent > 100)) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_entry_price_cent',
+        'trigger.position_drawdown entryPriceCent must be in (0, 100].'
+      );
+    }
+    if (entryPrice != null && (entryPrice <= 0 || entryPrice > 1)) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_entry_price',
+        'trigger.position_drawdown entryPrice must be in (0, 1].'
+      );
+    }
+
+    const minIntervalMs = toFiniteNumber(config.minIntervalMs);
+    if (minIntervalMs != null && minIntervalMs < 250) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_min_interval',
+        'trigger.position_drawdown minIntervalMs must be >= 250.'
+      );
+    }
+
+    const combineMode = toTrimmedString(config.combineMode).toLowerCase();
+    if (combineMode && combineMode !== 'and' && combineMode !== 'or') {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_combine_mode',
+        'trigger.position_drawdown combineMode must be and, or, or empty.'
+      );
+    }
+
+    let validRuleCount = 0;
+    let invalidDirectionFound = false;
+    if (Array.isArray(config.lossRules)) {
+      for (const item of config.lossRules) {
+        if (!isRecord(item)) continue;
+        const direction = toTrimmedString(item.direction).toLowerCase();
+        if (direction && direction !== 'down' && direction !== 'up') {
+          invalidDirectionFound = true;
+          continue;
+        }
+        const lossPct = toFiniteNumber(item.lossPct);
+        if (lossPct == null || lossPct <= 0 || lossPct > 100) {
+          continue;
+        }
+        const windowSec = toFiniteNumber(item.windowSec);
+        if (windowSec != null && windowSec <= 0) {
+          continue;
+        }
+        validRuleCount += 1;
+      }
+    } else {
+      const legacyLossPct = toFiniteNumber(config.lossPct);
+      const legacyWindowSec = toFiniteNumber(config.windowSec);
+      if (
+        legacyLossPct != null &&
+        legacyLossPct > 0 &&
+        legacyLossPct <= 100 &&
+        (legacyWindowSec == null || legacyWindowSec > 0)
+      ) {
+        validRuleCount += 1;
+      }
+    }
+
+    if (invalidDirectionFound) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_rule_direction',
+        'trigger.position_drawdown lossRules[].direction must be down, up, or empty.'
+      );
+    }
+
+    if (validRuleCount <= 0) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_loss_rules',
+        'trigger.position_drawdown requires at least one valid loss rule (lossPct in (0,100], optional windowSec > 0).'
       );
     }
   }

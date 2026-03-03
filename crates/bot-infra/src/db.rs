@@ -2,12 +2,23 @@ use anyhow::Result;
 use bot_core::{can_transition, LegSide, MarketCycleId, TradeState};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use sqlx::{pool::PoolConnection, postgres::PgPoolOptions, PgPool, Postgres, Row};
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct PostgresRepository {
     pool: PgPool,
+}
+
+pub struct RunnerSingletonDbLock {
+    _conn: PoolConnection<Postgres>,
+    lock_key: i64,
+}
+
+impl RunnerSingletonDbLock {
+    pub fn lock_key(&self) -> i64 {
+        self.lock_key
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -257,6 +268,25 @@ impl PostgresRepository {
             .connect(database_url)
             .await?;
         Ok(Self { pool })
+    }
+
+    pub async fn try_acquire_runner_singleton_lock(
+        &self,
+        lock_key: i64,
+    ) -> Result<Option<RunnerSingletonDbLock>> {
+        let mut conn = self.pool.acquire().await?;
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(lock_key)
+            .fetch_one(&mut *conn)
+            .await?;
+        if acquired {
+            Ok(Some(RunnerSingletonDbLock {
+                _conn: conn,
+                lock_key,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -1946,6 +1976,48 @@ impl PostgresRepository {
             .collect())
     }
 
+    pub async fn claim_ready_trade_flow_steps(&self, limit: i64) -> Result<Vec<TradeFlowRunStep>> {
+        let rows = sqlx::query(
+            "WITH claimable AS (
+               SELECT id
+               FROM trade_flow_run_steps
+               WHERE status = 'queued' AND available_at <= NOW()
+               ORDER BY available_at ASC, id ASC
+               LIMIT $1
+               FOR UPDATE SKIP LOCKED
+             )
+             UPDATE trade_flow_run_steps s
+             SET status = 'running', started_at = NOW()
+             FROM claimable
+             WHERE s.id = claimable.id
+             RETURNING s.id, s.run_id, s.node_key, s.node_type, s.status, s.attempt, s.input_json, s.output_json, s.error_text, s.started_at, s.ended_at, s.available_at, s.parent_step_id, s.idempotency_key, s.created_at",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| TradeFlowRunStep {
+                id: row.get("id"),
+                run_id: row.get("run_id"),
+                node_key: row.get("node_key"),
+                node_type: row.get("node_type"),
+                status: row.get("status"),
+                attempt: row.get("attempt"),
+                input_json: row.get("input_json"),
+                output_json: row.get("output_json"),
+                error_text: row.get("error_text"),
+                started_at: row.get("started_at"),
+                ended_at: row.get("ended_at"),
+                available_at: row.get("available_at"),
+                parent_step_id: row.get("parent_step_id"),
+                idempotency_key: row.get("idempotency_key"),
+                created_at: row.get("created_at"),
+            })
+            .collect())
+    }
+
     pub async fn mark_trade_flow_step_running(&self, step_id: i64) -> Result<()> {
         sqlx::query(
             "UPDATE trade_flow_run_steps \
@@ -2451,7 +2523,10 @@ impl PostgresRepository {
             .iter()
             .map(|r| {
                 use sqlx::Row;
-                (r.get::<i64, _>("id"), r.get::<Option<String>, _>("active_exchange_order_id"))
+                (
+                    r.get::<i64, _>("id"),
+                    r.get::<Option<String>, _>("active_exchange_order_id"),
+                )
             })
             .collect())
     }
@@ -2481,10 +2556,7 @@ impl PostgresRepository {
     }
 
     /// Resets a leg back to pending (for retry after cancel/error).
-    pub async fn reset_dual_dca_leg_to_pending(
-        &self,
-        leg_id: i64,
-    ) -> Result<()> {
+    pub async fn reset_dual_dca_leg_to_pending(&self, leg_id: i64) -> Result<()> {
         sqlx::query(
             "UPDATE trade_flow_dual_dca_legs \
              SET status = 'pending', active_exchange_order_id = NULL, client_order_id = NULL, \

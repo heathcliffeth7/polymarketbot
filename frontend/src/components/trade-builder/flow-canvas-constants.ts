@@ -65,6 +65,7 @@ export const NODE_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'trigger.market_price', label: 'Tetik: Piyasa Fiyati' },
   { value: 'trigger.sell_progress', label: 'Tetik: Satis Ilerlemesi' },
   { value: 'trigger.open_positions', label: 'Tetik: Mevcut Pozisyonlar' },
+  { value: 'trigger.position_drawdown', label: 'Tetik: Pozisyon Dusus (Drawdown)' },
   { value: 'trigger.time_window', label: 'Tetik: Zaman Penceresi' },
   { value: 'logic.if', label: 'Mantik: If / Else' },
   { value: 'logic.switch', label: 'Mantik: Switch' },
