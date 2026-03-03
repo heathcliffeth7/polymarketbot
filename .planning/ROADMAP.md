@@ -52,7 +52,8 @@ Shipped:
   1. If per-token key `previous_price_{token_id}` is absent from Redis, the lookup returns None (or an explicit error) — it never falls back to bare `previous_price` and never uses another token's price
   2. When a WS tick and REST snapshot carry the same timestamp, the bot consistently selects WS data and a test asserts this behavior
   3. Reconcile logic behavior at equal timestamps is documented in code with a comment explaining the `>=` choice
-**Plans**: TBD
+**Plans**: 07-01 (DONE: stale cross-token price key fix), 07-02 (DONE: equal-timestamp tie-break test and PRCE-02 documentation)
+**Status**: COMPLETE — all 2 plans executed, PRCE-01/PRCE-02 satisfied
 
 ## Progress
 
@@ -60,5 +61,5 @@ Shipped:
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 6. Trigger Evaluation Fixes | 1/2 | Complete    | 2026-03-03 | - |
-| 7. Price Data Integrity Fixes | v1.1 | 0/TBD | Not started | - |
+| 6. Trigger Evaluation Fixes | v1.1 | 2/2 Complete | 2026-03-03 | 2026-03-03 |
+| 7. Price Data Integrity Fixes | v1.1 | 2/2 Complete | 2026-03-03 | 2026-03-03 |

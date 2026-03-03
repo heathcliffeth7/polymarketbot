@@ -15,8 +15,8 @@ Requirements for tick bug fix milestone. Each maps to roadmap phases.
 
 ### Price Data Integrity
 
-- [ ] **PRCE-01**: previous_price legacy fallback kaldırılmalı — per-token `previous_price_{token_id}` key'i bulunamazsa bare `previous_price` key'ine düşmemeli, farklı token'dan stale fiyat kullanımını engellemeli
-- [ ] **PRCE-02**: Reconcile edge case — WS tick ve REST snapshot aynı timestamp'e sahipse davranış belirli olmalı (şu an `>=` ile WS tercih ediliyor, eşitlik durumu test edilmeli)
+- [x] **PRCE-01**: previous_price legacy fallback kaldırılmalı — per-token `previous_price_{token_id}` key'i bulunamazsa bare `previous_price` key'ine düşmemeli, farklı token'dan stale fiyat kullanımını engellemeli
+- [x] **PRCE-02**: Reconcile edge case — WS tick ve REST snapshot aynı timestamp'e sahipse davranış belirli olmalı (şu an `>=` ile WS tercih ediliyor, eşitlik durumu test edilmeli)
 
 ## v2 Requirements
 
@@ -41,8 +41,8 @@ Requirements for tick bug fix milestone. Each maps to roadmap phases.
 | TRIG-01 | Phase 6 | Complete |
 | TRIG-02 | Phase 6 | Complete |
 | TRIG-03 | Phase 6 | Complete |
-| PRCE-01 | Phase 7 | Pending |
-| PRCE-02 | Phase 7 | Pending |
+| PRCE-01 | Phase 7 | Complete |
+| PRCE-02 | Phase 7 | Complete |
 
 **Coverage:**
 - v1.1 requirements: 5 total

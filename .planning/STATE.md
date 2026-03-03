@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: tickhatası
-status: unknown
-last_updated: "2026-03-03T11:04:59.379Z"
+status: in_progress
+last_updated: "2026-03-03T11:15:48Z"
 progress:
-  total_phases: 1
+  total_phases: 2
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
+  total_plans: 4
+  completed_plans: 4
 ---
 
 # Project State
@@ -18,16 +18,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-03)
 
 **Core value:** Deterministic trade state machine with correct price-driven signals and risk guardrails
-**Current focus:** Phase 6 - Trigger Evaluation Fixes (v1.1 tickhatası)
+**Current focus:** Phase 7 - Price Data Integrity Fixes (v1.1 tickhatası)
 
 ## Current Position
 
-Phase: 6 of 7 (Trigger Evaluation Fixes)
+Phase: 7 of 7 (Price Data Integrity Fixes)
 Plan: 2 of 2 complete
 Status: Phase complete
-Last activity: 2026-03-03 — Completed 06-02 confirmation gate unit tests (TRIG-03)
+Last activity: 2026-03-03 — Completed 07-02 WS/REST equal-timestamp tie-break test and documentation (PRCE-02)
 
-Progress: [██░░░░░░░░] 20%
+Progress: [████░░░░░░] 40%
 
 ## Performance Metrics
 
@@ -58,6 +58,7 @@ Recent decisions affecting current work:
 - [v1.1]: confirmation_secs gate now resets on zone exit — remove_flow_node_state clears all three pending keys (TRIG-01 FIXED)
 - [v1.1]: first_tick_threshold already enters confirmation gate correctly — same confirmation_secs applies (TRIG-02 VERIFIED)
 - [v1.1]: TRIG-03 — confirmation gate tests exercise building blocks (not extracted function) since gate logic is inline in the event loop
+- [v1.1]: PRCE-02 — WS wins at equal timestamps (>= comparison) — documented inline in reconcile.rs with multi-line PRCE-02 comment and three boundary-covering unit tests
 
 ### Pending Todos
 
@@ -70,5 +71,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-03
-Stopped at: Completed 06-02-PLAN.md — confirmation gate tests committed (562f237)
-Resume file: .planning/phases/06-trigger-evaluation-fixes/06-02-SUMMARY.md
+Stopped at: Completed 07-02-PLAN.md — equal-timestamp tie-break test and PRCE-02 documentation committed (c5ad4f6)
+Resume file: .planning/phases/07-price-data-integrity-fixes/07-02-SUMMARY.md
