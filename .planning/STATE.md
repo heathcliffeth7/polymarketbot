@@ -2,11 +2,11 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: tickhatası
-status: in_progress
-last_updated: "2026-03-03T11:15:48Z"
+status: unknown
+last_updated: "2026-03-03T11:25:55.926Z"
 progress:
   total_phases: 2
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 4
   completed_plans: 4
 ---
