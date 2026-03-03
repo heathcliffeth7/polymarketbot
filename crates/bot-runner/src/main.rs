@@ -15,8 +15,7 @@ use bot_infra::config::AppConfig;
 use bot_infra::contracts::{OrderExecutor, StateRepository};
 use bot_infra::db::{
     PostgresRepository, TradeBuilderOrder, TradeBuilderWorkflow, TradeBuilderWorkflowLeg,
-    TradeFlowDefinitionRuntime, TradeFlowRun, TradeFlowRunStep,
-    TradeFlowVersionRuntime,
+    TradeFlowDefinitionRuntime, TradeFlowRun, TradeFlowRunStep, TradeFlowVersionRuntime,
 };
 use bot_infra::exchange::{
     ClobHttpClient, ClobRestClient, FillInfo, GammaClient, GammaHttpClient, GammaMarket, OrderInfo,
@@ -25,14 +24,20 @@ use bot_infra::exchange::{
 use bot_infra::market_data::{MarketDataProvider, MockMarketDataProvider};
 use bot_infra::reconcile::reconcile_tick_and_snapshot;
 use bot_infra::signer::ApiCredentials;
-use ethers::{signers::{LocalWallet, Signer as _}, types::Address};
 use bot_infra::ws::{ClobWsClient, WsChannel, WsEvent, WsEventType};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use ethers::{
+    signers::{LocalWallet, Signer as _},
+    types::Address,
+};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     env,
-    path::PathBuf,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{LazyLock, Mutex as StdMutex},
     time::Instant,
 };
 use tokio::time::{sleep, Duration};
@@ -48,7 +53,19 @@ const WORKFLOW_PROCESS_LIMIT: i64 = 100;
 const FLOW_DEFINITION_PROCESS_LIMIT: i64 = 100;
 const FLOW_STEP_PROCESS_LIMIT: i64 = 250;
 const PRESSURE_DROP_PCT_THRESHOLD: f64 = 1.5;
+const AUTO_SCOPE_CACHE_TTL_SECS: u64 = 30;
+
+static AUTO_SCOPE_MARKET_CACHE: LazyLock<StdMutex<HashMap<String, (Instant, Vec<GammaMarket>)>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
 const WORKFLOW_MIN_BUY_INCREMENT_USDC: f64 = 1.0;
+const FLOW_NODE_STATE_ONCE_FIRED: &str = "once_fired";
+const FLOW_NODE_STATE_ONCE_FIRED_AT: &str = "once_fired_at";
+const FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG: &str = "once_fired_market_slug";
+const FLOW_NODE_STATE_ONCE_BLOCK_LOGGED: &str = "once_blocked_logged";
+// Confirmation seconds default is 15, read from node config "confirmationSeconds".
+const FLOW_STATE_PUBLISH_MARKER: &str = "__publish_marker";
+const BOT_RUNNER_LOCK_PATH_DEFAULT: &str = "/tmp/polymarketbot-bot-runner.lock";
+const BOT_RUNNER_DB_LOCK_KEY: i64 = 4_925_982_722_255_244_133;
 const SUPPORTED_UPDOWN_SCOPE_DEFS: [UpdownScopeDef; 8] = [
     UpdownScopeDef {
         scope: "btc_5m_updown",
@@ -106,6 +123,150 @@ pub(crate) struct UpdownScopeDef {
     asset: &'static str,
     timeframe: &'static str,
     slug_prefix: &'static str,
+}
+
+struct RunnerProcessLock {
+    path: PathBuf,
+    _file: std::fs::File,
+}
+
+impl Drop for RunnerProcessLock {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_file(&self.path) {
+            warn!(
+                lock_path = %self.path.display(),
+                error = %err,
+                "BOT_RUNNER_LOCK_RELEASE_FAILED"
+            );
+        }
+    }
+}
+
+fn parse_lock_pid(content: &str) -> Option<u32> {
+    for line in content.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "pid" {
+            continue;
+        }
+        if let Ok(pid) = value.trim().parse::<u32>() {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+fn is_lock_stale(path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return true;
+    };
+    let Some(pid) = parse_lock_pid(&content) else {
+        return true;
+    };
+    let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+    if !proc_dir.exists() {
+        return true;
+    }
+    let Ok(cmdline_raw) = fs::read(proc_dir.join("cmdline")) else {
+        // If process metadata is inaccessible, assume lock owner may still be alive.
+        return false;
+    };
+    let cmdline = String::from_utf8_lossy(&cmdline_raw);
+    if cmdline.is_empty() {
+        return false;
+    }
+    !cmdline.contains("bot-runner")
+}
+
+fn acquire_runner_process_lock() -> Result<RunnerProcessLock> {
+    let lock_path = env::var("BOT_RUNNER_LOCK_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(BOT_RUNNER_LOCK_PATH_DEFAULT));
+
+    for _ in 0..2 {
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(mut file) => {
+                let _ = writeln!(file, "pid={}", std::process::id());
+                return Ok(RunnerProcessLock {
+                    path: lock_path,
+                    _file: file,
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if is_lock_stale(&lock_path) {
+                    let _ = fs::remove_file(&lock_path);
+                    continue;
+                }
+                anyhow::bail!(
+                    "another bot-runner process appears active (lock: {})",
+                    lock_path.display()
+                );
+            }
+            Err(err) => {
+                return Err(err.into());
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "failed to acquire bot-runner lock after stale cleanup (lock: {})",
+        lock_path.display()
+    )
+}
+
+fn crossed_above_strict(previous_price: Option<f64>, current_price: f64, trigger_price: f64) -> bool {
+    previous_price
+        .map(|prev| prev < trigger_price && current_price >= trigger_price)
+        .unwrap_or(false)
+}
+
+fn crossed_below_strict(previous_price: Option<f64>, current_price: f64, trigger_price: f64) -> bool {
+    previous_price
+        .map(|prev| prev > trigger_price && current_price <= trigger_price)
+        .unwrap_or(false)
+}
+
+fn evaluate_trigger_market_price_condition(
+    previous_price: Option<f64>,
+    current_price: f64,
+    trigger_price: f64,
+    trigger_condition: &str,
+    allow_first_tick_threshold: bool,
+) -> (bool, &'static str) {
+    match trigger_condition {
+        "cross_above" => {
+            if let Some(prev) = previous_price {
+                if prev < trigger_price && current_price >= trigger_price {
+                    (true, "cross_detected")
+                } else {
+                    (false, "no_cross")
+                }
+            } else if allow_first_tick_threshold && current_price >= trigger_price {
+                (true, "first_tick_threshold")
+            } else {
+                (false, "no_previous")
+            }
+        }
+        "cross_below" => {
+            if let Some(prev) = previous_price {
+                if prev > trigger_price && current_price <= trigger_price {
+                    (true, "cross_detected")
+                } else {
+                    (false, "no_cross")
+                }
+            } else if allow_first_tick_threshold && current_price <= trigger_price {
+                (true, "first_tick_threshold")
+            } else {
+                (false, "no_previous")
+            }
+        }
+        _ => (false, "unsupported_condition"),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -186,9 +347,14 @@ struct OrderMeta {
 struct WsOpenPositionPriceNodeSpec {
     node_key: String,
     node_type: String,
+    once_mode: bool,
+    once_scope_market: bool,
+    auto_scope: bool,
+    market_slug: Option<String>,
     token_id: String,
     trigger_condition: String,
     trigger_price: f64,
+    confirmation_secs: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -284,6 +450,12 @@ impl MarketDiscoveryState {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
+    let _process_lock = acquire_runner_process_lock()?;
+    info!(
+        lock_path = %_process_lock.path.display(),
+        pid = std::process::id(),
+        "BOT_RUNNER_PROCESS_LOCK_ACQUIRED"
+    );
 
     let config_dir = env::var("BOT_CONFIG_DIR").unwrap_or_else(|_| "./config".to_string());
     let database_url = env::var("DATABASE_URL").context(
@@ -293,6 +465,14 @@ async fn main() -> Result<()> {
     let cfg = AppConfig::load(&PathBuf::from(&config_dir))?;
 
     let repo = PostgresRepository::new(&database_url).await?;
+    let _runner_db_lock = repo
+        .try_acquire_runner_singleton_lock(BOT_RUNNER_DB_LOCK_KEY)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("another bot-runner process is already active"))?;
+    info!(
+        lock_key = _runner_db_lock.lock_key(),
+        "BOT_RUNNER_DB_LOCK_ACQUIRED"
+    );
     let mode = match cfg.bot.mode {
         ExecutionMode::Paper => "paper",
         ExecutionMode::Live => "live",
@@ -406,7 +586,12 @@ async fn main() -> Result<()> {
             let scope_run_id = scope_repo
                 .record_run_start(mode, env!("CARGO_PKG_VERSION"))
                 .await?;
-            info!(run_id = scope_run_id, parent_run_id = run_id, scope = scope.as_str(), "SCOPE_STARTED");
+            info!(
+                run_id = scope_run_id,
+                parent_run_id = run_id,
+                scope = scope.as_str(),
+                "SCOPE_STARTED"
+            );
             let handle = tokio::spawn(async move {
                 loop {
                     let result = match scope_cfg.bot.mode {
@@ -422,7 +607,10 @@ async fn main() -> Result<()> {
                         let _ = scope_repo.record_run_stop(scope_run_id, "error").await;
                         break;
                     }
-                    info!(run_id = scope_run_id, "MARKET_CYCLE_COMPLETE_SEARCHING_NEXT");
+                    info!(
+                        run_id = scope_run_id,
+                        "MARKET_CYCLE_COMPLETE_SEARCHING_NEXT"
+                    );
                     // no sleep: discovery loop starts immediately
                 }
             });
@@ -926,7 +1114,10 @@ fn find_updown_scope_by_scope(scope: &str) -> Option<UpdownScopeDef> {
         .find(|def| def.scope == normalized)
 }
 
-pub(crate) fn find_updown_scope_by_asset_timeframe(asset: &str, timeframe: &str) -> Option<UpdownScopeDef> {
+pub(crate) fn find_updown_scope_by_asset_timeframe(
+    asset: &str,
+    timeframe: &str,
+) -> Option<UpdownScopeDef> {
     let normalized_asset = asset.trim().to_ascii_lowercase();
     let normalized_timeframe = timeframe.trim().to_ascii_lowercase();
     SUPPORTED_UPDOWN_SCOPE_DEFS
@@ -969,7 +1160,10 @@ fn updown_scope_candidate_slugs(scope_def: UpdownScopeDef, now: DateTime<Utc>) -
         .collect()
 }
 
-pub(crate) async fn list_markets_for_scope(gamma: &GammaHttpClient, scope: &str) -> Result<Vec<GammaMarket>> {
+pub(crate) async fn list_markets_for_scope(
+    gamma: &GammaHttpClient,
+    scope: &str,
+) -> Result<Vec<GammaMarket>> {
     let scope_def = find_updown_scope_by_scope(scope).ok_or_else(|| {
         anyhow::anyhow!(
             "unsupported market_scope: {scope} (supported: {})",
@@ -1983,11 +2177,7 @@ async fn run_paper_dual_loop(
     Ok(())
 }
 
-async fn run_flow_only_loop(
-    run_id: i64,
-    repo: &PostgresRepository,
-    cfg: &AppConfig,
-) -> Result<()> {
+async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) -> Result<()> {
     let live_enabled = env::var("LIVE_TRADING_ENABLED").ok().as_deref() == Some("true");
     anyhow::ensure!(
         live_enabled,
@@ -2045,7 +2235,8 @@ async fn run_flow_only_loop(
         if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await {
             warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
         }
-        if let Err(e) = dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await {
+        if let Err(e) = dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await
+        {
             warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
         }
         if let Err(e) = process_trade_flows(repo, run_id, cfg, Some(&client), &ws).await {
@@ -2118,7 +2309,8 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await {
             warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
         }
-        if let Err(e) = dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await {
+        if let Err(e) = dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await
+        {
             warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
         }
         if let Err(e) = process_trade_flows(repo, run_id, cfg, Some(&client), &ws).await {
@@ -2446,7 +2638,8 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await {
             warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
         }
-        if let Err(e) = dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await {
+        if let Err(e) = dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await
+        {
             warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
         }
         if let Err(e) = process_trade_flows(repo, run_id, cfg, Some(&client), &ws).await {
@@ -3347,16 +3540,16 @@ async fn process_trade_flows(
             );
         }
     }
-    if let Err(err) = enqueue_trade_flow_ws_open_position_price_steps(repo, run_id, ws).await {
+    if let Err(err) = enqueue_trade_flow_ws_open_position_price_steps(repo, run_id, cfg, ws).await {
         warn!(run_id, error = %err, "TRADE_FLOW_WS_TRIGGER_ENQUEUE_FAILED");
     }
 
     let limits = to_risk_limits(cfg);
     let policy = DefaultRiskPolicy;
-    let ready_steps = repo
-        .list_ready_trade_flow_steps(FLOW_STEP_PROCESS_LIMIT)
+    let claimed_steps = repo
+        .claim_ready_trade_flow_steps(FLOW_STEP_PROCESS_LIMIT)
         .await?;
-    for step in ready_steps {
+    for step in claimed_steps {
         if let Err(err) =
             process_trade_flow_step(repo, run_id, cfg, &limits, &policy, client, ws, &step).await
         {
@@ -3381,6 +3574,215 @@ async fn process_trade_flows(
     Ok(())
 }
 
+fn node_repeat_mode(node: &TradeFlowNode) -> &str {
+    node.config
+        .get("repeatMode")
+        .and_then(Value::as_str)
+        .unwrap_or("loop")
+}
+
+fn node_once_scope(node: &TradeFlowNode) -> &str {
+    match node
+        .config
+        .get("onceScope")
+        .and_then(Value::as_str)
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("market") => "market",
+        _ => "run",
+    }
+}
+
+fn is_trade_flow_market_price_once_scope_market(node: &TradeFlowNode) -> bool {
+    is_trade_flow_market_price_once_node(node) && node_once_scope(node) == "market"
+}
+
+fn is_trade_flow_market_price_once_node(node: &TradeFlowNode) -> bool {
+    node.node_type == "trigger.market_price" && node_repeat_mode(node) == "once"
+}
+
+/// Check if an auto-scope market has expired based on the slug timestamp.
+/// Slug format: "btc-updown-5m-{unix_ts}" or "btc-updown-15m-{unix_ts}".
+fn is_auto_scope_market_expired(slug: &str, buffer_secs: i64) -> bool {
+    let parts: Vec<&str> = slug.rsplit('-').collect();
+    let ts: i64 = match parts.first().and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => return false,
+    };
+    let duration = if slug.contains("-5m-") {
+        300
+    } else if slug.contains("-15m-") {
+        900
+    } else {
+        return false;
+    };
+    let now = Utc::now().timestamp();
+    now >= ts + duration + buffer_secs
+}
+
+/// Check if an auto-scope market is in its resolution window (last `grace_secs`).
+/// During resolution, prices converge to 0/1 and should not trigger cross conditions.
+fn is_auto_scope_market_in_resolution_window(slug: &str, grace_secs: i64) -> bool {
+    let parts: Vec<&str> = slug.rsplit('-').collect();
+    let ts: i64 = match parts.first().and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => return false,
+    };
+    let duration = if slug.contains("-5m-") {
+        300i64
+    } else if slug.contains("-15m-") {
+        900i64
+    } else {
+        return false;
+    };
+    let now = Utc::now().timestamp();
+    now >= ts + duration - grace_secs
+}
+
+fn trade_flow_publish_marker(version: &TradeFlowVersionRuntime) -> String {
+    let marker_ts = version
+        .published_at
+        .unwrap_or(version.created_at)
+        .timestamp_millis();
+    format!("{}:{marker_ts}", version.id)
+}
+
+fn sync_trade_flow_once_state_for_publish(
+    graph: &TradeFlowGraphRuntime,
+    context: &mut Value,
+    publish_marker: &str,
+) -> (Option<String>, Vec<String>) {
+    let previous_marker = flow_state_string(context, FLOW_STATE_PUBLISH_MARKER);
+    if previous_marker.as_deref() == Some(publish_marker) {
+        return (previous_marker, Vec::new());
+    }
+
+    let mut reset_nodes = Vec::new();
+    for node in &graph.nodes {
+        if !is_trade_flow_market_price_once_node(node) {
+            continue;
+        }
+        if flow_node_state_truthy(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED) {
+            reset_nodes.push(node.key.clone());
+        }
+        clear_trade_flow_market_price_once_state(context, &node.key);
+    }
+
+    set_flow_state(context, FLOW_STATE_PUBLISH_MARKER, json!(publish_marker));
+    (previous_marker, reset_nodes)
+}
+
+fn node_market_mode(node: &TradeFlowNode) -> &str {
+    match node
+        .config
+        .get("marketMode")
+        .and_then(Value::as_str)
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("auto_scope") => "auto_scope",
+        _ => "fixed",
+    }
+}
+
+fn node_market_selection(node: &TradeFlowNode) -> String {
+    node_config_string(node, "marketSelection")
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "latest_by_slug".to_string())
+}
+
+fn should_accept_ws_market_slug_override(node: &TradeFlowNode, current_market_slug: &str) -> bool {
+    node_market_mode(node) != "auto_scope" || current_market_slug.trim().is_empty()
+}
+
+fn normalized_binary_outcome_label(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "yes" | "up" | "long" | "bull" => Some("yes"),
+        "no" | "down" | "short" | "bear" => Some("no"),
+        _ => None,
+    }
+}
+
+fn resolve_token_id_for_outcome_label(outcome_label: &str, context: &Value) -> Option<String> {
+    match normalized_binary_outcome_label(outcome_label) {
+        Some("yes") => flow_context_string(context, "yesTokenId"),
+        Some("no") => flow_context_string(context, "noTokenId"),
+        _ => None,
+    }
+}
+
+async fn sync_trigger_market_auto_scope_context(
+    cfg: &AppConfig,
+    node: &TradeFlowNode,
+    context: &mut Value,
+) -> Result<Option<SelectedLiveMarket>> {
+    if node_market_mode(node) != "auto_scope" {
+        return Ok(None);
+    }
+
+    let market_scope = node_config_string(node, "marketScope")
+        .or_else(|| flow_context_string(context, "marketScope"))
+        .ok_or_else(|| anyhow::anyhow!("trigger.market_price auto_scope requires marketScope"))?;
+    let scope_def = find_updown_scope_by_scope(&market_scope).ok_or_else(|| {
+        anyhow::anyhow!(
+            "trigger.market_price auto_scope unsupported marketScope={market_scope} (supported: {})",
+            SUPPORTED_UPDOWN_SCOPE_DEFS
+                .iter()
+                .map(|def| def.scope)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    let market_selection = node_market_selection(node);
+    let markets = {
+        let cache_hit = AUTO_SCOPE_MARKET_CACHE
+            .lock()
+            .unwrap()
+            .get(&market_scope)
+            .filter(|(t, _)| t.elapsed() < std::time::Duration::from_secs(AUTO_SCOPE_CACHE_TTL_SECS))
+            .map(|(_, m)| m.clone());
+        if let Some(cached) = cache_hit {
+            cached
+        } else {
+            let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
+            let fresh = list_markets_for_scope(&gamma, &market_scope).await?;
+            AUTO_SCOPE_MARKET_CACHE
+                .lock()
+                .unwrap()
+                .insert(market_scope.clone(), (Instant::now(), fresh.clone()));
+            fresh
+        }
+    };
+    let selected = select_market_from_candidates(markets, None, &market_selection, true);
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+
+    set_flow_context(context, "marketSlug", json!(selected.slug));
+    set_flow_context(context, "marketScope", json!(scope_def.scope));
+    set_flow_context(context, "marketAsset", json!(scope_def.asset));
+    set_flow_context(context, "marketTimeframe", json!(scope_def.timeframe));
+    set_flow_context(context, "yesTokenId", json!(selected.yes_token_id));
+    set_flow_context(context, "noTokenId", json!(selected.no_token_id));
+    if let Some(preferred_outcome) = node_config_string(node, "outcomeLabel")
+        .or_else(|| flow_context_string(context, "outcomeLabel"))
+        .and_then(|value| normalized_binary_outcome_label(&value).map(str::to_string))
+    {
+        let token_id = if preferred_outcome == "no" {
+            selected.no_token_id.clone()
+        } else {
+            selected.yes_token_id.clone()
+        };
+        let outcome_label = if preferred_outcome == "no" { "No" } else { "Yes" };
+        set_flow_context(context, "outcomeLabel", json!(outcome_label));
+        set_flow_context(context, "tokenId", json!(token_id));
+    }
+
+    Ok(Some(selected))
+}
+
 fn open_position_ws_price_node_specs(
     node: &TradeFlowNode,
     context: &Value,
@@ -3388,16 +3790,38 @@ fn open_position_ws_price_node_specs(
     if node.node_type != "trigger.open_positions" && node.node_type != "trigger.market_price" {
         return Vec::new();
     }
+    let once_mode = is_trade_flow_market_price_once_node(node);
+    let once_scope_market = is_trade_flow_market_price_once_scope_market(node);
+    let market_slug = if node_market_mode(node) == "auto_scope" {
+        flow_context_string(context, "marketSlug")
+            .or_else(|| node_config_string(node, "marketSlug"))
+    } else {
+        node_config_string(node, "marketSlug")
+            .or_else(|| flow_context_string(context, "marketSlug"))
+    };
     // Multi-outcome path
-    if let Some(conditions) = node.config.get("outcomeConditions").and_then(|v| v.as_array()) {
+    if let Some(conditions) = node
+        .config
+        .get("outcomeConditions")
+        .and_then(|v| v.as_array())
+    {
         let mut specs = Vec::new();
         for cond in conditions {
-            let token_id = cond
+            let mut token_id = cond
                 .get("tokenId")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim()
                 .to_string();
+            let cond_outcome_label = cond
+                .get("outcomeLabel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if node_market_mode(node) == "auto_scope" && !cond_outcome_label.is_empty() {
+                token_id = resolve_token_id_for_outcome_label(cond_outcome_label, context)
+                    .unwrap_or(token_id);
+            }
             let trigger_condition = cond
                 .get("triggerCondition")
                 .and_then(|v| v.as_str())
@@ -3421,9 +3845,14 @@ fn open_position_ws_price_node_specs(
             specs.push(WsOpenPositionPriceNodeSpec {
                 node_key: node.key.clone(),
                 node_type: node.node_type.clone(),
+                once_mode,
+                once_scope_market,
+                auto_scope: node_market_mode(node) == "auto_scope",
+                market_slug: market_slug.clone(),
                 token_id,
                 trigger_condition,
                 trigger_price: tp,
+                confirmation_secs: node_config_f64(node, "confirmationSeconds").unwrap_or(15.0),
             });
         }
         return specs;
@@ -3444,22 +3873,64 @@ fn open_position_ws_price_node_specs(
     };
     let token_id = match node_config_string(node, "tokenId")
         .or_else(|| flow_context_string(context, "tokenId"))
-    {
+        .or_else(|| {
+            if node_market_mode(node) != "auto_scope" {
+                return None;
+            }
+            let outcome = node_config_string(node, "outcomeLabel")
+                .or_else(|| flow_context_string(context, "outcomeLabel"))?;
+            resolve_token_id_for_outcome_label(&outcome, context)
+        }) {
         Some(id) if !id.is_empty() => id,
         _ => return Vec::new(),
     };
     vec![WsOpenPositionPriceNodeSpec {
         node_key: node.key.clone(),
         node_type: node.node_type.clone(),
+        once_mode,
+        once_scope_market,
+        auto_scope: node_market_mode(node) == "auto_scope",
+        market_slug,
         token_id,
         trigger_condition,
         trigger_price,
+        confirmation_secs: node_config_f64(node, "confirmationSeconds").unwrap_or(15.0),
     }]
+}
+
+fn ws_price_trigger_step_idempotency_key(
+    run_id: i64,
+    node_key: &str,
+    trigger_condition: &str,
+    current_price: f64,
+    event_ts: Option<i64>,
+    once_mode: bool,
+    once_scope_market: bool,
+    market_slug: Option<&str>,
+) -> String {
+    if once_mode {
+        // once mode must enqueue at most one step for a once scope.
+        if once_scope_market {
+            let scope_slug = market_slug
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .unwrap_or("unknown-market");
+            format!("ws-once:{run_id}:{node_key}:{scope_slug}")
+        } else {
+            format!("ws-once:{run_id}:{node_key}")
+        }
+    } else {
+        let dedupe_ts = event_ts.unwrap_or_else(|| Utc::now().timestamp_millis());
+        format!(
+            "ws-open-price:{run_id}:{node_key}:{trigger_condition}:{current_price:.6}:{dedupe_ts}"
+        )
+    }
 }
 
 async fn enqueue_trade_flow_ws_open_position_price_steps(
     repo: &PostgresRepository,
     run_id: i64,
+    cfg: &AppConfig,
     ws: &ClobWsClient,
 ) -> Result<()> {
     let definitions = repo
@@ -3480,9 +3951,32 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
             continue;
         };
         let graph = parse_trade_flow_graph(&version)?;
-        let context = normalize_trade_flow_context(run.context_json.clone(), &graph.context);
+        let mut context = normalize_trade_flow_context(run.context_json.clone(), &graph.context);
         let mut nodes = Vec::new();
         for node in &graph.nodes {
+            if node_market_mode(node) == "auto_scope"
+                && matches!(
+                    node.node_type.as_str(),
+                    "trigger.market_price" | "trigger.open_positions"
+                )
+            {
+                match sync_trigger_market_auto_scope_context(cfg, node, &mut context).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        continue;
+                    }
+                    Err(err) => {
+                        warn!(
+                            run_id,
+                            flow_run_id = run.id,
+                            node_key = %node.key,
+                            error = %err,
+                            "TRADE_FLOW_TRIGGER_AUTO_SCOPE_RESOLVE_FAILED"
+                        );
+                        continue;
+                    }
+                }
+            }
             let specs = open_position_ws_price_node_specs(node, &context);
             nodes.extend(specs);
         }
@@ -3512,24 +4006,26 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
         return Ok(());
     }
 
-    for (token_id, targets) in token_targets {
-        let events = match ws
-            .subscribe_once(WsChannel::Market, &[token_id.clone()])
-            .await
-        {
-            Ok(events) => events,
-            Err(err) => {
-                warn!(
-                    run_id,
-                    token_id = %token_id,
-                    error = %err,
-                    "TRADE_FLOW_WS_OPEN_POSITIONS_SUBSCRIBE_FAILED"
-                );
-                continue;
-            }
-        };
+    // Batch subscribe: single WS connection for all tokens
+    let all_token_ids: Vec<String> = token_targets.keys().cloned().collect();
+    let all_events = match ws
+        .subscribe_once(WsChannel::Market, &all_token_ids)
+        .await
+    {
+        Ok(events) => events,
+        Err(err) => {
+            warn!(
+                run_id,
+                token_count = all_token_ids.len(),
+                error = %err,
+                "TRADE_FLOW_WS_BATCH_SUBSCRIBE_FAILED"
+            );
+            return Ok(());
+        }
+    };
 
-        let Some((price_raw, event_ts)) = extract_price_from_market_events(&events, &token_id)
+    for (token_id, targets) in token_targets {
+        let Some((price_raw, event_ts)) = extract_price_from_market_events(&all_events, &token_id)
         else {
             continue;
         };
@@ -3542,30 +4038,158 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
             let Some(node_spec) = run_spec.nodes.get(node_index).cloned() else {
                 continue;
             };
+            // Skip expired (resolved) markets for auto_scope triggers
+            if node_spec.auto_scope {
+                if let Some(ref slug) = node_spec.market_slug {
+                    if is_auto_scope_market_expired(slug, 15) {
+                        continue;
+                    }
+                }
+            }
+            // Skip resolution-extreme prices (market resolving)
+            if current_price < 0.03 || current_price > 0.97 {
+                continue;
+            }
+            // Skip markets in resolution window (last 120s for 5m, last 180s for 15m)
+            if node_spec.auto_scope {
+                if let Some(ref slug) = node_spec.market_slug {
+                    if is_auto_scope_market_in_resolution_window(slug, 120) {
+                        continue;
+                    }
+                }
+            }
+            sync_trade_flow_market_price_once_scope_state(
+                &mut run_spec.context,
+                &node_spec.node_key,
+                node_spec.once_scope_market,
+                node_spec.market_slug.as_deref(),
+            );
+            // Market rotasyonunda previous_price temizle (sahte cross önleme)
+            if let Some(current_slug) = node_spec.market_slug.as_deref() {
+                let last_slug = flow_node_state_string(
+                    &run_spec.context,
+                    &node_spec.node_key,
+                    "last_ws_market_slug",
+                );
+                let slug_changed = last_slug
+                    .as_deref()
+                    .map(|last| last != current_slug)
+                    .unwrap_or(true);
+                if slug_changed {
+                    let prev_key = format!("previous_price_{}", node_spec.token_id);
+                    remove_flow_node_state(
+                        &mut run_spec.context,
+                        &node_spec.node_key,
+                        &prev_key,
+                    );
+                    remove_flow_node_state(
+                        &mut run_spec.context,
+                        &node_spec.node_key,
+                        "previous_price",
+                    );
+                    // Clear any pending cross confirmation from previous market
+                    let cpend_at = format!("cross_pending_at_{}", node_spec.token_id);
+                    let cpend_price = format!("cross_pending_price_{}", node_spec.token_id);
+                    let cpend_prev = format!("cross_pending_prev_{}", node_spec.token_id);
+                    remove_flow_node_state(
+                        &mut run_spec.context,
+                        &node_spec.node_key,
+                        &cpend_at,
+                    );
+                    remove_flow_node_state(
+                        &mut run_spec.context,
+                        &node_spec.node_key,
+                        &cpend_price,
+                    );
+                    remove_flow_node_state(
+                        &mut run_spec.context,
+                        &node_spec.node_key,
+                        &cpend_prev,
+                    );
+                    run_spec.context_dirty = true;
+                }
+                set_flow_node_state(
+                    &mut run_spec.context,
+                    &node_spec.node_key,
+                    "last_ws_market_slug",
+                    json!(current_slug),
+                );
+                if slug_changed {
+                    run_spec.context_dirty = true;
+                }
+            }
+            if node_spec.once_mode
+                && trade_flow_market_price_once_fired_for_scope(
+                    &run_spec.context,
+                    &node_spec.node_key,
+                    node_spec.once_scope_market,
+                    node_spec.market_slug.as_deref(),
+                )
+            {
+                if !flow_node_state_truthy(
+                    &run_spec.context,
+                    &node_spec.node_key,
+                    FLOW_NODE_STATE_ONCE_BLOCK_LOGGED,
+                ) {
+                    set_flow_node_state(
+                        &mut run_spec.context,
+                        &node_spec.node_key,
+                        FLOW_NODE_STATE_ONCE_BLOCK_LOGGED,
+                        json!(true),
+                    );
+                    run_spec.context_dirty = true;
+                    if let Err(err) = repo
+                        .append_trade_flow_event(
+                            Some(run_spec.run_id),
+                            run_spec.definition_id,
+                            Some(run_spec.version_id),
+                            "trigger_once_blocked",
+                            &json!({
+                                "node_key": node_spec.node_key,
+                                "node_type": node_spec.node_type,
+                                "token_id": node_spec.token_id,
+                                "reason": "ws_enqueue_once_fired",
+                                "once_scope": if node_spec.once_scope_market { "market" } else { "run" },
+                                "market_slug": node_spec.market_slug.clone()
+                            }),
+                        )
+                        .await
+                    {
+                        warn!(
+                            run_id,
+                            flow_run_id = run_spec.run_id,
+                            node_key = %node_spec.node_key,
+                            error = %err,
+                            "TRADE_FLOW_ONCE_BLOCK_EVENT_FAILED"
+                        );
+                    }
+                }
+                continue;
+            }
 
             // Use per-token state key for multi-outcome nodes
             let prev_key = format!("previous_price_{}", node_spec.token_id);
-            let previous_price =
-                flow_node_state(&run_spec.context, &node_spec.node_key, &prev_key)
-                    .and_then(value_as_f64)
-                    .or_else(|| {
-                        // Fallback to legacy key for backward compat
-                        flow_node_state(&run_spec.context, &node_spec.node_key, "previous_price")
-                            .and_then(value_as_f64)
-                    });
-            let crossed = match node_spec.trigger_condition.as_str() {
-                "cross_above" => previous_price
-                    .map(|prev| {
-                        prev < node_spec.trigger_price && current_price >= node_spec.trigger_price
-                    })
-                    .unwrap_or(current_price >= node_spec.trigger_price),
-                "cross_below" => previous_price
-                    .map(|prev| {
-                        prev > node_spec.trigger_price && current_price <= node_spec.trigger_price
-                    })
-                    .unwrap_or(current_price <= node_spec.trigger_price),
-                _ => false,
-            };
+            let previous_price = flow_node_state(&run_spec.context, &node_spec.node_key, &prev_key)
+                .and_then(value_as_f64)
+                .or_else(|| {
+                    // Fallback to legacy key for backward compat
+                    flow_node_state(&run_spec.context, &node_spec.node_key, "previous_price")
+                        .and_then(value_as_f64)
+                });
+            // once modunda first_tick_threshold devre dışı: gerçek bir cross (geçiş) gereksin
+            // ANCAK auto_scope + once'da yeni market açıldığında previous_price temizleniyor,
+            // bu yüzden fiyat zaten trigger üstündeyse asla cross algılanamaz.
+            // auto_scope'ta first_tick'e izin ver — confirmation gate transient spike'ları filtreler.
+            let allow_first_tick_threshold =
+                node_spec.node_type == "trigger.market_price"
+                    && (!node_spec.once_mode || node_spec.auto_scope);
+            let (crossed, evaluation_mode) = evaluate_trigger_market_price_condition(
+                previous_price,
+                current_price,
+                node_spec.trigger_price,
+                &node_spec.trigger_condition,
+                allow_first_tick_threshold,
+            );
 
             set_flow_node_state(
                 &mut run_spec.context,
@@ -3581,7 +4205,137 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
             );
             run_spec.context_dirty = true;
 
-            if !crossed {
+            // ── Confirmation gate for auto_scope + once triggers ──
+            // Transient dips (e.g. pre-traded opening prices) fire and recover
+            // in seconds.  Require price to STAY in trigger zone for
+            // confirmation_secs before enqueuing.
+            let mut should_enqueue = crossed;
+            let mut final_eval_mode: &str = evaluation_mode;
+
+            if node_spec.auto_scope && node_spec.once_mode && node_spec.confirmation_secs > 0.0 {
+                let cpend_at_key =
+                    format!("cross_pending_at_{}", node_spec.token_id);
+                let cpend_price_key =
+                    format!("cross_pending_price_{}", node_spec.token_id);
+                let cpend_prev_key =
+                    format!("cross_pending_prev_{}", node_spec.token_id);
+
+                let still_in_zone = match node_spec.trigger_condition.as_str() {
+                    "cross_below" => current_price <= node_spec.trigger_price,
+                    "cross_above" => current_price >= node_spec.trigger_price,
+                    _ => false,
+                };
+
+                if crossed {
+                    // New cross detected (including first_tick_threshold) → start confirmation
+                    // period. Both real crosses AND first_tick events must sustain in-zone
+                    // for confirmation_secs before enqueuing. This prevents false triggers
+                    // from transient opening prices in auto_scope+once mode.
+                    set_flow_node_state(
+                        &mut run_spec.context,
+                        &node_spec.node_key,
+                        &cpend_at_key,
+                        json!(Utc::now().to_rfc3339()),
+                    );
+                    set_flow_node_state(
+                        &mut run_spec.context,
+                        &node_spec.node_key,
+                        &cpend_price_key,
+                        json!(current_price),
+                    );
+                    set_flow_node_state(
+                        &mut run_spec.context,
+                        &node_spec.node_key,
+                        &cpend_prev_key,
+                        json!(previous_price),
+                    );
+                    run_spec.context_dirty = true;
+                    should_enqueue = false;
+                    info!(
+                        run_id = run_spec.run_id,
+                        node_key = %node_spec.node_key,
+                        price = current_price,
+                        prev = ?previous_price,
+                        market = ?node_spec.market_slug,
+                        "CROSS_PENDING_START: waiting {}s confirmation",
+                        node_spec.confirmation_secs,
+                    );
+                } else if let Some(pending_at_str) = flow_node_state_string(
+                    &run_spec.context,
+                    &node_spec.node_key,
+                    &cpend_at_key,
+                ) {
+                    // A cross was previously detected — check confirmation
+                    if still_in_zone {
+                        if let Ok(pending_at) =
+                            DateTime::parse_from_rfc3339(&pending_at_str)
+                        {
+                            let elapsed = Utc::now()
+                                .signed_duration_since(pending_at.with_timezone(&Utc));
+                            if elapsed.num_milliseconds() >= (node_spec.confirmation_secs * 1000.0) as i64 {
+                                // Confirmed! Price stayed in zone long enough.
+                                should_enqueue = true;
+                                final_eval_mode = "cross_confirmed";
+                                // Clear pending state
+                                remove_flow_node_state(
+                                    &mut run_spec.context,
+                                    &node_spec.node_key,
+                                    &cpend_at_key,
+                                );
+                                remove_flow_node_state(
+                                    &mut run_spec.context,
+                                    &node_spec.node_key,
+                                    &cpend_price_key,
+                                );
+                                remove_flow_node_state(
+                                    &mut run_spec.context,
+                                    &node_spec.node_key,
+                                    &cpend_prev_key,
+                                );
+                                run_spec.context_dirty = true;
+                                info!(
+                                    run_id = run_spec.run_id,
+                                    node_key = %node_spec.node_key,
+                                    price = current_price,
+                                    elapsed_secs = elapsed.num_seconds(),
+                                    market = ?node_spec.market_slug,
+                                    "CROSS_CONFIRMED: sustained for {}s",
+                                    elapsed.num_seconds(),
+                                );
+                            }
+                            // else: not enough time, keep waiting
+                        }
+                    } else {
+                        // Price left trigger zone — reset pending confirmation
+                        remove_flow_node_state(
+                            &mut run_spec.context,
+                            &node_spec.node_key,
+                            &cpend_at_key,
+                        );
+                        remove_flow_node_state(
+                            &mut run_spec.context,
+                            &node_spec.node_key,
+                            &cpend_price_key,
+                        );
+                        remove_flow_node_state(
+                            &mut run_spec.context,
+                            &node_spec.node_key,
+                            &cpend_prev_key,
+                        );
+                        run_spec.context_dirty = true;
+                        info!(
+                            run_id = run_spec.run_id,
+                            node_key = %node_spec.node_key,
+                            price = current_price,
+                            trigger = node_spec.trigger_price,
+                            market = ?node_spec.market_slug,
+                            "CROSS_PENDING_RESET: price left trigger zone, confirmation timer cleared",
+                        );
+                    }
+                }
+            }
+
+            if !should_enqueue {
                 continue;
             }
 
@@ -3590,16 +4344,21 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
                 "tokenId": token_id,
                 "wsPrice": current_price,
                 "wsPrices": { token_id.clone(): current_price },
-                "wsEventTs": event_ts
+                "wsPreviousPrice": previous_price,
+                "wsPreviousPrices": { token_id.clone(): previous_price },
+                "wsEventTs": event_ts,
+                "wsMarketSlug": node_spec.market_slug.clone(),
+                "wsEvaluationMode": final_eval_mode
             });
-            let dedupe_ts = event_ts.unwrap_or_else(|| Utc::now().timestamp_millis());
-            let idempotency_key = format!(
-                "ws-open-price:{}:{}:{}:{:.6}:{}",
+            let idempotency_key = ws_price_trigger_step_idempotency_key(
                 run_spec.run_id,
-                node_spec.node_key,
-                node_spec.trigger_condition,
+                &node_spec.node_key,
+                &node_spec.trigger_condition,
                 current_price,
-                dedupe_ts
+                event_ts,
+                node_spec.once_mode,
+                node_spec.once_scope_market,
+                node_spec.market_slug.as_deref(),
             );
 
             let enqueued = repo
@@ -3624,10 +4383,21 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
                         "node_key": node_spec.node_key,
                         "token_id": token_id,
                         "price": current_price,
-                        "event_ts": event_ts
+                        "previous_price": previous_price,
+                        "trigger_condition": node_spec.trigger_condition,
+                        "trigger_price": node_spec.trigger_price,
+                        "evaluation_mode": final_eval_mode,
+                        "event_ts": event_ts,
+                        "once_mode": node_spec.once_mode,
+                        "once_scope": if node_spec.once_scope_market { "market" } else { "run" },
+                        "market_slug": node_spec.market_slug.clone(),
+                        "idempotency_key": idempotency_key
                     }),
                 )
                 .await?;
+                // DB idempotency key (ws-once:{run}:{node}:{market}) prevents
+                // duplicate enqueues. No in-memory once_fired marking needed here;
+                // the execute path handles once_fired state after processing.
             }
         }
     }
@@ -3656,6 +4426,7 @@ async fn sync_trade_flow_definition_run(
         .await?
         .ok_or_else(|| anyhow::anyhow!("published trade flow version not found"))?;
     let graph = parse_trade_flow_graph(&version)?;
+    let publish_marker = trade_flow_publish_marker(&version);
 
     let mut needs_new_run = false;
     if let Some(active_run) = repo.get_active_trade_flow_run(definition.id).await? {
@@ -3674,6 +4445,32 @@ async fn sync_trade_flow_definition_run(
             )
             .await?;
             needs_new_run = true;
+        } else {
+            let mut context =
+                normalize_trade_flow_context(active_run.context_json.clone(), &graph.context);
+            let (previous_publish_marker, reset_nodes) =
+                sync_trade_flow_once_state_for_publish(&graph, &mut context, &publish_marker);
+            let publish_marker_changed =
+                previous_publish_marker.as_deref() != Some(publish_marker.as_str());
+            if publish_marker_changed {
+                repo.update_trade_flow_run_context(active_run.id, &context)
+                    .await?;
+                if let Some(prev_marker) = previous_publish_marker {
+                    repo.append_trade_flow_event(
+                        Some(active_run.id),
+                        definition.id,
+                        Some(active_run.version_id),
+                        "trigger_once_reset_on_publish",
+                        &json!({
+                            "previous_publish_marker": prev_marker,
+                            "next_publish_marker": publish_marker.clone(),
+                            "version_id": version.id,
+                            "reset_node_keys": reset_nodes,
+                        }),
+                    )
+                    .await?;
+                }
+            }
         }
     } else {
         needs_new_run = true;
@@ -3683,7 +4480,12 @@ async fn sync_trade_flow_definition_run(
         return Ok(());
     }
 
-    let context_json = build_initial_trade_flow_context(&graph.context);
+    let mut context_json = build_initial_trade_flow_context(&graph.context);
+    set_flow_state(
+        &mut context_json,
+        FLOW_STATE_PUBLISH_MARKER,
+        json!(publish_marker),
+    );
     let run = repo
         .create_trade_flow_run(
             definition.id,
@@ -3915,8 +4717,6 @@ async fn process_trade_flow_step(
     ws: &ClobWsClient,
     step: &TradeFlowRunStep,
 ) -> Result<()> {
-    repo.mark_trade_flow_step_running(step.id).await?;
-
     let run = match repo.get_trade_flow_run(step.run_id).await? {
         Some(run) => run,
         None => {
@@ -3982,7 +4782,12 @@ async fn process_trade_flow_step(
                     "step_id": step.id,
                     "node_key": node.key,
                     "node_type": node.node_type,
-                    "routes": execution.routes.iter().map(|r| r.edge_type.clone()).collect::<Vec<_>>()
+                    "routes": execution.routes.iter().map(|r| r.edge_type.clone()).collect::<Vec<_>>(),
+                    "triggered": !execution.routes.is_empty(),
+                    "trigger_price": execution.output.get("triggered_price"),
+                    "trigger_condition": execution.output.get("triggered_condition"),
+                    "current_price": execution.output.get("price"),
+                    "market_slug": execution.output.get("market_slug")
                 }),
             )
             .await?;
@@ -4215,7 +5020,7 @@ async fn execute_trade_flow_node(
 ) -> Result<TradeFlowNodeExecution> {
     match node.node_type.as_str() {
         "trigger.market_price" => {
-            execute_trigger_market_price(repo, client, ws, run, step, node, context).await
+            execute_trigger_market_price(repo, cfg, client, ws, run, step, node, context).await
         }
         "trigger.sell_progress" => execute_trigger_sell_progress(repo, run, node, context).await,
         "trigger.open_positions" => {
@@ -4244,7 +5049,8 @@ async fn execute_trade_flow_node(
 }
 
 async fn execute_trigger_market_price(
-    _repo: &PostgresRepository,
+    repo: &PostgresRepository,
+    cfg: &AppConfig,
     client: Option<&dyn OrderExecutor>,
     ws: &ClobWsClient,
     run: &TradeFlowRun,
@@ -4252,37 +5058,212 @@ async fn execute_trigger_market_price(
     node: &TradeFlowNode,
     context: &mut Value,
 ) -> Result<TradeFlowNodeExecution> {
-    let market_slug = node_config_string(node, "marketSlug")
-        .or_else(|| flow_context_string(context, "marketSlug"))
-        .ok_or_else(|| anyhow::anyhow!("trigger.market_price requires marketSlug"))?;
     let var_key = node_config_string(node, "varKey").unwrap_or_else(|| node.key.clone());
     let interval_ms = node_config_i64(node, "minIntervalMs")
         .or_else(|| node_config_i64(node, "pollIntervalMs"))
         .unwrap_or(10000)
         .max(250) as i64;
-    let repeat_mode = node.config
-        .get("repeatMode")
-        .and_then(Value::as_str)
-        .unwrap_or("loop");
+    let repeat_mode = node_repeat_mode(node);
+    let once_mode = repeat_mode == "once";
+    let once_scope_market = is_trade_flow_market_price_once_scope_market(node);
+    let auto_scope_mode = node_market_mode(node) == "auto_scope";
 
-    // --- WS-sourced step detection ---
-    let trigger_source = step
+    // --- Early WS-sourced detection for auto_scope guard ---
+    let ws_sourced = step
         .input_json
         .as_ref()
         .and_then(|input| input.get("triggerSource"))
-        .and_then(|v| v.as_str());
-    let ws_sourced = trigger_source == Some("ws_market_price");
+        .and_then(|v| v.as_str())
+        == Some("ws_market_price");
+    let ws_market_slug_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsMarketSlug").or_else(|| input.get("marketSlug")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+
+    // Skip WS-sourced steps for expired auto_scope markets
+    if ws_sourced && auto_scope_mode {
+        if let Some(ref ws_slug) = ws_market_slug_from_step {
+            if is_auto_scope_market_expired(ws_slug, 30) {
+                let output = json!({
+                    "run_id": run.id,
+                    "node_key": node.key,
+                    "pass": false,
+                    "reason": "market_expired",
+                    "ws_market_slug": ws_slug
+                });
+                return Ok(TradeFlowNodeExecution {
+                    output,
+                    routes: Vec::new(),
+                    repeat_at: None,
+                    repeat_idempotency_key: None,
+                });
+            }
+        }
+    }
+
+    let mut market_slug = node_config_string(node, "marketSlug")
+        .or_else(|| flow_context_string(context, "marketSlug"))
+        .unwrap_or_default();
+    if auto_scope_mode && !(ws_sourced && ws_market_slug_from_step.is_some()) {
+        match sync_trigger_market_auto_scope_context(cfg, node, context).await? {
+            Some(selected) => {
+                market_slug = selected.slug;
+            }
+            None => {
+                let output = json!({
+                    "run_id": run.id,
+                    "node_key": node.key,
+                    "pass": false,
+                    "once_mode": once_mode,
+                    "once_scope": if once_scope_market { "market" } else { "run" },
+                    "market_mode": "auto_scope",
+                    "market_scope": node_config_string(node, "marketScope")
+                        .or_else(|| flow_context_string(context, "marketScope")),
+                    "error": "market_not_found"
+                });
+                let repeat_at = if once_mode {
+                    None
+                } else {
+                    Some(Utc::now() + ChronoDuration::milliseconds(interval_ms))
+                };
+                return Ok(TradeFlowNodeExecution {
+                    output,
+                    routes: Vec::new(),
+                    repeat_at,
+                    repeat_idempotency_key: None,
+                });
+            }
+        }
+    }
+    // For WS-sourced auto_scope steps, use the step's market slug directly
+    // instead of re-resolving from Gamma API (which may return a newer market)
+    if ws_sourced && auto_scope_mode {
+        if let Some(ref ws_slug) = ws_market_slug_from_step {
+            market_slug = ws_slug.clone();
+        }
+    }
+    if market_slug.trim().is_empty() {
+        return Err(anyhow::anyhow!("trigger.market_price requires marketSlug"));
+    }
+    set_flow_context(context, "marketSlug", json!(market_slug.clone()));
+    sync_trade_flow_market_price_once_scope_state(
+        context,
+        &node.key,
+        once_scope_market,
+        Some(market_slug.as_str()),
+    );
+
+    // --- WS-sourced step data (ws_sourced already computed above) ---
+    let trigger_source = if ws_sourced { Some("ws_market_price") } else { None };
     let ws_prices_map: Option<&serde_json::Map<String, Value>> = step
         .input_json
         .as_ref()
         .and_then(|input| input.get("wsPrices"))
         .and_then(|v| v.as_object());
+    let ws_previous_prices_map: Option<&serde_json::Map<String, Value>> = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPreviousPrices"))
+        .and_then(|v| v.as_object());
+    let ws_token_id_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("tokenId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
     let ws_price_from_step = step
         .input_json
         .as_ref()
         .and_then(|input| input.get("wsPrice"))
         .and_then(value_as_f64)
         .map(clamp_probability);
+    let ws_previous_price_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPreviousPrice"))
+        .and_then(value_as_f64)
+        .map(clamp_probability);
+    let ws_previous_price_present = step
+        .input_json
+        .as_ref()
+        .map(|input| input.get("wsPreviousPrice").is_some())
+        .unwrap_or(false);
+    // ws_market_slug_from_step already computed above
+    if let Some(ws_market_slug) = ws_market_slug_from_step.as_deref() {
+        if should_accept_ws_market_slug_override(node, &market_slug) {
+            market_slug = ws_market_slug.to_string();
+            set_flow_context(context, "marketSlug", json!(market_slug.clone()));
+            sync_trade_flow_market_price_once_scope_state(
+                context,
+                &node.key,
+                once_scope_market,
+                Some(market_slug.as_str()),
+            );
+        }
+    }
+    if once_mode
+        && trade_flow_market_price_once_fired_for_scope(
+            context,
+            &node.key,
+            once_scope_market,
+            Some(market_slug.as_str()),
+        )
+    {
+        if !flow_node_state_truthy(context, &node.key, FLOW_NODE_STATE_ONCE_BLOCK_LOGGED) {
+            set_flow_node_state(
+                context,
+                &node.key,
+                FLOW_NODE_STATE_ONCE_BLOCK_LOGGED,
+                json!(true),
+            );
+            if let Err(err) = repo
+                .append_trade_flow_event(
+                    Some(run.id),
+                    run.definition_id,
+                    Some(run.version_id),
+                    "trigger_once_blocked",
+                    &json!({
+                        "node_key": node.key,
+                        "node_type": node.node_type,
+                        "reason": "execute_once_fired_guard",
+                        "once_scope": if once_scope_market { "market" } else { "run" },
+                        "market_slug": market_slug.clone(),
+                        "trigger_source": trigger_source,
+                    }),
+                )
+                .await
+            {
+                warn!(
+                    flow_run_id = run.id,
+                    node_key = %node.key,
+                    error = %err,
+                    "TRADE_FLOW_ONCE_BLOCK_EVENT_FAILED"
+                );
+            }
+        }
+        return Ok(TradeFlowNodeExecution {
+            output: json!({
+                "run_id": run.id,
+                "node_key": node.key,
+                "market_slug": market_slug,
+                "pass": false,
+                "once_mode": true,
+                "once_scope": if once_scope_market { "market" } else { "run" },
+                "once_fired": true,
+                "once_blocked": true,
+                "trigger_source": trigger_source
+            }),
+            routes: Vec::new(),
+            repeat_at: None,
+            repeat_idempotency_key: None,
+        });
+    }
 
     // --- Multi-outcome conditions (outcomeConditions array) ---
     let outcome_conditions = node
@@ -4296,13 +5277,33 @@ async fn execute_trigger_market_price(
     let mut triggered_condition = String::new();
     let mut triggered_price: Option<f64> = None;
     let mut current_price: Option<f64> = None;
+    let mut triggered_previous_price: Option<f64> = None;
+    let mut effective_previous_price: Option<f64> = None;
+    let mut trigger_evaluation_mode: &'static str = "not_evaluated";
+    let mut ws_hard_ignore_reason: Option<String> = None;
+    let mut ws_soft_ignore_reason: Option<String> = None;
     let mut pass: bool;
+
+    if ws_sourced {
+        match ws_market_slug_from_step.as_deref() {
+            Some(ws_market_slug) if ws_market_slug == market_slug => {}
+            Some(ws_market_slug) => {
+                ws_hard_ignore_reason = Some(format!(
+                    "ws_market_slug_mismatch:{ws_market_slug}!={market_slug}"
+                ));
+            }
+            None => {
+                ws_hard_ignore_reason = Some("ws_market_slug_missing".to_string());
+            }
+        }
+    }
 
     if let Some(ref conditions) = outcome_conditions {
         // Multi-outcome: OR logic
         pass = false;
+        let mut last_eval_mode = "not_evaluated";
         for cond in conditions {
-            let cond_token_id = cond
+            let mut cond_token_id = cond
                 .get("tokenId")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -4314,6 +5315,10 @@ async fn execute_trigger_market_price(
                 .unwrap_or("")
                 .trim()
                 .to_string();
+            if node_market_mode(node) == "auto_scope" && !cond_outcome_label.is_empty() {
+                cond_token_id = resolve_token_id_for_outcome_label(&cond_outcome_label, context)
+                    .unwrap_or(cond_token_id);
+            }
             let cond_trigger_condition = cond
                 .get("triggerCondition")
                 .and_then(|v| v.as_str())
@@ -4333,26 +5338,51 @@ async fn execute_trigger_market_price(
                 None => continue,
             };
             let prev_state_key = format!("previous_price_{}", cond_token_id);
-            let prev = flow_node_state(context, &node.key, &prev_state_key)
-                .and_then(value_as_f64);
-            let cur_result = if let Some(sp) = ws_prices_map
+            let state_prev = flow_node_state(context, &node.key, &prev_state_key).and_then(value_as_f64);
+            let prev = resolve_ws_previous_price(
+                ws_sourced,
+                state_prev,
+                cond_token_id.as_str(),
+                ws_token_id_from_step.as_deref(),
+                ws_previous_price_from_step,
+                ws_previous_price_present,
+                ws_previous_prices_map,
+            );
+            effective_previous_price = prev;
+            let step_ws_price = ws_prices_map
                 .and_then(|m| m.get(&cond_token_id))
                 .and_then(value_as_f64)
-                .map(clamp_probability)
-            {
+                .map(clamp_probability);
+            if ws_sourced && step_ws_price.is_none() {
+                if ws_soft_ignore_reason.is_none() {
+                    ws_soft_ignore_reason =
+                        Some(format!("ws_price_missing_for_token:{cond_token_id}"));
+                }
+                continue;
+            }
+            let cur_result = if let Some(sp) = step_ws_price {
                 Ok(sp)
             } else {
-                fetch_trade_flow_market_price(
-                    ws,
-                    client,
-                    &market_slug,
-                    Some(cond_token_id.as_str()),
-                )
-                .await
+                fetch_trade_flow_market_price(ws, client, &market_slug, Some(cond_token_id.as_str()))
+                    .await
             };
             let cur = match cur_result {
                 Ok(price) => price,
                 Err(err) => {
+                    if repeat_mode == "once" {
+                        return Ok(TradeFlowNodeExecution {
+                            output: json!({
+                                "run_id": run.id,
+                                "node_key": node.key,
+                                "market_slug": market_slug,
+                                "error": err.to_string(),
+                                "retry": false
+                            }),
+                            routes: Vec::new(),
+                            repeat_at: None,
+                            repeat_idempotency_key: None,
+                        });
+                    }
                     let retry_ms = interval_ms.max(5000);
                     let repeat_at = Utc::now() + ChronoDuration::milliseconds(retry_ms);
                     return Ok(TradeFlowNodeExecution {
@@ -4372,20 +5402,19 @@ async fn execute_trigger_market_price(
             };
             // Store per-token previous price
             set_flow_node_state(context, &node.key, &prev_state_key, json!(cur));
-            let pass_this = if ws_sourced {
-                // WS batch already confirmed the cross
-                true
-            } else {
-                match cond_trigger_condition.as_str() {
-                    "cross_above" => prev
-                        .map(|pv| pv < tp && cur >= tp)
-                        .unwrap_or(cur >= tp),
-                    "cross_below" => prev
-                        .map(|pv| pv > tp && cur <= tp)
-                        .unwrap_or(cur <= tp),
-                    _ => false,
-                }
-            };
+            let (pass_this, eval_mode) = evaluate_trigger_market_price_condition(
+                prev,
+                cur,
+                tp,
+                &cond_trigger_condition,
+                !once_mode,
+            );
+            last_eval_mode = eval_mode;
+            if ws_sourced && !pass_this && ws_soft_ignore_reason.is_none() {
+                ws_soft_ignore_reason = Some(format!(
+                    "ws_condition_not_met:{cond_token_id}:{cond_trigger_condition}:{tp:.6}"
+                ));
+            }
             if pass_this && !pass {
                 pass = true;
                 triggered_token_id = cond_token_id;
@@ -4393,20 +5422,54 @@ async fn execute_trigger_market_price(
                 triggered_condition = cond_trigger_condition;
                 triggered_price = Some(cur);
                 current_price = Some(cur);
+                triggered_previous_price = prev;
+                trigger_evaluation_mode = eval_mode;
             }
+        }
+        if !pass {
+            trigger_evaluation_mode = last_eval_mode;
         }
     } else {
         // Legacy single-token path
         let token_id = node_config_string(node, "tokenId")
-            .or_else(|| flow_context_string(context, "tokenId"));
+            .or_else(|| flow_context_string(context, "tokenId"))
+            .or_else(|| {
+                if node_market_mode(node) != "auto_scope" {
+                    return None;
+                }
+                let outcome = node_config_string(node, "outcomeLabel")
+                    .or_else(|| flow_context_string(context, "outcomeLabel"))?;
+                resolve_token_id_for_outcome_label(&outcome, context)
+            });
         let cur_result = if let Some(sp) = ws_price_from_step {
-            Ok(sp)
+            Ok(Some(sp))
+        } else if ws_sourced {
+            if ws_soft_ignore_reason.is_none() {
+                ws_soft_ignore_reason = Some("ws_price_missing".to_string());
+            }
+            Ok(None)
         } else {
-            fetch_trade_flow_market_price(ws, client, &market_slug, token_id.as_deref()).await
+            fetch_trade_flow_market_price(ws, client, &market_slug, token_id.as_deref())
+                .await
+                .map(Some)
         };
         let cur = match cur_result {
             Ok(price) => price,
             Err(err) => {
+                if repeat_mode == "once" {
+                    return Ok(TradeFlowNodeExecution {
+                        output: json!({
+                            "run_id": run.id,
+                            "node_key": node.key,
+                            "market_slug": market_slug,
+                            "error": err.to_string(),
+                            "retry": false
+                        }),
+                        routes: Vec::new(),
+                        repeat_at: None,
+                        repeat_idempotency_key: None,
+                    });
+                }
                 let retry_ms = interval_ms.max(5000);
                 let repeat_at = Utc::now() + ChronoDuration::milliseconds(retry_ms);
                 return Ok(TradeFlowNodeExecution {
@@ -4424,33 +5487,137 @@ async fn execute_trigger_market_price(
                 });
             }
         };
-        current_price = Some(cur);
-        set_flow_var(context, &var_key, json!(cur));
-        set_flow_node_state(context, &node.key, "last_price", json!(cur));
+        current_price = cur;
+        if let Some(cur_price) = cur {
+            set_flow_var(context, &var_key, json!(cur_price));
+            set_flow_node_state(context, &node.key, "last_price", json!(cur_price));
+        }
 
         let trigger_condition = node_config_string(node, "triggerCondition");
         let trigger_price = node_config_f64(node, "triggerPrice")
             .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
-        let previous_price =
+        let state_previous_price =
             flow_node_state(context, &node.key, "previous_price").and_then(value_as_f64);
-        pass = if ws_sourced {
-            // WS batch already confirmed the cross
-            true
-        } else {
+        let expected_token_id = token_id.as_deref().filter(|value| !value.is_empty());
+        let previous_price = resolve_ws_previous_price(
+            ws_sourced,
+            state_previous_price,
+            expected_token_id.unwrap_or_default(),
+            ws_token_id_from_step.as_deref(),
+            ws_previous_price_from_step,
+            ws_previous_price_present,
+            ws_previous_prices_map,
+        );
+        effective_previous_price = previous_price;
+        pass = if let Some(cur_price) = cur {
             match (trigger_condition.as_deref(), trigger_price) {
-                (Some("cross_above"), Some(tp)) => previous_price
-                    .map(|prev| prev < tp && cur >= tp)
-                    .unwrap_or(cur >= tp),
-                (Some("cross_below"), Some(tp)) => previous_price
-                    .map(|prev| prev > tp && cur <= tp)
-                    .unwrap_or(cur <= tp),
-                _ => false,
+                (Some("cross_above"), Some(tp)) => {
+                    let (matched, eval_mode) = evaluate_trigger_market_price_condition(
+                        previous_price,
+                        cur_price,
+                        tp,
+                        "cross_above",
+                        !once_mode,
+                    );
+                    trigger_evaluation_mode = eval_mode;
+                    matched
+                }
+                (Some("cross_below"), Some(tp)) => {
+                    let (matched, eval_mode) = evaluate_trigger_market_price_condition(
+                        previous_price,
+                        cur_price,
+                        tp,
+                        "cross_below",
+                        !once_mode,
+                    );
+                    trigger_evaluation_mode = eval_mode;
+                    matched
+                }
+                _ => {
+                    trigger_evaluation_mode = "unsupported_condition";
+                    false
+                }
             }
+        } else {
+            trigger_evaluation_mode = "ws_missing_price";
+            false
         };
-        set_flow_node_state(context, &node.key, "previous_price", json!(cur));
+        if let Some(cur_price) = cur {
+            set_flow_node_state(context, &node.key, "previous_price", json!(cur_price));
+            if let Some(ref tid) = token_id {
+                if !tid.is_empty() {
+                    let per_token_key = format!("previous_price_{}", tid);
+                    set_flow_node_state(context, &node.key, &per_token_key, json!(cur_price));
+                }
+            }
+        }
+        if ws_sourced {
+            if let Some(expected_token_id) = token_id.as_deref() {
+                if expected_token_id.is_empty() {
+                    if ws_hard_ignore_reason.is_none() {
+                        ws_hard_ignore_reason = Some("ws_expected_token_missing".to_string());
+                    }
+                } else if ws_token_id_from_step.as_deref() != Some(expected_token_id) {
+                    if ws_hard_ignore_reason.is_none() {
+                        ws_hard_ignore_reason = Some(format!(
+                            "ws_token_mismatch:{}!={expected_token_id}",
+                            ws_token_id_from_step.as_deref().unwrap_or("missing")
+                        ));
+                    }
+                }
+            }
+            if !pass && ws_soft_ignore_reason.is_none() {
+                ws_soft_ignore_reason = Some("ws_condition_not_met".to_string());
+            }
+        }
         triggered_token_id = token_id.unwrap_or_default();
         triggered_condition = trigger_condition.unwrap_or_default();
-        triggered_price = Some(cur);
+        triggered_price = current_price;
+        triggered_previous_price = previous_price;
+    }
+
+    let ws_ignore_reason = if ws_sourced {
+        if let Some(reason) = ws_hard_ignore_reason.clone() {
+            pass = false;
+            Some(reason)
+        } else if pass {
+            None
+        } else {
+            ws_soft_ignore_reason.clone()
+        }
+    } else {
+        None
+    };
+    if let Some(reason) = ws_ignore_reason.as_deref() {
+        if let Err(err) = repo
+            .append_trade_flow_event(
+                Some(run.id),
+                run.definition_id,
+                Some(run.version_id),
+                "trigger_ws_price_ignored",
+                &json!({
+                    "node_key": node.key,
+                    "node_type": node.node_type,
+                    "reason": reason,
+                    "trigger_source": trigger_source,
+                    "market_slug": market_slug.clone(),
+                    "ws_market_slug": ws_market_slug_from_step,
+                    "ws_token_id": ws_token_id_from_step,
+                    "expected_token_id": if triggered_token_id.is_empty() { Value::Null } else { json!(triggered_token_id.clone()) },
+                    "ws_price": ws_price_from_step,
+                    "ws_previous_price": ws_previous_price_from_step,
+                    "effective_previous_price": effective_previous_price
+                }),
+            )
+            .await
+        {
+            warn!(
+                flow_run_id = run.id,
+                node_key = %node.key,
+                error = %err,
+                "TRADE_FLOW_WS_IGNORE_EVENT_FAILED"
+            );
+        }
     }
 
     // Write triggered outcome info to context
@@ -4480,16 +5647,113 @@ async fn execute_trigger_market_price(
         );
     }
     if let Some(tp) = triggered_price {
-        set_flow_var(
-            context,
-            &format!("{var_key}_triggered_price"),
-            json!(tp),
+        set_flow_var(context, &format!("{var_key}_triggered_price"), json!(tp));
+    }
+    if once_mode && pass {
+        let once_fire_key = trade_flow_market_price_once_idempotency_key(
+            run.id,
+            &node.key,
+            once_scope_market,
+            Some(market_slug.as_str()),
         );
+        if repo.try_record_idempotency_key(&once_fire_key).await? {
+            let fired_at = Utc::now();
+            mark_trade_flow_market_price_once_fired(
+                context,
+                &node.key,
+                fired_at,
+                once_scope_market.then_some(market_slug.as_str()),
+            );
+            if let Err(err) = repo
+                .append_trade_flow_event(
+                    Some(run.id),
+                    run.definition_id,
+                    Some(run.version_id),
+                    "trigger_once_fired",
+                    &json!({
+                        "node_key": node.key,
+                        "node_type": node.node_type,
+                        "market_slug": market_slug.clone(),
+                        "triggered_token_id": triggered_token_id.clone(),
+                        "triggered_outcome_label": triggered_outcome_label.clone(),
+                        "triggered_condition": triggered_condition.clone(),
+                        "triggered_price": triggered_price,
+                        "previous_price": triggered_previous_price,
+                        "evaluation_mode": trigger_evaluation_mode,
+                        "price": current_price,
+                        "ws_sourced": ws_sourced,
+                        "once_scope": if once_scope_market { "market" } else { "run" },
+                        "fired_at": fired_at,
+                        "idempotency_key": once_fire_key
+                    }),
+                )
+                .await
+            {
+                warn!(
+                    flow_run_id = run.id,
+                    node_key = %node.key,
+                    error = %err,
+                    "TRADE_FLOW_ONCE_FIRED_EVENT_FAILED"
+                );
+            }
+        } else {
+            let already_block_logged =
+                flow_node_state_truthy(context, &node.key, FLOW_NODE_STATE_ONCE_BLOCK_LOGGED);
+            if !trade_flow_market_price_once_fired_for_scope(
+                context,
+                &node.key,
+                once_scope_market,
+                Some(market_slug.as_str()),
+            ) {
+                mark_trade_flow_market_price_once_fired(
+                    context,
+                    &node.key,
+                    Utc::now(),
+                    once_scope_market.then_some(market_slug.as_str()),
+                );
+            }
+            set_flow_node_state(
+                context,
+                &node.key,
+                FLOW_NODE_STATE_ONCE_BLOCK_LOGGED,
+                json!(true),
+            );
+            pass = false;
+
+            if !already_block_logged {
+                if let Err(err) = repo
+                    .append_trade_flow_event(
+                        Some(run.id),
+                        run.definition_id,
+                        Some(run.version_id),
+                        "trigger_once_blocked",
+                        &json!({
+                            "node_key": node.key,
+                            "node_type": node.node_type,
+                            "reason": "global_once_idempotency",
+                            "idempotency_key": once_fire_key,
+                            "trigger_source": trigger_source,
+                            "market_slug": market_slug.clone(),
+                            "once_scope": if once_scope_market { "market" } else { "run" },
+                            "ws_sourced": ws_sourced
+                        }),
+                    )
+                    .await
+                {
+                    warn!(
+                        flow_run_id = run.id,
+                        node_key = %node.key,
+                        error = %err,
+                        "TRADE_FLOW_ONCE_BLOCK_EVENT_FAILED"
+                    );
+                }
+            }
+        }
     }
 
     let repeat_at = if ws_sourced {
         None
-    } else if repeat_mode == "once" {
+    } else if once_mode {
         None // once modu: sadece 1 kere çalış, tekrar etme
     } else {
         Some(Utc::now() + ChronoDuration::milliseconds(interval_ms))
@@ -4511,12 +5775,37 @@ async fn execute_trigger_market_price(
         "triggered_outcome_label": triggered_outcome_label,
         "triggered_condition": triggered_condition,
         "triggered_price": triggered_price,
+        "previous_price": triggered_previous_price,
+        "ws_previous_price": ws_previous_price_from_step,
+        "effective_previous_price": effective_previous_price,
+        "evaluation_mode": trigger_evaluation_mode,
         "price": current_price,
         "pass": pass,
         "var_key": var_key,
         "multi_outcome": outcome_conditions.is_some(),
-        "ws_sourced": ws_sourced
+        "ws_sourced": ws_sourced,
+        "ws_ignored_reason": ws_ignore_reason,
+        "once_mode": once_mode,
+        "once_scope": if once_scope_market { "market" } else { "run" },
+        "once_fired": trade_flow_market_price_once_fired_for_scope(
+            context,
+            &node.key,
+            once_scope_market,
+            Some(market_slug.as_str())
+        )
     });
+    info!(
+        flow_run_id = run.id,
+        node_key = %node.key,
+        pass,
+        trigger_evaluation_mode,
+        ?current_price,
+        ?effective_previous_price,
+        once_mode,
+        ws_sourced,
+        routes_count = routes.len(),
+        "TRIGGER_MARKET_PRICE_EVALUATED"
+    );
     Ok(TradeFlowNodeExecution {
         output,
         routes,
@@ -4642,6 +5931,36 @@ async fn execute_trigger_open_positions(
         .as_ref()
         .and_then(|input| input.get("wsPrices"))
         .and_then(|v| v.as_object());
+    let ws_previous_prices_map: Option<&serde_json::Map<String, Value>> = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPreviousPrices"))
+        .and_then(|v| v.as_object());
+    let ws_token_id_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("tokenId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let ws_previous_price_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPreviousPrice"))
+        .and_then(value_as_f64)
+        .map(clamp_probability);
+    let ws_previous_price_present = step
+        .input_json
+        .as_ref()
+        .map(|input| input.get("wsPreviousPrice").is_some())
+        .unwrap_or(false);
+    let ws_sourced = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("triggerSource"))
+        .and_then(Value::as_str)
+        == Some("ws_market_price");
 
     // Shared mutable state for triggered outcome
     let mut triggered_token_id = String::new();
@@ -4649,6 +5968,7 @@ async fn execute_trigger_open_positions(
     let mut triggered_condition = String::new();
     let mut triggered_price: Option<f64> = None;
     let mut current_price: Option<f64> = None;
+    let mut effective_previous_price: Option<f64> = None;
     let mut price_pass = false;
     let mut websocket_price_mode = false;
 
@@ -4697,8 +6017,18 @@ async fn execute_trigger_open_positions(
                 websocket_price_mode = true;
             }
             let prev_state_key = format!("previous_price_{}", cond_token_id);
-            let prev = flow_node_state(context, &node.key, &prev_state_key)
-                .and_then(value_as_f64);
+            let state_prev =
+                flow_node_state(context, &node.key, &prev_state_key).and_then(value_as_f64);
+            let prev = resolve_ws_previous_price(
+                ws_sourced,
+                state_prev,
+                cond_token_id.as_str(),
+                ws_token_id_from_step.as_deref(),
+                ws_previous_price_from_step,
+                ws_previous_price_present,
+                ws_previous_prices_map,
+            );
+            effective_previous_price = prev;
             // Get current price for this token
             let step_ws_price = ws_prices_map
                 .and_then(|m| m.get(&cond_token_id))
@@ -4727,10 +6057,10 @@ async fn execute_trigger_open_positions(
             }
             let pass_this = match cond_trigger_condition.as_str() {
                 "cross_above" => cur
-                    .map(|v| prev.map(|pv| pv < tp && v >= tp).unwrap_or(v >= tp))
+                    .map(|v| crossed_above_strict(prev, v, tp))
                     .unwrap_or(false),
                 "cross_below" => cur
-                    .map(|v| prev.map(|pv| pv > tp && v <= tp).unwrap_or(v <= tp))
+                    .map(|v| crossed_below_strict(prev, v, tp))
                     .unwrap_or(false),
                 _ => false,
             };
@@ -4768,13 +6098,23 @@ async fn execute_trigger_open_positions(
                 "trigger.open_positions with triggerCondition requires tokenId"
             );
         }
-        let previous_price =
+        let state_previous_price =
             flow_node_state(context, &node.key, "previous_price").and_then(value_as_f64);
         let token_id_ref = if token_id.is_empty() {
             None
         } else {
             Some(token_id.as_str())
         };
+        let previous_price = resolve_ws_previous_price(
+            ws_sourced,
+            state_previous_price,
+            token_id_ref.unwrap_or_default(),
+            ws_token_id_from_step.as_deref(),
+            ws_previous_price_from_step,
+            ws_previous_price_present,
+            ws_previous_prices_map,
+        );
+        effective_previous_price = previous_price;
         let (cur, pass_single) = match (trigger_condition.as_deref(), trigger_price) {
             (Some("cross_above"), Some(tp)) => {
                 let cur_val = if let Some(step_price) = ws_price_from_step {
@@ -4794,11 +6134,7 @@ async fn execute_trigger_open_positions(
                     )
                 };
                 let p = cur_val
-                    .map(|value| {
-                        previous_price
-                            .map(|prev| prev < tp && value >= tp)
-                            .unwrap_or(value >= tp)
-                    })
+                    .map(|value| crossed_above_strict(previous_price, value, tp))
                     .unwrap_or(false);
                 (cur_val, p)
             }
@@ -4820,11 +6156,7 @@ async fn execute_trigger_open_positions(
                     )
                 };
                 let p = cur_val
-                    .map(|value| {
-                        previous_price
-                            .map(|prev| prev > tp && value <= tp)
-                            .unwrap_or(value <= tp)
-                    })
+                    .map(|value| crossed_below_strict(previous_price, value, tp))
                     .unwrap_or(false);
                 (cur_val, p)
             }
@@ -4848,6 +6180,10 @@ async fn execute_trigger_open_positions(
         triggered_price = cur;
         if let Some(p) = cur {
             set_flow_node_state(context, &node.key, "previous_price", json!(p));
+            if !triggered_token_id.is_empty() {
+                let per_token_key = format!("previous_price_{}", triggered_token_id);
+                set_flow_node_state(context, &node.key, &per_token_key, json!(p));
+            }
         }
     }
 
@@ -4893,11 +6229,7 @@ async fn execute_trigger_open_positions(
         );
     }
     if let Some(tp) = triggered_price {
-        set_flow_var(
-            context,
-            &format!("{var_prefix}_triggered_price"),
-            json!(tp),
-        );
+        set_flow_var(context, &format!("{var_prefix}_triggered_price"), json!(tp));
     }
     set_flow_node_state(
         context,
@@ -4930,6 +6262,9 @@ async fn execute_trigger_open_positions(
         "triggered_outcome_label": triggered_outcome_label,
         "triggered_price": triggered_price,
         "websocket_price_mode": websocket_price_mode,
+        "ws_sourced": ws_sourced,
+        "ws_previous_price": ws_previous_price_from_step,
+        "effective_previous_price": effective_previous_price,
         "price": current_price,
         "price_pass": price_pass,
         "exists": exists,
@@ -6198,6 +7533,27 @@ fn ensure_nested_object<'a>(
         .expect("nested object should exist")
 }
 
+fn set_flow_state(context: &mut Value, key: &str, value: Value) {
+    let state = ensure_nested_object(context, "state");
+    if value.is_null() {
+        state.remove(key);
+    } else {
+        state.insert(key.to_string(), value);
+    }
+}
+
+fn flow_state_string(context: &Value, key: &str) -> Option<String> {
+    context
+        .get("state")
+        .and_then(|state| state.get(key))
+        .and_then(|value| match value {
+            Value::String(v) => Some(v.trim().to_string()),
+            Value::Number(v) => Some(v.to_string()),
+            _ => None,
+        })
+        .filter(|value| !value.is_empty())
+}
+
 fn set_flow_var(context: &mut Value, key: &str, value: Value) {
     let vars = ensure_nested_object(context, "vars");
     vars.insert(key.to_string(), value);
@@ -6235,11 +7591,134 @@ fn set_flow_node_state(context: &mut Value, node_key: &str, state_key: &str, val
     }
 }
 
+fn remove_flow_node_state(context: &mut Value, node_key: &str, state_key: &str) {
+    let Some(node_state) = context.get_mut("nodeState").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(node) = node_state.get_mut(node_key).and_then(Value::as_object_mut) else {
+        return;
+    };
+    node.remove(state_key);
+}
+
 fn flow_node_state<'a>(context: &'a Value, node_key: &str, state_key: &str) -> Option<&'a Value> {
     context
         .get("nodeState")
         .and_then(|node_state| node_state.get(node_key))
         .and_then(|node| node.get(state_key))
+}
+
+fn flow_node_state_string(context: &Value, node_key: &str, state_key: &str) -> Option<String> {
+    flow_node_state(context, node_key, state_key)
+        .and_then(|value| match value {
+            Value::String(v) => Some(v.trim().to_string()),
+            Value::Number(v) => Some(v.to_string()),
+            _ => None,
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn flow_node_state_truthy(context: &Value, node_key: &str, state_key: &str) -> bool {
+    flow_node_state(context, node_key, state_key)
+        .map(value_truthy)
+        .unwrap_or(false)
+}
+
+fn trade_flow_market_price_once_idempotency_key(
+    run_id: i64,
+    node_key: &str,
+    once_scope_market: bool,
+    market_slug: Option<&str>,
+) -> String {
+    if once_scope_market {
+        let market_scope = market_slug
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("unknown-market");
+        format!("flow-once-fired:{run_id}:{node_key}:{market_scope}")
+    } else {
+        format!("flow-once-fired:{run_id}:{node_key}")
+    }
+}
+
+fn trade_flow_market_price_once_fired_for_scope(
+    context: &Value,
+    node_key: &str,
+    once_scope_market: bool,
+    market_slug: Option<&str>,
+) -> bool {
+    if !flow_node_state_truthy(context, node_key, FLOW_NODE_STATE_ONCE_FIRED) {
+        return false;
+    }
+    if !once_scope_market {
+        return true;
+    }
+    let Some(current_market_slug) = market_slug.map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    flow_node_state_string(context, node_key, FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG)
+        .map(|fired_market_slug| fired_market_slug == current_market_slug)
+        .unwrap_or(false)
+}
+
+fn sync_trade_flow_market_price_once_scope_state(
+    context: &mut Value,
+    node_key: &str,
+    once_scope_market: bool,
+    market_slug: Option<&str>,
+) {
+    if !once_scope_market {
+        return;
+    }
+    let Some(current_market_slug) = market_slug.map(str::trim).filter(|v| !v.is_empty()) else {
+        return;
+    };
+    let Some(last_fired_market_slug) =
+        flow_node_state_string(context, node_key, FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG)
+    else {
+        return;
+    };
+    if last_fired_market_slug != current_market_slug {
+        clear_trade_flow_market_price_once_state(context, node_key);
+    }
+}
+
+fn mark_trade_flow_market_price_once_fired(
+    context: &mut Value,
+    node_key: &str,
+    fired_at: DateTime<Utc>,
+    market_slug: Option<&str>,
+) {
+    set_flow_node_state(context, node_key, FLOW_NODE_STATE_ONCE_FIRED, json!(true));
+    set_flow_node_state(
+        context,
+        node_key,
+        FLOW_NODE_STATE_ONCE_FIRED_AT,
+        json!(fired_at.to_rfc3339()),
+    );
+    if let Some(slug) = market_slug.map(str::trim).filter(|v| !v.is_empty()) {
+        set_flow_node_state(
+            context,
+            node_key,
+            FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG,
+            json!(slug),
+        );
+    } else {
+        remove_flow_node_state(context, node_key, FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG);
+    }
+    set_flow_node_state(
+        context,
+        node_key,
+        FLOW_NODE_STATE_ONCE_BLOCK_LOGGED,
+        json!(false),
+    );
+}
+
+fn clear_trade_flow_market_price_once_state(context: &mut Value, node_key: &str) {
+    remove_flow_node_state(context, node_key, FLOW_NODE_STATE_ONCE_FIRED);
+    remove_flow_node_state(context, node_key, FLOW_NODE_STATE_ONCE_FIRED_AT);
+    remove_flow_node_state(context, node_key, FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG);
+    remove_flow_node_state(context, node_key, FLOW_NODE_STATE_ONCE_BLOCK_LOGGED);
 }
 
 fn build_trade_flow_eval_data(context: &Value) -> Value {
@@ -6444,6 +7923,42 @@ fn value_as_f64(value: &Value) -> Option<f64> {
     }
 }
 
+fn resolve_ws_previous_price(
+    ws_sourced: bool,
+    state_previous_price: Option<f64>,
+    token_id: &str,
+    ws_token_id_from_step: Option<&str>,
+    ws_previous_price_from_step: Option<f64>,
+    ws_previous_price_present: bool,
+    ws_previous_prices_map: Option<&serde_json::Map<String, Value>>,
+) -> Option<f64> {
+    if !ws_sourced {
+        return state_previous_price;
+    }
+
+    let token_id = token_id.trim();
+    if !token_id.is_empty() {
+        if let Some(map) = ws_previous_prices_map {
+            if let Some(raw_value) = map.get(token_id) {
+                // Explicit null means "no previous price"; do not fallback to context state.
+                return value_as_f64(raw_value).map(clamp_probability);
+            }
+        }
+    }
+
+    let ws_token_matches = ws_token_id_from_step
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|step_token_id| token_id.is_empty() || step_token_id == token_id)
+        .unwrap_or(token_id.is_empty());
+    if ws_token_matches && ws_previous_price_present {
+        // Explicit key presence (including null) should override state fallback.
+        return ws_previous_price_from_step;
+    }
+
+    state_previous_price
+}
+
 fn value_as_i64(value: &Value) -> Option<i64> {
     match value {
         Value::Number(v) => v.as_i64().or_else(|| v.as_f64().map(|n| n as i64)),
@@ -6519,9 +8034,7 @@ async fn process_trade_builder_orders(
     Ok(())
 }
 
-
 // DCA functions moved to dca.rs — direct market order approach.
-
 
 #[cfg(test)]
 mod dual_dca_tests {
@@ -6547,6 +8060,555 @@ mod dual_dca_tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn ws_once_idempotency_key_is_stable_per_run_and_node() {
+        let key_1 = ws_price_trigger_step_idempotency_key(
+            42,
+            "trigger_market",
+            "cross_above",
+            0.41,
+            Some(1000),
+            true,
+            false,
+            None,
+        );
+        let key_2 = ws_price_trigger_step_idempotency_key(
+            42,
+            "trigger_market",
+            "cross_below",
+            0.67,
+            Some(2000),
+            true,
+            false,
+            None,
+        );
+
+        assert_eq!(key_1, "ws-once:42:trigger_market");
+        assert_eq!(key_2, "ws-once:42:trigger_market");
+    }
+
+    #[test]
+    fn ws_loop_idempotency_key_depends_on_event_and_price() {
+        let key_a = ws_price_trigger_step_idempotency_key(
+            42,
+            "trigger_market",
+            "cross_above",
+            0.41,
+            Some(1000),
+            false,
+            false,
+            None,
+        );
+        let key_b = ws_price_trigger_step_idempotency_key(
+            42,
+            "trigger_market",
+            "cross_above",
+            0.41,
+            Some(1000),
+            false,
+            false,
+            None,
+        );
+        let key_c = ws_price_trigger_step_idempotency_key(
+            42,
+            "trigger_market",
+            "cross_above",
+            0.41,
+            Some(1001),
+            false,
+            false,
+            None,
+        );
+
+        assert_eq!(key_a, key_b);
+        assert_ne!(key_a, key_c);
+    }
+
+    #[test]
+    fn ws_market_once_idempotency_key_is_scoped_by_market_slug() {
+        let key_1 = ws_price_trigger_step_idempotency_key(
+            42,
+            "trigger_market",
+            "cross_above",
+            0.41,
+            Some(1000),
+            true,
+            true,
+            Some("btc-updown-5m-1"),
+        );
+        let key_2 = ws_price_trigger_step_idempotency_key(
+            42,
+            "trigger_market",
+            "cross_above",
+            0.42,
+            Some(1001),
+            true,
+            true,
+            Some("btc-updown-5m-2"),
+        );
+
+        assert_eq!(key_1, "ws-once:42:trigger_market:btc-updown-5m-1");
+        assert_eq!(key_2, "ws-once:42:trigger_market:btc-updown-5m-2");
+        assert_ne!(key_1, key_2);
+    }
+
+    #[test]
+    fn resolve_ws_previous_price_prefers_ws_payload_values() {
+        let token = "tok-yes";
+        let ws_prev_payload = json!({ token: 0.34 });
+        let ws_prev_map = ws_prev_payload.as_object();
+
+        let from_map = resolve_ws_previous_price(
+            true,
+            Some(0.30),
+            token,
+            Some(token),
+            Some(0.31),
+            true,
+            ws_prev_map,
+        );
+        assert!(from_map.is_some());
+        assert!((from_map.unwrap_or_default() - 0.34).abs() < 1e-9);
+
+        let from_single = resolve_ws_previous_price(
+            true,
+            Some(0.30),
+            token,
+            Some(token),
+            Some(0.33),
+            true,
+            None,
+        );
+        assert!(from_single.is_some());
+        assert!((from_single.unwrap_or_default() - 0.33).abs() < 1e-9);
+
+        let from_state = resolve_ws_previous_price(
+            true,
+            Some(0.30),
+            token,
+            Some("tok-no"),
+            Some(0.33),
+            true,
+            None,
+        );
+        assert!(from_state.is_some());
+        assert!((from_state.unwrap_or_default() - 0.30).abs() < 1e-9);
+
+        let ws_prev_null_payload = json!({ token: null });
+        let ws_prev_null_map = ws_prev_null_payload.as_object();
+        let explicit_null_from_map = resolve_ws_previous_price(
+            true,
+            Some(0.30),
+            token,
+            Some(token),
+            Some(0.33),
+            true,
+            ws_prev_null_map,
+        );
+        assert!(explicit_null_from_map.is_none());
+
+        let explicit_null_from_single = resolve_ws_previous_price(
+            true,
+            Some(0.30),
+            token,
+            Some(token),
+            None,
+            true,
+            None,
+        );
+        assert!(explicit_null_from_single.is_none());
+
+        let non_ws = resolve_ws_previous_price(
+            false,
+            Some(0.22),
+            token,
+            Some(token),
+            Some(0.99),
+            true,
+            ws_prev_map,
+        );
+        assert!(non_ws.is_some());
+        assert!((non_ws.unwrap_or_default() - 0.22).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ws_previous_price_preserves_cross_detection_after_context_update() {
+        let token = "tok-yes";
+        let trigger_price = 0.30;
+        let current_price = 0.30;
+        let state_prev = Some(0.30);
+
+        let ws_prev_payload = json!({ token: 0.34 });
+        let ws_prev_map = ws_prev_payload.as_object();
+        let effective_prev = resolve_ws_previous_price(
+            true,
+            state_prev,
+            token,
+            Some(token),
+            Some(0.34),
+            true,
+            ws_prev_map,
+        );
+        let (pass_with_ws_prev, mode_with_ws_prev) = evaluate_trigger_market_price_condition(
+            effective_prev,
+            current_price,
+            trigger_price,
+            "cross_below",
+            true,
+        );
+        assert!(pass_with_ws_prev);
+        assert_eq!(mode_with_ws_prev, "cross_detected");
+
+        let (pass_with_state_prev, mode_with_state_prev) = evaluate_trigger_market_price_condition(
+            state_prev,
+            current_price,
+            trigger_price,
+            "cross_below",
+            true,
+        );
+        assert!(!pass_with_state_prev);
+        assert_eq!(mode_with_state_prev, "no_cross");
+    }
+
+    #[test]
+    fn auto_scope_specs_resolve_token_from_outcome_label() {
+        let node = TradeFlowNode {
+            key: "trigger_market".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            config: json!({
+                "repeatMode": "once",
+                "onceScope": "market",
+                "marketMode": "auto_scope",
+                "outcomeConditions": [{
+                    "outcomeLabel": "Up",
+                    "triggerCondition": "cross_above",
+                    "triggerPriceCent": 60
+                }]
+            }),
+        };
+        let context = json!({
+            "flowContext": {
+                "marketSlug": "btc-updown-5m-1772296200",
+                "yesTokenId": "yes-token",
+                "noTokenId": "no-token"
+            }
+        });
+
+        let specs = open_position_ws_price_node_specs(&node, &context);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].token_id, "yes-token");
+        assert!(specs[0].once_mode);
+        assert!(specs[0].once_scope_market);
+        assert_eq!(
+            specs[0].market_slug.as_deref(),
+            Some("btc-updown-5m-1772296200")
+        );
+    }
+
+    #[test]
+    fn auto_scope_specs_prefer_context_market_slug_over_stale_config_slug() {
+        let node = TradeFlowNode {
+            key: "trigger_market".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            config: json!({
+                "repeatMode": "once",
+                "onceScope": "market",
+                "marketMode": "auto_scope",
+                "marketSlug": "btc-updown-15m-stale",
+                "outcomeConditions": [{
+                    "outcomeLabel": "Up",
+                    "triggerCondition": "cross_above",
+                    "triggerPriceCent": 60
+                }]
+            }),
+        };
+        let context = json!({
+            "flowContext": {
+                "marketSlug": "btc-updown-15m-fresh",
+                "yesTokenId": "yes-token",
+                "noTokenId": "no-token"
+            }
+        });
+
+        let specs = open_position_ws_price_node_specs(&node, &context);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].market_slug.as_deref(), Some("btc-updown-15m-fresh"));
+    }
+
+    #[test]
+    fn ws_market_slug_override_is_ignored_for_auto_scope_when_resolved_slug_exists() {
+        let auto_scope_node = TradeFlowNode {
+            key: "trigger_market".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            config: json!({
+                "marketMode": "auto_scope"
+            }),
+        };
+        let fixed_node = TradeFlowNode {
+            key: "trigger_market".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            config: json!({
+                "marketMode": "fixed"
+            }),
+        };
+
+        assert!(!should_accept_ws_market_slug_override(
+            &auto_scope_node,
+            "btc-updown-15m-1772300000"
+        ));
+        assert!(should_accept_ws_market_slug_override(&auto_scope_node, ""));
+        assert!(should_accept_ws_market_slug_override(
+            &fixed_node,
+            "btc-updown-15m-1772300000"
+        ));
+    }
+
+    #[test]
+    fn cross_below_requires_actual_crossing() {
+        // None previous → false (ilk tick, sadece fiyat kaydedilir)
+        assert!(!crossed_below_strict(None, 0.25, 0.30));
+        assert!(!crossed_below_strict(None, 0.35, 0.30));
+        // Gercek crossing: yukaridan asagiya
+        assert!(crossed_below_strict(Some(0.31), 0.30, 0.30));
+        assert!(crossed_below_strict(Some(0.35), 0.29, 0.30));
+        // Zaten asagida, crossing yok
+        assert!(!crossed_below_strict(Some(0.28), 0.27, 0.30));
+    }
+
+    #[test]
+    fn cross_above_requires_actual_crossing() {
+        assert!(!crossed_above_strict(None, 0.35, 0.30));
+        assert!(!crossed_above_strict(None, 0.25, 0.30));
+        assert!(crossed_above_strict(Some(0.29), 0.30, 0.30));
+        assert!(crossed_above_strict(Some(0.25), 0.31, 0.30));
+        assert!(!crossed_above_strict(Some(0.32), 0.33, 0.30));
+    }
+
+    #[test]
+    fn trigger_market_price_allows_first_tick_threshold_hit() {
+        let (pass_above, mode_above) =
+            evaluate_trigger_market_price_condition(None, 0.35, 0.30, "cross_above", true);
+        assert!(pass_above);
+        assert_eq!(mode_above, "first_tick_threshold");
+
+        let (pass_below, mode_below) =
+            evaluate_trigger_market_price_condition(None, 0.25, 0.30, "cross_below", true);
+        assert!(pass_below);
+        assert_eq!(mode_below, "first_tick_threshold");
+
+        let (strict_pass, strict_mode) =
+            evaluate_trigger_market_price_condition(None, 0.35, 0.30, "cross_above", false);
+        assert!(!strict_pass);
+        assert_eq!(strict_mode, "no_previous");
+    }
+
+    #[test]
+    fn extract_price_ignores_price_changes_without_asset_id() {
+        let events = vec![WsEvent {
+            channel: WsChannel::Market,
+            payload: json!({
+                "price_changes": [
+                    { "price": "0.71", "timestamp": 12345 }
+                ]
+            }),
+            event_type: WsEventType::PriceChange,
+            market: None,
+            order_id: None,
+            fill_id: None,
+            status: None,
+            price: None,
+            size: None,
+            ts: Some(12345),
+        }];
+
+        assert!(extract_price_from_market_events(&events, "tok-yes").is_none());
+
+        let events_with_asset = vec![WsEvent {
+            channel: WsChannel::Market,
+            payload: json!({
+                "price_changes": [
+                    { "asset_id": "tok-yes", "price": "0.71", "timestamp": 12345 }
+                ]
+            }),
+            event_type: WsEventType::PriceChange,
+            market: None,
+            order_id: None,
+            fill_id: None,
+            status: None,
+            price: None,
+            size: None,
+            ts: Some(12345),
+        }];
+
+        let extracted = extract_price_from_market_events(&events_with_asset, "tok-yes");
+        assert_eq!(extracted, Some((0.71, Some(12345))));
+    }
+
+    #[test]
+    fn market_once_idempotency_key_contains_market_slug() {
+        let key = trade_flow_market_price_once_idempotency_key(
+            77,
+            "trigger_market",
+            true,
+            Some("btc-updown-5m-1772296200"),
+        );
+        assert_eq!(
+            key,
+            "flow-once-fired:77:trigger_market:btc-updown-5m-1772296200"
+        );
+    }
+
+    #[test]
+    fn market_once_state_clears_when_market_changes() {
+        let mut context = json!({
+            "flowContext": {},
+            "vars": {},
+            "state": {},
+            "refs": {},
+            "nodeState": {
+                "trigger_market": {
+                    "once_fired": true,
+                    "once_fired_market_slug": "btc-updown-5m-old"
+                }
+            }
+        });
+        sync_trade_flow_market_price_once_scope_state(
+            &mut context,
+            "trigger_market",
+            true,
+            Some("btc-updown-5m-new"),
+        );
+        assert!(!flow_node_state_truthy(
+            &context,
+            "trigger_market",
+            FLOW_NODE_STATE_ONCE_FIRED
+        ));
+    }
+
+    #[test]
+    fn parse_lock_pid_extracts_pid_value() {
+        assert_eq!(parse_lock_pid("pid=12345\n"), Some(12345));
+        assert_eq!(parse_lock_pid("foo=1\npid=77\n"), Some(77));
+        assert_eq!(parse_lock_pid("pid=abc\n"), None);
+        assert_eq!(parse_lock_pid(""), None);
+    }
+
+    #[test]
+    fn market_price_once_detection_only_matches_once_mode() {
+        let once_node = TradeFlowNode {
+            key: "trigger_once".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            config: json!({ "repeatMode": "once" }),
+        };
+        let loop_node = TradeFlowNode {
+            key: "trigger_loop".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            config: json!({ "repeatMode": "loop" }),
+        };
+        let open_positions_node = TradeFlowNode {
+            key: "trigger_open".to_string(),
+            node_type: "trigger.open_positions".to_string(),
+            config: json!({ "repeatMode": "once" }),
+        };
+
+        assert!(is_trade_flow_market_price_once_node(&once_node));
+        assert!(!is_trade_flow_market_price_once_node(&loop_node));
+        assert!(!is_trade_flow_market_price_once_node(&open_positions_node));
+    }
+
+    #[test]
+    fn publish_marker_change_resets_once_state_for_once_nodes() {
+        let graph = TradeFlowGraphRuntime {
+            context: json!({}),
+            nodes: vec![
+                TradeFlowNode {
+                    key: "trigger_once".to_string(),
+                    node_type: "trigger.market_price".to_string(),
+                    config: json!({ "repeatMode": "once" }),
+                },
+                TradeFlowNode {
+                    key: "trigger_loop".to_string(),
+                    node_type: "trigger.market_price".to_string(),
+                    config: json!({ "repeatMode": "loop" }),
+                },
+            ],
+            edges: vec![],
+        };
+        let mut context = json!({
+            "flowContext": {},
+            "vars": {},
+            "state": {
+                "__publish_marker": "101:1000"
+            },
+            "refs": {},
+            "nodeState": {
+                "trigger_once": {
+                    "once_fired": true,
+                    "once_fired_at": "2026-02-28T00:00:00Z",
+                    "once_blocked_logged": true
+                },
+                "trigger_loop": {
+                    "once_fired": true
+                }
+            }
+        });
+
+        let (previous_marker, reset_nodes) =
+            sync_trade_flow_once_state_for_publish(&graph, &mut context, "101:2000");
+        assert_eq!(previous_marker.as_deref(), Some("101:1000"));
+        assert_eq!(reset_nodes, vec!["trigger_once".to_string()]);
+        assert_eq!(
+            flow_state_string(&context, FLOW_STATE_PUBLISH_MARKER).as_deref(),
+            Some("101:2000")
+        );
+        assert!(!flow_node_state_truthy(
+            &context,
+            "trigger_once",
+            FLOW_NODE_STATE_ONCE_FIRED
+        ));
+        assert!(flow_node_state_truthy(
+            &context,
+            "trigger_loop",
+            FLOW_NODE_STATE_ONCE_FIRED
+        ));
+    }
+
+    #[test]
+    fn publish_marker_same_keeps_once_state_intact() {
+        let graph = TradeFlowGraphRuntime {
+            context: json!({}),
+            nodes: vec![TradeFlowNode {
+                key: "trigger_once".to_string(),
+                node_type: "trigger.market_price".to_string(),
+                config: json!({ "repeatMode": "once" }),
+            }],
+            edges: vec![],
+        };
+        let mut context = json!({
+            "flowContext": {},
+            "vars": {},
+            "state": {
+                "__publish_marker": "77:5000"
+            },
+            "refs": {},
+            "nodeState": {
+                "trigger_once": {
+                    "once_fired": true
+                }
+            }
+        });
+
+        let (previous_marker, reset_nodes) =
+            sync_trade_flow_once_state_for_publish(&graph, &mut context, "77:5000");
+        assert_eq!(previous_marker.as_deref(), Some("77:5000"));
+        assert!(reset_nodes.is_empty());
+        assert!(flow_node_state_truthy(
+            &context,
+            "trigger_once",
+            FLOW_NODE_STATE_ONCE_FIRED
+        ));
     }
 
     #[test]
@@ -7242,12 +9304,8 @@ async fn evaluate_workflow_buy_price_condition(
 
     let previous_price = buy_leg.last_seen_price;
     let pass = match trigger_condition {
-        "cross_above" => previous_price
-            .map(|prev| prev < trigger_price && current_price >= trigger_price)
-            .unwrap_or(current_price >= trigger_price),
-        "cross_below" => previous_price
-            .map(|prev| prev > trigger_price && current_price <= trigger_price)
-            .unwrap_or(current_price <= trigger_price),
+        "cross_above" => crossed_above_strict(previous_price, current_price, trigger_price),
+        "cross_below" => crossed_below_strict(previous_price, current_price, trigger_price),
         _ => true,
     };
     Ok((pass, Some(current_price), previous_price))
@@ -7883,12 +9941,8 @@ fn should_trigger_builder_order(order: &TradeBuilderOrder, current_price: f64) -
     match trigger_condition {
         "cross_above" if order.status == "blocked" => current_price >= trigger_price,
         "cross_below" if order.status == "blocked" => current_price <= trigger_price,
-        "cross_above" => previous_price
-            .map(|prev| prev < trigger_price && current_price >= trigger_price)
-            .unwrap_or(current_price >= trigger_price),
-        "cross_below" => previous_price
-            .map(|prev| prev > trigger_price && current_price <= trigger_price)
-            .unwrap_or(current_price <= trigger_price),
+        "cross_above" => crossed_above_strict(previous_price, current_price, trigger_price),
+        "cross_below" => crossed_below_strict(previous_price, current_price, trigger_price),
         _ => false,
     }
 }
@@ -7917,13 +9971,26 @@ fn extract_price_from_market_events(
     events: &[WsEvent],
     token_id: &str,
 ) -> Option<(f64, Option<i64>)> {
+    let matches_token = |ev: &WsEvent| -> bool {
+        ev.market.as_deref() == Some(token_id)
+            || ev
+                .payload
+                .get("asset_id")
+                .and_then(|v| v.as_str())
+                == Some(token_id)
+    };
+
     for event in events.iter().rev() {
         if let Some(price) = event.price {
-            return Some((price, event.ts));
+            if matches_token(event) {
+                return Some((price, event.ts));
+            }
         }
 
-        if let Some(price) = parse_json_number(event.payload.get("price")) {
-            return Some((price, event.ts));
+        if matches_token(event) {
+            if let Some(price) = parse_json_number(event.payload.get("price")) {
+                return Some((price, event.ts));
+            }
         }
 
         if let Some(changes) = event
@@ -7932,10 +9999,11 @@ fn extract_price_from_market_events(
             .and_then(|v| v.as_array())
         {
             for change in changes.iter().rev() {
-                if let Some(asset_id) = change.get("asset_id").and_then(|v| v.as_str()) {
-                    if asset_id != token_id {
-                        continue;
-                    }
+                let Some(asset_id) = change.get("asset_id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if asset_id != token_id {
+                    continue;
                 }
                 if let Some(price) = parse_json_number(change.get("price")) {
                     let ts = change
@@ -7948,10 +10016,12 @@ fn extract_price_from_market_events(
             }
         }
 
-        let bid = parse_json_number(event.payload.get("best_bid"));
-        let ask = parse_json_number(event.payload.get("best_ask"));
-        if let (Some(bid), Some(ask)) = (bid, ask) {
-            return Some((((bid + ask) / 2.0), event.ts));
+        if matches_token(event) {
+            let bid = parse_json_number(event.payload.get("best_bid"));
+            let ask = parse_json_number(event.payload.get("best_ask"));
+            if let (Some(bid), Some(ask)) = (bid, ask) {
+                return Some(((bid + ask) / 2.0, event.ts));
+            }
         }
     }
 
@@ -7993,7 +10063,11 @@ pub(crate) fn min_price_distance_to_probability(min_price_distance_cent: f64) ->
     (min_price_distance_cent / 100.0).max(0.0001)
 }
 
-pub(crate) fn aggressive_price_for_side(side: &str, current_price: f64, min_price_distance_cent: f64) -> f64 {
+pub(crate) fn aggressive_price_for_side(
+    side: &str,
+    current_price: f64,
+    min_price_distance_cent: f64,
+) -> f64 {
     let distance = min_price_distance_to_probability(min_price_distance_cent);
     if side == "sell" {
         return clamp_probability(current_price - distance);
