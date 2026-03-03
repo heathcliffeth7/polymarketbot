@@ -10,11 +10,11 @@ See: .planning/PROJECT.md (updated 2026-03-03)
 ## Current Position
 
 Phase: 6 of 7 (Trigger Evaluation Fixes)
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-03-03 — Roadmap created for v1.1 tickhatası (phases 6-7)
+Plan: 1 of 2 complete
+Status: In progress
+Last activity: 2026-03-03 — Completed 06-01 confirmation gate out-of-zone reset
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 10%
 
 ## Performance Metrics
 
@@ -42,8 +42,8 @@ Progress: [░░░░░░░░░░] 0%
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
-- [v1.1]: confirmation_secs gate behavior under review — may need reset on zone exit (TRIG-01)
-- [v1.1]: first_tick_threshold in auto_scope under review — fragile interaction with confirmation (TRIG-02)
+- [v1.1]: confirmation_secs gate now resets on zone exit — remove_flow_node_state clears all three pending keys (TRIG-01 FIXED)
+- [v1.1]: first_tick_threshold already enters confirmation gate correctly — same confirmation_secs applies (TRIG-02 VERIFIED)
 
 ### Pending Todos
 
@@ -56,5 +56,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-03-03
-Stopped at: Phase 6 context gathered
-Resume file: .planning/phases/06-trigger-evaluation-fixes/06-CONTEXT.md
+Stopped at: Completed 06-01-PLAN.md — confirmation gate fix committed (8a214c6)
+Resume file: .planning/phases/06-trigger-evaluation-fixes/06-01-SUMMARY.md

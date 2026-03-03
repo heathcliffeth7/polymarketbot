@@ -59,5 +59,5 @@ Shipped:
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 6. Trigger Evaluation Fixes | v1.1 | 0/TBD | Not started | - |
+| 6. Trigger Evaluation Fixes | 1/2 | In Progress|  | - |
 | 7. Price Data Integrity Fixes | v1.1 | 0/TBD | Not started | - |
