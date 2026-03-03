@@ -38,17 +38,17 @@ Requirements for tick bug fix milestone. Each maps to roadmap phases.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| TRIG-01 | — | Pending |
-| TRIG-02 | — | Pending |
-| TRIG-03 | — | Pending |
-| PRCE-01 | — | Pending |
-| PRCE-02 | — | Pending |
+| TRIG-01 | Phase 6 | Pending |
+| TRIG-02 | Phase 6 | Pending |
+| TRIG-03 | Phase 6 | Pending |
+| PRCE-01 | Phase 7 | Pending |
+| PRCE-02 | Phase 7 | Pending |
 
 **Coverage:**
 - v1.1 requirements: 5 total
-- Mapped to phases: 0
-- Unmapped: 5
+- Mapped to phases: 5
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-03*
-*Last updated: 2026-03-03 after initial definition*
+*Last updated: 2026-03-03 after roadmap creation*
