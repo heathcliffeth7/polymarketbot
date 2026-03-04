@@ -945,6 +945,12 @@ function validateNodeConfig(
 
     let validRuleCount = 0;
     let invalidDirectionFound = false;
+    const hasDeprecatedWindowSec =
+      Object.prototype.hasOwnProperty.call(config, 'windowSec') ||
+      (Array.isArray(config.lossRules) &&
+        config.lossRules.some(
+          (item) => isRecord(item) && Object.prototype.hasOwnProperty.call(item, 'windowSec')
+        ));
     if (Array.isArray(config.lossRules)) {
       for (const item of config.lossRules) {
         if (!isRecord(item)) continue;
@@ -957,20 +963,20 @@ function validateNodeConfig(
         if (lossPct == null || lossPct <= 0 || lossPct > 100) {
           continue;
         }
-        const windowSec = toFiniteNumber(item.windowSec);
-        if (windowSec != null && windowSec <= 0) {
+        const windowMs = toFiniteNumber(item.windowMs);
+        if (windowMs != null && windowMs <= 0) {
           continue;
         }
         validRuleCount += 1;
       }
     } else {
       const legacyLossPct = toFiniteNumber(config.lossPct);
-      const legacyWindowSec = toFiniteNumber(config.windowSec);
+      const legacyWindowMs = toFiniteNumber(config.windowMs);
       if (
         legacyLossPct != null &&
         legacyLossPct > 0 &&
         legacyLossPct <= 100 &&
-        (legacyWindowSec == null || legacyWindowSec > 0)
+        (legacyWindowMs == null || legacyWindowMs > 0)
       ) {
         validRuleCount += 1;
       }
@@ -984,13 +990,21 @@ function validateNodeConfig(
         'trigger.position_drawdown lossRules[].direction must be down, up, or empty.'
       );
     }
+    if (hasDeprecatedWindowSec) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_deprecated_window_sec',
+        'trigger.position_drawdown windowSec is deprecated; use windowMs.'
+      );
+    }
 
     if (validRuleCount <= 0) {
       pushNodeError(
         issues,
         node,
         'missing_loss_rules',
-        'trigger.position_drawdown requires at least one valid loss rule (lossPct in (0,100], optional windowSec > 0).'
+        'trigger.position_drawdown requires at least one valid loss rule (lossPct in (0,100], optional windowMs > 0).'
       );
     }
   }
@@ -1127,9 +1141,28 @@ function validateNodeConfig(
         'action.place_order requires tokenId in node config/graph context (or a preceding action.resolve_market node).'
       );
     }
-    const side = String(config.side ?? '').trim();
-    if (side && side !== 'buy' && side !== 'sell') {
+    const side = String(config.side ?? '').trim().toLowerCase();
+    if (!side) {
+      pushNodeError(issues, node, 'missing_side', 'action.place_order side is required (buy or sell).');
+    } else if (side !== 'buy' && side !== 'sell') {
       pushNodeError(issues, node, 'invalid_side', 'action.place_order side must be buy or sell.');
+    }
+
+    const executionMode = String(config.executionMode ?? '').trim().toLowerCase();
+    if (!executionMode) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_execution_mode',
+        'action.place_order executionMode is required (market or limit).'
+      );
+    } else if (executionMode !== 'market' && executionMode !== 'limit') {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_execution_mode',
+        'action.place_order executionMode must be market or limit.'
+      );
     }
     const maxTriggers = toFiniteNumber(config.maxTriggers);
     if (maxTriggers != null && (maxTriggers < 1 || maxTriggers > 20)) {
@@ -1753,6 +1786,7 @@ function buildLegacyFlowGraph(workflow: NonNullable<Awaited<ReturnType<typeof ge
         positionY: 80,
         config: {
           side: sellLeg.side,
+          executionMode: 'limit',
           marketSlug: sellLeg.market_slug,
           tokenId: sellLeg.token_id,
           outcomeLabel: sellLeg.outcome_label,
@@ -1780,6 +1814,7 @@ function buildLegacyFlowGraph(workflow: NonNullable<Awaited<ReturnType<typeof ge
         positionY: 80,
         config: {
           side: buyLeg.side,
+          executionMode: 'limit',
           marketSlug: buyLeg.market_slug,
           tokenId: buyLeg.token_id,
           outcomeLabel: buyLeg.outcome_label,

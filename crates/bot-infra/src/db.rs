@@ -61,6 +61,7 @@ pub struct TradeBuilderOrder {
     pub token_id: String,
     pub outcome_label: String,
     pub side: String,
+    pub execution_mode: String,
     pub trigger_condition: Option<String>,
     pub trigger_price: Option<f64>,
     pub size_usdc: f64,
@@ -1012,6 +1013,7 @@ impl PostgresRepository {
         token_id: &str,
         outcome_label: &str,
         side: &str,
+        execution_mode: &str,
         trigger_condition: Option<&str>,
         trigger_price: Option<f64>,
         size_usdc: f64,
@@ -1021,9 +1023,9 @@ impl PostgresRepository {
     ) -> Result<i64> {
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO trade_builder_orders \
-              (trade_id, kind, status, market_slug, token_id, outcome_label, side, trigger_condition, trigger_price, size_usdc, min_price_distance_cent, expires_at, max_triggers, triggers_fired, created_at, updated_at) \
+              (trade_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, size_usdc, min_price_distance_cent, expires_at, max_triggers, triggers_fired, created_at, updated_at) \
              VALUES \
-              ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 0, NOW(), NOW()) \
+              ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 0, NOW(), NOW()) \
              RETURNING id",
         )
         .bind(trade_id)
@@ -1033,6 +1035,7 @@ impl PostgresRepository {
         .bind(token_id)
         .bind(outcome_label)
         .bind(side)
+        .bind(execution_mode)
         .bind(trigger_condition)
         .bind(trigger_price)
         .bind(size_usdc)
@@ -1068,7 +1071,7 @@ impl PostgresRepository {
         limit: i64,
     ) -> Result<Vec<TradeBuilderOrder>> {
         let rows = sqlx::query(
-            "SELECT id, trade_id, kind, status, market_slug, token_id, outcome_label, side, trigger_condition, trigger_price, size_usdc, min_price_distance_cent, expires_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, working_price, last_seen_price, last_error, created_at, updated_at \
+            "SELECT id, trade_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, size_usdc, min_price_distance_cent, expires_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, working_price, last_seen_price, last_error, created_at, updated_at \
              FROM trade_builder_orders \
              WHERE status IN ('pending', 'armed', 'triggered', 'open', 'partially_filled', 'canceled_requested') \
              ORDER BY created_at ASC \
@@ -1089,6 +1092,7 @@ impl PostgresRepository {
                 token_id: row.get("token_id"),
                 outcome_label: row.get("outcome_label"),
                 side: row.get("side"),
+                execution_mode: row.get("execution_mode"),
                 trigger_condition: row.get("trigger_condition"),
                 trigger_price: row.get("trigger_price"),
                 size_usdc: row.get("size_usdc"),
@@ -1115,7 +1119,7 @@ impl PostgresRepository {
         let rows = sqlx::query(
             "SELECT DISTINCT \
                 o.id, o.trade_id, o.kind, o.status, o.market_slug, o.token_id, o.outcome_label, o.side, \
-                o.trigger_condition, o.trigger_price, o.size_usdc, o.min_price_distance_cent, o.expires_at, \
+                o.execution_mode, o.trigger_condition, o.trigger_price, o.size_usdc, o.min_price_distance_cent, o.expires_at, \
                 o.max_triggers, o.triggers_fired, o.active_exchange_order_id, o.remaining_size, o.working_price, \
                 o.last_seen_price, o.last_error, o.created_at, o.updated_at \
              FROM trade_builder_orders o \
@@ -1142,6 +1146,7 @@ impl PostgresRepository {
                 token_id: row.get("token_id"),
                 outcome_label: row.get("outcome_label"),
                 side: row.get("side"),
+                execution_mode: row.get("execution_mode"),
                 trigger_condition: row.get("trigger_condition"),
                 trigger_price: row.get("trigger_price"),
                 size_usdc: row.get("size_usdc"),
@@ -1309,7 +1314,7 @@ impl PostgresRepository {
         builder_order_id: i64,
     ) -> Result<Option<TradeBuilderOrder>> {
         let row = sqlx::query(
-            "SELECT id, trade_id, kind, status, market_slug, token_id, outcome_label, side, trigger_condition, trigger_price, size_usdc, min_price_distance_cent, expires_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, working_price, last_seen_price, last_error, created_at, updated_at \
+            "SELECT id, trade_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, size_usdc, min_price_distance_cent, expires_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, working_price, last_seen_price, last_error, created_at, updated_at \
              FROM trade_builder_orders WHERE id = $1",
         )
         .bind(builder_order_id)
@@ -1325,6 +1330,7 @@ impl PostgresRepository {
             token_id: row.get("token_id"),
             outcome_label: row.get("outcome_label"),
             side: row.get("side"),
+            execution_mode: row.get("execution_mode"),
             trigger_condition: row.get("trigger_condition"),
             trigger_price: row.get("trigger_price"),
             size_usdc: row.get("size_usdc"),

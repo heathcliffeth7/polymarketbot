@@ -62,10 +62,16 @@ pub struct PlaceOrderRequest {
     pub price: f64,
     pub size: f64,
     pub intent: String,
+    #[serde(default = "default_order_type")]
+    pub order_type: String,
     pub client_order_id: String,
     pub leg_side: Option<String>,
     #[serde(default)]
     pub fee_rate_bps: u64,
+}
+
+fn default_order_type() -> String {
+    "GTC".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -477,6 +483,11 @@ impl ClobRestClient for ClobHttpClient {
         } else {
             req.client_order_id.clone()
         };
+        let normalized_order_type = match req.order_type.trim().to_ascii_uppercase().as_str() {
+            "IOC" => "IOC",
+            "FOK" => "FOK",
+            _ => "GTC",
+        };
 
         let token_id_str = req.token_id.as_deref().unwrap_or("");
         let token_id = U256::from_dec_str(token_id_str).unwrap_or(U256::zero());
@@ -558,7 +569,7 @@ impl ClobRestClient for ClobHttpClient {
                 "signature": signature,
             },
             "owner": self.api_key,
-            "orderType": "GTC",
+            "orderType": normalized_order_type,
         });
 
         tracing::warn!(
@@ -574,6 +585,7 @@ impl ClobRestClient for ClobHttpClient {
             sig_type,
             exchange = %self.exchange_address,
             chain_id = self.chain_id,
+            order_type = normalized_order_type,
             sig_prefix = &signature[..20],
             body_json = %body,
             "PLACE_ORDER_EIP712_DEBUG"
@@ -796,6 +808,7 @@ mod tests {
                 price: 0.60,
                 size: 10.0,
                 intent: "entry".to_string(),
+                order_type: "GTC".to_string(),
                 client_order_id: Uuid::new_v4().to_string(),
                 leg_side: Some("yes".to_string()),
                 fee_rate_bps: 0,

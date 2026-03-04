@@ -190,6 +190,7 @@ export function buildPlaceOrderPresetConfig(
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {
     side: kind === 'sell_current_position' ? 'sell' : kind === 'buy_current_position' ? 'buy' : '',
+    executionMode: kind === 'place_order' ? '' : 'limit',
     sizeMode: 'pct',
     sizePct: 100,
     minPriceDistanceCent: 1,
@@ -250,8 +251,15 @@ export function openPositionNodeLabel(config: Record<string, unknown>): string |
 
 export function placeOrderNodeLabel(config: Record<string, unknown>): string {
   const side = typeof config.side === 'string' ? config.side.trim().toLowerCase() : '';
-  if (side === 'sell') return 'Mevcut Pozisyonu Sat';
-  if (side === 'buy') return 'Mevcut Pozisyonu Al';
+  const executionMode =
+    typeof config.executionMode === 'string' ? config.executionMode.trim().toLowerCase() : '';
+
+  const sideLabel = side === 'sell' ? 'Sat' : side === 'buy' ? 'Al' : '';
+  const modeLabel = executionMode === 'market' ? 'Market' : executionMode === 'limit' ? 'Limit' : '';
+
+  if (modeLabel && sideLabel) return `${modeLabel} ${sideLabel}`;
+  if (sideLabel) return `${sideLabel} (mod sec)`;
+  if (modeLabel) return `${modeLabel} Al / Sat`;
   return 'Mevcut Pozisyonu Al / Sat';
 }
 

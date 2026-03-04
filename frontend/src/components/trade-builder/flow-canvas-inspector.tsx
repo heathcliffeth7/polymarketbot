@@ -179,7 +179,7 @@ export function NodeInspectorPanel({
       if (field.key === 'onceScope') {
         return triggerRepeatMode === 'once';
       }
-      if (field.key === 'confirmationSeconds') {
+      if (field.key === 'confirmationMs') {
         return triggerMarketMode === 'auto_scope' && triggerRepeatMode === 'once';
       }
     }
@@ -548,7 +548,7 @@ export function NodeInspectorPanel({
                 </div>
                 <p className="text-[10px] leading-relaxed text-slate-400 italic">
                   Slug gir, outcome sec, entry fiyatini yaz. Yon sec; loss % o yone gore tetikler.
-                  Sure opsiyonel.
+                  Sure opsiyonel (ms).
                 </p>
                 <div className="space-y-2">
                   {(form.drawdownRuleRows || []).map((row, index) => (
@@ -567,7 +567,7 @@ export function NodeInspectorPanel({
                           <Trash2 className="h-3 w-3" />
                         </Button>
                       </div>
-                      <div className="grid grid-cols-4 gap-1.5">
+                      <div className="grid grid-cols-3 gap-1.5">
                         <div className="space-y-0.5">
                           <Label className="text-[10px] font-medium text-slate-600">Yon</Label>
                           <Select
@@ -601,7 +601,7 @@ export function NodeInspectorPanel({
                         </div>
                         <div className="space-y-0.5">
                           <Label className="text-[10px] font-medium text-slate-600">
-                            Sure (ops.)
+                            Sure (ms, ops.)
                           </Label>
                           <Input
                             type="number"
@@ -611,28 +611,9 @@ export function NodeInspectorPanel({
                                 durationValue: e.target.value,
                               })
                             }
-                            placeholder="ör: 5"
+                            placeholder="ör: 1500"
                             className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
                           />
-                        </div>
-                        <div className="space-y-0.5">
-                          <Label className="text-[10px] font-medium text-slate-600">Birim</Label>
-                          <Select
-                            value={row.durationUnit}
-                            onValueChange={(v) =>
-                              actions.onUpdateDrawdownRule(row.id, {
-                                durationUnit: v === 'min' ? 'min' : 'sec',
-                              })
-                            }
-                          >
-                            <SelectTrigger className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900" size="sm">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="sec">sn</SelectItem>
-                              <SelectItem value="min">dk</SelectItem>
-                            </SelectContent>
-                          </Select>
                         </div>
                       </div>
                     </div>

@@ -44,6 +44,7 @@ interface CreateTradeBuilderOrderInput {
   tokenId: string;
   outcomeLabel: string;
   side: 'buy' | 'sell';
+  executionMode?: 'limit' | 'market';
   sizeUsdc: number;
   minPriceDistanceCent: number;
   triggerCondition?: 'cross_above' | 'cross_below';
@@ -159,6 +160,7 @@ export async function getTradeBuilderOrderEvents(
 export async function createTradeBuilderOrder(
   input: CreateTradeBuilderOrderInput
 ): Promise<TradeBuilderOrder> {
+  const executionMode = input.executionMode === 'market' ? 'market' : 'limit';
   const now = new Date();
   const startsAt = now;
   const endsAt = input.expiresAt ? new Date(input.expiresAt) : new Date(now.getTime() + 7 * 24 * 3600 * 1000);
@@ -196,10 +198,10 @@ export async function createTradeBuilderOrder(
 
     const orderRes = await client.query(
       `INSERT INTO trade_builder_orders
-         (trade_id, kind, status, market_slug, token_id, outcome_label, side, trigger_condition, trigger_price,
+         (trade_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price,
           size_usdc, min_price_distance_cent, expires_at, max_triggers, triggers_fired, created_at, updated_at)
        VALUES
-         ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, NOW(), NOW())
+         ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 0, NOW(), NOW())
        RETURNING *`,
       [
         tradeId,
@@ -208,6 +210,7 @@ export async function createTradeBuilderOrder(
         input.tokenId,
         input.outcomeLabel,
         input.side,
+        executionMode,
         input.kind === 'conditional' ? input.triggerCondition || 'cross_above' : null,
         triggerPrice,
         input.sizeUsdc,
@@ -227,6 +230,7 @@ export async function createTradeBuilderOrder(
           marketSlug: input.marketSlug,
           tokenId: input.tokenId,
           side: input.side,
+          executionMode,
           triggerCondition: input.triggerCondition || null,
           triggerPriceCent: input.triggerPriceCent || null,
           sizeUsdc: input.sizeUsdc,

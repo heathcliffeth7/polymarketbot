@@ -30,6 +30,7 @@ export async function POST(req: NextRequest) {
     const tokenId = String(body?.tokenId || '').trim();
     const outcomeLabel = String(body?.outcomeLabel || '').trim();
     const side = String(body?.side || '').toLowerCase();
+    const executionMode = String(body?.executionMode || '').trim().toLowerCase();
     const sizeUsdc = Number(body?.sizeUsdc);
     const minPriceDistanceCent = Number(body?.minPriceDistanceCent);
     const triggerCondition = body?.triggerCondition ? String(body.triggerCondition) : undefined;
@@ -45,6 +46,9 @@ export async function POST(req: NextRequest) {
     if (!outcomeLabel) return NextResponse.json({ error: 'outcomeLabel is required' }, { status: 400 });
     if (!['buy', 'sell'].includes(side)) {
       return NextResponse.json({ error: 'side must be buy or sell' }, { status: 400 });
+    }
+    if (executionMode && !['limit', 'market'].includes(executionMode)) {
+      return NextResponse.json({ error: 'executionMode must be limit or market' }, { status: 400 });
     }
     if (!Number.isFinite(sizeUsdc) || sizeUsdc <= 0) {
       return NextResponse.json({ error: 'sizeUsdc must be > 0' }, { status: 400 });
@@ -71,6 +75,7 @@ export async function POST(req: NextRequest) {
       tokenId,
       outcomeLabel,
       side: side as 'buy' | 'sell',
+      executionMode: (executionMode || 'limit') as 'limit' | 'market',
       sizeUsdc,
       minPriceDistanceCent,
       triggerCondition: triggerCondition as 'cross_above' | 'cross_below' | undefined,

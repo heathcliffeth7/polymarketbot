@@ -249,6 +249,7 @@ export interface TradeBuilderOrder {
   token_id: string;
   outcome_label: string;
   side: 'buy' | 'sell';
+  execution_mode: 'limit' | 'market';
   trigger_condition: TriggerCondition | null;
   trigger_price: number | null;
   size_usdc: number;

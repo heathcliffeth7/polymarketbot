@@ -30,7 +30,6 @@ export interface DrawdownRuleRow {
   direction: 'down' | 'up';
   lossPct: string;
   durationValue: string;
-  durationUnit: 'sec' | 'min';
 }
 
 export interface NodeConfigFormState {
@@ -170,7 +169,7 @@ export function createEmptyOutcomeConditionRow(): OutcomeConditionRow {
 }
 
 export function createEmptyDrawdownRuleRow(): DrawdownRuleRow {
-  return { id: createId('dr'), direction: 'down', lossPct: '', durationValue: '', durationUnit: 'sec' };
+  return { id: createId('dr'), direction: 'down', lossPct: '', durationValue: '' };
 }
 
 export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
@@ -225,7 +224,7 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       ],
     },
     { key: 'minIntervalMs', label: 'Kontrol Aralığı (ms)', input: 'number', help: 'Varsayılan: 10000 (10sn). Minimum: 250ms.' },
-    { key: 'confirmationSeconds', label: 'Onay Süresi (sn)', input: 'number', help: 'Cross sonrası fiyatın eşik altında kalması gereken süre. 0 = anında tetik.' },
+    { key: 'confirmationMs', label: 'Onay Süresi (ms)', input: 'number', help: 'Cross sonrası fiyatın eşikte kalması gereken süre. 0 = anında tetik.' },
   ],
   'trigger.sell_progress': [
     { key: 'sourceTradeId', label: 'Source Trade ID', input: 'number' },
@@ -445,6 +444,16 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'sell', value: 'sell' },
       ],
     },
+    {
+      key: 'executionMode',
+      label: 'Islem Modu',
+      input: 'select',
+      options: [
+        { label: 'market (IOC)', value: 'market' },
+        { label: 'limit (GTC)', value: 'limit' },
+      ],
+      help: 'market secimi piyasa benzeri davranis icin IOC + agresif fiyat kullanir.',
+    },
     { key: 'marketSlug', label: 'Market Slug', input: 'text' },
     { key: 'tokenId', label: 'Token ID', input: 'text' },
     { key: 'outcomeLabel', label: 'Outcome Label', input: 'text' },
@@ -535,7 +544,7 @@ const NUMERIC_KEYS = new Set([
   'tpProfitPct',
   'slLossPct',
   'slSpreadPct',
-  'confirmationSeconds',
+  'confirmationMs',
   'entryPriceCent',
 ]);
 
@@ -796,8 +805,8 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     const onceScopeRaw = toStringValue(cfg.onceScope).trim().toLowerCase();
     fields.onceScope = onceScopeRaw === 'market' ? 'market' : 'run';
 
-    if (!fields.confirmationSeconds?.trim()) {
-      fields.confirmationSeconds = '15';
+    if (!fields.confirmationMs?.trim()) {
+      fields.confirmationMs = '50';
     }
   }
 
@@ -839,48 +848,28 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
         const lossPctRaw = toStringValue(item.lossPct).trim();
         const directionRaw = toStringValue(item.direction).trim().toLowerCase();
         const direction: 'down' | 'up' = directionRaw === 'up' ? 'up' : 'down';
-        const windowSecValue = Number(toStringValue(item.windowSec).trim());
-        let durationValue = '';
-        let durationUnit: 'sec' | 'min' = 'sec';
-        if (Number.isFinite(windowSecValue) && windowSecValue > 0) {
-          if (windowSecValue % 60 === 0) {
-            durationValue = String(windowSecValue / 60);
-            durationUnit = 'min';
-          } else {
-            durationValue = String(windowSecValue);
-            durationUnit = 'sec';
-          }
-        }
+        const windowMsValue = Number(toStringValue(item.windowMs).trim());
+        const durationValue =
+          Number.isFinite(windowMsValue) && windowMsValue > 0 ? String(Math.floor(windowMsValue)) : '';
         drawdownRuleRows.push({
           id: createId('dr'),
           direction,
           lossPct: lossPctRaw,
           durationValue,
-          durationUnit,
         });
       }
     }
     if (drawdownRuleRows.length === 0) {
       const fallbackLossPct = toStringValue(cfg.lossPct).trim();
-      const fallbackWindowSec = Number(toStringValue(cfg.windowSec).trim());
-      let durationValue = '';
-      let durationUnit: 'sec' | 'min' = 'sec';
-      if (Number.isFinite(fallbackWindowSec) && fallbackWindowSec > 0) {
-        if (fallbackWindowSec % 60 === 0) {
-          durationValue = String(fallbackWindowSec / 60);
-          durationUnit = 'min';
-        } else {
-          durationValue = String(fallbackWindowSec);
-          durationUnit = 'sec';
-        }
-      }
+      const fallbackWindowMs = Number(toStringValue(cfg.windowMs).trim());
+      const durationValue =
+        Number.isFinite(fallbackWindowMs) && fallbackWindowMs > 0 ? String(Math.floor(fallbackWindowMs)) : '';
       if (fallbackLossPct) {
         drawdownRuleRows.push({
           id: createId('dr'),
           direction: 'down',
           lossPct: fallbackLossPct,
           durationValue,
-          durationUnit,
         });
       }
     }
@@ -945,6 +934,13 @@ export function buildNodeConfigFromForm(
   }
 
   if (nodeType === 'action.place_order') {
+    const executionModeRaw = (form.fields.executionMode ?? '').trim().toLowerCase();
+    if (executionModeRaw === 'market' || executionModeRaw === 'limit') {
+      config.executionMode = executionModeRaw;
+    } else {
+      delete config.executionMode;
+    }
+
     const sizeModeRaw = (form.fields.sizeMode ?? '').trim().toLowerCase();
     const sizeMode = sizeModeRaw === 'pct' ? 'pct' : 'usdc';
     config.sizeMode = sizeMode;
@@ -1078,6 +1074,16 @@ export function buildNodeConfigFromForm(
     const selectionRaw = toStringValue(config.marketSelection).trim().toLowerCase();
     config.marketSelection = selectionRaw || 'latest_by_slug';
 
+    const confirmationMsRaw = toStringValue(form.fields.confirmationMs).trim();
+    if (confirmationMsRaw) {
+      const parsedConfirmationMs = Number(confirmationMsRaw);
+      if (Number.isInteger(parsedConfirmationMs) && parsedConfirmationMs >= 0) {
+        config.confirmationMs = parsedConfirmationMs;
+      } else {
+        delete config.confirmationMs;
+      }
+    }
+
     const scopeRaw = toStringValue(config.marketScope).trim().toLowerCase();
     if (marketMode === 'auto_scope') {
       if (scopeRaw && RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[scopeRaw]) {
@@ -1094,7 +1100,7 @@ export function buildNodeConfigFromForm(
 
     if (config.repeatMode !== 'once') {
       delete config.onceScope;
-      delete config.confirmationSeconds;
+      delete config.confirmationMs;
     }
   }
 
@@ -1126,18 +1132,16 @@ export function buildNodeConfigFromForm(
         const direction = row.direction === 'up' ? 'up' : 'down';
 
         const durationRaw = row.durationValue.trim();
-        let windowSec: number | undefined;
+        let windowMs: number | undefined;
         if (durationRaw) {
           const durationValue = Number(durationRaw);
           if (!Number.isFinite(durationValue) || durationValue <= 0) return null;
-          const unit = row.durationUnit === 'min' ? 'min' : 'sec';
-          const computed = unit === 'min' ? durationValue * 60 : durationValue;
-          if (!Number.isFinite(computed) || computed <= 0) return null;
-          windowSec = Math.floor(computed);
+          windowMs = Math.floor(durationValue);
+          if (!Number.isFinite(windowMs) || windowMs <= 0) return null;
         }
 
         const item: Record<string, unknown> = { lossPct, direction };
-        if (windowSec != null) item.windowSec = windowSec;
+        if (windowMs != null) item.windowMs = windowMs;
         return item;
       })
       .filter((item): item is Record<string, unknown> => item != null);
@@ -1151,6 +1155,7 @@ export function buildNodeConfigFromForm(
     delete config.entryPrice;
     delete config.lossPct;
     delete config.windowSec;
+    delete config.windowMs;
   }
 
   if ((nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') && form.outcomeConditionRows.length > 0) {

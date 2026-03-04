@@ -741,6 +741,27 @@ function FlowCanvasEditorBody({
       }
     }
     if (nextType === 'trigger.position_drawdown') {
+      if (source === 'basic' && nodeForm) {
+        try {
+          const advancedParsed = JSON.parse(nodeForm.advancedJson) as unknown;
+          if (isRecord(advancedParsed)) {
+            const legacyAtRoot = Object.prototype.hasOwnProperty.call(advancedParsed, 'windowSec');
+            const legacyInRules =
+              Array.isArray(advancedParsed.lossRules) &&
+              advancedParsed.lossRules.some(
+                (item) => isRecord(item) && Object.prototype.hasOwnProperty.call(item, 'windowSec')
+              );
+            if (legacyAtRoot || legacyInRules) {
+              onError(
+                'Bu node eski windowSec kullaniyor. Advanced JSON ekraninda windowSec alanlarini kaldirip windowMs kullan.'
+              );
+              return;
+            }
+          }
+        } catch {
+          // advancedJson parse edilmezse standart save validasyonu asagida devam eder.
+        }
+      }
       const selectedOutcomeLabel = toTrimmedStringValue(parsedConfig.outcomeLabel);
       const selectedTokenId = toTrimmedStringValue(parsedConfig.tokenId);
       if (!selectedOutcomeLabel || !selectedTokenId) {
@@ -765,6 +786,13 @@ function FlowCanvasEditorBody({
       });
       if (hasInvalidDirection) {
         onError('Drawdown kural yonu sadece down veya up olabilir.');
+        return;
+      }
+      const hasDeprecatedWindowSec =
+        drawdownRules.some((item) => Object.prototype.hasOwnProperty.call(item, 'windowSec')) ||
+        Object.prototype.hasOwnProperty.call(parsedConfig, 'windowSec');
+      if (hasDeprecatedWindowSec) {
+        onError('windowSec artik desteklenmiyor. Lutfen windowMs kullan.');
         return;
       }
     }

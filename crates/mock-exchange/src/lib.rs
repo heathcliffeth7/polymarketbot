@@ -129,11 +129,12 @@ async fn post_order(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let side_num = order
+            let side_raw = order
                 .get("side")
                 .and_then(|v| v.as_str())
                 .unwrap_or("0");
-            let side_str = if side_num == "0" { "buy" } else { "sell" }.to_string();
+            let is_buy = side_raw == "0" || side_raw.eq_ignore_ascii_case("buy");
+            let side_str = if is_buy { "buy" } else { "sell" }.to_string();
             let maker_amount: f64 = order
                 .get("makerAmount")
                 .and_then(|v| v.as_str())
@@ -145,7 +146,7 @@ async fn post_order(
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0.0);
             // Decode price and size from amounts (both 6 decimals)
-            let (price, size) = if side_num == "0" {
+            let (price, size) = if is_buy {
                 // BUY: makerAmount=USDC, takerAmount=shares
                 let shares = taker_amount / 1_000_000.0;
                 let usdc = maker_amount / 1_000_000.0;
