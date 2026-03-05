@@ -31,6 +31,8 @@ import {
   createEmptyDrawdownRuleRow,
   createEmptyKeyValueDraft,
   createEmptyOutcomeConditionRow,
+  isPresetBuySellPlaceOrderMarker,
+  isPresetPlaceOrderMarker,
   parseEdgeConditionToForm,
   parseNodeConfigToForm,
   type ConditionDraft,
@@ -79,6 +81,16 @@ import {
 } from './flow-canvas-inspector';
 import { useCanvasKeyboard } from './flow-canvas-keyboard';
 import { exportGraphAsJson, importGraphFromFile } from './flow-import-export';
+
+function normalizePresetPlaceOrderConfig(config: Record<string, unknown>): void {
+  config.kind = 'immediate';
+  delete config.triggerCondition;
+  delete config.triggerPrice;
+  delete config.triggerPriceCent;
+  if (isPresetBuySellPlaceOrderMarker(config.presetKind, config.refKey)) {
+    config.executionMode = 'market';
+  }
+}
 
 function FlowCanvasEditorBody({
   graph,
@@ -403,8 +415,8 @@ function FlowCanvasEditorBody({
     queueNodeFocus(nextNode.id);
     if (!hasRequiredPlaceOrderSeed(seed)) {
       onError(kind === 'sell_current_position'
-        ? 'Mevcut pozisyon kaynak bilgisi eksik. Node eklendi, alanlari manuel doldurun.'
-        : 'Alis preset node eklendi. Eksik alanlari manuel doldurun.');
+        ? 'Mevcut pozisyon kaynak bilgisi eksik. Node eklendi; sag paneldeki acik pozisyon listesinden secim yapabilirsin.'
+        : 'Alis preset node eklendi. Eksik alanlar icin sag paneldeki acik pozisyon listesinden secim yapabilirsin.');
       return;
     }
     onError(null);
@@ -486,7 +498,11 @@ function FlowCanvasEditorBody({
           tokenId: position.tokenId, outcomeLabel: position.outcomeLabel },
       } : prev);
       setHasPendingNodeDraft(true);
-      if (selectedNode && selectedNode.data.nodeType === 'trigger.open_positions') {
+      if (
+        selectedNode &&
+        (selectedNode.data.nodeType === 'trigger.open_positions' ||
+          selectedNode.data.nodeType === 'action.place_order')
+      ) {
         const nextNodes = canvasNodes.map((n) => n.id !== selectedNode.id ? n : {
           ...n, data: { ...n.data, config: { ...n.data.config, sourceTradeId: nid,
             marketSlug: position.marketSlug, tokenId: position.tokenId, outcomeLabel: position.outcomeLabel } },
@@ -707,6 +723,9 @@ function FlowCanvasEditorBody({
     } else {
       if (!nodeForm) return;
       parsedConfig = buildNodeConfigFromForm(nextType, nodeForm);
+    }
+    if (nextType === 'action.place_order' && isPresetPlaceOrderMarker(parsedConfig.presetKind, parsedConfig.refKey)) {
+      normalizePresetPlaceOrderConfig(parsedConfig);
     }
     if (outcomeRequired) {
       const outcomeConditions = Array.isArray(parsedConfig.outcomeConditions)
@@ -1178,7 +1197,7 @@ function FlowCanvasEditorBody({
         <div className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white/95 p-3 h-[calc(100vh-12rem)]">
           {selectedNode && nodeForm ? (
             <NodeInspectorPanel
-              node={selectedNode} form={nodeForm} nodeKeyDraft={nodeKeyDraft}
+              form={nodeForm} nodeKeyDraft={nodeKeyDraft}
               nodeTypeDraft={nodeTypeDraft} tab={nodeInspectorTab}
               openPositions={openPositions} openPositionsMeta={openPositionsMeta}
               openPositionsLoading={openPositionsLoading}

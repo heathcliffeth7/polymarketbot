@@ -41,7 +41,7 @@ use std::{
     time::Instant,
 };
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 const CONFIG_ENC_PREFIX: &str = "enc:v1:";
@@ -62,8 +62,6 @@ const FLOW_NODE_STATE_ONCE_FIRED: &str = "once_fired";
 const FLOW_NODE_STATE_ONCE_FIRED_AT: &str = "once_fired_at";
 const FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG: &str = "once_fired_market_slug";
 const FLOW_NODE_STATE_ONCE_BLOCK_LOGGED: &str = "once_blocked_logged";
-const FLOW_TRIGGER_CONFIRMATION_MS_DEFAULT: i64 = 50;
-// Confirmation default is 50ms, read from node config "confirmationMs".
 const FLOW_STATE_PUBLISH_MARKER: &str = "__publish_marker";
 const BOT_RUNNER_LOCK_PATH_DEFAULT: &str = "/tmp/polymarketbot-bot-runner.lock";
 const BOT_RUNNER_DB_LOCK_KEY: i64 = 4_925_982_722_255_244_133;
@@ -220,13 +218,21 @@ fn acquire_runner_process_lock() -> Result<RunnerProcessLock> {
     )
 }
 
-fn crossed_above_strict(previous_price: Option<f64>, current_price: f64, trigger_price: f64) -> bool {
+fn crossed_above_strict(
+    previous_price: Option<f64>,
+    current_price: f64,
+    trigger_price: f64,
+) -> bool {
     previous_price
         .map(|prev| prev < trigger_price && current_price >= trigger_price)
         .unwrap_or(false)
 }
 
-fn crossed_below_strict(previous_price: Option<f64>, current_price: f64, trigger_price: f64) -> bool {
+fn crossed_below_strict(
+    previous_price: Option<f64>,
+    current_price: f64,
+    trigger_price: f64,
+) -> bool {
     previous_price
         .map(|prev| prev > trigger_price && current_price <= trigger_price)
         .unwrap_or(false)
@@ -290,6 +296,43 @@ fn is_ws_cross_confirmed_unexpected_fail(
         && ws_evaluation_mode_from_step == "cross_confirmed"
         && !pass
         && ws_hard_ignore_reason.is_none()
+}
+
+fn market_price_confirmation_ms(node_spec: &WsOpenPositionPriceNodeSpec) -> Option<i64> {
+    if node_spec.node_type != "trigger.market_price" {
+        return None;
+    }
+    node_spec.confirmation_ms.filter(|value| *value > 0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum WsPriceMode {
+    Midpoint,
+    Raw,
+    BestBid,
+    BestAsk,
+}
+
+impl WsPriceMode {
+    fn parse(raw: Option<&str>, default: Self) -> Self {
+        let normalized = raw.map(str::trim).unwrap_or_default().to_ascii_lowercase();
+        match normalized.as_str() {
+            "midpoint" | "orderbook_midpoint" | "mid" => Self::Midpoint,
+            "raw" | "trade" | "last_trade" | "last_trade_price" => Self::Raw,
+            "best_bid" | "bid" => Self::BestBid,
+            "best_ask" | "ask" => Self::BestAsk,
+            _ => default,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Midpoint => "midpoint",
+            Self::Raw => "raw",
+            Self::BestBid => "best_bid",
+            Self::BestAsk => "best_ask",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -373,11 +416,12 @@ struct WsOpenPositionPriceNodeSpec {
     once_mode: bool,
     once_scope_market: bool,
     auto_scope: bool,
+    price_mode: WsPriceMode,
     market_slug: Option<String>,
     token_id: String,
     trigger_condition: String,
     trigger_price: f64,
-    confirmation_ms: i64,
+    confirmation_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -3656,6 +3700,11 @@ fn node_repeat_mode(node: &TradeFlowNode) -> &str {
 }
 
 fn node_once_scope(node: &TradeFlowNode) -> &str {
+    // auto_scope marketlerde onceScope her zaman "market" olmalı —
+    // "run" scope rotate eden marketlerde anlamsız (ilk market'ten sonra kalıcı blok).
+    if node_market_mode(node) == "auto_scope" {
+        return "market";
+    }
     match node
         .config
         .get("onceScope")
@@ -3815,7 +3864,9 @@ async fn sync_trigger_market_auto_scope_context(
             .lock()
             .unwrap()
             .get(&market_scope)
-            .filter(|(t, _)| t.elapsed() < std::time::Duration::from_secs(AUTO_SCOPE_CACHE_TTL_SECS))
+            .filter(|(t, _)| {
+                t.elapsed() < std::time::Duration::from_secs(AUTO_SCOPE_CACHE_TTL_SECS)
+            })
             .map(|(_, m)| m.clone());
         if let Some(cached) = cache_hit {
             cached
@@ -3849,7 +3900,11 @@ async fn sync_trigger_market_auto_scope_context(
         } else {
             selected.yes_token_id.clone()
         };
-        let outcome_label = if preferred_outcome == "no" { "No" } else { "Yes" };
+        let outcome_label = if preferred_outcome == "no" {
+            "No"
+        } else {
+            "Yes"
+        };
         set_flow_context(context, "outcomeLabel", json!(outcome_label));
         set_flow_context(context, "tokenId", json!(token_id));
     }
@@ -3866,6 +3921,19 @@ fn open_position_ws_price_node_specs(
     }
     let once_mode = is_trade_flow_market_price_once_node(node);
     let once_scope_market = is_trade_flow_market_price_once_scope_market(node);
+    let price_mode = if node.node_type == "trigger.market_price" {
+        WsPriceMode::parse(
+            node.config.get("priceMode").and_then(|v| v.as_str()),
+            WsPriceMode::Midpoint,
+        )
+    } else {
+        WsPriceMode::Raw
+    };
+    let confirmation_ms = node
+        .config
+        .get("confirmationMs")
+        .and_then(value_as_i64_strict)
+        .filter(|value| *value >= 0);
     let market_slug = if node_market_mode(node) == "auto_scope" {
         flow_context_string(context, "marketSlug")
             .or_else(|| node_config_string(node, "marketSlug"))
@@ -3922,16 +3990,12 @@ fn open_position_ws_price_node_specs(
                 once_mode,
                 once_scope_market,
                 auto_scope: node_market_mode(node) == "auto_scope",
+                price_mode,
                 market_slug: market_slug.clone(),
                 token_id,
                 trigger_condition,
                 trigger_price: tp,
-                confirmation_ms: node
-                    .config
-                    .get("confirmationMs")
-                    .and_then(value_as_i64_strict)
-                    .filter(|v| *v >= 0)
-                    .unwrap_or(FLOW_TRIGGER_CONFIRMATION_MS_DEFAULT),
+                confirmation_ms,
             });
         }
         return specs;
@@ -3969,16 +4033,12 @@ fn open_position_ws_price_node_specs(
         once_mode,
         once_scope_market,
         auto_scope: node_market_mode(node) == "auto_scope",
+        price_mode,
         market_slug,
         token_id,
         trigger_condition,
         trigger_price,
-        confirmation_ms: node
-            .config
-            .get("confirmationMs")
-            .and_then(value_as_i64_strict)
-            .filter(|v| *v >= 0)
-            .unwrap_or(FLOW_TRIGGER_CONFIRMATION_MS_DEFAULT),
+        confirmation_ms,
     }]
 }
 
@@ -4092,10 +4152,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
 
     // Batch subscribe: single WS connection for all tokens
     let all_token_ids: Vec<String> = token_targets.keys().cloned().collect();
-    let all_events = match ws
-        .subscribe_once(WsChannel::Market, &all_token_ids)
-        .await
-    {
+    let all_events = match ws.subscribe_once(WsChannel::Market, &all_token_ids).await {
         Ok(events) => events,
         Err(err) => {
             warn!(
@@ -4108,18 +4165,41 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
         }
     };
 
+    let mut ws_price_cache: HashMap<(String, WsPriceMode), Option<ExtractedWsPrice>> =
+        HashMap::new();
     for (token_id, targets) in token_targets {
-        let Some((price_raw, event_ts)) = extract_price_from_market_events(&all_events, &token_id)
-        else {
-            continue;
-        };
-        let current_price = clamp_probability(price_raw);
-
         for (run_index, node_index) in targets {
-            let Some(run_spec) = run_specs.get_mut(run_index) else {
+            let Some(node_spec) = run_specs
+                .get(run_index)
+                .and_then(|run_spec| run_spec.nodes.get(node_index))
+                .cloned()
+            else {
                 continue;
             };
-            let Some(node_spec) = run_spec.nodes.get(node_index).cloned() else {
+
+            let cache_key = (token_id.clone(), node_spec.price_mode);
+            let extracted = ws_price_cache.entry(cache_key).or_insert_with(|| {
+                extract_price_from_market_events_with_mode(
+                    &all_events,
+                    &token_id,
+                    node_spec.price_mode,
+                )
+            });
+            let Some(extracted_price) = *extracted else {
+                debug!(
+                    run_id,
+                    node_key = %node_spec.node_key,
+                    token_id = %node_spec.token_id,
+                    market = ?node_spec.market_slug,
+                    "TRIGGER_WS_NO_PRICE_DATA"
+                );
+                continue;
+            };
+            let current_price = clamp_probability(extracted_price.price);
+            let event_ts = extracted_price.ts;
+            let price_source = extracted_price.source;
+
+            let Some(run_spec) = run_specs.get_mut(run_index) else {
                 continue;
             };
             // Skip expired (resolved) markets for auto_scope triggers
@@ -4132,12 +4212,28 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
             }
             // Skip resolution-extreme prices (market resolving)
             if current_price < 0.03 || current_price > 0.97 {
+                debug!(
+                    run_id,
+                    flow_run_id = run_spec.run_id,
+                    node_key = %node_spec.node_key,
+                    price = current_price,
+                    token_id = %node_spec.token_id,
+                    market = ?node_spec.market_slug,
+                    "TRIGGER_SKIP_RESOLUTION_PRICE"
+                );
                 continue;
             }
             // Skip markets in resolution window (last 120s for 5m, last 180s for 15m)
             if node_spec.auto_scope {
                 if let Some(ref slug) = node_spec.market_slug {
                     if is_auto_scope_market_in_resolution_window(slug, 120) {
+                        debug!(
+                            run_id,
+                            flow_run_id = run_spec.run_id,
+                            node_key = %node_spec.node_key,
+                            market_slug = %slug,
+                            "TRIGGER_SKIP_RESOLUTION_WINDOW"
+                        );
                         continue;
                     }
                 }
@@ -4161,11 +4257,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
                     .unwrap_or(true);
                 if slug_changed {
                     let prev_key = format!("previous_price_{}", node_spec.token_id);
-                    remove_flow_node_state(
-                        &mut run_spec.context,
-                        &node_spec.node_key,
-                        &prev_key,
-                    );
+                    remove_flow_node_state(&mut run_spec.context, &node_spec.node_key, &prev_key);
                     remove_flow_node_state(
                         &mut run_spec.context,
                         &node_spec.node_key,
@@ -4175,21 +4267,13 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
                     let cpend_at = format!("cross_pending_at_{}", node_spec.token_id);
                     let cpend_price = format!("cross_pending_price_{}", node_spec.token_id);
                     let cpend_prev = format!("cross_pending_prev_{}", node_spec.token_id);
-                    remove_flow_node_state(
-                        &mut run_spec.context,
-                        &node_spec.node_key,
-                        &cpend_at,
-                    );
+                    remove_flow_node_state(&mut run_spec.context, &node_spec.node_key, &cpend_at);
                     remove_flow_node_state(
                         &mut run_spec.context,
                         &node_spec.node_key,
                         &cpend_price,
                     );
-                    remove_flow_node_state(
-                        &mut run_spec.context,
-                        &node_spec.node_key,
-                        &cpend_prev,
-                    );
+                    remove_flow_node_state(&mut run_spec.context, &node_spec.node_key, &cpend_prev);
                     run_spec.context_dirty = true;
                 }
                 set_flow_node_state(
@@ -4257,13 +4341,14 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
             let prev_key = format!("previous_price_{}", node_spec.token_id);
             let previous_price = flow_node_state(&run_spec.context, &node_spec.node_key, &prev_key)
                 .and_then(value_as_f64);
-            // once modunda first_tick_threshold devre dışı: gerçek bir cross (geçiş) gereksin
-            // ANCAK auto_scope + once'da yeni market açıldığında previous_price temizleniyor,
-            // bu yüzden fiyat zaten trigger üstündeyse asla cross algılanamaz.
-            // auto_scope'ta first_tick'e izin ver — confirmation gate transient spike'ları filtreler.
-            let allow_first_tick_threshold =
-                node_spec.node_type == "trigger.market_price"
-                    && (!node_spec.once_mode || node_spec.auto_scope);
+            // once modunda first_tick_threshold devre dışı: gerçek bir cross (geçiş) gereksin.
+            // İSTİSNALAR:
+            //   1. auto_scope: yeni market açıldığında previous_price temizleniyor,
+            //      first_tick'e izin ver — confirmation gate transient spike'ları filtreler.
+            //   2. previous_price=None (bootstrap): bot restart veya ilk subscription'da
+            //      previous_price yok. once_fired guard re-fire'ı zaten engelliyor.
+            let allow_first_tick_threshold = node_spec.node_type == "trigger.market_price"
+                && (!node_spec.once_mode || node_spec.auto_scope || previous_price.is_none());
             let (crossed, evaluation_mode) = evaluate_trigger_market_price_condition(
                 previous_price,
                 current_price,
@@ -4271,6 +4356,21 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
                 &node_spec.trigger_condition,
                 allow_first_tick_threshold,
             );
+
+            if !crossed && evaluation_mode == "no_previous" {
+                debug!(
+                    run_id,
+                    flow_run_id = run_spec.run_id,
+                    node_key = %node_spec.node_key,
+                    price = current_price,
+                    trigger_price = node_spec.trigger_price,
+                    trigger_condition = %node_spec.trigger_condition,
+                    once_mode = node_spec.once_mode,
+                    token_id = %node_spec.token_id,
+                    market = ?node_spec.market_slug,
+                    "TRIGGER_WS_NO_PREVIOUS_PRICE"
+                );
+            }
 
             set_flow_node_state(
                 &mut run_spec.context,
@@ -4286,20 +4386,16 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
             );
             run_spec.context_dirty = true;
 
-            // ── Confirmation gate for auto_scope + once triggers ──
-            // Transient dips (e.g. pre-traded opening prices) fire and recover
-            // quickly. Require price to STAY in trigger zone for
-            // confirmation_ms before enqueuing.
+            // ── Confirmation gate for trigger.market_price with explicit confirmationMs ──
+            // When confirmationMs > 0 is configured, price must STAY in trigger zone
+            // for the configured duration before enqueuing.
             let mut should_enqueue = crossed;
             let mut final_eval_mode: &str = evaluation_mode;
 
-            if node_spec.auto_scope && node_spec.once_mode && node_spec.confirmation_ms > 0 {
-                let cpend_at_key =
-                    format!("cross_pending_at_{}", node_spec.token_id);
-                let cpend_price_key =
-                    format!("cross_pending_price_{}", node_spec.token_id);
-                let cpend_prev_key =
-                    format!("cross_pending_prev_{}", node_spec.token_id);
+            if let Some(confirmation_ms) = market_price_confirmation_ms(&node_spec) {
+                let cpend_at_key = format!("cross_pending_at_{}", node_spec.token_id);
+                let cpend_price_key = format!("cross_pending_price_{}", node_spec.token_id);
+                let cpend_prev_key = format!("cross_pending_prev_{}", node_spec.token_id);
 
                 let still_in_zone = match node_spec.trigger_condition.as_str() {
                     "cross_below" => current_price <= node_spec.trigger_price,
@@ -4339,21 +4435,17 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
                         prev = ?previous_price,
                         market = ?node_spec.market_slug,
                         "CROSS_PENDING_START: waiting {}ms confirmation",
-                        node_spec.confirmation_ms,
+                        confirmation_ms,
                     );
-                } else if let Some(pending_at_str) = flow_node_state_string(
-                    &run_spec.context,
-                    &node_spec.node_key,
-                    &cpend_at_key,
-                ) {
+                } else if let Some(pending_at_str) =
+                    flow_node_state_string(&run_spec.context, &node_spec.node_key, &cpend_at_key)
+                {
                     // A cross was previously detected — check confirmation
                     if still_in_zone {
-                        if let Ok(pending_at) =
-                            DateTime::parse_from_rfc3339(&pending_at_str)
-                        {
-                            let elapsed = Utc::now()
-                                .signed_duration_since(pending_at.with_timezone(&Utc));
-                            if elapsed.num_milliseconds() >= node_spec.confirmation_ms {
+                        if let Ok(pending_at) = DateTime::parse_from_rfc3339(&pending_at_str) {
+                            let elapsed =
+                                Utc::now().signed_duration_since(pending_at.with_timezone(&Utc));
+                            if elapsed.num_milliseconds() >= confirmation_ms {
                                 // Confirmed! Price stayed in zone long enough.
                                 should_enqueue = true;
                                 final_eval_mode = "cross_confirmed";
@@ -4429,7 +4521,9 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
                 "wsPreviousPrices": { token_id.clone(): previous_price },
                 "wsEventTs": event_ts,
                 "wsMarketSlug": node_spec.market_slug.clone(),
-                "wsEvaluationMode": final_eval_mode
+                "wsEvaluationMode": final_eval_mode,
+                "wsPriceMode": node_spec.price_mode.as_str(),
+                "wsPriceSource": price_source
             });
             let idempotency_key = ws_price_trigger_step_idempotency_key(
                 run_spec.run_id,
@@ -4468,6 +4562,8 @@ async fn enqueue_trade_flow_ws_open_position_price_steps(
                         "trigger_condition": node_spec.trigger_condition,
                         "trigger_price": node_spec.trigger_price,
                         "evaluation_mode": final_eval_mode,
+                        "price_mode": node_spec.price_mode.as_str(),
+                        "price_source": price_source,
                         "event_ts": event_ts,
                         "once_mode": node_spec.once_mode,
                         "once_scope": if node_spec.once_scope_market { "market" } else { "run" },
@@ -4559,6 +4655,19 @@ async fn sync_trade_flow_definition_run(
 
     if !needs_new_run {
         return Ok(());
+    }
+
+    // Defensive: cancel any stale 'running' run that might cause unique constraint violation.
+    // This handles crash recovery and concurrent-start edge cases.
+    if let Some(stale_run) = repo.get_active_trade_flow_run(definition.id).await? {
+        warn!(
+            run_id,
+            definition_id = definition.id,
+            stale_run_id = stale_run.id,
+            "TRADE_FLOW_STALE_RUN_CLEANUP"
+        );
+        repo.set_trade_flow_run_status(stale_run.id, "canceled", Some("stale_run_cleanup"))
+            .await?;
     }
 
     let mut context_json = build_initial_trade_flow_context(&graph.context);
@@ -5151,6 +5260,10 @@ async fn execute_trigger_market_price(
     let once_mode = repeat_mode == "once";
     let once_scope_market = is_trade_flow_market_price_once_scope_market(node);
     let auto_scope_mode = node_market_mode(node) == "auto_scope";
+    let price_mode = WsPriceMode::parse(
+        node.config.get("priceMode").and_then(|v| v.as_str()),
+        WsPriceMode::Midpoint,
+    );
 
     // --- Early WS-sourced detection for auto_scope guard ---
     let ws_sourced = step
@@ -5162,7 +5275,11 @@ async fn execute_trigger_market_price(
     let ws_market_slug_from_step = step
         .input_json
         .as_ref()
-        .and_then(|input| input.get("wsMarketSlug").or_else(|| input.get("marketSlug")))
+        .and_then(|input| {
+            input
+                .get("wsMarketSlug")
+                .or_else(|| input.get("marketSlug"))
+        })
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|v| !v.is_empty())
@@ -5242,7 +5359,11 @@ async fn execute_trigger_market_price(
     );
 
     // --- WS-sourced step data (ws_sourced already computed above) ---
-    let trigger_source = if ws_sourced { Some("ws_market_price") } else { None };
+    let trigger_source = if ws_sourced {
+        Some("ws_market_price")
+    } else {
+        None
+    };
     let ws_prices_map: Option<&serde_json::Map<String, Value>> = step
         .input_json
         .as_ref()
@@ -5286,6 +5407,18 @@ async fn execute_trigger_market_price(
         .input_json
         .as_ref()
         .and_then(|input| input.get("wsEvaluationMode"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let ws_price_mode_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPriceMode"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let ws_price_source_from_step = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsPriceSource"))
         .and_then(Value::as_str)
         .unwrap_or("");
     let mut ws_cross_confirmed_short_circuit_applied = false;
@@ -5433,8 +5566,7 @@ async fn execute_trigger_market_price(
                             .trim()
                             .to_string();
                         if node_market_mode(node) == "auto_scope" && !ol.is_empty() {
-                            tid = resolve_token_id_for_outcome_label(&ol, context)
-                                .unwrap_or(tid);
+                            tid = resolve_token_id_for_outcome_label(&ol, context).unwrap_or(tid);
                         }
                         if !conf_token_id.is_empty() && tid != conf_token_id {
                             return None;
@@ -5481,11 +5613,14 @@ async fn execute_trigger_market_price(
                     "node_key": node.key,
                     "node_type": node.node_type,
                     "market_slug": market_slug.clone(),
+                    "price_mode": price_mode.as_str(),
                     "ws_market_slug": ws_market_slug_from_step.clone(),
                     "ws_token_id": ws_token_id_from_step.clone(),
                     "ws_price": ws_price_from_step,
                     "ws_previous_price": ws_previous_price_from_step,
                     "ws_evaluation_mode": ws_evaluation_mode_from_step,
+                    "ws_price_mode": ws_price_mode_from_step,
+                    "ws_price_source": ws_price_source_from_step,
                     "once_mode": once_mode,
                     "once_scope": if once_scope_market { "market" } else { "run" }
                 }),
@@ -5551,7 +5686,8 @@ async fn execute_trigger_market_price(
                 None => continue,
             };
             let prev_state_key = format!("previous_price_{}", cond_token_id);
-            let state_prev = flow_node_state(context, &node.key, &prev_state_key).and_then(value_as_f64);
+            let state_prev =
+                flow_node_state(context, &node.key, &prev_state_key).and_then(value_as_f64);
             let prev = resolve_ws_previous_price(
                 ws_sourced,
                 state_prev,
@@ -5576,8 +5712,14 @@ async fn execute_trigger_market_price(
             let cur_result = if let Some(sp) = step_ws_price {
                 Ok(sp)
             } else {
-                fetch_trade_flow_market_price(ws, client, &market_slug, Some(cond_token_id.as_str()))
-                    .await
+                fetch_trade_flow_market_price(
+                    ws,
+                    client,
+                    &market_slug,
+                    Some(cond_token_id.as_str()),
+                    price_mode,
+                )
+                .await
             };
             let cur = match cur_result {
                 Ok(price) => price,
@@ -5615,12 +5757,13 @@ async fn execute_trigger_market_price(
             };
             // Store per-token previous price
             set_flow_node_state(context, &node.key, &prev_state_key, json!(cur));
+            let allow_first_tick = !once_mode || prev.is_none();
             let (pass_this, eval_mode) = evaluate_trigger_market_price_condition(
                 prev,
                 cur,
                 tp,
                 &cond_trigger_condition,
-                !once_mode,
+                allow_first_tick,
             );
             last_eval_mode = eval_mode;
             if ws_sourced && !pass_this && ws_soft_ignore_reason.is_none() {
@@ -5662,7 +5805,7 @@ async fn execute_trigger_market_price(
             }
             Ok(None)
         } else {
-            fetch_trade_flow_market_price(ws, client, &market_slug, token_id.as_deref())
+            fetch_trade_flow_market_price(ws, client, &market_slug, token_id.as_deref(), price_mode)
                 .await
                 .map(Some)
         };
@@ -5729,6 +5872,7 @@ async fn execute_trigger_market_price(
             ws_previous_prices_map,
         );
         effective_previous_price = previous_price;
+        let allow_first_tick = !once_mode || previous_price.is_none();
         pass = if let Some(cur_price) = cur {
             match (trigger_condition.as_deref(), trigger_price) {
                 (Some("cross_above"), Some(tp)) => {
@@ -5737,7 +5881,7 @@ async fn execute_trigger_market_price(
                         cur_price,
                         tp,
                         "cross_above",
-                        !once_mode,
+                        allow_first_tick,
                     );
                     trigger_evaluation_mode = eval_mode;
                     matched
@@ -5748,7 +5892,7 @@ async fn execute_trigger_market_price(
                         cur_price,
                         tp,
                         "cross_below",
-                        !once_mode,
+                        allow_first_tick,
                     );
                     trigger_evaluation_mode = eval_mode;
                     matched
@@ -5820,6 +5964,7 @@ async fn execute_trigger_market_price(
                     "node_key": node.key,
                     "node_type": node.node_type,
                     "reason": reason,
+                    "price_mode": price_mode.as_str(),
                     "trigger_source": trigger_source,
                     "market_slug": market_slug.clone(),
                     "ws_market_slug": ws_market_slug_from_step,
@@ -5827,6 +5972,8 @@ async fn execute_trigger_market_price(
                     "expected_token_id": if triggered_token_id.is_empty() { Value::Null } else { json!(triggered_token_id.clone()) },
                     "ws_price": ws_price_from_step,
                     "ws_previous_price": ws_previous_price_from_step,
+                    "ws_price_mode": ws_price_mode_from_step,
+                    "ws_price_source": ws_price_source_from_step,
                     "effective_previous_price": effective_previous_price
                 }),
             )
@@ -5856,11 +6003,14 @@ async fn execute_trigger_market_price(
                     "node_key": node.key,
                     "node_type": node.node_type,
                     "market_slug": market_slug.clone(),
+                    "price_mode": price_mode.as_str(),
                     "ws_market_slug": ws_market_slug_from_step.clone(),
                     "ws_token_id": ws_token_id_from_step.clone(),
                     "ws_price": ws_price_from_step,
                     "ws_previous_price": ws_previous_price_from_step,
                     "ws_evaluation_mode": ws_evaluation_mode_from_step,
+                    "ws_price_mode": ws_price_mode_from_step,
+                    "ws_price_source": ws_price_source_from_step,
                     "evaluation_mode": trigger_evaluation_mode,
                     "ws_ignored_reason": ws_ignore_reason.clone(),
                     "effective_previous_price": effective_previous_price,
@@ -5932,6 +6082,7 @@ async fn execute_trigger_market_price(
                         "node_key": node.key,
                         "node_type": node.node_type,
                         "market_slug": market_slug.clone(),
+                        "price_mode": price_mode.as_str(),
                         "triggered_token_id": triggered_token_id.clone(),
                         "triggered_outcome_label": triggered_outcome_label.clone(),
                         "triggered_condition": triggered_condition.clone(),
@@ -5940,6 +6091,8 @@ async fn execute_trigger_market_price(
                         "evaluation_mode": trigger_evaluation_mode,
                         "price": current_price,
                         "ws_sourced": ws_sourced,
+                        "ws_price_mode": ws_price_mode_from_step,
+                        "ws_price_source": ws_price_source_from_step,
                         "once_scope": if once_scope_market { "market" } else { "run" },
                         "fired_at": fired_at,
                         "idempotency_key": once_fire_key
@@ -6029,6 +6182,7 @@ async fn execute_trigger_market_price(
         "run_id": run.id,
         "node_key": node.key,
         "market_slug": market_slug,
+        "price_mode": price_mode.as_str(),
         "triggered_token_id": triggered_token_id,
         "triggered_outcome_label": triggered_outcome_label,
         "triggered_condition": triggered_condition,
@@ -6038,6 +6192,8 @@ async fn execute_trigger_market_price(
         "effective_previous_price": effective_previous_price,
         "evaluation_mode": trigger_evaluation_mode,
         "ws_evaluation_mode_from_step": ws_evaluation_mode_from_step,
+        "ws_price_mode_from_step": ws_price_mode_from_step,
+        "ws_price_source_from_step": ws_price_source_from_step,
         "cross_confirmed_short_circuit_applied": ws_cross_confirmed_short_circuit_applied,
         "price": current_price,
         "pass": pass,
@@ -6061,6 +6217,7 @@ async fn execute_trigger_market_price(
         trigger_evaluation_mode,
         ?current_price,
         ?effective_previous_price,
+        price_mode = price_mode.as_str(),
         once_mode,
         ws_sourced,
         routes_count = routes.len(),
@@ -6307,6 +6464,7 @@ async fn execute_trigger_open_positions(
                         client,
                         &market_slug,
                         Some(cond_token_id.as_str()),
+                        WsPriceMode::Raw,
                     )
                     .await?,
                 )
@@ -6394,8 +6552,14 @@ async fn execute_trigger_open_positions(
                     }
                 } else {
                     Some(
-                        fetch_trade_flow_market_price(ws, client, &market_slug, token_id_ref)
-                            .await?,
+                        fetch_trade_flow_market_price(
+                            ws,
+                            client,
+                            &market_slug,
+                            token_id_ref,
+                            WsPriceMode::Raw,
+                        )
+                        .await?,
                     )
                 };
                 let p = cur_val
@@ -6416,8 +6580,14 @@ async fn execute_trigger_open_positions(
                     }
                 } else {
                     Some(
-                        fetch_trade_flow_market_price(ws, client, &market_slug, token_id_ref)
-                            .await?,
+                        fetch_trade_flow_market_price(
+                            ws,
+                            client,
+                            &market_slug,
+                            token_id_ref,
+                            WsPriceMode::Raw,
+                        )
+                        .await?,
                     )
                 };
                 let p = cur_val
@@ -6564,12 +6734,15 @@ fn parse_position_drawdown_rules(node: &TradeFlowNode) -> Vec<PositionDrawdownRu
             if !loss_pct.is_finite() || loss_pct <= 0.0 || loss_pct > 100.0 {
                 continue;
             }
-            let Some(direction) = PositionDrawdownDirection::parse(
-                obj.get("direction").and_then(Value::as_str),
-            ) else {
+            let Some(direction) =
+                PositionDrawdownDirection::parse(obj.get("direction").and_then(Value::as_str))
+            else {
                 continue;
             };
-            let window_ms = obj.get("windowMs").and_then(value_as_i64).filter(|v| *v > 0);
+            let window_ms = obj
+                .get("windowMs")
+                .and_then(value_as_i64)
+                .filter(|v| *v > 0);
             rules.push(PositionDrawdownRule {
                 index,
                 loss_pct,
@@ -6628,8 +6801,14 @@ fn parse_position_drawdown_samples(value: Option<&Value>) -> Vec<PositionDrawdow
         let Some(price) = obj.get("price").and_then(value_as_f64) else {
             continue;
         };
-        let loss_pct = obj.get("loss_pct").and_then(value_as_f64).unwrap_or_default();
-        let gain_pct = obj.get("gain_pct").and_then(value_as_f64).unwrap_or_default();
+        let loss_pct = obj
+            .get("loss_pct")
+            .and_then(value_as_f64)
+            .unwrap_or_default();
+        let gain_pct = obj
+            .get("gain_pct")
+            .and_then(value_as_f64)
+            .unwrap_or_default();
         if !price.is_finite() || price < 0.0 {
             continue;
         }
@@ -6896,15 +7075,22 @@ async fn execute_trigger_position_drawdown(
         .clamp(0.0, 100.0);
     let now_ms = now.timestamp_millis();
 
-    let mut samples =
-        parse_position_drawdown_samples(flow_node_state(context, &node.key, "drawdown_loss_samples"));
+    let mut samples = parse_position_drawdown_samples(flow_node_state(
+        context,
+        &node.key,
+        "drawdown_loss_samples",
+    ));
     samples.push(PositionDrawdownSample {
         ts_ms: now_ms,
         loss_pct: loss_pct_now,
         gain_pct: gain_pct_now,
         price: current_price,
     });
-    let max_window_ms = rules.iter().filter_map(|rule| rule.window_ms).max().unwrap_or(0);
+    let max_window_ms = rules
+        .iter()
+        .filter_map(|rule| rule.window_ms)
+        .max()
+        .unwrap_or(0);
     if max_window_ms > 0 {
         let cutoff = now_ms.saturating_sub(max_window_ms);
         samples.retain(|sample| sample.ts_ms >= cutoff);
@@ -7008,17 +7194,15 @@ async fn execute_trigger_position_drawdown(
         context,
         &node.key,
         "drawdown_loss_samples",
-        json!(
-            samples
-                .iter()
-                .map(|sample| json!({
-                    "ts_ms": sample.ts_ms,
-                    "loss_pct": sample.loss_pct,
-                    "gain_pct": sample.gain_pct,
-                    "price": sample.price
-                }))
-                .collect::<Vec<Value>>()
-        ),
+        json!(samples
+            .iter()
+            .map(|sample| json!({
+                "ts_ms": sample.ts_ms,
+                "loss_pct": sample.loss_pct,
+                "gain_pct": sample.gain_pct,
+                "price": sample.price
+            }))
+            .collect::<Vec<Value>>()),
     );
     set_flow_node_state(context, &node.key, "last_price", json!(current_price));
     set_flow_node_state(context, &node.key, "last_loss_pct", json!(loss_pct_now));
@@ -7046,14 +7230,26 @@ async fn execute_trigger_position_drawdown(
         json!(outcome_label.clone()),
     );
     set_flow_var(context, &format!("{var_prefix}_position_qty"), json!(0.0));
-    set_flow_var(context, &format!("{var_prefix}_entry_price"), json!(entry_price));
+    set_flow_var(
+        context,
+        &format!("{var_prefix}_entry_price"),
+        json!(entry_price),
+    );
     set_flow_var(
         context,
         &format!("{var_prefix}_current_price"),
         json!(current_price),
     );
-    set_flow_var(context, &format!("{var_prefix}_loss_pct"), json!(loss_pct_now));
-    set_flow_var(context, &format!("{var_prefix}_gain_pct"), json!(gain_pct_now));
+    set_flow_var(
+        context,
+        &format!("{var_prefix}_loss_pct"),
+        json!(loss_pct_now),
+    );
+    set_flow_var(
+        context,
+        &format!("{var_prefix}_gain_pct"),
+        json!(gain_pct_now),
+    );
     set_flow_var(context, &format!("{var_prefix}_pass"), json!(pass));
 
     let routes = if pass {
@@ -8242,10 +8438,12 @@ async fn fetch_trade_flow_market_price(
     client: Option<&dyn OrderExecutor>,
     market_slug: &str,
     token_id: Option<&str>,
+    price_mode: WsPriceMode,
 ) -> Result<f64> {
     let token_id = token_id.filter(|v| !v.trim().is_empty());
     if let Some(token_id) = token_id {
-        if let Some(ws_price) = fetch_price_from_market_ws(ws, token_id).await {
+        if let Some(ws_price) = fetch_price_from_market_ws_with_mode(ws, token_id, price_mode).await
+        {
             return Ok(clamp_probability(ws_price));
         }
     }
@@ -8255,6 +8453,14 @@ async fn fetch_trade_flow_market_price(
                 "trigger.market_price requires tokenId for REST midpoint fallback (marketSlug={market_slug})"
             )
         })?;
+        if matches!(price_mode, WsPriceMode::BestBid | WsPriceMode::BestAsk) {
+            warn!(
+                %market_slug,
+                price_mode = price_mode.as_str(),
+                "REST_FALLBACK_MIDPOINT_USED: WS price unavailable, falling back to REST midpoint for {} mode",
+                price_mode.as_str()
+            );
+        }
         let fallback = client.midpoint(token_id).await?;
         return Ok(clamp_probability(fallback.price));
     }
@@ -9071,15 +9277,8 @@ mod dual_dca_tests {
         assert!(from_map.is_some());
         assert!((from_map.unwrap_or_default() - 0.34).abs() < 1e-9);
 
-        let from_single = resolve_ws_previous_price(
-            true,
-            Some(0.30),
-            token,
-            Some(token),
-            Some(0.33),
-            true,
-            None,
-        );
+        let from_single =
+            resolve_ws_previous_price(true, Some(0.30), token, Some(token), Some(0.33), true, None);
         assert!(from_single.is_some());
         assert!((from_single.unwrap_or_default() - 0.33).abs() < 1e-9);
 
@@ -9108,15 +9307,8 @@ mod dual_dca_tests {
         );
         assert!(explicit_null_from_map.is_none());
 
-        let explicit_null_from_single = resolve_ws_previous_price(
-            true,
-            Some(0.30),
-            token,
-            Some(token),
-            None,
-            true,
-            None,
-        );
+        let explicit_null_from_single =
+            resolve_ws_previous_price(true, Some(0.30), token, Some(token), None, true, None);
         assert!(explicit_null_from_single.is_none());
 
         let non_ws = resolve_ws_previous_price(
@@ -9200,6 +9392,7 @@ mod dual_dca_tests {
         assert_eq!(specs[0].token_id, "yes-token");
         assert!(specs[0].once_mode);
         assert!(specs[0].once_scope_market);
+        assert_eq!(specs[0].price_mode, WsPriceMode::Midpoint);
         assert_eq!(
             specs[0].market_slug.as_deref(),
             Some("btc-updown-5m-1772296200")
@@ -9233,7 +9426,73 @@ mod dual_dca_tests {
 
         let specs = open_position_ws_price_node_specs(&node, &context);
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].market_slug.as_deref(), Some("btc-updown-15m-fresh"));
+        assert_eq!(
+            specs[0].market_slug.as_deref(),
+            Some("btc-updown-15m-fresh")
+        );
+    }
+
+    #[test]
+    fn market_price_specs_parse_price_mode_and_default_to_midpoint() {
+        let context = json!({
+            "flowContext": {
+                "marketSlug": "epl-test",
+                "yesTokenId": "yes-token",
+                "noTokenId": "no-token"
+            }
+        });
+        let default_node = TradeFlowNode {
+            key: "trigger_market".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            config: json!({
+                "marketMode": "auto_scope",
+                "outcomeConditions": [{
+                    "outcomeLabel": "Yes",
+                    "triggerCondition": "cross_above",
+                    "triggerPriceCent": 60
+                }]
+            }),
+        };
+        let raw_node = TradeFlowNode {
+            key: "trigger_market".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            config: json!({
+                "marketMode": "auto_scope",
+                "priceMode": "raw",
+                "outcomeConditions": [{
+                    "outcomeLabel": "Yes",
+                    "triggerCondition": "cross_above",
+                    "triggerPriceCent": 60
+                }]
+            }),
+        };
+
+        let default_specs = open_position_ws_price_node_specs(&default_node, &context);
+        let raw_specs = open_position_ws_price_node_specs(&raw_node, &context);
+        assert_eq!(default_specs.len(), 1);
+        assert_eq!(raw_specs.len(), 1);
+        assert_eq!(default_specs[0].price_mode, WsPriceMode::Midpoint);
+        assert_eq!(raw_specs[0].price_mode, WsPriceMode::Raw);
+    }
+
+    #[test]
+    fn open_positions_specs_keep_raw_price_mode() {
+        let node = TradeFlowNode {
+            key: "trigger_open".to_string(),
+            node_type: "trigger.open_positions".to_string(),
+            config: json!({
+                "marketSlug": "epl-test",
+                "outcomeConditions": [{
+                    "tokenId": "tok-yes",
+                    "triggerCondition": "cross_above",
+                    "triggerPriceCent": 55
+                }]
+            }),
+        };
+
+        let specs = open_position_ws_price_node_specs(&node, &json!({}));
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].price_mode, WsPriceMode::Raw);
     }
 
     #[test]
@@ -9343,6 +9602,173 @@ mod dual_dca_tests {
 
         let extracted = extract_price_from_market_events(&events_with_asset, "tok-yes");
         assert_eq!(extracted, Some((0.71, Some(12345))));
+    }
+
+    #[test]
+    fn extract_price_midpoint_mode_prefers_best_bid_ask_over_price_changes() {
+        let events = vec![WsEvent {
+            channel: WsChannel::Market,
+            payload: json!({
+                "asset_id": "tok-yes",
+                "best_bid": "0.57",
+                "best_ask": "0.59",
+                "price_changes": [
+                    { "asset_id": "tok-yes", "price": "0.14", "timestamp": 12345 }
+                ]
+            }),
+            event_type: WsEventType::PriceChange,
+            market: Some("tok-yes".to_string()),
+            order_id: None,
+            fill_id: None,
+            status: None,
+            price: None,
+            size: None,
+            ts: Some(12345),
+        }];
+
+        let raw = extract_price_from_market_events_with_mode(&events, "tok-yes", WsPriceMode::Raw);
+        assert_eq!(
+            raw,
+            Some(ExtractedWsPrice {
+                price: 0.14,
+                ts: Some(12345),
+                source: "price_changes",
+            })
+        );
+
+        let midpoint =
+            extract_price_from_market_events_with_mode(&events, "tok-yes", WsPriceMode::Midpoint);
+        assert_eq!(
+            midpoint,
+            Some(ExtractedWsPrice {
+                price: 0.58,
+                ts: Some(12345),
+                source: "best_bid_ask",
+            })
+        );
+    }
+
+    #[test]
+    fn ws_price_mode_parse_best_bid_ask_aliases() {
+        assert_eq!(WsPriceMode::parse(Some("best_bid"), WsPriceMode::Midpoint), WsPriceMode::BestBid);
+        assert_eq!(WsPriceMode::parse(Some("bid"), WsPriceMode::Midpoint), WsPriceMode::BestBid);
+        assert_eq!(WsPriceMode::parse(Some("best_ask"), WsPriceMode::Midpoint), WsPriceMode::BestAsk);
+        assert_eq!(WsPriceMode::parse(Some("ask"), WsPriceMode::Midpoint), WsPriceMode::BestAsk);
+        assert_eq!(WsPriceMode::parse(Some("BEST_BID"), WsPriceMode::Midpoint), WsPriceMode::BestBid);
+        assert_eq!(WsPriceMode::parse(Some(" Best_Ask "), WsPriceMode::Midpoint), WsPriceMode::BestAsk);
+        assert_eq!(WsPriceMode::parse(Some("BID"), WsPriceMode::Midpoint), WsPriceMode::BestBid);
+        assert_eq!(WsPriceMode::parse(Some("ASK"), WsPriceMode::Midpoint), WsPriceMode::BestAsk);
+    }
+
+    #[test]
+    fn extract_price_best_bid_mode_returns_bid_only() {
+        let events = vec![WsEvent {
+            channel: WsChannel::Market,
+            payload: json!({
+                "asset_id": "tok-yes",
+                "best_bid": "0.57",
+                "best_ask": "0.59",
+            }),
+            event_type: WsEventType::PriceChange,
+            market: Some("tok-yes".to_string()),
+            order_id: None,
+            fill_id: None,
+            status: None,
+            price: None,
+            size: None,
+            ts: Some(12345),
+        }];
+
+        let best_bid = extract_price_from_market_events_with_mode(
+            &events, "tok-yes", WsPriceMode::BestBid,
+        );
+        assert_eq!(
+            best_bid,
+            Some(ExtractedWsPrice {
+                price: 0.57,
+                ts: Some(12345),
+                source: "best_bid",
+            })
+        );
+    }
+
+    #[test]
+    fn extract_price_best_ask_mode_returns_ask_only() {
+        let events = vec![WsEvent {
+            channel: WsChannel::Market,
+            payload: json!({
+                "asset_id": "tok-yes",
+                "best_bid": "0.57",
+                "best_ask": "0.59",
+            }),
+            event_type: WsEventType::PriceChange,
+            market: Some("tok-yes".to_string()),
+            order_id: None,
+            fill_id: None,
+            status: None,
+            price: None,
+            size: None,
+            ts: Some(12345),
+        }];
+
+        let best_ask = extract_price_from_market_events_with_mode(
+            &events, "tok-yes", WsPriceMode::BestAsk,
+        );
+        assert_eq!(
+            best_ask,
+            Some(ExtractedWsPrice {
+                price: 0.59,
+                ts: Some(12345),
+                source: "best_ask",
+            })
+        );
+    }
+
+    #[test]
+    fn extract_price_best_bid_from_price_changes() {
+        let events = vec![WsEvent {
+            channel: WsChannel::Market,
+            payload: json!({
+                "price_changes": [{
+                    "asset_id": "tok-yes",
+                    "best_bid": "0.45",
+                    "best_ask": "0.47",
+                    "timestamp": 99999
+                }]
+            }),
+            event_type: WsEventType::PriceChange,
+            market: None,
+            order_id: None,
+            fill_id: None,
+            status: None,
+            price: None,
+            size: None,
+            ts: Some(88888),
+        }];
+
+        let bid = extract_price_from_market_events_with_mode(
+            &events, "tok-yes", WsPriceMode::BestBid,
+        );
+        assert_eq!(
+            bid,
+            Some(ExtractedWsPrice {
+                price: 0.45,
+                ts: Some(99999),
+                source: "best_bid",
+            })
+        );
+
+        let ask = extract_price_from_market_events_with_mode(
+            &events, "tok-yes", WsPriceMode::BestAsk,
+        );
+        assert_eq!(
+            ask,
+            Some(ExtractedWsPrice {
+                price: 0.47,
+                ts: Some(99999),
+                source: "best_ask",
+            })
+        );
     }
 
     #[test]
@@ -9763,18 +10189,23 @@ mod dual_dca_tests {
 mod confirmation_gate_tests {
     use super::*;
 
-    fn test_node_spec(trigger_condition: &str, trigger_price: f64, confirmation_ms: i64) -> WsOpenPositionPriceNodeSpec {
+    fn test_node_spec(
+        trigger_condition: &str,
+        trigger_price: f64,
+        confirmation_ms: i64,
+    ) -> WsOpenPositionPriceNodeSpec {
         WsOpenPositionPriceNodeSpec {
             node_key: "trigger_1".to_string(),
             node_type: "trigger.market_price".to_string(),
             once_mode: true,
             once_scope_market: false,
             auto_scope: true,
+            price_mode: WsPriceMode::Midpoint,
             market_slug: Some("btc-updown-5m-test".to_string()),
             token_id: "tok-yes-123".to_string(),
             trigger_condition: trigger_condition.to_string(),
             trigger_price,
-            confirmation_ms,
+            confirmation_ms: Some(confirmation_ms),
         }
     }
 
@@ -9787,7 +10218,12 @@ mod confirmation_gate_tests {
         let cpend_prev_key = format!("cross_pending_prev_{}", node.token_id);
 
         // Simulate: a cross was pending
-        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!("2026-01-01T00:00:00Z"));
+        set_flow_node_state(
+            &mut context,
+            &node.node_key,
+            &cpend_at_key,
+            json!("2026-01-01T00:00:00Z"),
+        );
         set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.81));
         set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
 
@@ -9832,17 +10268,30 @@ mod confirmation_gate_tests {
 
         // Re-entry: new cross detected, set fresh timestamp
         let new_ts = Utc::now().to_rfc3339();
-        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(new_ts.clone()));
+        set_flow_node_state(
+            &mut context,
+            &node.node_key,
+            &cpend_at_key,
+            json!(new_ts.clone()),
+        );
         set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.82));
         set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
 
         // Assert new timestamp is different from old (timer restarted)
         let stored = flow_node_state_string(&context, &node.node_key, &cpend_at_key).unwrap();
-        assert_ne!(stored, old_ts, "New pending timestamp must differ from old (timer restarted)");
+        assert_ne!(
+            stored, old_ts,
+            "New pending timestamp must differ from old (timer restarted)"
+        );
         // New timestamp should be very recent (within 2 seconds)
-        let parsed = DateTime::parse_from_rfc3339(&stored).unwrap().with_timezone(&Utc);
+        let parsed = DateTime::parse_from_rfc3339(&stored)
+            .unwrap()
+            .with_timezone(&Utc);
         let elapsed = Utc::now().signed_duration_since(parsed);
-        assert!(elapsed.num_seconds() < 2, "Re-entry timestamp should be near-zero elapsed");
+        assert!(
+            elapsed.num_seconds() < 2,
+            "Re-entry timestamp should be near-zero elapsed"
+        );
     }
 
     #[test]
@@ -9860,16 +10309,29 @@ mod confirmation_gate_tests {
         let mut context = json!({});
         let cpend_at_key = format!("cross_pending_at_{}", node.token_id);
 
-        // With auto_scope + once_mode + confirmation_ms > 0, crossed enters gate (not immediately enqueued)
+        // With explicit confirmationMs > 0, crossed enters gate (not immediately enqueued)
         let should_enqueue_immediately = false; // confirmation gate defers enqueue
-        let enter_gate = crossed && node.auto_scope && node.once_mode && node.confirmation_ms > 0;
-        assert!(enter_gate, "first_tick_threshold + auto_scope + once_mode + confirmation_ms should enter gate");
-        assert!(!should_enqueue_immediately, "Timer started — should NOT enqueue immediately");
+        let enter_gate = crossed && market_price_confirmation_ms(&node).is_some();
+        assert!(
+            enter_gate,
+            "first_tick_threshold + explicit confirmation_ms should enter gate"
+        );
+        assert!(
+            !should_enqueue_immediately,
+            "Timer started — should NOT enqueue immediately"
+        );
 
         // Simulate timer start
-        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(Utc::now().to_rfc3339()));
-        assert!(flow_node_state_string(&context, &node.node_key, &cpend_at_key).is_some(),
-            "cross_pending_at should be set when entering confirmation gate");
+        set_flow_node_state(
+            &mut context,
+            &node.node_key,
+            &cpend_at_key,
+            json!(Utc::now().to_rfc3339()),
+        );
+        assert!(
+            flow_node_state_string(&context, &node.node_key, &cpend_at_key).is_some(),
+            "cross_pending_at should be set when entering confirmation gate"
+        );
     }
 
     #[test]
@@ -9882,7 +10344,12 @@ mod confirmation_gate_tests {
 
         // cross_pending_at was set 16s ago (past the 15000ms confirmation threshold)
         let pending_ts = (Utc::now() - ChronoDuration::seconds(16)).to_rfc3339();
-        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(pending_ts.clone()));
+        set_flow_node_state(
+            &mut context,
+            &node.node_key,
+            &cpend_at_key,
+            json!(pending_ts.clone()),
+        );
         set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.82));
         set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
 
@@ -9893,18 +10360,27 @@ mod confirmation_gate_tests {
 
         // Check elapsed time
         let stored_ts = flow_node_state_string(&context, &node.node_key, &cpend_at_key).unwrap();
-        let pending_at = DateTime::parse_from_rfc3339(&stored_ts).unwrap().with_timezone(&Utc);
-        let elapsed_ms = Utc::now().signed_duration_since(pending_at).num_milliseconds();
+        let pending_at = DateTime::parse_from_rfc3339(&stored_ts)
+            .unwrap()
+            .with_timezone(&Utc);
+        let elapsed_ms = Utc::now()
+            .signed_duration_since(pending_at)
+            .num_milliseconds();
+        let confirmation_ms = market_price_confirmation_ms(&node).unwrap();
         assert!(
-            elapsed_ms >= node.confirmation_ms,
+            elapsed_ms >= confirmation_ms,
             "Elapsed {}ms should be >= confirmation_ms {}ms",
             elapsed_ms,
-            node.confirmation_ms
+            confirmation_ms
         );
 
         // Gate fires: should_enqueue = true, eval_mode = "cross_confirmed"
-        let should_enqueue = elapsed_ms >= node.confirmation_ms;
-        let final_eval_mode = if should_enqueue { "cross_confirmed" } else { "pending" };
+        let should_enqueue = elapsed_ms >= confirmation_ms;
+        let final_eval_mode = if should_enqueue {
+            "cross_confirmed"
+        } else {
+            "pending"
+        };
         assert!(should_enqueue, "Should enqueue after sustained zone time");
         assert_eq!(final_eval_mode, "cross_confirmed");
 
@@ -9925,7 +10401,12 @@ mod confirmation_gate_tests {
 
         // Step 1: Cross detected — set pending with timestamp 8 seconds ago
         let first_pending_ts = (Utc::now() - ChronoDuration::seconds(8)).to_rfc3339();
-        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(first_pending_ts.clone()));
+        set_flow_node_state(
+            &mut context,
+            &node.node_key,
+            &cpend_at_key,
+            json!(first_pending_ts.clone()),
+        );
         set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.81));
         set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
 
@@ -9939,25 +10420,54 @@ mod confirmation_gate_tests {
 
         // Step 3: New cross — set fresh pending timestamp (near-zero elapsed)
         let second_pending_ts = Utc::now().to_rfc3339();
-        set_flow_node_state(&mut context, &node.node_key, &cpend_at_key, json!(second_pending_ts.clone()));
+        set_flow_node_state(
+            &mut context,
+            &node.node_key,
+            &cpend_at_key,
+            json!(second_pending_ts.clone()),
+        );
         set_flow_node_state(&mut context, &node.node_key, &cpend_price_key, json!(0.82));
         set_flow_node_state(&mut context, &node.node_key, &cpend_prev_key, json!(0.79));
 
         // Assert: elapsed from second entry is near-zero (not accumulated from first 8s entry)
         let stored = flow_node_state_string(&context, &node.node_key, &cpend_at_key).unwrap();
-        assert_ne!(stored, first_pending_ts, "Second entry must use fresh timestamp, not old one");
-        let second_pending_at = DateTime::parse_from_rfc3339(&stored).unwrap().with_timezone(&Utc);
-        let elapsed_ms = Utc::now().signed_duration_since(second_pending_at).num_milliseconds();
+        assert_ne!(
+            stored, first_pending_ts,
+            "Second entry must use fresh timestamp, not old one"
+        );
+        let second_pending_at = DateTime::parse_from_rfc3339(&stored)
+            .unwrap()
+            .with_timezone(&Utc);
+        let elapsed_ms = Utc::now()
+            .signed_duration_since(second_pending_at)
+            .num_milliseconds();
         assert!(
             elapsed_ms < 2_000,
             "Elapsed from re-entry should be near-zero (got {}ms), not accumulated from first entry (8s)",
             elapsed_ms
         );
         assert!(
-            elapsed_ms < node.confirmation_ms,
+            elapsed_ms < market_price_confirmation_ms(&node).unwrap(),
             "Should not have fired yet — confirmation_ms={} not yet elapsed",
-            node.confirmation_ms
+            market_price_confirmation_ms(&node).unwrap()
         );
+    }
+
+    #[test]
+    fn market_price_confirmation_ms_helper_is_explicit_only_and_mode_agnostic() {
+        let mut fixed_once = test_node_spec("cross_above", 0.80, 250);
+        fixed_once.auto_scope = false; // fixed market mode
+        assert_eq!(market_price_confirmation_ms(&fixed_once), Some(250));
+
+        fixed_once.confirmation_ms = None;
+        assert_eq!(market_price_confirmation_ms(&fixed_once), None);
+
+        fixed_once.confirmation_ms = Some(0);
+        assert_eq!(market_price_confirmation_ms(&fixed_once), None);
+
+        fixed_once.confirmation_ms = Some(250);
+        fixed_once.node_type = "trigger.open_positions".to_string();
+        assert_eq!(market_price_confirmation_ms(&fixed_once), None);
     }
 
     // ---------------------------------------------------------------------------
@@ -9997,7 +10507,10 @@ mod confirmation_gate_tests {
             "cross_above",
             false, // once_mode=true → allow_first_tick_threshold=false
         );
-        assert!(!would_cross, "Pre-confirmed in-zone prices must NOT produce a new cross (got mode={mode})");
+        assert!(
+            !would_cross,
+            "Pre-confirmed in-zone prices must NOT produce a new cross (got mode={mode})"
+        );
         assert_eq!(mode, "no_cross");
 
         // Verify that the cross_confirmed detection logic works:
@@ -10005,17 +10518,26 @@ mod confirmation_gate_tests {
         let ws_sourced = true;
         let ws_evaluation_mode = "cross_confirmed";
         let ws_cross_confirmed = ws_sourced && ws_evaluation_mode == "cross_confirmed";
-        assert!(ws_cross_confirmed, "ws_cross_confirmed must be true when wsEvaluationMode=cross_confirmed");
+        assert!(
+            ws_cross_confirmed,
+            "ws_cross_confirmed must be true when wsEvaluationMode=cross_confirmed"
+        );
 
         // And verify that WITHOUT ws_cross_confirmed, the trigger would silently fail
         let without_short_circuit_pass = would_cross; // false from above
-        assert!(!without_short_circuit_pass, "Without short-circuit, trigger would silently fail");
+        assert!(
+            !without_short_circuit_pass,
+            "Without short-circuit, trigger would silently fail"
+        );
 
         // With the short-circuit, pass is set to true directly (tested implicitly
         // by the production code path - this test validates the invariants the
         // short-circuit relies on).
         let with_short_circuit_pass = ws_cross_confirmed; // true
-        assert!(with_short_circuit_pass, "With short-circuit, trigger must fire when cross_confirmed");
+        assert!(
+            with_short_circuit_pass,
+            "With short-circuit, trigger must fire when cross_confirmed"
+        );
     }
 
     #[test]
@@ -10028,17 +10550,25 @@ mod confirmation_gate_tests {
         let mode_cross_detected = "cross_detected";
         let mode_first_tick = "first_tick_threshold";
 
-        assert!(!( ws_sourced && mode_absent == "cross_confirmed"),
-            "Empty evaluation mode must not trigger short-circuit");
-        assert!(!(ws_sourced && mode_cross_detected == "cross_confirmed"),
-            "cross_detected must not trigger short-circuit (handled normally)");
-        assert!(!(ws_sourced && mode_first_tick == "cross_confirmed"),
-            "first_tick_threshold must not trigger short-circuit");
+        assert!(
+            !(ws_sourced && mode_absent == "cross_confirmed"),
+            "Empty evaluation mode must not trigger short-circuit"
+        );
+        assert!(
+            !(ws_sourced && mode_cross_detected == "cross_confirmed"),
+            "cross_detected must not trigger short-circuit (handled normally)"
+        );
+        assert!(
+            !(ws_sourced && mode_first_tick == "cross_confirmed"),
+            "first_tick_threshold must not trigger short-circuit"
+        );
 
         // Non-WS steps also must not trigger short-circuit
         let not_ws_sourced = false;
-        assert!(!(not_ws_sourced && "cross_confirmed" == "cross_confirmed"),
-            "Non-WS steps must not trigger short-circuit even if mode says cross_confirmed");
+        assert!(
+            !(not_ws_sourced && "cross_confirmed" == "cross_confirmed"),
+            "Non-WS steps must not trigger short-circuit even if mode says cross_confirmed"
+        );
     }
 
     #[test]
@@ -10114,12 +10644,20 @@ mod price_integrity_tests {
         });
         // Per-token key absent — lookup must return None (PRCE-01 guarantee)
         let result = flow_node_state(&context, node_key, &prev_key).and_then(value_as_f64);
-        assert!(result.is_none(), "Must not fall back to bare previous_price; got {:?}", result);
+        assert!(
+            result.is_none(),
+            "Must not fall back to bare previous_price; got {:?}",
+            result
+        );
 
         // Now set per-token key — lookup must return its value
         set_flow_node_state(&mut context, node_key, &prev_key, json!(0.42));
         let result2 = flow_node_state(&context, node_key, &prev_key).and_then(value_as_f64);
-        assert_eq!(result2, Some(0.42), "Per-token key must be returned when present");
+        assert_eq!(
+            result2,
+            Some(0.42),
+            "Per-token key must be returned when present"
+        );
     }
 
     #[test]
@@ -10136,7 +10674,11 @@ mod price_integrity_tests {
         });
         set_flow_node_state(&mut context, node_key, &prev_key, json!(0.42));
         let result = flow_node_state(&context, node_key, &prev_key).and_then(value_as_f64);
-        assert_eq!(result, Some(0.42), "Per-token key lookup must return stored value");
+        assert_eq!(
+            result,
+            Some(0.42),
+            "Per-token key lookup must return stored value"
+        );
     }
 
     #[test]
@@ -10162,7 +10704,11 @@ mod price_integrity_tests {
 
         // tok-B lookup must return None — no cross-token contamination
         let result_b = flow_node_state(&context, node_key, &key_b).and_then(value_as_f64);
-        assert!(result_b.is_none(), "tok-B must not get tok-A's price; got {:?}", result_b);
+        assert!(
+            result_b.is_none(),
+            "tok-B must not get tok-A's price; got {:?}",
+            result_b
+        );
     }
 }
 
@@ -11279,36 +11825,192 @@ async fn fetch_current_token_price(
 }
 
 pub(crate) async fn fetch_price_from_market_ws(ws: &ClobWsClient, token_id: &str) -> Option<f64> {
+    fetch_price_from_market_ws_with_mode(ws, token_id, WsPriceMode::Raw).await
+}
+
+async fn fetch_price_from_market_ws_with_mode(
+    ws: &ClobWsClient,
+    token_id: &str,
+    mode: WsPriceMode,
+) -> Option<f64> {
     let events = ws
         .subscribe_once(WsChannel::Market, &[token_id.to_string()])
         .await
         .ok()?;
-    extract_price_from_market_events(&events, token_id).map(|(price, _)| price)
+    extract_price_from_market_events_with_mode(&events, token_id, mode).map(|value| value.price)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ExtractedWsPrice {
+    price: f64,
+    ts: Option<i64>,
+    source: &'static str,
 }
 
 fn extract_price_from_market_events(
     events: &[WsEvent],
     token_id: &str,
 ) -> Option<(f64, Option<i64>)> {
+    extract_price_from_market_events_with_mode(events, token_id, WsPriceMode::Raw)
+        .map(|value| (value.price, value.ts))
+}
+
+fn extract_price_from_market_events_with_mode(
+    events: &[WsEvent],
+    token_id: &str,
+    mode: WsPriceMode,
+) -> Option<ExtractedWsPrice> {
+    match mode {
+        WsPriceMode::Midpoint => extract_price_from_market_events_midpoint(events, token_id),
+        WsPriceMode::Raw => extract_price_from_market_events_raw(events, token_id),
+        WsPriceMode::BestBid | WsPriceMode::BestAsk => {
+            extract_price_from_market_events_book_side(events, token_id, mode)
+        }
+    }
+}
+
+fn extract_price_from_market_events_midpoint(
+    events: &[WsEvent],
+    token_id: &str,
+) -> Option<ExtractedWsPrice> {
     let matches_token = |ev: &WsEvent| -> bool {
         ev.market.as_deref() == Some(token_id)
-            || ev
-                .payload
-                .get("asset_id")
-                .and_then(|v| v.as_str())
-                == Some(token_id)
+            || ev.payload.get("asset_id").and_then(|v| v.as_str()) == Some(token_id)
+    };
+
+    for event in events.iter().rev() {
+        if matches_token(event) {
+            if let Some(price) = extract_midpoint_from_payload(&event.payload) {
+                return Some(ExtractedWsPrice {
+                    price,
+                    ts: event.ts,
+                    source: "best_bid_ask",
+                });
+            }
+        }
+
+        if let Some(changes) = event
+            .payload
+            .get("price_changes")
+            .and_then(|v| v.as_array())
+        {
+            for change in changes.iter().rev() {
+                let Some(asset_id) = change.get("asset_id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if asset_id != token_id {
+                    continue;
+                }
+                if let Some(price) = extract_midpoint_from_payload(change) {
+                    let ts = change
+                        .get("timestamp")
+                        .or_else(|| change.get("ts"))
+                        .and_then(value_as_i64)
+                        .or(event.ts);
+                    return Some(ExtractedWsPrice {
+                        price,
+                        ts,
+                        source: "best_bid_ask",
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_price_from_market_events_book_side(
+    events: &[WsEvent],
+    token_id: &str,
+    side: WsPriceMode,
+) -> Option<ExtractedWsPrice> {
+    let extract_fn: fn(&Value) -> Option<f64> = match side {
+        WsPriceMode::BestBid => extract_bid_from_payload,
+        WsPriceMode::BestAsk => extract_ask_from_payload,
+        _ => return None,
+    };
+
+    let source: &'static str = match side {
+        WsPriceMode::BestBid => "best_bid",
+        WsPriceMode::BestAsk => "best_ask",
+        _ => "unknown",
+    };
+
+    let matches_token = |ev: &WsEvent| -> bool {
+        ev.market.as_deref() == Some(token_id)
+            || ev.payload.get("asset_id").and_then(|v| v.as_str()) == Some(token_id)
+    };
+
+    for event in events.iter().rev() {
+        if matches_token(event) {
+            if let Some(price) = extract_fn(&event.payload) {
+                return Some(ExtractedWsPrice {
+                    price,
+                    ts: event.ts,
+                    source,
+                });
+            }
+        }
+
+        if let Some(changes) = event
+            .payload
+            .get("price_changes")
+            .and_then(|v| v.as_array())
+        {
+            for change in changes.iter().rev() {
+                let Some(asset_id) = change.get("asset_id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if asset_id != token_id {
+                    continue;
+                }
+                if let Some(price) = extract_fn(change) {
+                    let ts = change
+                        .get("timestamp")
+                        .or_else(|| change.get("ts"))
+                        .and_then(value_as_i64)
+                        .or(event.ts);
+                    return Some(ExtractedWsPrice {
+                        price,
+                        ts,
+                        source,
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_price_from_market_events_raw(
+    events: &[WsEvent],
+    token_id: &str,
+) -> Option<ExtractedWsPrice> {
+    let matches_token = |ev: &WsEvent| -> bool {
+        ev.market.as_deref() == Some(token_id)
+            || ev.payload.get("asset_id").and_then(|v| v.as_str()) == Some(token_id)
     };
 
     for event in events.iter().rev() {
         if let Some(price) = event.price {
             if matches_token(event) {
-                return Some((price, event.ts));
+                return Some(ExtractedWsPrice {
+                    price,
+                    ts: event.ts,
+                    source: "event_price",
+                });
             }
         }
 
         if matches_token(event) {
             if let Some(price) = parse_json_number(event.payload.get("price")) {
-                return Some((price, event.ts));
+                return Some(ExtractedWsPrice {
+                    price,
+                    ts: event.ts,
+                    source: "payload_price",
+                });
             }
         }
 
@@ -11330,21 +12032,52 @@ fn extract_price_from_market_events(
                         .or_else(|| change.get("ts"))
                         .and_then(value_as_i64)
                         .or(event.ts);
-                    return Some((price, ts));
+                    return Some(ExtractedWsPrice {
+                        price,
+                        ts,
+                        source: "price_changes",
+                    });
                 }
             }
         }
 
         if matches_token(event) {
-            let bid = parse_json_number(event.payload.get("best_bid"));
-            let ask = parse_json_number(event.payload.get("best_ask"));
-            if let (Some(bid), Some(ask)) = (bid, ask) {
-                return Some(((bid + ask) / 2.0, event.ts));
+            if let Some(price) = extract_midpoint_from_payload(&event.payload) {
+                return Some(ExtractedWsPrice {
+                    price,
+                    ts: event.ts,
+                    source: "best_bid_ask",
+                });
             }
         }
     }
 
     None
+}
+
+fn extract_bid_from_payload(payload: &Value) -> Option<f64> {
+    parse_json_number(
+        payload
+            .get("best_bid")
+            .or_else(|| payload.get("bestBid"))
+            .or_else(|| payload.get("bid")),
+    )
+}
+
+fn extract_ask_from_payload(payload: &Value) -> Option<f64> {
+    parse_json_number(
+        payload
+            .get("best_ask")
+            .or_else(|| payload.get("bestAsk"))
+            .or_else(|| payload.get("ask")),
+    )
+}
+
+fn extract_midpoint_from_payload(payload: &Value) -> Option<f64> {
+    match (extract_bid_from_payload(payload), extract_ask_from_payload(payload)) {
+        (Some(bid), Some(ask)) => Some((bid + ask) / 2.0),
+        _ => None,
+    }
 }
 
 fn parse_json_number(value: Option<&serde_json::Value>) -> Option<f64> {

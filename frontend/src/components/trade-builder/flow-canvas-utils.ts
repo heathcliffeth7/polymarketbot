@@ -188,9 +188,13 @@ export function buildPlaceOrderPresetConfig(
   kind: PlaceOrderPresetKind,
   seed: PlaceOrderPresetSeed
 ): Record<string, unknown> {
+  const isQuickPresetBuySell =
+    kind === 'sell_current_position' || kind === 'buy_current_position';
   const config: Record<string, unknown> = {
+    presetKind: kind,
     side: kind === 'sell_current_position' ? 'sell' : kind === 'buy_current_position' ? 'buy' : '',
-    executionMode: kind === 'place_order' ? '' : 'limit',
+    executionMode: isQuickPresetBuySell ? 'market' : kind === 'place_order' ? '' : 'limit',
+    kind: 'immediate',
     sizeMode: 'pct',
     sizePct: 100,
     minPriceDistanceCent: 1,

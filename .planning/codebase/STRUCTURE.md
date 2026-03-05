@@ -6,276 +6,228 @@
 
 ```
 polymarketbot/
-├── crates/                      # Rust workspace (4 crates)
-│   ├── bot-core/                # Pure domain: types, state machine, risk, strategy
+├── crates/                    # Workspace with 4 Rust crates
+│   ├── bot-core/              # Domain: state machine, strategy, risk (zero I/O)
 │   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── types.rs         # TradeState enum, ExecutionMode, etc.
-│   │       ├── state_machine.rs # State transitions rules
-│   │       ├── risk.rs          # RiskPolicy trait, DefaultRiskPolicy
-│   │       ├── strategy.rs      # Strategy trait implementations
-│   │       └── market_cycle.rs  # Market cycle identifier
-│   ├── bot-infra/               # Infrastructure & integrations
+│   │       ├── lib.rs         # Re-exports
+│   │       ├── types.rs       # TradeState enum, ExecutionMode, OrderStatus
+│   │       ├── state_machine.rs  # can_transition() validator
+│   │       ├── strategy.rs    # Strategy trait, PriceThresholdStrategy
+│   │       ├── risk.rs        # RiskPolicy trait, DefaultRiskPolicy
+│   │       └── market_cycle.rs  # MarketCycleId and cycle utilities
+│   ├── bot-infra/             # Infrastructure: DB, WebSocket, REST clients
 │   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── contracts.rs     # OrderExecutor, StateRepository traits
-│   │       ├── db.rs            # PostgresRepository implementation
-│   │       ├── exchange.rs      # CLOB REST client
-│   │       ├── market_data.rs   # MarketDataProvider trait
-│   │       ├── ws.rs            # WebSocket client (CLOB)
-│   │       ├── config.rs        # Config structs (TOML parsing)
-│   │       ├── signer.rs        # EIP-712 signing, HMAC headers
-│   │       ├── claim.rs         # Auto-claim service for resolved positions
-│   │       └── reconcile.rs     # Fill event + snapshot merging
-│   ├── bot-runner/              # Orchestration & main loop
+│   │       ├── lib.rs         # Re-exports
+│   │       ├── db.rs          # PostgresRepository, TradeFlowRuntime, queries
+│   │       ├── ws.rs          # ClobWsClient, WsEvent, WebSocket parsing
+│   │       ├── market_data.rs # MarketDataProvider trait, snapshot logic
+│   │       ├── exchange.rs    # ClobRestClient, GammaClient, REST calls
+│   │       ├── signer.rs      # EIP-712 signing, HMAC headers
+│   │       ├── config.rs      # AppConfig loading, encryption/decryption
+│   │       ├── contracts.rs   # StateRepository, OrderExecutor traits
+│   │       ├── claim.rs       # AutoClaimService for resolved positions
+│   │       └── reconcile.rs   # reconcile_tick_and_snapshot() dedup logic
+│   ├── bot-runner/            # Orchestration: main loop, flow executor
 │   │   └── src/
-│   │       ├── main.rs          # Entry point, market discovery, scheduler
-│   │       └── dca.rs           # Dollar-cost averaging logic
-│   └── mock-exchange/           # Test fixture (axum server)
-│       └── src/lib.rs
-├── frontend/                    # Next.js 16 dashboard & trade builder
+│   │       ├── main.rs        # 8500+ lines: event loop, trigger eval, flow DAG
+│   │       └── dca.rs         # Dual-side DCA order building
+│   └── mock-exchange/         # Test fixture: Axum mock CLOB server
+│       └── src/
+│           └── lib.rs         # Mock endpoints
+├── frontend/                  # Next.js 16 frontend
 │   ├── src/
-│   │   ├── app/                 # Next.js app router
-│   │   │   ├── layout.tsx       # Root layout with AppShell
-│   │   │   ├── page.tsx         # Dashboard page
-│   │   │   ├── login/           # Login page
-│   │   │   ├── control/         # Bot control page
-│   │   │   ├── settings/        # Configuration page
-│   │   │   ├── trade-builder/   # Visual flow editor
-│   │   │   └── api/             # Backend API routes (50+ endpoints)
-│   │   │       ├── auth/        # Login/logout
-│   │   │       ├── bot/         # Bot status/control
-│   │   │       ├── trades/      # Trade queries
-│   │   │       ├── orders/      # Order queries
-│   │   │       ├── fills/       # Fill queries
-│   │   │       ├── markets/     # Market listing
-│   │   │       ├── trade-builder/  # Workflow CRUD
-│   │   │       ├── trade-flow/  # Flow definition CRUD
-│   │   │       ├── dashboard/   # Summary stats
-│   │   │       └── (other endpoints...)
-│   │   ├── components/          # React components
-│   │   │   ├── layout/          # AppShell, nav, sidebar
-│   │   │   ├── dashboard/       # Trade summary, charts
-│   │   │   ├── control/         # Bot control buttons
-│   │   │   ├── settings/        # Config editor
-│   │   │   ├── trade-builder/   # Flow canvas (@xyflow/react)
-│   │   │   └── ui/              # Radix UI + Tailwind components
-│   │   ├── hooks/               # SWR-based custom hooks
-│   │   │   ├── use-dashboard.ts
-│   │   │   ├── use-bot-status.ts
-│   │   │   ├── use-trade-builder.ts
-│   │   │   ├── use-trade-flow.ts
-│   │   │   └── (polling, canvas, config hooks)
-│   │   └── lib/                 # Utilities & queries
-│   │       ├── auth.ts          # JWT creation, cookie handling
-│   │       ├── config.ts        # Config type definitions
-│   │       ├── http-client.ts   # Fetch wrapper
-│   │       ├── db.ts            # Database connection (unused - routes use pg directly)
-│   │       ├── types.ts         # Frontend type definitions
-│   │       ├── queries/         # SQL query builders
-│   │       │   ├── trades.ts
-│   │       │   ├── orders.ts
-│   │       │   ├── fills.ts
-│   │       │   ├── trade-builder.ts
-│   │       │   ├── trade-flow.ts
-│   │       │   └── (other queries)
-│   │       ├── trade-flow-config-mappers.ts  # Graph ↔ config conversion
-│   │       └── (utility functions)
-│   ├── package.json
-│   └── tailwind.config.ts
-├── config/                      # Runtime configuration (TOML)
-│   ├── bot.toml                 # Execution mode, market scope, loop timing
-│   ├── strategy.toml            # Entry/exit params, DCA settings
-│   ├── risk.toml                # Daily loss limit, kill switch, max notional
-│   ├── execution.toml           # Order type, retry logic
-│   ├── exchange.toml            # CLOB/Gamma endpoints, encrypted creds
-│   └── claim.toml               # Auto-claim settings
-├── migrations/                  # PostgreSQL migration scripts
-├── scripts/                     # Utility scripts
-│   ├── bootstrap_db.sh          # Create database & schema
-│   ├── apply_migrations.sh      # Run migrations
-│   ├── check_health.sh          # Health check
-│   └── (other scripts)
-├── deploy/                      # Systemd service files
-│   └── systemd/
-├── mimari/                      # Architecture documentation (Turkish)
-│   ├── plan.md
-│   ├── architecture.md
-│   ├── state-machine.md
-│   └── db-schema.md
-├── .planning/codebase/          # GSD codebase analysis (this directory)
-├── Cargo.toml                   # Rust workspace definition
-├── Cargo.lock                   # Dependency lock
-└── README.md
+│   │   ├── app/               # Pages and API routes
+│   │   │   ├── api/           # 50+ API endpoints to bot-runner
+│   │   │   ├── dashboard/     # Dashboard page
+│   │   │   ├── trade-builder/ # Trade flow builder UI
+│   │   │   ├── control/       # Bot control panel
+│   │   │   └── login/         # JWT auth
+│   │   ├── components/        # React components
+│   │   │   ├── ui/            # Radix UI wrappers
+│   │   │   ├── dashboard/     # Dashboard widgets
+│   │   │   ├── trade-builder/ # Flow editor components
+│   │   │   └── layout/        # Page layout
+│   │   ├── hooks/             # SWR data hooks
+│   │   └── lib/
+│   │       └── queries/       # SQL query builders
+│   └── package.json
+├── config/                    # Runtime configuration files (TOML)
+│   ├── bot.toml               # Execution mode, market scope, loop interval
+│   ├── strategy.toml          # Entry/exit params, DCA settings, TP/SL %
+│   ├── risk.toml              # Daily loss, kill switch, max notional
+│   ├── exchange.toml          # CLOB/Gamma endpoints, encrypted credentials
+│   ├── execution.toml         # Order type, retry logic
+│   └── claim.toml             # Auto-claim settings
+├── migrations/                # PostgreSQL schema migrations
+│   ├── 001_init.sql           # Tables: markets, orders, trades, fills
+│   ├── 002_live_hardening.sql # Idempotency keys, bot_runs
+│   ├── ...
+│   ├── 010_trade_flow_engine.sql  # trade_flow_definitions, runs, steps
+│   └── 015_trade_flow_steps_claim_index.sql # Latest schema
+├── mimari/                    # Architecture documentation (Turkish)
+│   ├── plan.md                # Master plan phases
+│   ├── architecture.md        # Component overview
+│   ├── state-machine.md       # State transitions
+│   └── db-schema.md           # Database tables
+├── scripts/                   # Utility scripts
+│   ├── bootstrap_db.sh        # Create DB
+│   ├── apply_migrations.sh    # Run sqlx migrations
+│   └── check_health.sh        # Health check
+├── .claude/                   # Claude agent rules
+│   └── rules/
+│       └── rust-backend.md    # Architecture rules, traits, patterns
+├── .planning/                 # GSD planning documents (this analysis)
+│   └── codebase/
+│       ├── ARCHITECTURE.md    # This file's twin
+│       └── STRUCTURE.md       # This file
+├── Cargo.toml                 # Workspace manifest
+├── Cargo.lock                 # Dependency lock
+├── README.md                  # Overview
+└── CLAUDE.md                  # Project brief
 ```
 
 ## Directory Purposes
 
-**`crates/bot-core/src/`:**
-- Pure domain logic, zero I/O. Types, enums, state machine rules, trait definitions.
-- Key files: `types.rs` (TradeState, ExecutionMode, RiskDecision), `state_machine.rs` (transition rules), `risk.rs` (RiskPolicy), `strategy.rs` (Strategy implementations).
-- No external dependencies except chrono, serde, thiserror.
+**crates/bot-core/src/:**
+- Purpose: Pure domain logic, no dependencies on tokio or sqlx
+- Contains: State enum (11 states), strategy interfaces, risk policy interface, market cycle types
+- Key files: `types.rs` (types), `state_machine.rs` (validation), `strategy.rs` (trading logic), `risk.rs` (risk checks)
 
-**`crates/bot-infra/src/`:**
-- Infrastructure layer. Implements bot-core traits. Handles all I/O: DB, HTTP, WebSocket, signing, config.
-- Key files: `contracts.rs` (trait implementations), `db.rs` (PostgresRepository), `exchange.rs` (CLOB client), `ws.rs` (WebSocket), `config.rs` (TOML parsing), `signer.rs` (EIP-712).
-- Heavy dependency usage: tokio, sqlx, reqwest, tokio-tungstenite, ethers.
+**crates/bot-infra/src/:**
+- Purpose: Infrastructure: databases, HTTP clients, WebSocket, config, signing
+- Contains: PostgreSQL queries via sqlx, CLOB/Gamma REST clients, WebSocket subscription, AES-256 config encryption
+- Key files: `db.rs` (2000+ lines, all DB queries and ORM-like structures), `ws.rs` (WebSocket client), `exchange.rs` (REST clients)
 
-**`crates/bot-runner/src/`:**
-- Orchestration and main loops. Ties domain + infra together. Market discovery, event processing, trade state machine orchestration.
-- Entry point: `main.rs` (~1000+ lines). Also `dca.rs` for dollar-cost averaging.
-- Runs as systemd service or CLI.
+**crates/bot-runner/src/:**
+- Purpose: Main application logic coordinating everything
+- Contains: Market discovery loop, event loop for price ticks, flow DAG executor, trigger evaluation, state machine transitions
+- Key files: `main.rs` (8500+ lines, split into logical sections by comment headers), `dca.rs` (multi-leg order building)
 
-**`frontend/src/app/`:**
-- Next.js app router structure. Pages at top level, API routes in `api/` subdirectory.
-- `page.tsx`: Dashboard home. `login/page.tsx`: Authentication. `trade-builder/page.tsx`: Visual flow editor.
-- API routes proxy to PostgreSQL or trigger bot operations.
+**frontend/src/app/:**
+- Purpose: Next.js 13+ App Router pages and API routes
+- Contains: Dashboard, trade builder UI, control panel, settings, login
+- API routes: `frontend/src/app/api/` handles all bot interaction via HTTP (50+ endpoints)
 
-**`frontend/src/components/`:**
-- React components using Radix UI + Tailwind. Organized by feature (dashboard, control, settings, trade-builder).
-- `layout/app-shell.tsx`: Top-level app layout with navigation.
-- `trade-builder/`: Flow canvas editor using @xyflow/react.
+**config/:**
+- Purpose: Runtime configuration, encrypted when needed
+- Encryption: Values prefixed with `enc:v1:` are AES-256-GCM encrypted. Fallback to env var with `_env` suffix (e.g., `enc:v1:...` → `EXCHANGE_CREDS_env`)
 
-**`frontend/src/hooks/`:**
-- Custom SWR-based hooks for data fetching and polling. Coupled to API endpoints.
-- `use-dashboard.ts`: Fetch trade summary, orders, fills.
-- `use-bot-status.ts`: Poll bot health/status.
-- `use-trade-builder.ts`: Manage workflow state.
-- `use-trade-flow.ts`: Manage flow definitions.
+**migrations/:**
+- Purpose: PostgreSQL schema migrations using sqlx
+- Pattern: Numbered 001..015, applied sequentially. Table names include scope (`trade_flow_*`, `auto_claim_*`)
 
-**`frontend/src/lib/queries/`:**
-- SQL query builders for database operations in API routes. Each file corresponds to an entity (trades, orders, fills, etc.).
-- Files construct parameterized queries, not raw SQL strings in routes.
-
-**`config/`:**
-- Runtime TOML configuration files. Loaded by bot-runner on startup.
-- `bot.toml`: Scope, execution mode, timing.
-- `strategy.toml`: Signal thresholds, TP/SL, DCA.
-- `risk.toml`: Loss limits, kill switch, caps.
-- `exchange.toml`: API endpoints, encrypted credentials.
-
-**`migrations/`:**
-- PostgreSQL schema migrations. Run via `scripts/apply_migrations.sh`.
-- Creates tables: `trades`, `orders`, `fills`, `positions`, `risk_events`, `bot_runs`, `config_snapshots`, `idempotency_keys`, etc.
-
-**`deploy/systemd/`:**
-- Systemd service files for bot-runner and frontend. Enable via `systemctl --user enable`.
-
-**`mimari/`:**
-- Architecture documentation in Turkish. Detailed specs for state machine, database schema, data flow, risk policy.
+**mimari/:**
+- Purpose: Architecture documentation in Turkish (reference for developers)
+- Linked from: CLAUDE.md with `@mimari/` references
 
 ## Key File Locations
 
 **Entry Points:**
-- `crates/bot-runner/src/main.rs`: Rust backend entry point. Loads config, connects to DB/Redis/WS, spawns market cycles.
-- `frontend/src/app/page.tsx`: Next.js dashboard home page.
-- `frontend/src/app/api/auth/route.ts`: Login API endpoint.
+- `crates/bot-runner/src/main.rs`: Binary entry point. Async main() initializes config, DB pool, tokio runtime, spawns market discovery and event loops.
 
 **Configuration:**
-- `config/bot.toml`: Execution mode (Paper/Live), market scope, loop interval.
-- `config/strategy.toml`: Entry price, TP/SL %, DCA settings.
-- `config/risk.toml`: Daily loss limit, consecutive loss limit, max notional.
-- `config/exchange.toml`: CLOB/Gamma endpoints, API credentials (encrypted).
+- `crates/bot-infra/src/config.rs`: Loads TOML files, decrypts AES values, resolves env var overrides.
+- `config/bot.toml`: Execution mode (paper/live), market scope, loop interval.
+- `config/exchange.toml`: CLOB/Gamma URLs, encrypted API credentials.
 
 **Core Logic:**
-- `crates/bot-core/src/types.rs`: TradeState enum, ExecutionMode, OrderStatus, RiskDecision.
-- `crates/bot-core/src/state_machine.rs`: State transition rules via `can_transition()` function.
-- `crates/bot-core/src/risk.rs`: RiskPolicy trait, risk evaluation logic.
-- `crates/bot-core/src/strategy.rs`: Strategy trait, signal generation implementations.
+- `crates/bot-core/src/state_machine.rs`: State transition rules (11 states, 13 valid transitions).
+- `crates/bot-core/src/strategy.rs`: `PriceThresholdStrategy` implements `entry_signal()` as `current_price >= entry_price`.
+- `crates/bot-core/src/risk.rs`: `DefaultRiskPolicy` checks notional, daily loss, kill switch.
 
-**Database:**
-- `crates/bot-infra/src/db.rs`: PostgresRepository implementation. All DB queries here.
-- `crates/bot-infra/src/contracts.rs`: StateRepository trait definition & implementation.
-- `frontend/src/lib/queries/`: SQL query builders for API routes.
+**Price Trigger Logic:**
+- `crates/bot-runner/src/main.rs:234-270`: `evaluate_trigger_market_price_condition()` checks cross_above/cross_below.
+- `crates/bot-runner/src/main.rs:4170-4246`: Trigger evaluation per price tick (uses previous_price from context).
+- `crates/bot-runner/src/main.rs:3716-3784`: `sync_trigger_market_auto_scope_context()` resolves market slug + token IDs.
 
-**Frontend Components:**
-- `frontend/src/components/layout/app-shell.tsx`: Root layout, navigation, sidebar.
-- `frontend/src/components/dashboard/`: Trade summary, charts, status displays.
-- `frontend/src/components/trade-builder/`: Flow canvas, node types, utilities.
-- `frontend/src/app/login/page.tsx`: Login page (password auth).
+**Database Queries:**
+- `crates/bot-infra/src/db.rs`: All queries via `sqlx::query!()` macro (compile-time checked against schema).
+- Transactions: Wrapped with `db_tx()` for atomicity (e.g., simultaneous order + state update).
 
-**Hooks & State Management:**
-- `frontend/src/hooks/use-dashboard.ts`: Trade data polling.
-- `frontend/src/hooks/use-bot-status.ts`: Bot health polling.
-- `frontend/src/hooks/use-trade-builder.ts`: Workflow builder state.
-- `frontend/src/hooks/use-polling.ts`: Generic polling hook used by others.
+**Testing:**
+- Test fixtures: `crates/bot-runner/src/main.rs` has inline `#[cfg(test)]` sections (100+ tests).
+- Mock provider: `crates/bot-infra/src/market_data.rs:MockMarketDataProvider` simulates price stream.
 
 ## Naming Conventions
 
 **Files:**
-- Rust: `snake_case.rs` (e.g., `state_machine.rs`, `market_data.rs`)
-- TypeScript: `kebab-case.ts` for utilities, `camelCase.ts` for components (e.g., `use-dashboard.ts`, `app-shell.tsx`)
-- TOML configs: `lowercase.toml` (e.g., `bot.toml`, `strategy.toml`)
+- Rust modules: snake_case (`state_machine.rs`, `market_data.rs`).
+- Feature flags: Feature branches use prefix `feat/` (e.g., `feat/dual-dca-support`).
 
-**Directories:**
-- Rust: `snake_case` (e.g., `bot-core`, `bot-infra`, `bot-runner`)
-- TypeScript: `kebab-case` (e.g., `trade-builder`, `trade-flow`, `app-shell`)
-- Features: Named after domain concept (e.g., `trades`, `orders`, `fills`, `risk-events`)
+**Functions:**
+- Camel case operations: `evaluate_trigger_market_price_condition()`, `reconcile_tick_and_snapshot()`.
+- Prefixes: `process_*` (main loop iterations), `sync_*` (fetch/update external), `apply_*` (apply state change).
 
-**Types & Enums:**
-- Rust: PascalCase (e.g., `TradeState`, `ExecutionMode`, `RiskPolicy`)
-- TypeScript: PascalCase for types/interfaces (e.g., `Trade`, `Order`, `Fill`)
+**Variables & Types:**
+- States: PascalCase enum variants (`Idle`, `EntryPlaced`, `TpPlaced`).
+- Constants: SCREAMING_SNAKE_CASE (`DEFAULT_DROP_SELL_PCT`, `CONFIG_ENC_PREFIX`).
+- Flow context keys: snake_case strings (`"previous_price_{token_id}"`, `"market_slug"`).
 
-**Functions & Methods:**
-- Rust: `snake_case` (e.g., `transition_trade_state()`, `evaluate_risk()`)
-- TypeScript: `camelCase` (e.g., `getTradeState()`, `evaluateRisk()`)
+**Database Objects:**
+- Tables: snake_case plural (`trades`, `orders`, `trade_flow_runs`).
+- Columns: snake_case with `_at` suffix for timestamps (`filled_at`, `updated_at`).
+- Indexes: Composite names reflect columns (`orders(trade_id,status)`).
 
 ## Where to Add New Code
 
-**New Feature (e.g., New Signal Type):**
-- Primary code: `crates/bot-core/src/strategy.rs` (implement Strategy trait)
-- Config: Add params to `crates/bot-infra/src/config.rs` and `config/strategy.toml`
-- Tests: Add unit tests in strategy.rs `#[cfg(test)]` module
-- Frontend: Add UI in `frontend/src/components/settings/` if user-configurable
+**New Trigger Type (e.g., trigger.position_size):**
+1. Add enum variant to `WsEventType` in `bot-infra/src/ws.rs`.
+2. Add parsing logic in `parse_ws_event()` in `bot-runner/src/main.rs`.
+3. Add condition evaluation in `evaluate_trigger_market_price_condition()` or new `evaluate_trigger_position_size()`.
+4. Update flow specs in `open_position_ws_price_node_specs()` to handle new node type.
+5. Tests: Add inline `#[test]` section in `main.rs` testing condition logic.
 
-**New Component/Module (e.g., New Integration):**
-- Implementation: `crates/bot-infra/src/{feature}.rs`
-- Contract: Add trait to `crates/bot-infra/src/contracts.rs` if it's a core abstraction
-- Usage: Call from `crates/bot-runner/src/main.rs` main loop or from API routes
-- Tests: Add tests in feature file or `crates/bot-infra/tests/` if complex
+**New Risk Check (e.g., max_consecutive_losses):**
+1. Add field to `RiskLimits` struct in `bot-core/src/risk.rs`.
+2. Implement check in `DefaultRiskPolicy::check_pre_trade()` or `check_post_trade()`.
+3. Load config from `config/risk.toml` in `crates/bot-infra/src/config.rs`.
+4. Return `RiskDecision::Block` or `Halt` from policy.
+5. Bot-runner calls policy before order placement: check result before `OrderExecutor::place_order()`.
 
-**New API Endpoint:**
-- Implementation: `frontend/src/app/api/{feature}/route.ts`
-- Query builder: Add to `frontend/src/lib/queries/{entity}.ts` if database access needed
-- Hook: Add to `frontend/src/hooks/use-{feature}.ts` if UI needs to poll
-- Component: Add to `frontend/src/components/{feature}/` if new UI required
+**New Market Data Source (e.g., REST polling instead of WebSocket):**
+1. Create new struct implementing `MarketDataProvider` trait in `bot-infra/src/market_data.rs`.
+2. Implement `next_tick()` and `snapshot()` methods.
+3. Update bot-runner to instantiate provider based on config mode (paper vs. live).
+4. Tick flow unchanged: provider output → trigger evaluation → flow execution.
 
-**Utilities:**
-- Shared helpers: `frontend/src/lib/utils.ts`
-- Type definitions: `frontend/src/lib/types.ts`
-- HTTP utilities: `frontend/src/lib/http-client.ts`
+**New Database Table (e.g., trade_signals):**
+1. Create migration in `migrations/016_trade_signals.sql`.
+2. Define sqlx schema file or update `sqlx-data.json` (if using offline mode).
+3. Add ORM struct to `bot-infra/src/db.rs` and query methods.
+4. Call new query from bot-runner event loop as needed (e.g., after trigger fires).
 
-**Database Migrations:**
-- Create: `migrations/{YYYYMMDDHHMMSS}_{description}.sql`
-- Run: `scripts/apply_migrations.sh` applies all pending migrations
-- No down migrations—schema is forward-only
+**Frontend Page (e.g., signals dashboard):**
+1. Create file `frontend/src/app/signals/page.tsx`.
+2. Create API route `frontend/src/app/api/signals.ts` to fetch from bot-runner.
+3. Add hook in `frontend/src/hooks/useSignals.ts` using SWR for polling.
+4. Add navigation link in `frontend/src/components/layout/Navbar.tsx`.
+5. Style using Tailwind 4 + Radix UI components from `frontend/src/components/ui/`.
 
 ## Special Directories
 
-**`target/`:**
-- Purpose: Rust build artifacts. Generated by cargo.
-- Generated: Yes (created by `cargo build`)
+**target/:**
+- Purpose: Compiled binaries and artifacts (auto-generated)
+- Generated: Yes (cargo build output)
 - Committed: No (in .gitignore)
+- Release binary location: `target/release/bot-runner`
 
-**`migrations/`:**
-- Purpose: PostgreSQL migration scripts. Each file is timestamped.
-- Generated: No (manually created)
-- Committed: Yes
+**.planning/codebase/:**
+- Purpose: GSD codebase analysis documents (this directory)
+- Generated: Yes (by GSD mappers)
+- Committed: Yes (reference for future tasks)
 
-**`.planning/codebase/`:**
-- Purpose: GSD codebase analysis documents (ARCHITECTURE.md, STRUCTURE.md, etc.)
-- Generated: Yes (by gsd orchestrator)
-- Committed: Yes
+**.git/:**
+- Purpose: Git version control
+- Hooks: None configured (pre-commit hooks not installed)
 
-**`config/`:**
-- Purpose: Runtime TOML configuration. Loaded by bot-runner on startup.
-- Generated: No (created manually or via config initialization script)
-- Committed: Depends (`.example` files committed, actual values may be encrypted)
+**.claude/rules/:**
+- Purpose: Agent-readable architecture rules (YAML frontmatter style)
+- File: `rust-backend.md` with Path: field linking to relevant code
 
-**`.claude/`:**
-- Purpose: Claude Code configuration and rules.
-- Generated: No (manually maintained)
-- Committed: Yes (contains CLAUDE.md, rules/ directory)
+**config/ (runtime, not source):**
+- Purpose: Configuration consumed at bot startup
+- Committed: TOML templates, not secrets (encrypted values use `enc:v1:` prefix)
+- Secrets: Use env var fallback with `_env` suffix (never committed)
 
 ---
 

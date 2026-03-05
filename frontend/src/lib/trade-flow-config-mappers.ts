@@ -86,6 +86,32 @@ const RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME: Record<string, { asset: string; t
   xrp_5m_updown: { asset: 'xrp', timeframe: '5m' },
   xrp_15m_updown: { asset: 'xrp', timeframe: '15m' },
 };
+const QUICK_PRESET_BUY_SELL_REF_KEYS = new Set([
+  'preset_sell_current_position',
+  'preset_buy_current_position',
+]);
+const QUICK_PRESET_BUY_SELL_KINDS = new Set([
+  'sell_current_position',
+  'buy_current_position',
+]);
+const PRESET_PLACE_ORDER_KINDS = new Set([
+  'place_order',
+  ...QUICK_PRESET_BUY_SELL_KINDS,
+]);
+
+export function isPresetBuySellPlaceOrderMarker(presetKind: unknown, refKey: unknown): boolean {
+  const kind = toStringValue(presetKind).trim().toLowerCase();
+  if (QUICK_PRESET_BUY_SELL_KINDS.has(kind)) return true;
+  const ref = toStringValue(refKey).trim().toLowerCase();
+  return QUICK_PRESET_BUY_SELL_REF_KEYS.has(ref);
+}
+
+export function isPresetPlaceOrderMarker(presetKind: unknown, refKey: unknown): boolean {
+  const kind = toStringValue(presetKind).trim().toLowerCase();
+  if (PRESET_PLACE_ORDER_KINDS.has(kind)) return true;
+  const ref = toStringValue(refKey).trim().toLowerCase();
+  return ref.startsWith('preset_');
+}
 
 function normalizeResolveMarketScope(scope: unknown): { asset: string; timeframe: string } | null {
   const key = toStringValue(scope).trim().toLowerCase();
@@ -224,7 +250,19 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       ],
     },
     { key: 'minIntervalMs', label: 'Kontrol Aralığı (ms)', input: 'number', help: 'Varsayılan: 10000 (10sn). Minimum: 250ms.' },
-    { key: 'confirmationMs', label: 'Onay Süresi (ms)', input: 'number', help: 'Cross sonrası fiyatın eşikte kalması gereken süre. 0 = anında tetik.' },
+    { key: 'confirmationMs', label: 'Onay Süresi (ms)', input: 'number', help: 'Cross sonrası fiyatın eşikte kalması gereken süre. Boş = onay kapalı, 0 = anında tetik.' },
+    {
+      key: 'priceMode',
+      label: 'Fiyat Kaynağı',
+      input: 'select',
+      options: [
+        { label: 'midpoint (önerilen)', value: 'midpoint' },
+        { label: 'raw trade', value: 'raw' },
+        { label: 'best bid (satış için)', value: 'best_bid' },
+        { label: 'best ask (alış için)', value: 'best_ask' },
+      ],
+      help: 'midpoint: best bid/ask ortalaması (daha stabil). raw: WS trade/price_changes (daha oynak). best_bid: en iyi alım fiyatı (satış tetikleyici). best_ask: en iyi satım fiyatı (alış tetikleyici).',
+    },
   ],
   'trigger.sell_progress': [
     { key: 'sourceTradeId', label: 'Source Trade ID', input: 'number' },
@@ -703,6 +741,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     if (!fields.sizePct.trim()) {
       fields.sizePct = toStringValue(cfg.sizePercent);
     }
+    fields.presetKind = toStringValue(fields.presetKind || cfg.presetKind);
     const existingMode = String(fields.sizeMode ?? '').trim().toLowerCase();
     if (existingMode !== 'usdc' && existingMode !== 'pct') {
       const hasPct =
@@ -722,6 +761,34 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
       rowTarget > 0
         ? Array.from({ length: rowTarget }, (_, index) => parsedRows[index] ?? '')
         : parsedRows;
+
+    const isPresetPlaceOrder = isPresetPlaceOrderMarker(
+      fields.presetKind,
+      fields.refKey || cfg.refKey
+    );
+    const isPresetBuySell = isPresetBuySellPlaceOrderMarker(
+      fields.presetKind,
+      fields.refKey || cfg.refKey
+    );
+    if (isPresetPlaceOrder) {
+      if (!(fields.presetKind ?? '').trim()) {
+        const ref = toStringValue(fields.refKey || cfg.refKey).trim().toLowerCase();
+        if (ref === 'preset_sell_current_position') {
+          fields.presetKind = 'sell_current_position';
+        } else if (ref === 'preset_buy_current_position') {
+          fields.presetKind = 'buy_current_position';
+        } else if (ref === 'preset_place_order') {
+          fields.presetKind = 'place_order';
+        }
+      }
+      fields.kind = 'immediate';
+      fields.triggerCondition = '';
+      fields.triggerPrice = '';
+      fields.triggerPriceCent = '';
+      if (isPresetBuySell) {
+        fields.executionMode = 'market';
+      }
+    }
   }
   if (nodeType === 'action.resolve_market') {
     const legacy = normalizeResolveMarketScope(cfg.marketScope);
@@ -789,6 +856,9 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     const marketModeRaw = toStringValue(cfg.marketMode).trim().toLowerCase();
     const marketMode = marketModeRaw === 'auto_scope' ? 'auto_scope' : 'fixed';
     fields.marketMode = marketMode;
+    const priceModeRaw = toStringValue(cfg.priceMode).trim().toLowerCase();
+    const validPriceModes = ['midpoint', 'raw', 'best_bid', 'best_ask'];
+    fields.priceMode = validPriceModes.includes(priceModeRaw) ? priceModeRaw : 'midpoint';
 
     const scopeRaw = toStringValue(cfg.marketScope).trim().toLowerCase();
     if (scopeRaw && RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[scopeRaw]) {
@@ -805,9 +875,6 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     const onceScopeRaw = toStringValue(cfg.onceScope).trim().toLowerCase();
     fields.onceScope = onceScopeRaw === 'market' ? 'market' : 'run';
 
-    if (!fields.confirmationMs?.trim()) {
-      fields.confirmationMs = '50';
-    }
   }
 
   let outcomeConditionRows: OutcomeConditionRow[] = [];
@@ -934,6 +1001,11 @@ export function buildNodeConfigFromForm(
   }
 
   if (nodeType === 'action.place_order') {
+    const presetKindRaw = (form.fields.presetKind ?? '').trim();
+    if (presetKindRaw) {
+      config.presetKind = presetKindRaw;
+    }
+
     const executionModeRaw = (form.fields.executionMode ?? '').trim().toLowerCase();
     if (executionModeRaw === 'market' || executionModeRaw === 'limit') {
       config.executionMode = executionModeRaw;
@@ -972,6 +1044,17 @@ export function buildNodeConfigFromForm(
       }
     } else {
       delete config.triggerSizes;
+    }
+
+    const isPresetPlaceOrder = isPresetPlaceOrderMarker(config.presetKind, config.refKey);
+    if (isPresetPlaceOrder) {
+      config.kind = 'immediate';
+      delete config.triggerCondition;
+      delete config.triggerPrice;
+      delete config.triggerPriceCent;
+      if (isPresetBuySellPlaceOrderMarker(config.presetKind, config.refKey)) {
+        config.executionMode = 'market';
+      }
     }
   }
 
@@ -1064,6 +1147,9 @@ export function buildNodeConfigFromForm(
     const marketModeRaw = toStringValue(config.marketMode).trim().toLowerCase();
     const marketMode = marketModeRaw === 'auto_scope' ? 'auto_scope' : 'fixed';
     config.marketMode = marketMode;
+    const priceModeRaw = toStringValue(config.priceMode).trim().toLowerCase();
+    const validPriceModes2 = ['midpoint', 'raw', 'best_bid', 'best_ask'];
+    config.priceMode = validPriceModes2.includes(priceModeRaw) ? priceModeRaw : 'midpoint';
 
     const repeatModeRaw = toStringValue(config.repeatMode).trim().toLowerCase();
     config.repeatMode = repeatModeRaw === 'once' ? 'once' : 'loop';
@@ -1100,7 +1186,6 @@ export function buildNodeConfigFromForm(
 
     if (config.repeatMode !== 'once') {
       delete config.onceScope;
-      delete config.confirmationMs;
     }
   }
 

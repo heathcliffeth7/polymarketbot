@@ -14,6 +14,8 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   NODE_FIELD_SCHEMAS,
+  isPresetBuySellPlaceOrderMarker,
+  isPresetPlaceOrderMarker,
   jsonLogicToNestedExprGroup,
   type ConditionDraft,
   type DrawdownRuleRow,
@@ -28,7 +30,6 @@ import {
   NODE_FIELD_HELP_CONTENT,
   NODE_TYPE_OPTIONS,
   type FlowEdge,
-  type FlowNode,
 } from './flow-canvas-constants';
 import { normalizeDateTimeInput } from './flow-canvas-utils';
 import { ExpressionBuilder } from './flow-expression-builder';
@@ -85,7 +86,6 @@ export interface EdgeInspectorActions {
 }
 
 interface NodeInspectorPanelProps {
-  node: FlowNode;
   form: NodeConfigFormState;
   nodeKeyDraft: string;
   nodeTypeDraft: string;
@@ -154,6 +154,20 @@ export function NodeInspectorPanel({
     placeOrderSizeMode === 'pct' &&
     placeOrderTriggerRows.some((row) => row.trim().length > 0) &&
     placeOrderTriggerSum > 100.000001;
+  const isPresetPlaceOrder =
+    nodeTypeDraft === 'action.place_order' &&
+    isPresetPlaceOrderMarker(
+      form.fields.presetKind,
+      form.fields.refKey
+    );
+  const isPresetBuySellPlaceOrder =
+    nodeTypeDraft === 'action.place_order' &&
+    isPresetBuySellPlaceOrderMarker(
+      form.fields.presetKind,
+      form.fields.refKey
+    );
+  const supportsOpenPositionPicker =
+    nodeTypeDraft === 'trigger.open_positions' || nodeTypeDraft === 'action.place_order';
   const marketOutcomeByTokenId = useMemo(
     () => new Map(marketOutcomes.map((outcome) => [outcome.token_id, outcome])),
     [marketOutcomes]
@@ -163,6 +177,15 @@ export function NodeInspectorPanel({
       if (field.key === 'sizePct') return placeOrderSizeMode === 'pct';
       if (field.key === 'sizeUsdc' || field.key === 'targetNotionalUsdc') {
         return placeOrderSizeMode !== 'pct';
+      }
+      if (
+        isPresetPlaceOrder &&
+        (field.key === 'kind' ||
+          field.key === 'triggerCondition' ||
+          field.key === 'triggerPrice' ||
+          field.key === 'triggerPriceCent')
+      ) {
+        return false;
       }
     }
     if (nodeTypeDraft === 'action.dual_dca') {
@@ -178,9 +201,6 @@ export function NodeInspectorPanel({
       }
       if (field.key === 'onceScope') {
         return triggerRepeatMode === 'once';
-      }
-      if (field.key === 'confirmationMs') {
-        return triggerMarketMode === 'auto_scope' && triggerRepeatMode === 'once';
       }
     }
     return true;
@@ -242,8 +262,20 @@ export function NodeInspectorPanel({
               </Select>
             </div>
 
-            {visibleNodeSchema.map((field) => (
-              <div key={field.key} className="space-y-1">
+            {visibleNodeSchema.map((field) => {
+              const selectOptions = field.input === 'select'
+                ? (
+                  isPresetBuySellPlaceOrder && field.key === 'executionMode'
+                      ? [{ label: 'market (IOC)', value: 'market' }]
+                      : (field.options || [])
+                )
+                : [];
+              const selectValue =
+                isPresetBuySellPlaceOrder && field.key === 'executionMode'
+                    ? 'market'
+                    : (form.fields[field.key] ?? '');
+              return (
+                <div key={field.key} className="space-y-1">
                 <div className="flex items-center gap-1">
                   <Label className="text-[11px] font-medium text-slate-600">{field.label}</Label>
                   {nodeTypeDraft === 'action.dual_dca' && nodeFieldHelp[field.key] && (
@@ -290,7 +322,7 @@ export function NodeInspectorPanel({
                   </Select>
                 ) : field.input === 'select' ? (
                   <Select
-                    value={(form.fields[field.key] ?? '') || EMPTY_SELECT_SENTINEL}
+                    value={selectValue || EMPTY_SELECT_SENTINEL}
                     onValueChange={(v) =>
                       actions.onUpdateField(field.key, v === EMPTY_SELECT_SENTINEL ? '' : v)
                     }
@@ -299,7 +331,7 @@ export function NodeInspectorPanel({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {(field.options || []).map((option) => (
+                      {selectOptions.map((option) => (
                         <SelectItem
                           key={option.value || EMPTY_SELECT_SENTINEL}
                           value={option.value || EMPTY_SELECT_SENTINEL}
@@ -402,8 +434,15 @@ export function NodeInspectorPanel({
                 {field.help && (
                   <p className="text-[10px] leading-relaxed text-slate-400 italic">{field.help}</p>
                 )}
-              </div>
-            ))}
+                </div>
+              );
+            })}
+            {isPresetPlaceOrder && (
+              <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                Bu preset node tetik gelince calisir; node ici tetik kosulu kullanmaz. Al/Sat preset
+                node&apos;lar market (IOC) modunda sabittir.
+              </p>
+            )}
 
             {nodeTypeDraft === 'action.place_order' && placeOrderMaxTriggers > 1 && (
               <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
@@ -453,15 +492,16 @@ export function NodeInspectorPanel({
               </div>
             )}
 
-            {nodeTypeDraft !== 'trigger.open_positions' && (
+            {!supportsOpenPositionPicker && (
               <p className="text-[10px] leading-relaxed text-slate-400 italic">
                 Acik pozisyon listesi yalnizca{' '}
-                <span className="text-slate-700">Tetik: Mevcut Pozisyonlar</span>{' '}
-                node&apos;lari secildiginde gorunur.
+                <span className="text-slate-700">Tetik: Mevcut Pozisyonlar</span> veya{' '}
+                <span className="text-slate-700">Aksiyon: Place Order</span> node&apos;lari
+                secildiginde gorunur.
               </p>
             )}
 
-            {nodeTypeDraft === 'trigger.open_positions' && (
+            {supportsOpenPositionPicker && (
               <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
                 <div className="flex items-center gap-1.5">
                   <Wallet className="h-3.5 w-3.5 text-sky-500" />
@@ -505,7 +545,9 @@ export function NodeInspectorPanel({
                             {position.outcomeLabel}
                           </Badge>
                           <Badge variant="outline" className="text-[9px]">
-                            qty {position.size.toFixed(4)}
+                            qty {Number.isFinite(Number(position.size))
+                              ? Number(position.size).toFixed(4)
+                              : '0.0000'}
                           </Badge>
                         </div>
                         <p className="truncate text-[10px] text-slate-400">

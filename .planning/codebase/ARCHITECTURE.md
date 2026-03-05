@@ -4,165 +4,176 @@
 
 ## Pattern Overview
 
-**Overall:** Multi-crate Rust backend with deterministic state machine orchestration. Frontend (Next.js) provides dashboard and trade builder UI. Event-driven with WebSocket price feeds, REST order execution, and PostgreSQL state persistence.
+**Overall:** Event-driven, layered microservices-like Rust backend with WebSocket price streaming, deterministic state machine transitions, and trade flow DAG execution.
 
 **Key Characteristics:**
-- Strict separation of concerns: bot-core (domain logic, no I/O) → bot-infra (infrastructure contracts) → bot-runner (orchestration)
-- State transitions enforced via trait-based contracts, never raw SQL
-- Idempotent processing with event deduplication on unique `fill_id`
-- Dual-execution modes: Paper (simulated) and Live (real CLOB orders with EIP-712 signing)
-- Concurrent trade flows with locked market cycles using Redis + DB advisory locks
+- **Event-driven**: Price ticks from CLOB WebSocket drive trigger evaluation and state transitions
+- **Stateful**: Trade and flow state persisted to PostgreSQL; in-memory context for decision-making
+- **Deterministic**: State transitions validated against explicit state machine rules (11 states)
+- **Async/concurrent**: Tokio runtime with multi-threaded executor for parallel market monitoring
+- **Clean separation**: Domain logic (bot-core) isolated from infrastructure (bot-infra) and orchestration (bot-runner)
 
 ## Layers
 
-**Domain Layer (bot-core):**
-- Purpose: Pure business logic, type definitions, state machine rules. Zero I/O. Framework: `thiserror` for typed errors.
+**Domain (bot-core):**
+- Purpose: Pure business logic, zero I/O dependencies
 - Location: `crates/bot-core/src/`
-- Contains: TradeState enum (11 states), RiskPolicy trait, Strategy trait, risk evaluation functions
-- Depends on: Only std lib + chrono, serde, thiserror
-- Used by: bot-infra (trait implementations), bot-runner (state transitions & risk checks)
+- Contains: State machine rules, strategy interfaces, risk policies, types
+- Depends on: anyhow, thiserror, serde (no tokio, no sqlx)
+- Used by: bot-infra, bot-runner for decision-making
 
-**Infrastructure Layer (bot-infra):**
-- Purpose: External integrations - database, exchange API, WebSocket, configuration, signing. Implements bot-core contracts.
+**Infrastructure (bot-infra):**
+- Purpose: External integrations, data persistence, trait implementations
 - Location: `crates/bot-infra/src/`
-- Contains: PostgreSQL repository, CLOB HTTP/WS clients, market data provider, config loader, EIP-712 signer, reconciliation
-- Depends on: bot-core, sqlx, tokio, reqwest, tokio-tungstenite, ethers, redis
-- Used by: bot-runner (execution) and frontend API routes (database queries)
+- Contains: DB repository (PostgreSQL), WebSocket client (CLOB), REST clients (Gamma/Polymarket), config loading, signing
+- Depends on: tokio, sqlx, reqwest, tokio-tungstenite, bot-core
+- Used by: bot-runner for all I/O operations
 
-**Orchestration Layer (bot-runner):**
-- Purpose: Main event loops, market discovery, trade/flow engines, cycle scheduling. Ties domain logic + infra together.
+**Orchestration (bot-runner):**
+- Purpose: Glue layer coordinating market discovery, flow execution, price streaming, and state transitions
 - Location: `crates/bot-runner/src/`
-- Contains: main.rs (scheduler), market discovery, fill event processing, state transitions, risk enforcement, DCA logic
-- Depends on: bot-core, bot-infra
-- Used by: systemd service, CLI invocation
+- Contains: Main event loop, trade flow DAG executor, market cycle management, reconciliation logic
+- Depends on: bot-core, bot-infra, tokio
+- Used by: systemd service as executable entry point
 
-**Frontend Layer (Next.js):**
-- Purpose: Dashboard UI, API routes that proxy to database, trade builder UI with visual flow editor.
-- Location: `frontend/src/`
-- Contains: React components (Radix UI + Tailwind), API routes that query PostgreSQL, SWR-based polling hooks, trade flow definition UI
-- Depends on: Next.js, React, SWR, @xyflow/react, jose (JWT), pg (PostgreSQL client)
-- Used by: Browser clients
+**Test fixtures (mock-exchange):**
+- Purpose: In-memory HTTP mock for testing without hitting real CLOB
+- Location: `crates/mock-exchange/src/`
+- Contains: Axum server simulating Polymarket order/fill responses
+- Depends on: axum, tokio, serde_json
 
 ## Data Flow
 
-**Order Execution Flow:**
+**Price Trigger → Execution → State Transition:**
 
-1. Market discovery identifies active market (e.g., `btc-updown-5m-2025-03-02-10-00`)
-2. Price stream (WebSocket) receives real-time ticks from CLOB
-3. Signal engine (strategy.rs) evaluates entry condition
-4. If risk check passes (risk.rs), execution engine places entry order via CLOB REST API (signed with EIP-712)
-5. Fill event arrives via WebSocket, validated with `idempotency_keys` table
-6. `transition_trade_state()` enforces valid state path (e.g., `EntryPlaced → EntryPartiallyFilled`)
-7. TP/SL orders placed after entry is fully filled
-8. Exit fill arrives, final state transition to `Settled`
+1. **Price Stream**: WebSocket client (`bot-infra/src/ws.rs`) subscribes to market CLOB channels
+2. **Tick Buffering**: Ticks queued in `WsEvent` with `PriceTick` payload (price, timestamp, market slug)
+3. **Trigger Evaluation** (`main.rs:4170-4202`):
+   - Previous price retrieved from flow context state: `previous_price_{token_id}`
+   - Current tick price vs. trigger price evaluated: `evaluate_trigger_market_price_condition()`
+   - Condition: `"cross_above"` (prev < trigger, current ≥ trigger) or `"cross_below"`
+   - For `once` mode + auto_scope: confirmation gate requires price to STAY in trigger zone for N seconds
+4. **State Storage**: Current price stored as `previous_price_{token_id}` for next tick's evaluation
+5. **Flow Execution**: If trigger fires, flow step enqueued via `TradeFlowRunStep` table
+6. **Order Placement**: Step execution → `OrderExecutor` trait → REST POST to CLOB with EIP-712 signature
+7. **Fill Tracking**: WebSocket `Fill` events → `reconcile_tick_and_snapshot()` deduplicates via `fill_id` UNIQUE constraint
+8. **State Transition**: Fill event triggers `transition_trade_state()` → validates rule via `can_transition()` → persists to DB
 
-**State Recovery on Restart:**
+**Stale Price Fallback:**
 
-1. Bot reads last known trade state from `trades` table (plus `orders` and `fills`)
-2. Queries exchange for open orders, reconciles with DB (`reconcile.rs`)
-3. On mismatch (e.g., order filled but not recorded), updates DB via `StateRepository`
-4. Only after reconciliation is complete, bot resumes normal cycles
-
-**WebSocket → REST Fallback:**
-
-1. Price stream healthy: consume WebSocket ticks
-2. If WebSocket stale (>max_stale_data_ms), snapshot client (REST) fetches latest price
-3. Both feeds use `reconcile_tick_and_snapshot()` to merge deterministically (timestamp-based)
-
-**State Management:**
-
-- Primary: PostgreSQL `trades`, `orders`, `fills`, `positions` tables
-- Cache: Redis for last price, WebSocket liveness checks
-- In-memory: Current trade runtime state, strategy parameters
-- Advisory locks: `lock:trade:{market_id}` ensures only one bot instance processes a market
+- If WebSocket stale (no ticks for 5s), snapshot client falls back: `snapshot_client()` polls REST `GET /book/{market}`
+- Snapshot price used if fresher than last tick; recorded in same flow state for next evaluation
 
 ## Key Abstractions
 
-**TradeState (11-state machine):**
-- Purpose: Deterministic trade lifecycle with explicit transitions
-- Examples: `crates/bot-core/src/state_machine.rs` enforces `can_transition()` rules
-- Pattern: Enum + function. Invalid transitions return `TransitionError`. Any state → Halted on risk breach.
+**Strategy (trait):**
+- Purpose: Encapsulates entry/exit price computation logic
+- Examples: `PriceThresholdStrategy` (file: `crates/bot-core/src/strategy.rs`)
+- Pattern: Entry signal checks `current_price >= entry_price`; TP/SL computed as percentage deltas
 
-**RiskPolicy trait:**
-- Purpose: Pluggable risk evaluation without hardcoding rules
-- Examples: `crates/bot-core/src/risk.rs`, `DefaultRiskPolicy` implementation
-- Pattern: Evaluate daily loss, consecutive losses, stale data, manual kill switch. Return Allow/Block/Halt.
+**DualSideStrategy (trait):**
+- Purpose: Multi-leg DCA decision-making (YES + NO positions simultaneously)
+- Pattern: `SymmetricDualDcaStrategy` tracks last fill price, requires price distance ≥ step_pct before next DCA leg
+- Used by: Dual-side workflows for basket P&L management
 
-**Strategy trait:**
-- Purpose: Entry/exit signal generation
-- Examples: `crates/bot-core/src/strategy.rs` - `PriceThresholdStrategy`, `SymmetricDualDcaStrategy`, `DualSideStrategy`
-- Pattern: Evaluate price conditions, return true/false for entry/exit. Dual-side version manages basket P&L across YES/NO legs.
+**RiskPolicy (trait):**
+- Purpose: Pre-trade and post-trade risk checks
+- Examples: `DefaultRiskPolicy` (file: `crates/bot-core/src/risk.rs`)
+- Pattern: Returns `RiskDecision { allow | block | halt }` based on notional, daily loss limits, kill switch
 
-**OrderExecutor trait:**
-- Purpose: Unified interface for order operations (place, cancel, replace, status, fills list)
-- Examples: `crates/bot-infra/src/contracts.rs`. Blanket implementation on `ClobRestClient`.
-- Pattern: Async trait with REST call wrapper. Replace = cancel + place.
+**MarketDataProvider (trait):**
+- Purpose: Abstraction over live vs. mock price data
+- Location: `bot-infra/src/market_data.rs`
+- Implementations: `ClobWsClient` (live), `MockMarketDataProvider` (testing)
 
-**StateRepository trait:**
-- Purpose: All state changes must flow through this trait. No direct SQL in bot-runner.
-- Examples: `crates/bot-infra/src/contracts.rs`. Implementation: `PostgresRepository::transition_trade_state()`
-- Pattern: Methods check `can_transition()` before updating DB. Record state change reason in logs.
+**StateRepository (trait):**
+- Purpose: Atomic state transitions with validation
+- Location: `bot-infra/src/contracts.rs`
+- Implementor: `PostgresRepository`
+- Pattern: `transition_trade_state()` calls `can_transition()` before UPDATE, prevents invalid state sequences
 
-**MarketDataProvider trait:**
-- Purpose: Abstraction for price stream (WebSocket or mock)
-- Examples: `crates/bot-infra/src/market_data.rs`. Mock impl for testing.
-- Pattern: `next_tick()` returns Option (sparse stream OK), `snapshot()` returns latest price.
+**OrderExecutor (trait):**
+- Purpose: Order placement/cancel/replace abstraction
+- Location: `bot-infra/src/contracts.rs`
+- Implementor: `ClobRestClient`
+- Pattern: Blanket impl wraps `PlaceOrderRequest` → EIP-712 signing → REST POST
+
+**TradeFlowRuntime (struct):**
+- Purpose: In-memory DAG execution context for flow automation
+- Location: `bot-infra/src/db.rs`
+- Contains: Node specs, edges, flow context (market slug, prices, token IDs), node state per token
+- Pattern: Context persisted to `trade_flow_runs` table on each iteration
 
 ## Entry Points
 
-**Bot Runner:**
+**Main Binary:**
 - Location: `crates/bot-runner/src/main.rs`
-- Triggers: `cargo run -p bot-runner` or systemd service start
-- Responsibilities: Load config, establish DB + Redis + WebSocket connections, spawn market cycle tasks, handle graceful shutdown
+- Triggers: `systemctl start dextrabot` (systemd service)
+- Responsibilities:
+  1. Parse config from `$BOT_CONFIG_DIR` (encrypted AES-256-GCM values with `enc:v1:` prefix)
+  2. Initialize DB pool (PostgreSQL via `sqlx`)
+  3. Spawn async runtime (tokio multi-threaded)
+  4. Launch market discovery task (polls Gamma API for active markets)
+  5. Launch main event loop: price stream → trigger eval → flow execution → order placement
 
-**Frontend Dashboard:**
-- Location: `frontend/src/app/page.tsx`
-- Triggers: Browser navigation to `/`
-- Responsibilities: Fetch trade summary via SWR, display trades/orders/fills/risk events, show bot status
+**Market Discovery Loop:**
+- Runs every 30s (cached)
+- Polls Gamma API for markets matching configured scope (`btc_5m_updown`, `eth_15m_updown`, etc.)
+- Populates flow context with live market slug, token IDs, timeframe
+- Prevents stale market references in auto_scope triggers
 
-**Frontend Login:**
-- Location: `frontend/src/login/page.tsx`, API route `frontend/src/app/api/auth/route.ts`
-- Triggers: Unauthenticated request redirects here
-- Responsibilities: Verify AUTH_SECRET password, issue JWT, set httpOnly cookie
-
-**Trade Builder:**
-- Location: `frontend/src/app/trade-builder/page.tsx`
-- Triggers: User clicks "Trade Builder" nav
-- Responsibilities: Visual flow editor (@xyflow/react), serialize to JSON, POST to `POST /api/trade-flow/definitions` to create workflow
-
-**API Routes (Frontend):**
-- Location: `frontend/src/app/api/` (50+ routes)
-- Triggers: React components call SWR hooks
-- Responsibilities: Query PostgreSQL via `pg` client or proxy requests to bot-runner
+**Flow Processing Loop:**
+- Triggered by price tick arrival or poll interval (< 1s)
+- Reads pending `TradeFlowRun` rows with `status = 'processing'`
+- For each run: evaluates node conditions, enqueues steps to next node, updates `flow_context`
+- Commits `context_dirty` back to DB via `update_trade_flow_run_context()`
 
 ## Error Handling
 
-**Strategy:** Domain errors in bot-core use `thiserror`, operational errors in bot-infra/bot-runner use `anyhow::Result`.
+**Strategy:** Fail-safe with logging and DB fallback.
 
 **Patterns:**
-- Soft errors (e.g., RPC timeout): Log warning, retry with exponential backoff
-- State machine violation: Panic (invariant broken, bot must restart)
-- Config missing/invalid: Return Err early, bot won't start
-- Fill event already seen: Idempotency key found in DB → skip silently
-- Exchange order rejected: Log reason, record in `risk_events` table, move to Halted if policy dictates
-- Database transaction conflict: Retry with backoff or fail fast depending on severity
+
+1. **Config Load Failure**: Bot refuses to start. Error logged, process exits non-zero.
+   - Example: Encrypted config value corrupted → `aes_gcm.decrypt()` fails → `?` operator in `decrypt_value()`
+
+2. **DB Connection Loss**: All infra operations return `anyhow::Result<T>`. Caller decides retry vs. graceful shutdown.
+   - Example: WebSocket fill event → idempotency check fails (DB unreachable) → event buffered locally
+
+3. **Exchange API Timeout**: HTTP client has 30s timeout per request. Retries via `max_retries` field on `ClobWsClient` and `ClobRestClient`.
+   - Example: POST `/submit_order` times out → log warn, retry with exponential backoff
+
+4. **Invalid State Transition**: `can_transition()` returns `TransitionError::Invalid { from, to }`. Transition silently blocked, event logged with context.
+   - Example: Attempting `Idle → TpPlaced` (invalid) → error caught, DB state unchanged
+
+5. **Risk Policy Breach**: `RiskPolicy::check()` returns `RiskDecision::Halt`. Trade halted, no further orders placed.
+   - Example: Daily loss limit exceeded → new entry blocked, `Halted` state persisted
 
 ## Cross-Cutting Concerns
 
-**Logging:** Structured logging via `tracing` + `tracing-subscriber` with JSON output. Entry: `cargo run` with `RUST_LOG=info` or `debug`.
+**Logging:**
+- Tool: `tracing` with `tracing-subscriber` (JSON output for production)
+- When to log:
+  - Every price tick: `info!(market_slug=%slug, price=%tick.price, "PRICE_TICK")`
+  - Every trigger evaluation: `info!(trigger_fired=%crossed, condition=%eval_mode, "TRIGGER_EVAL")`
+  - State transitions: `info!(from_state=?old_state, to_state=?new_state, "STATE_TRANSITION")`
+  - Risk decisions: `warn!(decision=?risk_decision, notional=%notional, "RISK_CHECK")`
 
-**Validation:** Config load fails early if required fields missing. Trade state transitions validated before DB update. Order size/price validated against limits.
+**Validation:**
+- Config validation: Happens at startup in `load_config()`. All required fields checked; missing fields = startup failure.
+- Order validation: `PlaceOrderRequest` validated for non-zero size, non-negative price before signing.
+- State validation: State machine rules encoded in `can_transition()` switch statement; all invalid paths explicitly rejected.
 
-**Authentication:** Frontend uses AUTH_SECRET (simple password) + JWT (jose) + httpOnly cookie. No bot-runner auth (runs locally).
+**Authentication:**
+- Header signing: All CLOB REST requests signed with HMAC-SHA256 over payload, timestamp, nonce.
+  - Headers: `POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, `POLY_PASSPHRASE`, `POLY_API_KEY`
+  - Implementation: `bot-infra/src/signer.rs:sign_request_headers()`
+- WebSocket auth: None (market data public); user channel requires API credentials in subscription message.
 
-**Configuration:** TOML files in `config/` directory:
-- `bot.toml`: Execution mode, market scope, loop interval
-- `strategy.toml`: Entry price, TP/SL %, DCA settings
-- `risk.toml`: Daily loss limit, kill switch, notional cap
-- `execution.toml`: Order type, retry logic
-- `exchange.toml`: CLOB/Gamma endpoints, encrypted API credentials (AES-256-GCM with `enc:v1:` prefix)
-
-**Encryption:** Config values prefixed with `enc:v1:` are AES-256-GCM encrypted. Key from CONFIG_ENCRYPTION_KEY env var.
+**Idempotency:**
+- Fill deduplication: Every `fill_id` checked against `idempotency_keys` table before processing. Duplicate = silent skip.
+- Flow step deduplication: Step enqueued with `idempotency_key`; re-processing a step with same key is a no-op (checked at row lock).
+- Trigger deduplication: Once-fired nodes tracked with `node_state["once_fired"] = true`; subsequent conditions ignored.
 
 ---
 

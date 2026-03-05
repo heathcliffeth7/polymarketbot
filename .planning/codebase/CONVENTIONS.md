@@ -15,12 +15,14 @@
 - React hooks: prefix with `use` in camelCase (e.g., `useDashboard()`, `usePolling()`, `useBotStatus()`)
 - Private helpers: camelCase with underscore or unprefixed (e.g., `sleep()`, `isAbortError()`, `shouldRetry()`)
 - Rust: snake_case (e.g., `can_transition()`, `evaluate_risk()`, `entry_signal()`)
+- Rust trigger/crossing helpers: explicit names like `crossed_above_strict()`, `evaluate_trigger_market_price_condition()`
 
 **Variables:**
 - Constants: UPPER_SNAKE_CASE (e.g., `DEFAULT_TIMEOUT_MS`, `CONFIG_ENC_PREFIX`, `COOKIE_NAME`)
 - Local/state: camelCase (e.g., `controlUnavailable`, `loading`, `paramIdx`, `filters`)
 - Database columns: snake_case (e.g., `opened_at`, `exchange_order_id`, `market_slug`)
 - React state: camelCase with semantic names (e.g., `data`, `mutate`, `error`, `isLoading`)
+- Rust price variables: explicit names (e.g., `current_price`, `previous_price`, `trigger_price`, `last_fill_price`)
 
 **Types:**
 - TypeScript: PascalCase (e.g., `Trade`, `Order`, `RiskDecision`, `ClientRequestError`, `TradeState`)
@@ -156,17 +158,24 @@ pub fn can_transition(from: TradeState, to: TradeState) -> Result<(), Transition
 - `mock-exchange` (test fixture) uses `unwrap_or_else()` and `unwrap_or()` for defaults
 - Production code avoids unwrap; uses Result propagation or ? operator
 
+**Price Comparison Error Handling:**
+- Trigger conditions never panic on invalid prices
+- Optional price comparisons use `.unwrap_or(false)` pattern: `previous_price.map(|prev| prev < trigger_price && current_price >= trigger_price).unwrap_or(false)`
+- Invalid trigger condition types return safe defaults: `(false, "unsupported_condition")` for unknown conditions in `evaluate_trigger_market_price_condition()`
+
 ## Logging
 
 **Framework:**
 - TypeScript: `console.error()` for errors (e.g., in API routes)
 - Rust: `tracing` crate with structured logging
   - Levels: `info!()`, `warn!()`, `error!()`
-  - Attributes: None observed; unstructured strings used
+  - Attributes: Structured key-value pairs
 
 **When to Log:**
 - TypeScript: API errors, action failures (e.g., `console.error('Bot control error:', err)`)
-- Rust: Critical state transitions, errors, reconnects (inferred from crates)
+- Rust: Critical state transitions, errors, reconnects
+- Trigger evaluations: Log when cross-above/cross-below is detected with price and reason
+- Example: `info!(market=%market_slug, prev_price=%previous_price, current=%current_price, reason="cross_detected")`
 
 ## Comments
 
@@ -174,9 +183,22 @@ pub fn can_transition(from: TradeState, to: TradeState) -> Result<(), Transition
 - Complex logic (trade state transitions, risk evaluation, DCA calculations)
 - Non-obvious type guards or data transformations
 - Rationale for unusual patterns (e.g., retry logic, encryption)
+- **Critical for trigger logic:** Explain why `>=` vs `>` is chosen, when `previous_price` is checked
 
 **Example (Observed in Strategy):**
 No explicit comments in most code; logic is self-documenting via function names and type signatures.
+
+**Example for Trigger Logic:**
+```rust
+// crossed_above_strict: both conditions required
+// 1. previous_price MUST exist (no first-tick fill on cross)
+// 2. previous < trigger AND current >= trigger (boundary inclusive on cross)
+fn crossed_above_strict(previous_price: Option<f64>, current_price: f64, trigger_price: f64) -> bool {
+    previous_price
+        .map(|prev| prev < trigger_price && current_price >= trigger_price)
+        .unwrap_or(false)
+}
+```
 
 ## Function Design
 
@@ -189,12 +211,56 @@ No explicit comments in most code; logic is self-documenting via function names 
 - Use object/interface for multiple related params (e.g., `TradeFilters`, `RequestJsonOptions`, `RiskLimits`)
 - Single primitives okay for flags or simple values
 - TypeScript: Type all parameters explicitly
+- Rust: For price comparisons, keep `current_price` and `trigger_price` as separate `f64` parameters (not bundled into struct)
 
 **Return Values:**
 - Async functions return Promise-wrapped types
 - Query functions return `PaginatedResponse<T>` with data, total, page, limit, totalPages
 - Strategy/risk functions return computed scalars (prices, booleans, decisions)
 - Rust: Return Result<T, E> for fallible operations
+- **Trigger evaluation functions:** Return tuples like `(bool, &'static str)` for condition met + reason
+
+**Trigger Condition Functions (Rust):**
+```rust
+// Two-return pattern: (passed: bool, reason: &'static str)
+fn evaluate_trigger_market_price_condition(
+    previous_price: Option<f64>,
+    current_price: f64,
+    trigger_price: f64,
+    trigger_condition: &str,
+    allow_first_tick_threshold: bool,
+) -> (bool, &'static str) {
+    match trigger_condition {
+        "cross_above" => {
+            if let Some(prev) = previous_price {
+                if prev < trigger_price && current_price >= trigger_price {
+                    (true, "cross_detected")
+                } else {
+                    (false, "no_cross")
+                }
+            } else if allow_first_tick_threshold && current_price >= trigger_price {
+                (true, "first_tick_threshold")
+            } else {
+                (false, "no_previous")
+            }
+        }
+        "cross_below" => {
+            if let Some(prev) = previous_price {
+                if prev > trigger_price && current_price <= trigger_price {
+                    (true, "cross_detected")
+                } else {
+                    (false, "no_cross")
+                }
+            } else if allow_first_tick_threshold && current_price <= trigger_price {
+                (true, "first_tick_threshold")
+            } else {
+                (false, "no_previous")
+            }
+        }
+        _ => (false, "unsupported_condition"),
+    }
+}
+```
 
 ## Module Design
 
@@ -252,6 +318,8 @@ No explicit comments in most code; logic is self-documenting via function names 
   - `ws.rs`: WebSocket event handling
   - `signer.rs`: API request signing
 - `bot-runner/src/`: Orchestration (main loop, market discovery)
+  - Contains trigger evaluation logic for market price nodes
+  - Calls `evaluate_trigger_market_price_condition()` with price state and condition type
 
 **Trait-Based Design:**
 - Strategy, DualSideStrategy, RiskPolicy, OrderExecutor, StateRepository are traits
@@ -261,6 +329,15 @@ No explicit comments in most code; logic is self-documenting via function names 
 **Idempotency:**
 - Every WS event checked against idempotency_keys table
 - fill_id UNIQUE in fills table - duplicate inserts silently skipped via DB constraint
+
+**Trigger Condition Patterns:**
+- File location: `crates/bot-runner/src/main.rs` (lines ~222-270, ~9295-9305, ~4220-4221)
+- Three operator patterns used:
+  1. **Cross-above:** `prev < trigger && current >= trigger` (strictly crosses above)
+  2. **Cross-below:** `prev > trigger && current <= trigger` (strictly crosses below)
+  3. **Absolute threshold (first tick only):** `current >= trigger` or `current <= trigger` (for initial entry)
+- Condition type passed as string: `"cross_above"`, `"cross_below"` matched in helper functions
+- Price history stored per market/token in DB field `last_seen_price` (nullable)
 
 ---
 

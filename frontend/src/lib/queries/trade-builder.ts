@@ -11,6 +11,24 @@ import type {
 } from '@/lib/types';
 
 const GAMMA_BASE_URL = process.env.GAMMA_BASE_URL || 'https://gamma-api.polymarket.com';
+const SCOPE_TO_UPDOWN_SLUG_PREFIX: Record<string, string> = {
+  btc_5m_updown: 'btc-updown-5m-',
+  btc_15m_updown: 'btc-updown-15m-',
+  eth_5m_updown: 'eth-updown-5m-',
+  eth_15m_updown: 'eth-updown-15m-',
+  sol_5m_updown: 'sol-updown-5m-',
+  sol_15m_updown: 'sol-updown-15m-',
+  xrp_5m_updown: 'xrp-updown-5m-',
+  xrp_15m_updown: 'xrp-updown-15m-',
+};
+const ACTIVE_UPDOWN_MARKETS_CACHE_TTL_MS = 30_000;
+
+interface ActiveUpdownMarketsCacheEntry {
+  expiresAt: number;
+  markets: Array<Record<string, unknown>>;
+}
+
+let activeUpdownMarketsCache: ActiveUpdownMarketsCacheEntry | null = null;
 
 interface TradeBuilderFilters {
   page?: number;
@@ -734,6 +752,15 @@ export async function searchGammaMarkets(query: string): Promise<TradeBuilderMar
 export async function getMarketOutcomesBySlug(slug: string): Promise<TradeBuilderOutcome[]> {
   const trimmed = slug.trim();
   if (!trimmed) return [];
+  const normalized = trimmed.toLowerCase();
+
+  // 0. If input is a market scope (auto_scope), resolve to latest live market first.
+  const scopeMarket = await resolveMarketFromScope(normalized);
+  if (scopeMarket) {
+    const eventOutcomes = await tryExtractEventOutcomes(scopeMarket);
+    if (eventOutcomes.length > 1) return eventOutcomes;
+    return extractOutcomes(scopeMarket);
+  }
 
   // 1. Try as market slug first
   const market = await fetchMarketBySlug(trimmed);
@@ -768,18 +795,6 @@ async function fetchMarketBySlug(slug: string): Promise<Record<string, unknown> 
   return null;
 }
 
-async function fetchMarketFromEventSlug(slug: string): Promise<Record<string, unknown> | null> {
-  const eventData = await fetchEventData(slug);
-  if (!eventData) return null;
-  const markets = Array.isArray(eventData.markets) ? (eventData.markets as Array<Record<string, unknown>>) : [];
-  if (markets.length === 0) return null;
-  return (
-    markets.find((m) => String(m.slug || '') === slug) ||
-    markets[0] ||
-    null
-  );
-}
-
 async function fetchEventData(slug: string): Promise<Record<string, unknown> | null> {
   const url = `${GAMMA_BASE_URL.replace(/\/$/, '')}/events/slug/${encodeURIComponent(slug)}`;
   const res = await fetch(url, { cache: 'no-store' });
@@ -787,6 +802,178 @@ async function fetchEventData(slug: string): Promise<Record<string, unknown> | n
   const data = (await res.json()) as unknown;
   if (data && typeof data === 'object' && !Array.isArray(data)) return data as Record<string, unknown>;
   return null;
+}
+
+function isTruthyValue(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+  }
+  return false;
+}
+
+function isMarketActive(row: Record<string, unknown>): boolean {
+  const activeRaw = row.active;
+  const closedRaw = row.closed;
+  const active = activeRaw == null ? true : isTruthyValue(activeRaw);
+  const closed = closedRaw == null ? false : isTruthyValue(closedRaw);
+  return active && !closed;
+}
+
+function parseDateMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value > 10_000_000_000) return Math.floor(value);
+    if (value > 100_000_000) return Math.floor(value * 1000);
+    return null;
+  }
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsedNumber = Number(trimmed);
+  if (Number.isFinite(parsedNumber)) {
+    if (parsedNumber > 10_000_000_000) return Math.floor(parsedNumber);
+    if (parsedNumber > 100_000_000) return Math.floor(parsedNumber * 1000);
+  }
+  const parsedDate = Date.parse(trimmed);
+  return Number.isFinite(parsedDate) ? parsedDate : null;
+}
+
+function scopeWindowSeconds(scope: string): number {
+  return scope.includes('_15m_') ? 900 : 300;
+}
+
+function inferWindowFromScopeMarket(
+  market: Record<string, unknown>,
+  slugPrefix: string,
+  windowSec: number
+): { startsAtMs: number | null; endsAtMs: number | null } {
+  const slug = String(market.slug || '').trim().toLowerCase();
+  let startsAtMs: number | null = null;
+  if (slug.startsWith(slugPrefix)) {
+    const suffix = slug.slice(slugPrefix.length);
+    const match = suffix.match(/^(\d{9,13})$/);
+    if (match) {
+      const rawTs = Number(match[1]);
+      if (Number.isFinite(rawTs) && rawTs > 0) {
+        startsAtMs = rawTs > 10_000_000_000 ? Math.floor(rawTs) : Math.floor(rawTs * 1000);
+      }
+    }
+  }
+
+  const endsAtMs =
+    parseDateMs(market.endDate) ??
+    parseDateMs(market.end_date) ??
+    parseDateMs(market.endDateIso) ??
+    parseDateMs(market.end_date_iso);
+
+  if (startsAtMs != null && endsAtMs == null) {
+    return { startsAtMs, endsAtMs: startsAtMs + windowSec * 1000 };
+  }
+  if (startsAtMs == null && endsAtMs != null) {
+    return { startsAtMs: endsAtMs - windowSec * 1000, endsAtMs };
+  }
+  return { startsAtMs, endsAtMs };
+}
+
+function selectPreferredScopeMarket(
+  markets: Array<Record<string, unknown>>,
+  slugPrefix: string,
+  windowSec: number
+): Record<string, unknown> | null {
+  if (markets.length === 0) return null;
+  const nowMs = Date.now();
+  const withWindow = markets.map((market) => {
+    const slug = String(market.slug || '').trim().toLowerCase();
+    const window = inferWindowFromScopeMarket(market, slugPrefix, windowSec);
+    return { market, slug, ...window };
+  });
+
+  const inWindow = withWindow
+    .filter((row) => row.startsAtMs != null && row.endsAtMs != null && row.startsAtMs <= nowMs && nowMs < row.endsAtMs)
+    .sort((a, b) => {
+      const startA = a.startsAtMs ?? 0;
+      const startB = b.startsAtMs ?? 0;
+      if (startA !== startB) return startB - startA;
+      return b.slug.localeCompare(a.slug);
+    });
+  if (inWindow.length > 0) return inWindow[0].market;
+
+  const nearestFuture = withWindow
+    .filter((row) => row.startsAtMs != null && row.startsAtMs >= nowMs)
+    .sort((a, b) => {
+      const startA = a.startsAtMs ?? Number.MAX_SAFE_INTEGER;
+      const startB = b.startsAtMs ?? Number.MAX_SAFE_INTEGER;
+      if (startA !== startB) return startA - startB;
+      return a.slug.localeCompare(b.slug);
+    });
+  if (nearestFuture.length > 0) return nearestFuture[0].market;
+
+  return withWindow
+    .sort((a, b) => b.slug.localeCompare(a.slug))
+    .at(0)?.market || null;
+}
+
+function buildScopeCandidateSlugs(slugPrefix: string, windowSec: number, nowMs: number): string[] {
+  const nowSec = Math.floor(nowMs / 1000);
+  const base = nowSec - (nowSec % windowSec);
+  return [base - windowSec, base, base + windowSec, base + 2 * windowSec]
+    .filter((value) => value > 0)
+    .map((value) => `${slugPrefix}${value}`);
+}
+
+async function fetchActiveUpdownMarkets(): Promise<Array<Record<string, unknown>>> {
+  const now = Date.now();
+  if (activeUpdownMarketsCache && activeUpdownMarketsCache.expiresAt > now) {
+    return activeUpdownMarketsCache.markets;
+  }
+
+  const url = `${GAMMA_BASE_URL.replace(/\/$/, '')}/markets?active=true&closed=false&limit=1000`;
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) return [];
+  const payload = (await res.json()) as unknown;
+  const rows = Array.isArray(payload)
+    ? payload.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+    : [];
+  const prefixes = new Set(Object.values(SCOPE_TO_UPDOWN_SLUG_PREFIX));
+  const markets = rows.filter((row) => {
+    if (!isMarketActive(row)) return false;
+    const marketSlug = String(row.slug || '').trim().toLowerCase();
+    if (!marketSlug) return false;
+    for (const prefix of prefixes) {
+      if (marketSlug.startsWith(prefix)) return true;
+    }
+    return false;
+  });
+  activeUpdownMarketsCache = {
+    expiresAt: now + ACTIVE_UPDOWN_MARKETS_CACHE_TTL_MS,
+    markets,
+  };
+  return markets;
+}
+
+async function resolveMarketFromScope(scope: string): Promise<Record<string, unknown> | null> {
+  const normalizedScope = scope.trim().toLowerCase();
+  const slugPrefix = SCOPE_TO_UPDOWN_SLUG_PREFIX[normalizedScope];
+  if (!slugPrefix) return null;
+
+  const windowSec = scopeWindowSeconds(normalizedScope);
+  const activeMarkets = await fetchActiveUpdownMarkets();
+  const scopedMarkets = activeMarkets.filter((market) =>
+    String(market.slug || '').trim().toLowerCase().startsWith(slugPrefix)
+  );
+  const selected = selectPreferredScopeMarket(scopedMarkets, slugPrefix, windowSec);
+  if (selected) return selected;
+
+  // Gamma may briefly lag active listing during market boundary; probe nearby candidate slugs.
+  const candidates = buildScopeCandidateSlugs(slugPrefix, windowSec, Date.now());
+  const fetched = await Promise.all(candidates.map((candidateSlug) => fetchMarketBySlug(candidateSlug)));
+  const fallbackScoped = fetched
+    .filter((market): market is Record<string, unknown> => !!market)
+    .filter((market) => isMarketActive(market))
+    .filter((market) => String(market.slug || '').trim().toLowerCase().startsWith(slugPrefix));
+  return selectPreferredScopeMarket(fallbackScoped, slugPrefix, windowSec);
 }
 
 async function tryExtractEventOutcomes(market: Record<string, unknown>): Promise<TradeBuilderOutcome[]> {

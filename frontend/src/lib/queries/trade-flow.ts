@@ -20,7 +20,7 @@ import type {
   TradeFlowVersion,
 } from '@/lib/types';
 import { readPositionWalletAddress } from '@/lib/config';
-import { getTradeBuilderWorkflowById } from './trade-builder';
+import { getMarketOutcomesBySlug, getTradeBuilderWorkflowById } from './trade-builder';
 
 type Queryable = {
   query: PoolClient['query'];
@@ -48,6 +48,35 @@ const SUPPORTED_NODE_TYPES = new Set([
 const POLYMARKET_DATA_API_BASE =
   process.env.POLYMARKET_DATA_API_BASE || 'https://data-api.polymarket.com';
 const OPEN_POSITIONS_MIN_CURRENT_VALUE_USD = 1;
+const OPEN_POSITION_OUTCOME_LABEL_CACHE_TTL_MS = 5 * 60 * 1000;
+const OPEN_POSITION_OUTCOME_LABEL_ERROR_CACHE_TTL_MS = 60 * 1000;
+const OPEN_POSITION_MARKET_SLUG_KEYS = ['slug', 'market_slug', 'marketSlug'];
+const OPEN_POSITION_TOKEN_ID_KEYS = ['asset', 'tokenId', 'token_id', 'clobTokenId'];
+const OPEN_POSITION_OUTCOME_LABEL_KEYS = [
+  'outcomeLabel',
+  'outcome_label',
+  'outcomeName',
+  'outcome_name',
+  'label',
+  'outcome',
+];
+const GENERIC_OPEN_POSITION_OUTCOME_LABELS = new Set([
+  '',
+  'unknown',
+  'yes',
+  'no',
+  'true',
+  'false',
+  '1',
+  '0',
+]);
+
+interface OpenPositionOutcomeLabelCacheEntry {
+  expiresAt: number;
+  byTokenId: Map<string, string>;
+}
+
+const openPositionOutcomeLabelCache = new Map<string, OpenPositionOutcomeLabelCacheEntry>();
 
 const DEFAULT_GRAPH: TradeFlowGraph = {
   context: {},
@@ -197,6 +226,116 @@ function pickNumber(row: Record<string, unknown>, keys: string[]): number | null
     if (value != null) return value;
   }
   return null;
+}
+
+function extractOpenPositionOutcomeLabel(row: Record<string, unknown>): string {
+  return pickString(row, OPEN_POSITION_OUTCOME_LABEL_KEYS);
+}
+
+function normalizeOpenPositionSlug(slug: string): string {
+  return slug.trim().toLowerCase();
+}
+
+function normalizeOpenPositionTokenId(tokenId: string): string {
+  return tokenId.trim().toLowerCase();
+}
+
+function openPositionOutcomeLabelIndexKey(marketSlug: string, tokenId: string): string {
+  return `${normalizeOpenPositionSlug(marketSlug)}::${normalizeOpenPositionTokenId(tokenId)}`;
+}
+
+function isGenericOpenPositionOutcomeLabel(label: string): boolean {
+  return GENERIC_OPEN_POSITION_OUTCOME_LABELS.has(label.trim().toLowerCase());
+}
+
+async function getMarketOutcomeLabelMapCached(slug: string): Promise<Map<string, string>> {
+  const normalizedSlug = normalizeOpenPositionSlug(slug);
+  if (!normalizedSlug) return new Map<string, string>();
+
+  const now = Date.now();
+  const cached = openPositionOutcomeLabelCache.get(normalizedSlug);
+  if (cached && cached.expiresAt > now) {
+    return cached.byTokenId;
+  }
+
+  try {
+    const outcomes = await getMarketOutcomesBySlug(slug);
+    const byTokenId = new Map<string, string>();
+    for (const outcome of outcomes) {
+      const tokenKey = normalizeOpenPositionTokenId(outcome.token_id);
+      const label = String(outcome.label || '').trim();
+      if (!tokenKey || !label) continue;
+      byTokenId.set(tokenKey, label);
+    }
+    openPositionOutcomeLabelCache.set(normalizedSlug, {
+      expiresAt: now + OPEN_POSITION_OUTCOME_LABEL_CACHE_TTL_MS,
+      byTokenId,
+    });
+    return byTokenId;
+  } catch (err) {
+    console.warn('Open position outcome label resolve error:', slug, err);
+    const empty = new Map<string, string>();
+    openPositionOutcomeLabelCache.set(normalizedSlug, {
+      expiresAt: now + OPEN_POSITION_OUTCOME_LABEL_ERROR_CACHE_TTL_MS,
+      byTokenId: empty,
+    });
+    return empty;
+  }
+}
+
+async function buildOpenPositionOutcomeLabelIndex(
+  rows: Array<Record<string, unknown>>
+): Promise<Map<string, string>> {
+  const slugsNeedingLookup = new Set<string>();
+
+  for (const row of rows) {
+    const marketSlug = pickString(row, OPEN_POSITION_MARKET_SLUG_KEYS);
+    const tokenId = pickString(row, OPEN_POSITION_TOKEN_ID_KEYS);
+    if (!marketSlug || !tokenId) continue;
+    if (!isGenericOpenPositionOutcomeLabel(extractOpenPositionOutcomeLabel(row))) continue;
+    slugsNeedingLookup.add(marketSlug);
+  }
+
+  if (slugsNeedingLookup.size === 0) {
+    return new Map<string, string>();
+  }
+
+  const bySlug = new Map<string, Map<string, string>>();
+  const loaded = await Promise.all(
+    Array.from(slugsNeedingLookup).map(async (slug) => [slug, await getMarketOutcomeLabelMapCached(slug)] as const)
+  );
+  for (const [slug, tokenMap] of loaded) {
+    bySlug.set(normalizeOpenPositionSlug(slug), tokenMap);
+  }
+
+  const out = new Map<string, string>();
+  for (const row of rows) {
+    const marketSlug = pickString(row, OPEN_POSITION_MARKET_SLUG_KEYS);
+    const tokenId = pickString(row, OPEN_POSITION_TOKEN_ID_KEYS);
+    if (!marketSlug || !tokenId) continue;
+    if (!isGenericOpenPositionOutcomeLabel(extractOpenPositionOutcomeLabel(row))) continue;
+    const tokenMap = bySlug.get(normalizeOpenPositionSlug(marketSlug));
+    if (!tokenMap) continue;
+    const mapped = tokenMap.get(normalizeOpenPositionTokenId(tokenId));
+    if (!mapped) continue;
+    out.set(openPositionOutcomeLabelIndexKey(marketSlug, tokenId), mapped);
+  }
+
+  return out;
+}
+
+function resolveOpenPositionOutcomeLabel(
+  rawOutcomeLabel: string,
+  marketSlug: string,
+  tokenId: string,
+  labelIndex: Map<string, string>
+): string {
+  const normalizedRaw = rawOutcomeLabel.trim();
+  if (marketSlug && tokenId && isGenericOpenPositionOutcomeLabel(normalizedRaw)) {
+    const mapped = labelIndex.get(openPositionOutcomeLabelIndexKey(marketSlug, tokenId));
+    if (mapped) return mapped;
+  }
+  return normalizedRaw || 'unknown';
 }
 
 interface OpenTradeMatchCandidate {
@@ -489,15 +628,22 @@ export async function getTradeFlowOpenPositions(): Promise<TradeFlowOpenPosition
     fetchPolymarketOpenPositions(walletAddress),
     loadOpenTradeMatchCandidates(),
   ]);
+  const outcomeLabelIndex = await buildOpenPositionOutcomeLabelIndex(openRows);
 
   const positions = openRows
     .map((row, idx): TradeFlowOpenPositionOption | null => {
       const marketTitle =
         pickString(row, ['title', 'question', 'marketTitle', 'market_title', 'name']) ||
         'Untitled market';
-      const marketSlug = pickString(row, ['slug', 'market_slug', 'marketSlug']);
-      const tokenId = pickString(row, ['asset', 'tokenId', 'token_id', 'clobTokenId']);
-      const outcomeLabel = pickString(row, ['outcome', 'outcomeLabel']) || 'unknown';
+      const marketSlug = pickString(row, OPEN_POSITION_MARKET_SLUG_KEYS);
+      const tokenId = pickString(row, OPEN_POSITION_TOKEN_ID_KEYS);
+      const rawOutcomeLabel = extractOpenPositionOutcomeLabel(row);
+      const outcomeLabel = resolveOpenPositionOutcomeLabel(
+        rawOutcomeLabel,
+        marketSlug,
+        tokenId,
+        outcomeLabelIndex
+      );
       const size = pickNumber(row, ['size', 'amount', 'positionSize', 'balance']) ?? 0;
       const avgPrice = pickNumber(row, ['avgPrice', 'avg_price', 'averagePrice', 'entryPrice']);
       const currentValue = pickNumber(row, ['currentValue', 'current_value', 'value']);
@@ -744,6 +890,33 @@ function validateNodeConfig(
         node,
         'missing_market_slug',
         'trigger.market_price requires marketSlug in node config or graph context.'
+      );
+    }
+
+    if (config.confirmationMs != null && toTrimmedString(config.confirmationMs).length > 0) {
+      const confirmationMs = toFiniteNumber(config.confirmationMs);
+      if (
+        confirmationMs == null ||
+        !Number.isInteger(confirmationMs) ||
+        confirmationMs < 0
+      ) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_confirmation_ms',
+          'trigger.market_price confirmationMs must be an integer >= 0.'
+        );
+      }
+    }
+
+    const priceMode = toTrimmedString(config.priceMode).toLowerCase();
+    const validPriceModes = ['midpoint', 'raw', 'best_bid', 'best_ask'];
+    if (priceMode && !validPriceModes.includes(priceMode)) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_price_mode',
+        'trigger.market_price priceMode must be midpoint, raw, best_bid, or best_ask.'
       );
     }
 

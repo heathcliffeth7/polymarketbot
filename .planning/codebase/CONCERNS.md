@@ -2,6 +2,157 @@
 
 **Analysis Date:** 2026-03-02
 
+## Known Bugs
+
+### CRITICAL: Market Price Trigger Not Firing at 0.80 Threshold
+
+**Issue:** Market price trigger nodes configured to fire when price crosses above 0.80 are not consistently triggering, blocking trades from executing.
+
+**Root Cause Analysis:**
+
+1. **Raw API Price Without Clamping** - `crates/bot-runner/src/main.rs` line 1734 retrieves price from `client.midpoint()` and passes it directly to `strategy.entry_signal(price, trade.entry_price)` without clamping to valid probability range.
+
+2. **Floating-Point Comparison Precision** - Cross-detection logic in `evaluate_trigger_market_price_condition()` (lines 234-270) uses simple `>=` and `<=` comparisons without tolerance for floating-point rounding errors. Price 0.79999999999 will not match trigger at 0.80.
+
+3. **Asymmetric Price Processing** - The `clamp_probability()` function (line 3422) clamps prices to [0.01, 0.99], but this is only applied in specific code paths. In the main market cycle entry signal check (line 1811), the unclamped price is used:
+   ```rust
+   if live_enabled && matches!(trade.state, TradeState::WaitingEntry)
+       && strategy.entry_signal(price, trade.entry_price)  // price not clamped!
+   ```
+
+4. **Missing API Price Validation** - `crates/bot-infra/src/exchange.rs` lines 448-473: `get_price_snapshot()` has no validation of the returned price. If API returns invalid/missing data, defaults to 0.0, which silently triggers false comparisons.
+
+**Flow Trace:**
+1. REST API returns price 0.7999 (slightly below threshold)
+2. Strategy.entry_signal(0.7999, 0.60) → false (no trigger)
+3. Next tick, API returns 0.8001 (above threshold)
+4. But previous_price tracking may have expired or been cleared
+5. crossed_above_strict() requires BOTH prev < 0.80 AND current >= 0.80 in same evaluation
+6. If previous_price state is lost (reconnect), first_tick_threshold is blocked in once_mode
+7. Result: Trigger doesn't fire
+
+**Files:**
+- `crates/bot-runner/src/main.rs` (lines 1734, 1811, 3422, 4220-4221)
+- `crates/bot-infra/src/exchange.rs` (lines 448-473)
+- `crates/bot-core/src/strategy.rs` (line 27)
+
+**Impact:**
+- Trades fail to enter when price reaches configured triggers
+- Dual-sided DCA strategies may activate only one leg
+- Trading opportunities missed during market volatility
+- Users unable to execute market-based trading workflows
+
+**Fix Approach:**
+1. **Immediate:** Clamp price consistently before ALL threshold comparisons:
+   ```rust
+   let clamped_price = clamp_probability(price);
+   if strategy.entry_signal(clamped_price, trade.entry_price)
+   ```
+
+2. **Add Validation:** Validate `get_price_snapshot()` returns price in [0.0, 1.0]:
+   ```rust
+   let price = raw
+       .get("price")
+       .or_else(|| raw.get("mid"))
+       .and_then(|v| v.as_f64())
+       .and_then(|p| if p >= 0.0 && p <= 1.0 { Some(p) } else { None })
+       .ok_or_else(|| anyhow!("Invalid price from API: {}", raw))?;
+   ```
+
+3. **Add Epsilon Tolerance:** Modify cross-detection to use 0.001 epsilon for floating-point comparison:
+   ```rust
+   fn crossed_above_strict(prev: Option<f64>, curr: f64, trigger: f64) -> bool {
+       const EPSILON: f64 = 0.001;
+       prev.map(|p| p < trigger - EPSILON && curr >= trigger - EPSILON)
+           .unwrap_or(false)
+   }
+   ```
+
+4. **Add Test Coverage:** Unit tests for trigger firing at exact and near-threshold prices
+
+---
+
+### Market Discovery State Machine Incomplete
+
+**Issue:** Market discovery has states (`Init`, `Cooldown`, `Fetching`) but transition logic is incomplete. Can get stuck in `Fetching` state if Gamma API timeout occurs.
+
+**Files:** `crates/bot-runner/src/main.rs` (lines 1431-1613)
+
+**Trigger:**
+1. Start bot
+2. Gamma API endpoint unavailable (network issue)
+3. `discover_live_market()` times out
+4. State never transitions back to `Init` or `Cooldown`
+5. Bot continues polling indefinitely without recovery
+
+**Workaround:** Manual restart required. Monitor `market_discovery_timeout_sec` env var (default 30s).
+
+**Fix approach:**
+1. Add explicit timeout handler: `match tokio::time::timeout(...).await`
+2. Always transition to `Cooldown` on error
+3. Add max consecutive discovery failures before halt
+4. Implement exponential backoff for retries
+
+---
+
+### JSON Normalization Can Lose Data
+
+**Issue:** Trade flow context normalization has two different normalization paths that may produce different results.
+
+**Files:** `crates/bot-runner/src/main.rs` (lines 4540-4557, 7720-7732)
+
+**Code:** Two conflicting normalizations:
+```rust
+// Path 1: Flow context normalization (lines 4540-4557)
+// Iterates over keys and creates empty objects
+
+// Path 2: Expression evaluation context (lines 7720-7732)
+// Flattens from flowContext, state, vars, refs, nodeState
+```
+
+**Impact:**
+- Expressions may evaluate incorrectly if context keys accessed during flatten
+- Fields present in one normalization absent in other
+- Expressions using nested paths fail silently (return null instead of error)
+
+**Fix approach:**
+1. Single source of truth: `fn normalize_flow_context(context: &Value) -> Value`
+2. Document nesting rules explicitly
+3. Add unit tests for all access patterns
+4. Return `Err` instead of `null` for missing fields
+
+---
+
+### Expression Evaluation Division by Zero
+
+**Issue:** JSONLogic division operator doesn't validate denominator.
+
+**Files:** `crates/bot-runner/src/main.rs` (lines 7800-7806)
+
+**Code:**
+```rust
+"/" => {
+    if numeric_values.len() < 2 || numeric_values[1] == 0.0 {
+        return Value::Null;  // ← Returns null, not error
+    }
+    // ...
+}
+```
+
+**Impact:**
+- Division by zero silently returns `null`
+- Expression continues with null values
+- Hard to debug why condition failed
+- No audit trail of mathematical errors
+
+**Fix approach:**
+1. Return `Err(ExpressionError::DivisionByZero)` instead of null
+2. Add error propagation to node execution
+3. Log and record failures in `trade_flow_run_steps`
+4. Halt flow with clear reason
+
+---
+
 ## Tech Debt
 
 ### Monolithic Main.rs (10,755 lines)
@@ -112,89 +263,6 @@ let cache_hit = AUTO_SCOPE_MARKET_CACHE
 3. Implement background cache eviction task
 4. Add `cache_size`, `cache_age_secs` metrics
 5. Consider using `Arc<DashMap>` for lock-free access (no TTL though)
-
----
-
-## Known Bugs
-
-### Market Discovery State Machine Incomplete
-
-**Issue:** Market discovery has states (`Init`, `Cooldown`, `Fetching`) but transition logic is incomplete. Can get stuck in `Fetching` state if Gamma API timeout occurs.
-
-**Files:** `crates/bot-runner/src/main.rs` (lines 1431-1613)
-
-**Trigger:**
-1. Start bot
-2. Gamma API endpoint unavailable (network issue)
-3. `discover_live_market()` times out
-4. State never transitions back to `Init` or `Cooldown`
-5. Bot continues polling indefinitely without recovery
-
-**Workaround:** Manual restart required. Monitor `market_discovery_timeout_sec` env var (default 30s).
-
-**Fix approach:**
-1. Add explicit timeout handler: `match tokio::time::timeout(...).await`
-2. Always transition to `Cooldown` on error
-3. Add max consecutive discovery failures before halt
-4. Implement exponential backoff for retries
-
----
-
-### JSON Normalization Can Lose Data
-
-**Issue:** Trade flow context normalization has two different normalization paths that may produce different results.
-
-**Files:** `crates/bot-runner/src/main.rs` (lines 4540-4557, 7720-7732)
-
-**Code:** Two conflicting normalizations:
-```rust
-// Path 1: Flow context normalization (lines 4540-4557)
-// Iterates over keys and creates empty objects
-
-// Path 2: Expression evaluation context (lines 7720-7732)
-// Flattens from flowContext, state, vars, refs, nodeState
-```
-
-**Impact:**
-- Expressions may evaluate incorrectly if context keys accessed during flatten
-- Fields present in one normalization absent in other
-- Expressions using nested paths fail silently (return null instead of error)
-
-**Fix approach:**
-1. Single source of truth: `fn normalize_flow_context(context: &Value) -> Value`
-2. Document nesting rules explicitly
-3. Add unit tests for all access patterns
-4. Return `Err` instead of `null` for missing fields
-
----
-
-### Expression Evaluation Division by Zero
-
-**Issue:** JSONLogic division operator doesn't validate denominator.
-
-**Files:** `crates/bot-runner/src/main.rs` (lines 7800-7806)
-
-**Code:**
-```rust
-"/" => {
-    if numeric_values.len() < 2 || numeric_values[1] == 0.0 {
-        return Value::Null;  // ← Returns null, not error
-    }
-    // ...
-}
-```
-
-**Impact:**
-- Division by zero silently returns `null`
-- Expression continues with null values
-- Hard to debug why condition failed
-- No audit trail of mathematical errors
-
-**Fix approach:**
-1. Return `Err(ExpressionError::DivisionByZero)` instead of null
-2. Add error propagation to node execution
-3. Log and record failures in `trade_flow_run_steps`
-4. Halt flow with clear reason
 
 ---
 
@@ -594,19 +662,37 @@ fn evaluate_jsonlogic(expression: &Value, data: &Value) -> Value {
 
 ---
 
+### Price Trigger Edge Cases Not Tested
+
+**Area:** Cross-detection for market price triggers (lines 222-270)
+
+**What's Not Tested:**
+- Trigger firing exactly at threshold (0.800000...)
+- Trigger with floating point rounding (0.79999999)
+- Trigger after price missing for several ticks then returning
+- Trigger in volatile market where price oscillates across threshold
+
+**Risk:** High - trigger logic is in live code path and directly affects trade execution. This is related to the main CRITICAL bug above.
+
+**Priority:** High - add comprehensive tests after fixing the clamping issue
+
+---
+
 ## Recommendations by Priority
 
 ### Critical (Do First)
-1. Replace all `.unwrap()` in critical paths with proper error handling
-2. Fix lock poisoning in market cache (add recovery)
-3. Test database lock scenarios with real PostgreSQL
-4. Add config validation schema at startup
+1. **FIX PRICE TRIGGER BUG:** Add price clamping to all entry signal comparisons
+2. Replace all `.unwrap()` in critical paths with proper error handling
+3. Fix lock poisoning in market cache (add recovery)
+4. Test database lock scenarios with real PostgreSQL
+5. Add config validation schema at startup
 
 ### High (Do This Sprint)
-1. Extract main.rs into modules (flow_engine, expression_eval, market_discovery)
-2. Add expression evaluation edge case tests
-3. Add WebSocket reconnection tests
-4. Implement lock poisoning recovery for global cache
+1. Add price validation in `get_price_snapshot()` to detect API errors
+2. Extract main.rs into modules (flow_engine, expression_eval, market_discovery)
+3. Add expression evaluation edge case tests
+4. Add WebSocket reconnection tests
+5. Implement lock poisoning recovery for global cache
 
 ### Medium (Do Next Sprint)
 1. Replace StdMutex with tokio::sync::Mutex
