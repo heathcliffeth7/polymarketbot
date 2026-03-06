@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -97,6 +97,9 @@ interface NodeInspectorPanelProps {
   canApplyOpenPosition: (p: TradeFlowOpenPositionOption) => boolean;
   marketOutcomes: TradeBuilderOutcome[];
   marketOutcomesLoading: boolean;
+  upstreamAutoScope: boolean;
+  globalTelegramBotTokenMasked: string | null;
+  globalTelegramChatId: string | null;
   actions: NodeInspectorActions;
 }
 
@@ -119,15 +122,19 @@ export function NodeInspectorPanel({
   canApplyOpenPosition,
   marketOutcomes,
   marketOutcomesLoading,
+  upstreamAutoScope,
+  globalTelegramBotTokenMasked,
+  globalTelegramChatId,
   actions,
 }: NodeInspectorPanelProps) {
-  const [openFieldHelpKey, setOpenFieldHelpKey] = useState<string | null>(null);
+  const [openFieldHelpState, setOpenFieldHelpState] = useState<{ nodeType: string; key: string } | null>(null);
   const nodeSchema = NODE_FIELD_SCHEMAS[nodeTypeDraft] || [];
   const nodeFieldHelp = NODE_FIELD_HELP_CONTENT[nodeTypeDraft] || {};
   const placeOrderSizeMode = (form.fields.sizeMode ?? '').trim().toLowerCase();
   const dualDcaBaseSizing = (form.fields.baseSizing ?? '').trim().toLowerCase();
   const triggerMarketMode = (form.fields.marketMode ?? '').trim().toLowerCase();
   const triggerRepeatMode = (form.fields.repeatMode ?? '').trim().toLowerCase();
+  const triggerCycleWindowMode = (form.fields.cycleWindowMode ?? '').trim().toLowerCase();
   const placeOrderMaxTriggersRaw = Number(form.fields.maxTriggers ?? '');
   const placeOrderMaxTriggers =
     Number.isFinite(placeOrderMaxTriggersRaw) && placeOrderMaxTriggersRaw > 0
@@ -166,16 +173,30 @@ export function NodeInspectorPanel({
       form.fields.presetKind,
       form.fields.refKey
     );
+  const placeOrderSide =
+    nodeTypeDraft === 'action.place_order'
+      ? (form.fields.side ?? '').toString().trim().toLowerCase()
+      : '';
+  const hideAutoScopePlaceOrderOutcomeFields =
+    isPresetPlaceOrder && upstreamAutoScope && placeOrderSide === 'buy';
   const supportsOpenPositionPicker =
     nodeTypeDraft === 'trigger.open_positions' || nodeTypeDraft === 'action.place_order';
   const marketOutcomeByTokenId = useMemo(
     () => new Map(marketOutcomes.map((outcome) => [outcome.token_id, outcome])),
     [marketOutcomes]
   );
+  const telegramLegacyBotToken = (form.fields.botToken ?? '').trim();
+  const telegramGlobalBotToken = (globalTelegramBotTokenMasked ?? '').trim();
+  const telegramNodeChatId = (form.fields.chatId ?? '').trim();
+  const telegramGlobalChatId = (globalTelegramChatId ?? '').trim();
+  const telegramBotTokenMasked =
+    telegramGlobalBotToken || (telegramLegacyBotToken ? '********' : '');
+  const telegramBotTokenSource =
+    telegramGlobalBotToken ? 'global' : telegramLegacyBotToken ? 'legacy' : 'missing';
   const visibleNodeSchema = nodeSchema.filter((field) => {
     if (nodeTypeDraft === 'action.place_order') {
       if (field.key === 'sizePct') return placeOrderSizeMode === 'pct';
-      if (field.key === 'sizeUsdc' || field.key === 'targetNotionalUsdc') {
+      if (field.key === 'sizeUsdc') {
         return placeOrderSizeMode !== 'pct';
       }
       if (
@@ -187,6 +208,26 @@ export function NodeInspectorPanel({
       ) {
         return false;
       }
+      if (
+        hideAutoScopePlaceOrderOutcomeFields &&
+        (field.key === 'marketSlug' || field.key === 'tokenId' || field.key === 'outcomeLabel')
+      ) {
+        return false;
+      }
+      if (field.key === 'tpEnabled') {
+        return placeOrderSide === 'buy';
+      }
+      if (field.key === 'tpPriceCent') {
+        const tpEnabled = (form.fields.tpEnabled ?? '').toString().trim().toLowerCase();
+        return placeOrderSide === 'buy' && tpEnabled === 'true';
+      }
+      if (field.key === 'slEnabled') {
+        return placeOrderSide === 'buy';
+      }
+      if (field.key === 'slPriceCent') {
+        const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
+        return placeOrderSide === 'buy' && slEnabled === 'true';
+      }
     }
     if (nodeTypeDraft === 'action.dual_dca') {
       if (field.key === 'baseShares') return dualDcaBaseSizing !== 'usdc';
@@ -196,26 +237,34 @@ export function NodeInspectorPanel({
       if (field.key === 'marketScope' || field.key === 'marketSelection') {
         return triggerMarketMode === 'auto_scope';
       }
+      if (field.key === 'protectionMode') {
+        return triggerMarketMode === 'auto_scope';
+      }
+      if (field.key === 'protectionPreset') {
+        const protectionMode = (form.fields.protectionMode ?? '').trim().toLowerCase();
+        return triggerMarketMode === 'auto_scope' && protectionMode === 'underlying_confirm';
+      }
       if (field.key === 'marketSlug') {
         return triggerMarketMode !== 'auto_scope';
       }
       if (field.key === 'onceScope') {
         return triggerRepeatMode === 'once';
       }
+      if (field.key === 'cycleWindowMode') {
+        return triggerMarketMode === 'auto_scope';
+      }
+      if (field.key === 'cycleWindowSecs') {
+        return triggerMarketMode === 'auto_scope' &&
+          (triggerCycleWindowMode === 'first' || triggerCycleWindowMode === 'last');
+      }
     }
     return true;
   });
-
-  useEffect(() => {
-    setOpenFieldHelpKey(null);
-  }, [nodeTypeDraft]);
-
-  useEffect(() => {
-    if (!openFieldHelpKey) return;
-    if (!visibleNodeSchema.some((field) => field.key === openFieldHelpKey)) {
-      setOpenFieldHelpKey(null);
-    }
-  }, [openFieldHelpKey, visibleNodeSchema]);
+  const openFieldHelpKey =
+    openFieldHelpState?.nodeType === nodeTypeDraft &&
+    visibleNodeSchema.some((field) => field.key === openFieldHelpState.key)
+      ? openFieldHelpState.key
+      : null;
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -262,6 +311,46 @@ export function NodeInspectorPanel({
               </Select>
             </div>
 
+            {nodeTypeDraft === 'action.telegram_notify' && (
+              <div className="space-y-1">
+                <Label className="text-[11px] font-medium text-slate-600">Bot Token</Label>
+                <Input
+                  value={telegramBotTokenMasked}
+                  disabled
+                  placeholder="Settings -> Telegram"
+                  className="h-8 border-slate-200 bg-slate-50 text-xs text-slate-500"
+                />
+                <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                  {telegramBotTokenSource === 'global'
+                    ? 'Bu token merkezi Telegram ayarindan gelir ve workflow icinde tekrar saklanmaz.'
+                    : telegramBotTokenSource === 'legacy'
+                      ? 'Bu workflow eski inline token ile acildi. Node kaydedilince global token modeline normalize olur.'
+                      : 'Global Telegram bot token henuz tanimli degil. Settings -> Telegram ekranindan ekle.'}
+                </p>
+              </div>
+            )}
+
+            {nodeTypeDraft === 'action.telegram_notify' && (
+              <div className="space-y-1">
+                <Label className="text-[11px] font-medium text-slate-600">
+                  Global Chat ID (Fallback)
+                </Label>
+                <Input
+                  value={telegramGlobalChatId}
+                  disabled
+                  placeholder="Settings -> Telegram"
+                  className="h-8 border-slate-200 bg-slate-50 text-xs text-slate-500"
+                />
+                <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                  {telegramNodeChatId
+                    ? 'Node Chat ID doluysa runtime onu kullanir. Global Chat ID sadece node bos oldugunda fallback olur.'
+                    : telegramGlobalChatId
+                      ? 'Node Chat ID bos. Runtime bu global Chat ID fallback degerini kullanir.'
+                      : 'Global Chat ID opsiyoneldir. Burasi da bossa node icinde Chat ID doldurman gerekir.'}
+                </p>
+              </div>
+            )}
+
             {visibleNodeSchema.map((field) => {
               const selectOptions = field.input === 'select'
                 ? (
@@ -286,7 +375,11 @@ export function NodeInspectorPanel({
                       aria-expanded={openFieldHelpKey === field.key}
                       aria-controls={`dual-dca-field-help-${field.key}`}
                       onClick={() =>
-                        setOpenFieldHelpKey((prev) => (prev === field.key ? null : field.key))
+                        setOpenFieldHelpState((prev) =>
+                          prev?.nodeType === nodeTypeDraft && prev.key === field.key
+                            ? null
+                            : { nodeType: nodeTypeDraft, key: field.key }
+                        )
                       }
                     >
                       <span className="h-1.5 w-1.5 rounded-full bg-sky-600" />
@@ -441,6 +534,15 @@ export function NodeInspectorPanel({
               <p className="text-[10px] leading-relaxed text-slate-400 italic">
                 Bu preset node tetik gelince calisir; node ici tetik kosulu kullanmaz. Al/Sat preset
                 node&apos;lar market (IOC) modunda sabittir.
+              </p>
+            )}
+            {isPresetPlaceOrder && upstreamAutoScope && (
+              <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                {placeOrderSide === 'buy'
+                  ? 'Buy: market/token auto-scope tetikten runtime’da cozulur; sourceTradeId yoksa backend usdc sizing ile local source trade uretebilir.'
+                  : placeOrderSide === 'sell'
+                    ? 'Sell: mevcut sourceTradeId veya pozisyon baglami gerekir; auto-scope tek basina yeterli degildir.'
+                    : 'Auto-scope zincirinde buy runtime binding kullanabilir; sell tarafi mevcut sourceTradeId/pozisyon ister.'}
               </p>
             )}
 
@@ -739,7 +841,7 @@ export function NodeInspectorPanel({
                             <Trash2 className="h-3 w-3" />
                           </Button>
                         </div>
-                        <div className="grid grid-cols-2 gap-1.5">
+                        <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
                           <div className="space-y-0.5">
                             <Label className="text-[10px] font-medium text-slate-600">Tetik Kosulu</Label>
                             <Select
@@ -773,6 +875,23 @@ export function NodeInspectorPanel({
                               placeholder="ör: 30"
                               className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
                             />
+                          </div>
+                          <div className="space-y-0.5">
+                            <Label className="text-[10px] font-medium text-slate-600">Tavan Fiyati (cent)</Label>
+                            <Input
+                              type="number"
+                              value={row.maxPriceCent}
+                              onChange={(e) =>
+                                actions.onUpdateOutcomeCondition(row.id, {
+                                  maxPriceCent: e.target.value,
+                                })
+                              }
+                              placeholder="opsiyonel: 90"
+                              className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
+                            />
+                            <p className="text-[10px] leading-relaxed text-slate-400">
+                              Bos birakirsan ust limit uygulanmaz.
+                            </p>
                           </div>
                         </div>
                       </div>

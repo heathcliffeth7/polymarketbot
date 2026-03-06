@@ -252,6 +252,7 @@ export interface TradeBuilderOrder {
   execution_mode: 'limit' | 'market';
   trigger_condition: TriggerCondition | null;
   trigger_price: number | null;
+  max_price: number | null;
   size_usdc: number;
   min_price_distance_cent: number;
   expires_at: string | null;
@@ -264,6 +265,11 @@ export interface TradeBuilderOrder {
   last_error: string | null;
   created_at: string;
   updated_at: string;
+  parent_order_id: number | null;
+  tp_enabled: boolean;
+  tp_price: number | null;
+  sl_enabled: boolean;
+  sl_price: number | null;
 }
 
 export interface TradeBuilderOrderEvent {

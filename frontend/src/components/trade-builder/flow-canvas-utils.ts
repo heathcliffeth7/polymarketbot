@@ -261,10 +261,21 @@ export function placeOrderNodeLabel(config: Record<string, unknown>): string {
   const sideLabel = side === 'sell' ? 'Sat' : side === 'buy' ? 'Al' : '';
   const modeLabel = executionMode === 'market' ? 'Market' : executionMode === 'limit' ? 'Limit' : '';
 
-  if (modeLabel && sideLabel) return `${modeLabel} ${sideLabel}`;
-  if (sideLabel) return `${sideLabel} (mod sec)`;
-  if (modeLabel) return `${modeLabel} Al / Sat`;
-  return 'Mevcut Pozisyonu Al / Sat';
+  let label: string;
+  if (modeLabel && sideLabel) label = `${modeLabel} ${sideLabel}`;
+  else if (sideLabel) label = `${sideLabel} (mod sec)`;
+  else if (modeLabel) label = `${modeLabel} Al / Sat`;
+  else label = 'Mevcut Pozisyonu Al / Sat';
+
+  if (config.tpEnabled === true || config.tpEnabled === 'true') {
+    const tpCent = typeof config.tpPriceCent === 'number' ? config.tpPriceCent : null;
+    label += tpCent != null ? ` | TP@${tpCent}c` : ' | TP';
+  }
+  if (config.slEnabled === true || config.slEnabled === 'true') {
+    const slCent = typeof config.slPriceCent === 'number' ? config.slPriceCent : null;
+    label += slCent != null ? ` | SL@${slCent}c` : ' | SL';
+  }
+  return label;
 }
 
 export function dualDcaNodeLabel(config: Record<string, unknown>): string {
@@ -322,6 +333,39 @@ export function resolveMarketNodeLabel(config: Record<string, unknown>): string 
   const source = `${asset} ${timeframe}`.trim();
   if (outcome) return `${source} | ${outcome}`;
   return source;
+}
+
+export function hasUpstreamAutoScopeTrigger(
+  nodeId: string,
+  nodes: FlowNode[],
+  edges: FlowEdge[],
+): boolean {
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of edges) {
+    const list = incomingByTarget.get(edge.target) ?? [];
+    list.push(edge.source);
+    incomingByTarget.set(edge.target, list);
+  }
+  const visited = new Set<string>();
+  const queue = [nodeId];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const sourceId of incomingByTarget.get(current) ?? []) {
+      const sourceNode = nodeMap.get(sourceId);
+      if (!sourceNode) continue;
+      if (
+        sourceNode.data.nodeType === 'trigger.market_price' &&
+        String(sourceNode.data.config?.marketMode ?? '').trim().toLowerCase() === 'auto_scope'
+      ) {
+        return true;
+      }
+      queue.push(sourceId);
+    }
+  }
+  return false;
 }
 
 export function autoLayoutNodes(

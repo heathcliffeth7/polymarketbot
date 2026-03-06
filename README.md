@@ -90,7 +90,9 @@ export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dex
 - Runtime supports `paper` and `live` mode.
 - `live` mode defaults to safe behavior. Real order placement requires `LIVE_TRADING_ENABLED=true`.
 - `exchange.toml` is required for Gamma/CLOB URLs and encrypted credentials (`api_address`, `api_key`, `api_secret`, `api_passphrase` as `enc:v1:`).
+- `telegram.toml` stores the global Telegram `bot_token`; `chatId` remains workflow node-specific.
 - Runtime'da `CONFIG_ENCRYPTION_KEY` zorunludur; frontend ile aynı key kullanılmalıdır.
+- Published trade flows are processed by a single `bot-runner` process. Do not run `cargo run -p bot-runner` in parallel with the systemd service.
 - Architecture and rollout docs are under `mimari/`.
 - Docker compose file is kept for optional dev-only usage.
 
@@ -128,6 +130,9 @@ export CONFIG_ENCRYPTION_KEY='BASE64_32_BYTE_KEY'
 export LIVE_TRADING_ENABLED=true
 ```
 Credentials değerlerini UI'da `Settings -> Exchange` bölümünden gir; dosyada otomatik şifreli saklanır.
+Telegram action node için global bot tokeni UI'da `Settings -> Telegram` bölümünden gir; opsiyonel global `chat_id` de aynı ekrandan tanımlanabilir.
+Node icinde `chatId` varsa runtime onu kullanir; node bos ise global `chat_id` fallback olur.
+Telegram token/chat ayarlari settings autosave tamamlandıktan sonra bir sonraki Telegram action çalışmasında restart olmadan kullanılır.
 3. Çalıştır:
 ```bash
 cargo run -p bot-runner

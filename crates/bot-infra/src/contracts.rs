@@ -15,6 +15,7 @@ pub trait OrderExecutor: Send + Sync {
     async fn status(&self, exchange_order_id: &str) -> Result<OrderInfo>;
     async fn list_open(&self, market: Option<&str>) -> Result<Vec<OrderInfo>>;
     async fn list_fills(&self, next_cursor: Option<&str>) -> Result<Vec<FillInfo>>;
+    async fn available_token_qty(&self, token_id: &str) -> Result<Option<f64>>;
 
     async fn replace(&self, exchange_order_id: &str, req: &PlaceOrderRequest) -> Result<OrderAck> {
         self.cancel(exchange_order_id).await?;
@@ -49,6 +50,10 @@ where
 
     async fn list_fills(&self, next_cursor: Option<&str>) -> Result<Vec<FillInfo>> {
         ClobRestClient::list_fills(self, next_cursor).await
+    }
+
+    async fn available_token_qty(&self, token_id: &str) -> Result<Option<f64>> {
+        ClobRestClient::get_token_inventory(self, token_id).await
     }
 }
 

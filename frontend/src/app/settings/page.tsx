@@ -14,6 +14,7 @@ export default function SettingsPage() {
           <TabsTrigger value="execution" className="data-[state=active]:bg-zinc-700">Execution</TabsTrigger>
           <TabsTrigger value="bot" className="data-[state=active]:bg-zinc-700">Bot</TabsTrigger>
           <TabsTrigger value="exchange" className="data-[state=active]:bg-zinc-700">Exchange</TabsTrigger>
+          <TabsTrigger value="telegram" className="data-[state=active]:bg-zinc-700">Telegram</TabsTrigger>
         </TabsList>
 
         <TabsContent value="strategy">
@@ -120,6 +121,17 @@ export default function SettingsPage() {
               { key: 'api_key_env', label: 'Key Env (fallback)', type: 'text' },
               { key: 'api_secret_env', label: 'Secret Env (fallback)', type: 'text' },
               { key: 'api_passphrase_env', label: 'Passphrase Env (fallback)', type: 'text' },
+            ]}
+          />
+        </TabsContent>
+
+        <TabsContent value="telegram">
+          <ConfigEditor
+            file="telegram"
+            title="Telegram Config (Auto-Applies After Save)"
+            fields={[
+              { key: 'bot_token', label: 'Telegram Bot Token', type: 'text' },
+              { key: 'chat_id', label: 'Default Telegram Chat ID (Optional)', type: 'text' },
             ]}
           />
         </TabsContent>

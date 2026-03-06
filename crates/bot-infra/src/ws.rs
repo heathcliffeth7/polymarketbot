@@ -61,7 +61,11 @@ impl ClobWsClient {
         }
     }
 
-    async fn subscribe_once_inner(&self, channel: WsChannel, ids: &[String]) -> Result<Vec<WsEvent>> {
+    async fn subscribe_once_inner(
+        &self,
+        channel: WsChannel,
+        ids: &[String],
+    ) -> Result<Vec<WsEvent>> {
         let sub_msg = match channel {
             WsChannel::Market => json!({
                 "type": "market",
@@ -102,7 +106,7 @@ impl ClobWsClient {
                         }
                     }
                     Ok(Some(Ok(_))) => {} // non-text message, skip
-                    _ => break, // error, stream ended, or timeout
+                    _ => break,           // error, stream ended, or timeout
                 }
             }
 

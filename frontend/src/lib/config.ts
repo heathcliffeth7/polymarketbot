@@ -16,6 +16,7 @@ const EXCHANGE_SENSITIVE_FIELDS = [
   'api_secret',
   'api_passphrase',
 ] as const;
+const TELEGRAM_SENSITIVE_FIELDS = ['bot_token'] as const;
 const SUPPORTED_MARKET_SCOPES = [
   'btc_5m_updown',
   'btc_15m_updown',
@@ -43,6 +44,7 @@ const ALLOWED_FILES: Record<string, { writable: boolean }> = {
   risk: { writable: true },
   execution: { writable: true },
   exchange: { writable: true },
+  telegram: { writable: true },
 };
 
 export function isAllowedFile(name: string): boolean {
@@ -57,6 +59,9 @@ export async function readConfig(name: string): Promise<Record<string, unknown>>
   const raw = await readRawConfig(name);
   if (name === 'exchange') {
     return sanitizeExchangeConfigForRead(raw);
+  }
+  if (name === 'telegram') {
+    return sanitizeTelegramConfigForRead(raw);
   }
   return raw;
 }
@@ -113,6 +118,14 @@ export async function writeConfig(name: string, data: Record<string, unknown>): 
     return;
   }
 
+  if (name === 'telegram') {
+    const existing = await readRawConfig(name);
+    const normalized = normalizeTelegramConfigForWrite(data, existing);
+    validateConfig(name, normalized);
+    await writeRawConfig(name, normalized);
+    return;
+  }
+
   let coerced = data;
   if (name === 'strategy') coerced = coerceConfigTypes(data, STRATEGY_NUMERIC_KEYS, STRATEGY_BOOLEAN_KEYS);
   else if (name === 'risk') coerced = coerceConfigTypes(data, RISK_NUMERIC_KEYS, RISK_BOOLEAN_KEYS);
@@ -162,10 +175,36 @@ export async function readPositionWalletAddress(): Promise<string> {
   return readExchangeApiAddressForServer();
 }
 
+export async function readTelegramBotTokenForServer(): Promise<string> {
+  const raw = normalizeTelegramShape(await readRawConfig('telegram'));
+  const inlineToken = String(raw.bot_token ?? '').trim();
+  if (!inlineToken) return '';
+  if (!isEncryptedConfigValue(inlineToken)) return inlineToken;
+  return decryptConfigValue(inlineToken).trim();
+}
+
+export async function readTelegramChatIdForServer(): Promise<string> {
+  const raw = normalizeTelegramShape(await readRawConfig('telegram'));
+  return String(raw.chat_id ?? '').trim();
+}
+
 async function readRawConfig(name: string): Promise<Record<string, unknown>> {
   const filePath = path.join(CONFIG_DIR, `${name}.toml`);
-  const raw = await fs.readFile(filePath, 'utf-8');
-  return TOML.parse(raw) as Record<string, unknown>;
+  try {
+    const raw = await fs.readFile(filePath, 'utf-8');
+    return TOML.parse(raw) as Record<string, unknown>;
+  } catch (err) {
+    if (
+      name === 'telegram' &&
+      typeof err === 'object' &&
+      err != null &&
+      'code' in err &&
+      err.code === 'ENOENT'
+    ) {
+      return {};
+    }
+    throw err;
+  }
 }
 
 async function writeRawConfig(name: string, data: Record<string, unknown>): Promise<void> {
@@ -177,6 +216,17 @@ async function writeRawConfig(name: string, data: Record<string, unknown>): Prom
 function sanitizeExchangeConfigForRead(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = normalizeExchangeShape(raw);
   for (const field of EXCHANGE_SENSITIVE_FIELDS) {
+    const value = String(sanitized[field] ?? '').trim();
+    const hasValue = value.length > 0;
+    sanitized[`has_${field}`] = hasValue;
+    sanitized[field] = hasValue ? MASKED_SECRET : '';
+  }
+  return sanitized;
+}
+
+function sanitizeTelegramConfigForRead(raw: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = normalizeTelegramShape(raw);
+  for (const field of TELEGRAM_SENSITIVE_FIELDS) {
     const value = String(sanitized[field] ?? '').trim();
     const hasValue = value.length > 0;
     sanitized[`has_${field}`] = hasValue;
@@ -228,8 +278,25 @@ function normalizeExchangeConfigForWrite(
   return merged;
 }
 
+function normalizeTelegramConfigForWrite(
+  incoming: Record<string, unknown>,
+  existing: Record<string, unknown>
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = {
+    ...existing,
+    ...normalizeTelegramShape(existing),
+  };
+
+  merged.bot_token = resolveSensitiveFieldForWrite('bot_token', incoming, existing);
+  if (incoming.chat_id !== undefined) {
+    merged.chat_id = String(incoming.chat_id ?? '').trim();
+  }
+
+  return merged;
+}
+
 function resolveSensitiveFieldForWrite(
-  field: (typeof EXCHANGE_SENSITIVE_FIELDS)[number],
+  field: string,
   incoming: Record<string, unknown>,
   existing: Record<string, unknown>
 ): string {
@@ -284,6 +351,13 @@ function normalizeExchangeShape(source: Record<string, unknown>): Record<string,
     api_passphrase_env: String(source.api_passphrase_env ?? ''),
     gnosis_safe_address: String(source.gnosis_safe_address ?? ''),
     gnosis_safe_address_env: String(source.gnosis_safe_address_env ?? ''),
+  };
+}
+
+function normalizeTelegramShape(source: Record<string, unknown>): Record<string, unknown> {
+  return {
+    bot_token: String(source.bot_token ?? ''),
+    chat_id: String(source.chat_id ?? ''),
   };
 }
 
@@ -405,6 +479,13 @@ function validateConfig(name: string, data: Record<string, unknown>): void {
       if (!keyEnv) errors.push('api_key_env is required when api_key is empty');
       if (!secretEnv) errors.push('api_secret_env is required when api_secret is empty');
       if (!passphraseEnv) errors.push('api_passphrase_env is required when api_passphrase is empty');
+    }
+  }
+
+  if (name === 'telegram') {
+    const botToken = String(data.bot_token ?? '').trim();
+    if (botToken === MASKED_SECRET) {
+      errors.push('bot_token cannot be the masked placeholder');
     }
   }
 

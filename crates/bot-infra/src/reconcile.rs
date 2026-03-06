@@ -90,7 +90,10 @@ mod tests {
         };
 
         let r = reconcile_tick_and_snapshot(Some(&tick), &snap, now.timestamp_millis());
-        assert_eq!(r.source, "ws", "WS must win when timestamps are equal (>= tie-break)");
+        assert_eq!(
+            r.source, "ws",
+            "WS must win when timestamps are equal (>= tie-break)"
+        );
         assert_eq!(r.chosen_price, 0.65);
     }
 
@@ -110,7 +113,10 @@ mod tests {
         };
 
         let r = reconcile_tick_and_snapshot(Some(&tick), &snap, now.timestamp_millis());
-        assert_eq!(r.source, "rest", "REST must win when snapshot is strictly newer");
+        assert_eq!(
+            r.source, "rest",
+            "REST must win when snapshot is strictly newer"
+        );
         assert_eq!(r.chosen_price, 0.64);
     }
 

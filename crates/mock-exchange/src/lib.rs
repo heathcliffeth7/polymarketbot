@@ -121,75 +121,75 @@ async fn post_order(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Handle both old flat format and new EIP-712 nested format
-    let (market, side, price, size, client_order_id) =
-        if let Some(order) = body.get("order") {
-            // New EIP-712 format: { "order": { "tokenId", "side", "makerAmount", "takerAmount" }, "owner", "orderType" }
-            let token_id = order
-                .get("tokenId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let side_raw = order
-                .get("side")
-                .and_then(|v| v.as_str())
-                .unwrap_or("0");
-            let is_buy = side_raw == "0" || side_raw.eq_ignore_ascii_case("buy");
-            let side_str = if is_buy { "buy" } else { "sell" }.to_string();
-            let maker_amount: f64 = order
-                .get("makerAmount")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0);
-            let taker_amount: f64 = order
-                .get("takerAmount")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0);
-            // Decode price and size from amounts (both 6 decimals)
-            let (price, size) = if is_buy {
-                // BUY: makerAmount=USDC, takerAmount=shares
-                let shares = taker_amount / 1_000_000.0;
-                let usdc = maker_amount / 1_000_000.0;
-                let p = if shares > 0.0 { usdc / shares } else { 0.0 };
-                (p, shares)
-            } else {
-                // SELL: makerAmount=shares, takerAmount=USDC
-                let shares = maker_amount / 1_000_000.0;
-                let usdc = taker_amount / 1_000_000.0;
-                let p = if shares > 0.0 { usdc / shares } else { 0.0 };
-                (p, shares)
-            };
-            let coid = body
-                .get("owner")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            (token_id, side_str, price, size, coid)
+    let (market, side, price, size, client_order_id) = if let Some(order) = body.get("order") {
+        // New EIP-712 format: { "order": { "tokenId", "side", "makerAmount", "takerAmount" }, "owner", "orderType" }
+        let token_id = order
+            .get("tokenId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let side_raw = order.get("side").and_then(|v| v.as_str()).unwrap_or("0");
+        let is_buy = side_raw == "0" || side_raw.eq_ignore_ascii_case("buy");
+        let side_str = if is_buy { "buy" } else { "sell" }.to_string();
+        let maker_amount: f64 = order
+            .get("makerAmount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let taker_amount: f64 = order
+            .get("takerAmount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        // Decode price and size from amounts (both 6 decimals)
+        let (price, size) = if is_buy {
+            // BUY: makerAmount=USDC, takerAmount=shares
+            let shares = taker_amount / 1_000_000.0;
+            let usdc = maker_amount / 1_000_000.0;
+            let p = if shares > 0.0 { usdc / shares } else { 0.0 };
+            (p, shares)
         } else {
-            // Legacy flat format
-            let token_id = body
-                .get("tokenID")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let market = body
-                .get("market")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let market = if token_id.is_empty() { market } else { token_id };
-            let side_str = body
-                .get("side")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let price = body.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let size = body.get("size").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let coid = body
-                .get("clientOrderId")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            (market, side_str, price, size, coid)
+            // SELL: makerAmount=shares, takerAmount=USDC
+            let shares = maker_amount / 1_000_000.0;
+            let usdc = taker_amount / 1_000_000.0;
+            let p = if shares > 0.0 { usdc / shares } else { 0.0 };
+            (p, shares)
         };
+        let coid = body
+            .get("owner")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        (token_id, side_str, price, size, coid)
+    } else {
+        // Legacy flat format
+        let token_id = body
+            .get("tokenID")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let market = body
+            .get("market")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let market = if token_id.is_empty() {
+            market
+        } else {
+            token_id
+        };
+        let side_str = body
+            .get("side")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let price = body.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let size = body.get("size").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let coid = body
+            .get("clientOrderId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        (market, side_str, price, size, coid)
+    };
 
     let mut g = state.inner.lock().await;
     let id = Uuid::new_v4().to_string();

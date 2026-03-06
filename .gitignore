@@ -36,3 +36,4 @@ CLAUDE.local.md
 .DS_Store
 *.swp
 *.swo
+frontend/dev.log

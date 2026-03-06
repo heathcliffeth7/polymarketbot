@@ -229,6 +229,20 @@ impl Default for ClaimConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TelegramConfig {
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub chat_id: String,
+}
+
+impl TelegramConfig {
+    pub fn load_from_dir(dir: &Path) -> Result<Self> {
+        load_toml_or_default(&dir.join("telegram.toml"))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub bot: BotConfig,
@@ -237,6 +251,7 @@ pub struct AppConfig {
     pub execution: ExecutionConfig,
     pub exchange: ExchangeConfig,
     pub claim: ClaimConfig,
+    pub telegram: TelegramConfig,
 }
 
 impl AppConfig {
@@ -247,8 +262,11 @@ impl AppConfig {
         let execution: ExecutionConfig = load_toml(&dir.join("execution.toml"))?;
         let exchange: ExchangeConfig = load_toml(&dir.join("exchange.toml"))?;
         let claim: ClaimConfig = load_toml_or_default(&dir.join("claim.toml"))?;
+        let telegram = TelegramConfig::load_from_dir(dir)?;
 
-        validate(&bot, &strategy, &risk, &execution, &exchange, &claim)?;
+        validate(
+            &bot, &strategy, &risk, &execution, &exchange, &claim, &telegram,
+        )?;
 
         Ok(Self {
             bot,
@@ -257,6 +275,7 @@ impl AppConfig {
             execution,
             exchange,
             claim,
+            telegram,
         })
     }
 }
@@ -436,6 +455,7 @@ fn validate(
     execution: &ExecutionConfig,
     exchange: &ExchangeConfig,
     claim: &ClaimConfig,
+    _telegram: &TelegramConfig,
 ) -> Result<()> {
     anyhow::ensure!(
         (0.0..=1.0).contains(&strategy.entry_price),

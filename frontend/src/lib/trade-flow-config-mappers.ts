@@ -23,6 +23,7 @@ export interface OutcomeConditionRow {
   outcomeLabel: string;
   triggerCondition: string;
   triggerPriceCent: string;
+  maxPriceCent: string;
 }
 
 export interface DrawdownRuleRow {
@@ -58,6 +59,7 @@ export interface ContextFormState {
   marketSlug: string;
   tokenId: string;
   outcomeLabel: string;
+  autoClaimEnabled: boolean;
   extras: KeyValueDraft[];
   advancedJson: string;
 }
@@ -98,6 +100,7 @@ const PRESET_PLACE_ORDER_KINDS = new Set([
   'place_order',
   ...QUICK_PRESET_BUY_SELL_KINDS,
 ]);
+const TRIGGER_MARKET_ONCE_SCOPE_VERSION = 2;
 
 export function isPresetBuySellPlaceOrderMarker(presetKind: unknown, refKey: unknown): boolean {
   const kind = toStringValue(presetKind).trim().toLowerCase();
@@ -152,6 +155,43 @@ function toStringValue(value: unknown): string {
   return '';
 }
 
+function toCentStringValue(centValue: unknown, legacyDecimalValue?: unknown): string {
+  const cent = toStringValue(centValue).trim();
+  if (cent) return cent;
+
+  const legacyDecimal = Number(toStringValue(legacyDecimalValue).trim());
+  if (Number.isFinite(legacyDecimal) && legacyDecimal > 0 && legacyDecimal <= 1) {
+    return String(Math.round(legacyDecimal * 100));
+  }
+
+  return '';
+}
+
+function toTriggerMarketOnceScopeVersion(value: unknown): number {
+  const parsed = Number(toStringValue(value).trim());
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.trunc(parsed);
+}
+
+function resolveTriggerMarketOnceScope(
+  cfg: Record<string, unknown>,
+  marketMode: 'auto_scope' | 'fixed',
+  repeatMode: 'once' | 'loop'
+): 'run' | 'market' {
+  const onceScopeRaw = toStringValue(cfg.onceScope).trim().toLowerCase();
+  const onceScopeVersion = toTriggerMarketOnceScopeVersion(cfg.onceScopeVersion);
+
+  if (
+    marketMode === 'auto_scope' &&
+    repeatMode === 'once' &&
+    onceScopeVersion < TRIGGER_MARKET_ONCE_SCOPE_VERSION
+  ) {
+    return 'market';
+  }
+
+  return onceScopeRaw === 'market' ? 'market' : 'run';
+}
+
 function valueTypeOf(value: unknown): PrimitiveValueType {
   if (typeof value === 'number') return 'number';
   if (typeof value === 'boolean') return 'boolean';
@@ -169,6 +209,15 @@ function parsePrimitive(value: string, valueType: PrimitiveValueType): unknown {
     return null;
   }
   return value;
+}
+
+function toBooleanValue(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) && value !== 0;
+  if (typeof value !== 'string') return false;
+
+  const normalized = value.trim().toLowerCase();
+  return ['true', '1', 'yes', 'y', 'on'].includes(normalized);
 }
 
 export function createEmptyConditionDraft(): ConditionDraft {
@@ -191,7 +240,14 @@ export function createEmptyKeyValueDraft(): KeyValueDraft {
 }
 
 export function createEmptyOutcomeConditionRow(): OutcomeConditionRow {
-  return { id: createId('oc'), tokenId: '', outcomeLabel: '', triggerCondition: '', triggerPriceCent: '' };
+  return {
+    id: createId('oc'),
+    tokenId: '',
+    outcomeLabel: '',
+    triggerCondition: '',
+    triggerPriceCent: '',
+    maxPriceCent: '',
+  };
 }
 
 export function createEmptyDrawdownRuleRow(): DrawdownRuleRow {
@@ -232,6 +288,44 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       options: [{ label: 'latest_by_slug', value: 'latest_by_slug' }],
     },
     {
+      key: 'protectionMode',
+      label: 'Underlying Koruma',
+      input: 'select',
+      options: [
+        { label: 'Kapali (off)', value: 'off' },
+        { label: 'Asset teyidi', value: 'underlying_confirm' },
+      ],
+      help: 'Koruma secilen auto_scope assetine otomatik baglanir. BTC scope BTC ile, XRP scope XRP ile dogrulanir.',
+    },
+    {
+      key: 'protectionPreset',
+      label: 'Koruma Preseti',
+      input: 'select',
+      options: [
+        { label: 'Loose', value: 'loose' },
+        { label: 'Balanced', value: 'balanced' },
+        { label: 'Strict', value: 'strict' },
+      ],
+      help: 'Balanced varsayilandir. Ayrica manuel asset secimi yoktur; secilen scope kullanilir.',
+    },
+    {
+      key: 'cycleWindowMode',
+      label: 'Cycle Pencere Modu',
+      input: 'select',
+      options: [
+        { label: 'Tamamı (kapalı)', value: 'off' },
+        { label: 'İlk N saniye (first)', value: 'first' },
+        { label: 'Son N saniye (last)', value: 'last' },
+      ],
+      help: 'Cycle icinde sadece belirli bir zaman penceresinde tetik degerlendirilir. `last` modunda pencereye zaten esik ustunde girerse tetiklemez; bu pencere icinde gercek cross gerekir.',
+    },
+    {
+      key: 'cycleWindowSecs',
+      label: 'Pencere Süresi (saniye)',
+      input: 'number',
+      help: 'Kac saniye boyunca tetik degerlendirilecek. Or: 5m cycle, last 60 -> son 60sn. `last` modunda bu pencere icinde esigin altindan ustune gercek gecis aranir.',
+    },
+    {
       key: 'repeatMode',
       label: 'Tetik Modu',
       input: 'select',
@@ -248,6 +342,7 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'Run', value: 'run' },
         { label: 'Market', value: 'market' },
       ],
+      help: '`run` ilk basarili tetikten sonra workflow run boyunca tekrar almaz. `market` her yeni auto_scope markette bir kez daha tetikleyebilir. Auto-scope + once varsayilani markettir.',
     },
     { key: 'minIntervalMs', label: 'Kontrol Aralığı (ms)', input: 'number', help: 'Varsayılan: 10000 (10sn). Minimum: 250ms.' },
     { key: 'confirmationMs', label: 'Onay Süresi (ms)', input: 'number', help: 'Cross sonrası fiyatın eşikte kalması gereken süre. Boş = onay kapalı, 0 = anında tetik.' },
@@ -290,6 +385,12 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       label: 'Fiyat Eşiği (cent)',
       input: 'number',
       help: 'Örn: 70 girersen 70c.',
+    },
+    {
+      key: 'maxPriceCent',
+      label: 'Tavan Fiyati (cent)',
+      input: 'number',
+      help: 'Opsiyonel. Bossa ust limit uygulanmaz.',
     },
     {
       key: 'minIntervalMs',
@@ -507,7 +608,6 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
     },
     { key: 'sizeUsdc', label: 'Tutar (USDC)', input: 'number' },
     { key: 'sizePct', label: 'Tutar (%)', input: 'number', help: 'Geçerli aralık: 0 < % <= 100.' },
-    { key: 'targetNotionalUsdc', label: 'Target Notional (USDC)', input: 'number' },
     { key: 'minPriceDistanceCent', label: 'Minimum Fiyat Mesafesi (cent)', input: 'number' },
     { key: 'maxTriggers', label: 'Maksimum Tetikleme', input: 'number' },
     {
@@ -531,6 +631,28 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
     },
     { key: 'triggerPrice', label: 'Tetik Fiyatı', input: 'number' },
     { key: 'expiresAt', label: 'Bitiş Zamanı', input: 'datetime-local' },
+    {
+      key: 'tpEnabled',
+      label: 'Take Profit',
+      input: 'select',
+      options: [
+        { label: 'Kapali', value: 'false' },
+        { label: 'Aktif', value: 'true' },
+      ],
+      help: 'Buy emri doldurulunca belirtilen fiyatta otomatik IOC sell emri olusturur.',
+    },
+    { key: 'tpPriceCent', label: 'TP Fiyat (cent)', input: 'number', help: 'Hedef satis fiyati (1-99 cent). Fiyat bu seviyeyi gecince marketten IOC ile satilir.' },
+    {
+      key: 'slEnabled',
+      label: 'Stop Loss',
+      input: 'select',
+      options: [
+        { label: 'Kapali', value: 'false' },
+        { label: 'Aktif', value: 'true' },
+      ],
+      help: 'Buy emri doldurulunca belirtilen stop seviyesinde otomatik IOC sell emri olusturur.',
+    },
+    { key: 'slPriceCent', label: 'SL Fiyat (cent)', input: 'number', help: 'Stop satis fiyati (1-99 cent). Fiyat bu seviyenin altina inince marketten IOC ile satilir.' },
     { key: 'refKey', label: 'Reference Key', input: 'text' },
   ],
   'action.cancel_order': [
@@ -549,7 +671,6 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
     { key: 'message', label: 'Mesaj', input: 'textarea' },
   ],
   'action.telegram_notify': [
-    { key: 'botToken', label: 'Bot Token', input: 'text', placeholder: '123456:ABC-DEF...' },
     { key: 'chatId', label: 'Chat ID', input: 'text', placeholder: '-1001234567890' },
     { key: 'message', label: 'Mesaj', input: 'textarea', placeholder: 'Tetik: {{vars.trigger_1_price}}' },
   ],
@@ -560,6 +681,7 @@ const NUMERIC_KEYS = new Set([
   'minIntervalMs',
   'triggerPrice',
   'triggerPriceCent',
+  'maxPriceCent',
   'sourceTradeId',
   'minProgressPct',
   'minPositionQty',
@@ -584,9 +706,17 @@ const NUMERIC_KEYS = new Set([
   'slSpreadPct',
   'confirmationMs',
   'entryPriceCent',
+  'tpPriceCent',
+  'slPriceCent',
 ]);
 
-const BOOLEAN_KEYS = new Set(['failOnMissingMarket', 'requireYesNoTokens', 'requireTokenId']);
+const BOOLEAN_KEYS = new Set([
+  'failOnMissingMarket',
+  'requireYesNoTokens',
+  'requireTokenId',
+  'tpEnabled',
+  'slEnabled',
+]);
 
 function toDateTimeLocalString(value: unknown): string {
   const raw = toStringValue(value).trim();
@@ -737,7 +867,22 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
       ? toDateTimeLocalString(cfg[field.key])
       : toStringValue(cfg[field.key]);
   }
+  if (nodeType === 'action.telegram_notify') {
+    fields.botToken = toStringValue(cfg.botToken);
+  }
   if (nodeType === 'action.place_order') {
+    if (!fields.tpPriceCent.trim()) {
+      const legacyTpPrice = Number(cfg.tpPrice);
+      if (Number.isFinite(legacyTpPrice) && legacyTpPrice > 0 && legacyTpPrice <= 1) {
+        fields.tpPriceCent = String(Math.round(legacyTpPrice * 100));
+      }
+    }
+    if (!fields.slPriceCent.trim()) {
+      const legacySlPrice = Number(cfg.slPrice);
+      if (Number.isFinite(legacySlPrice) && legacySlPrice > 0 && legacySlPrice <= 1) {
+        fields.slPriceCent = String(Math.round(legacySlPrice * 100));
+      }
+    }
     if (!fields.sizePct.trim()) {
       fields.sizePct = toStringValue(cfg.sizePercent);
     }
@@ -867,17 +1012,36 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
 
     const selectionRaw = toStringValue(cfg.marketSelection).trim().toLowerCase();
     fields.marketSelection = selectionRaw || 'latest_by_slug';
+    const protectionModeRaw = toStringValue(cfg.protectionMode).trim().toLowerCase();
+    fields.protectionMode =
+      protectionModeRaw === 'underlying_confirm' ? 'underlying_confirm' : 'off';
+    const protectionPresetRaw = toStringValue(cfg.protectionPreset).trim().toLowerCase();
+    fields.protectionPreset =
+      protectionPresetRaw === 'loose' ||
+      protectionPresetRaw === 'balanced' ||
+      protectionPresetRaw === 'strict'
+        ? protectionPresetRaw
+        : 'balanced';
 
-    if (!fields.repeatMode.trim()) {
-      fields.repeatMode = 'loop';
+    const repeatModeRaw = toStringValue(fields.repeatMode || cfg.repeatMode).trim().toLowerCase();
+    fields.repeatMode = repeatModeRaw === 'once' ? 'once' : 'loop';
+    fields.onceScope = resolveTriggerMarketOnceScope(cfg, marketMode, fields.repeatMode as 'once' | 'loop');
+
+    const cycleWindowModeRaw = toStringValue(cfg.cycleWindowMode).trim().toLowerCase();
+    if (cycleWindowModeRaw === 'first' || cycleWindowModeRaw === 'last') {
+      fields.cycleWindowMode = cycleWindowModeRaw;
+    } else {
+      fields.cycleWindowMode = 'off';
     }
-
-    const onceScopeRaw = toStringValue(cfg.onceScope).trim().toLowerCase();
-    fields.onceScope = onceScopeRaw === 'market' ? 'market' : 'run';
+    fields.cycleWindowSecs = toStringValue(cfg.cycleWindowSecs);
 
   }
 
-  let outcomeConditionRows: OutcomeConditionRow[] = [];
+  if (nodeType === 'trigger.open_positions') {
+    fields.maxPriceCent = toCentStringValue(fields.maxPriceCent || cfg.maxPriceCent, cfg.maxPrice);
+  }
+
+  const outcomeConditionRows: OutcomeConditionRow[] = [];
   let drawdownRuleRows: DrawdownRuleRow[] = [];
   if (nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') {
     if (Array.isArray(cfg.outcomeConditions)) {
@@ -889,6 +1053,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
           outcomeLabel: toStringValue(item.outcomeLabel),
           triggerCondition: toStringValue(item.triggerCondition),
           triggerPriceCent: toStringValue(item.triggerPriceCent),
+          maxPriceCent: toCentStringValue(item.maxPriceCent, item.maxPrice),
         });
       }
     } else if (toStringValue(cfg.tokenId).trim() && toStringValue(cfg.triggerCondition).trim()) {
@@ -898,6 +1063,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
         outcomeLabel: toStringValue(cfg.outcomeLabel),
         triggerCondition: toStringValue(cfg.triggerCondition),
         triggerPriceCent: toStringValue(cfg.triggerPriceCent),
+        maxPriceCent: toCentStringValue(cfg.maxPriceCent, cfg.maxPrice),
       });
     }
   }
@@ -1056,6 +1222,30 @@ export function buildNodeConfigFromForm(
         config.executionMode = 'market';
       }
     }
+
+    const sideRaw = toStringValue(config.side).trim().toLowerCase();
+    const isBuySide = sideRaw === 'buy';
+    const tpEnabled = config.tpEnabled === true;
+    const slEnabled = config.slEnabled === true;
+    if (!isBuySide) {
+      delete config.tpEnabled;
+      delete config.tpPriceCent;
+      delete config.tpPrice;
+      delete config.slEnabled;
+      delete config.slPriceCent;
+      delete config.slPrice;
+    } else {
+      if (!tpEnabled) {
+        delete config.tpEnabled;
+        delete config.tpPriceCent;
+        delete config.tpPrice;
+      }
+      if (!slEnabled) {
+        delete config.slEnabled;
+        delete config.slPriceCent;
+        delete config.slPrice;
+      }
+    }
   }
 
   if (nodeType === 'action.resolve_market') {
@@ -1144,7 +1334,7 @@ export function buildNodeConfigFromForm(
   }
 
   if (nodeType === 'trigger.market_price') {
-    const marketModeRaw = toStringValue(config.marketMode).trim().toLowerCase();
+    const marketModeRaw = toStringValue(form.fields.marketMode ?? config.marketMode).trim().toLowerCase();
     const marketMode = marketModeRaw === 'auto_scope' ? 'auto_scope' : 'fixed';
     config.marketMode = marketMode;
     const priceModeRaw = toStringValue(config.priceMode).trim().toLowerCase();
@@ -1155,7 +1345,14 @@ export function buildNodeConfigFromForm(
     config.repeatMode = repeatModeRaw === 'once' ? 'once' : 'loop';
 
     const onceScopeRaw = toStringValue(config.onceScope).trim().toLowerCase();
-    config.onceScope = onceScopeRaw === 'market' ? 'market' : 'run';
+    if (config.repeatMode === 'once') {
+      if (onceScopeRaw === 'market' || onceScopeRaw === 'run') {
+        config.onceScope = onceScopeRaw;
+      } else {
+        config.onceScope = marketMode === 'auto_scope' ? 'market' : 'run';
+      }
+      config.onceScopeVersion = TRIGGER_MARKET_ONCE_SCOPE_VERSION;
+    }
 
     const selectionRaw = toStringValue(config.marketSelection).trim().toLowerCase();
     config.marketSelection = selectionRaw || 'latest_by_slug';
@@ -1177,15 +1374,49 @@ export function buildNodeConfigFromForm(
       } else {
         delete config.marketScope;
       }
+      const protectionModeRaw = toStringValue(config.protectionMode).trim().toLowerCase();
+      if (protectionModeRaw === 'underlying_confirm') {
+        config.protectionMode = 'underlying_confirm';
+        const protectionPresetRaw = toStringValue(config.protectionPreset).trim().toLowerCase();
+        config.protectionPreset =
+          protectionPresetRaw === 'loose' ||
+          protectionPresetRaw === 'balanced' ||
+          protectionPresetRaw === 'strict'
+            ? protectionPresetRaw
+            : 'balanced';
+      } else {
+        delete config.protectionMode;
+        delete config.protectionPreset;
+      }
       // auto_scope resolves market slug at runtime.
       delete config.marketSlug;
+      // Cycle window focus
+      const cycleWindowModeRaw2 = toStringValue(config.cycleWindowMode).trim().toLowerCase();
+      if (cycleWindowModeRaw2 === 'first' || cycleWindowModeRaw2 === 'last') {
+        config.cycleWindowMode = cycleWindowModeRaw2;
+        const cwSecsRaw = Number(toStringValue(config.cycleWindowSecs).trim());
+        if (Number.isInteger(cwSecsRaw) && cwSecsRaw > 0) {
+          config.cycleWindowSecs = cwSecsRaw;
+        } else {
+          delete config.cycleWindowMode;
+          delete config.cycleWindowSecs;
+        }
+      } else {
+        delete config.cycleWindowMode;
+        delete config.cycleWindowSecs;
+      }
     } else {
       delete config.marketScope;
       delete config.marketSelection;
+      delete config.protectionMode;
+      delete config.protectionPreset;
+      delete config.cycleWindowMode;
+      delete config.cycleWindowSecs;
     }
 
     if (config.repeatMode !== 'once') {
       delete config.onceScope;
+      delete config.onceScopeVersion;
     }
   }
 
@@ -1243,6 +1474,16 @@ export function buildNodeConfigFromForm(
     delete config.windowMs;
   }
 
+  if (nodeType === 'trigger.open_positions') {
+    const maxPriceCentRaw = Number(form.fields.maxPriceCent?.trim() ?? '');
+    if (Number.isFinite(maxPriceCentRaw) && maxPriceCentRaw > 0 && maxPriceCentRaw <= 100) {
+      config.maxPriceCent = maxPriceCentRaw;
+    } else {
+      delete config.maxPriceCent;
+    }
+    delete config.maxPrice;
+  }
+
   if ((nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') && form.outcomeConditionRows.length > 0) {
     const conditions = form.outcomeConditionRows
       .filter((row) => {
@@ -1250,24 +1491,42 @@ export function buildNodeConfigFromForm(
         const outcomeLabel = row.outcomeLabel.trim();
         const triggerCondition = row.triggerCondition.trim();
         const triggerPriceCent = Number(row.triggerPriceCent.trim());
+        const maxPriceCentRaw = row.maxPriceCent.trim();
+        const maxPriceCent = maxPriceCentRaw ? Number(maxPriceCentRaw) : null;
+        const hasValidMaxPriceCent =
+          !maxPriceCentRaw ||
+          (Number.isFinite(maxPriceCent) && (maxPriceCent as number) > 0 && (maxPriceCent as number) <= 100);
         if (!tokenId || !outcomeLabel) return false;
         if (triggerCondition !== 'cross_above' && triggerCondition !== 'cross_below') return false;
-        return Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100;
+        return Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100 && hasValidMaxPriceCent;
       })
       .map((row) => {
         const priceCent = Number(row.triggerPriceCent.trim());
-        return {
+        const maxPriceCentRaw = row.maxPriceCent.trim();
+        const maxPriceCent = maxPriceCentRaw ? Number(maxPriceCentRaw) : null;
+        const condition: Record<string, unknown> = {
           tokenId: row.tokenId.trim(),
           outcomeLabel: row.outcomeLabel.trim(),
           triggerCondition: row.triggerCondition.trim(),
           triggerPriceCent: Number.isFinite(priceCent) ? priceCent : 0,
         };
+        if (
+          maxPriceCentRaw &&
+          Number.isFinite(maxPriceCent) &&
+          (maxPriceCent as number) > 0 &&
+          (maxPriceCent as number) <= 100
+        ) {
+          condition.maxPriceCent = maxPriceCent;
+        }
+        return condition;
       });
     if (conditions.length > 0) {
       config.outcomeConditions = conditions;
       delete config.tokenId;
       delete config.triggerCondition;
       delete config.triggerPriceCent;
+      delete config.maxPriceCent;
+      delete config.maxPrice;
     }
   }
 
@@ -1281,6 +1540,10 @@ export function buildNodeConfigFromForm(
 
   if (nodeType === 'action.set_state') {
     config.statePatch = buildObjectFromKeyValueDrafts(form.statePatchRows);
+  }
+
+  if (nodeType === 'action.telegram_notify') {
+    delete config.botToken;
   }
 
   return config;
@@ -1409,7 +1672,13 @@ export function jsonLogicToNestedExprGroup(logic: unknown): import('@/lib/types'
   return null;
 }
 
-const CONTEXT_BASE_KEYS = new Set(['sourceTradeId', 'marketSlug', 'tokenId', 'outcomeLabel']);
+const CONTEXT_BASE_KEYS = new Set([
+  'sourceTradeId',
+  'marketSlug',
+  'tokenId',
+  'outcomeLabel',
+  'autoClaimEnabled',
+]);
 
 export function parseContextToForm(context: unknown): ContextFormState {
   const ctx = isRecord(context) ? context : {};
@@ -1417,6 +1686,7 @@ export function parseContextToForm(context: unknown): ContextFormState {
   const marketSlug = toStringValue(ctx.marketSlug);
   const tokenId = toStringValue(ctx.tokenId);
   const outcomeLabel = toStringValue(ctx.outcomeLabel);
+  const autoClaimEnabled = toBooleanValue(ctx.autoClaimEnabled);
 
   const extras: KeyValueDraft[] = [];
   for (const [key, value] of Object.entries(ctx)) {
@@ -1434,6 +1704,7 @@ export function parseContextToForm(context: unknown): ContextFormState {
     marketSlug,
     tokenId,
     outcomeLabel,
+    autoClaimEnabled,
     extras,
     advancedJson: safeJsonStringify(ctx),
   };
@@ -1451,6 +1722,7 @@ export function buildContextFromForm(form: ContextFormState): Record<string, unk
   if (form.marketSlug.trim()) context.marketSlug = form.marketSlug.trim();
   if (form.tokenId.trim()) context.tokenId = form.tokenId.trim();
   if (form.outcomeLabel.trim()) context.outcomeLabel = form.outcomeLabel.trim();
+  if (form.autoClaimEnabled) context.autoClaimEnabled = true;
 
   const extraValues = buildObjectFromKeyValueDrafts(form.extras);
   for (const [key, value] of Object.entries(extraValues)) {

@@ -1,5 +1,6 @@
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   createEmptyKeyValueDraft,
@@ -22,6 +23,7 @@ interface FlowContextEditorProps {
   onContextTabChange: (tab: 'basic' | 'advanced') => void;
   onApplyFromForm: () => void;
   onApplyFromAdvanced: () => void;
+  onAutoClaimEnabledChange?: (enabled: boolean) => void;
 }
 
 export function FlowContextEditor({
@@ -31,6 +33,7 @@ export function FlowContextEditor({
   onContextTabChange,
   onApplyFromForm,
   onApplyFromAdvanced,
+  onAutoClaimEnabledChange,
 }: FlowContextEditorProps) {
   return (
     <div className="space-y-2 md:col-span-3">
@@ -75,6 +78,27 @@ export function FlowContextEditor({
                 onChange={(e) => onContextFormChange((prev) => ({ ...prev, outcomeLabel: e.target.value }))}
                 className="h-8 border-zinc-700 bg-zinc-800 text-xs text-zinc-200"
               />
+            </div>
+            <div className="md:col-span-2">
+              <div className="flex items-start justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+                <div className="space-y-1">
+                  <p className="text-[11px] font-medium text-zinc-300">Autoclaim</p>
+                  <p className="text-[11px] text-zinc-500">
+                    Acikken ayar aninda kaydedilir. Runner bir sonraki turda wallet&apos;taki
+                    kazanilmis redeemable prediction&apos;lari otomatik claim etmeyi dener.
+                  </p>
+                </div>
+                <Switch
+                  checked={contextForm.autoClaimEnabled}
+                  onCheckedChange={(checked) => {
+                    if (onAutoClaimEnabledChange) {
+                      onAutoClaimEnabledChange(checked);
+                      return;
+                    }
+                    onContextFormChange((prev) => ({ ...prev, autoClaimEnabled: checked }));
+                  }}
+                />
+              </div>
             </div>
           </div>
 
@@ -172,6 +196,9 @@ interface FlowSummaryBarProps {
 }
 
 export function FlowSummaryBar({ graph, validation }: FlowSummaryBarProps) {
+  const autoClaimEnabled =
+    graph.context?.autoClaimEnabled === true || graph.context?.autoClaimEnabled === 'true';
+
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
       <p className="text-xs text-zinc-400">Flow Ozeti</p>
@@ -180,6 +207,7 @@ export function FlowSummaryBar({ graph, validation }: FlowSummaryBarProps) {
         <span>Edge: {graph.edges.length}</span>
         <span>Trigger: {graph.nodes.filter((n) => n.type.startsWith('trigger.')).length}</span>
         <span>Action: {graph.nodes.filter((n) => n.type.startsWith('action.')).length}</span>
+        <span>AutoClaim: {autoClaimEnabled ? 'Acik' : 'Kapali'}</span>
       </div>
       {validation && (
         <div className="mt-3 space-y-2 rounded-md border border-zinc-800 bg-zinc-900/70 p-2">
@@ -237,6 +265,8 @@ interface CreateFlowSlotProps {
   onDeselectAllDefinitions?: () => void;
   onBulkArchive?: () => void;
   bulkArchiving?: boolean;
+  autoClaimEnabled?: boolean;
+  onAutoClaimEnabledChange?: (enabled: boolean) => void;
 }
 
 export function CreateFlowSlot({
@@ -250,6 +280,7 @@ export function CreateFlowSlot({
   onSaveDraft, onValidate, onPublish, onArchiveFlow,
   botActive, botControlAvailable, onStopBot, stoppingBot,
   selectedDefinitionIds, onToggleDefinitionSelection, onSelectAllDefinitions, onDeselectAllDefinitions, onBulkArchive, bulkArchiving,
+  autoClaimEnabled = false, onAutoClaimEnabledChange,
 }: CreateFlowSlotProps) {
   return (
     <div className="space-y-2 overflow-hidden rounded-md border border-slate-200 bg-white p-2">
@@ -307,6 +338,27 @@ export function CreateFlowSlot({
               >
                 {stoppingBot ? 'Durduruluyor...' : botActive ? 'Botu Durdur' : 'Bot Durmus'}
               </Button>
+            )}
+            {onAutoClaimEnabledChange && (
+              <label className="flex cursor-pointer items-start gap-3 rounded-md border border-emerald-200 bg-emerald-50 p-2">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 accent-emerald-600"
+                  checked={autoClaimEnabled}
+                  disabled={workflowActionsDisabled}
+                  onChange={(e) => onAutoClaimEnabledChange(e.target.checked)}
+                />
+                <span className="space-y-1">
+                  <span className="block text-[11px] font-medium text-emerald-900">Autoclaim</span>
+                  <span className="block text-[10px] text-emerald-800">
+                    Kazandigin prediction varsa checkbox&apos;i isaretledigin anda ayar kaydolur.
+                    Runner bir sonraki turda wallet-wide claim dener.
+                  </span>
+                  <span className="block text-[10px] text-emerald-700">
+                    claim.toml ve claim env ayarlari yine zorunlu.
+                  </span>
+                </span>
+              </label>
             )}
           </div>
         </div>

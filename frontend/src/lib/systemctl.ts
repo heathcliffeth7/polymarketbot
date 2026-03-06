@@ -192,6 +192,19 @@ export async function controlService(action: ServiceAction): Promise<ControlResu
     };
   }
 
+  if (action === 'start') {
+    const status = await getServiceStatus();
+    if (status.controlAvailable && status.serviceActive) {
+      return {
+        success: true,
+        message: 'Runner zaten aktif; yeni proses acilmadi, mevcut singleton proses kullanilacak.',
+        controlAvailable: true,
+        controlReason: null,
+        controlReasonCode: null,
+      };
+    }
+  }
+
   try {
     await execAsync(`sudo -n systemctl ${action} ${serviceName}`);
     return {

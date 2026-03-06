@@ -5,8 +5,8 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useReducer,
   useRef,
-  useState,
   type ReactNode,
 } from 'react';
 import { toast } from 'sonner';
@@ -27,6 +27,15 @@ interface NotificationContextValue {
   unreadCount: number;
   markAllRead: () => void;
 }
+
+interface NotificationState {
+  notifications: Notification[];
+  unreadCount: number;
+}
+
+type NotificationAction =
+  | { type: 'append'; incoming: Notification[] }
+  | { type: 'mark_all_read' };
 
 const NotificationContext = createContext<NotificationContextValue>({
   notifications: [],
@@ -99,6 +108,24 @@ function saveNotifications(items: Notification[]) {
   } catch {}
 }
 
+function notificationReducer(
+  state: NotificationState,
+  action: NotificationAction,
+): NotificationState {
+  switch (action.type) {
+    case 'append':
+      if (action.incoming.length === 0) return state;
+      return {
+        notifications: [...action.incoming, ...state.notifications].slice(0, MAX_NOTIFICATIONS),
+        unreadCount: state.unreadCount + action.incoming.length,
+      };
+    case 'mark_all_read':
+      return { ...state, unreadCount: 0 };
+    default:
+      return state;
+  }
+}
+
 function loadLastSeenId(): number {
   try {
     return Number(localStorage.getItem(STORAGE_LAST_SEEN_KEY)) || 0;
@@ -123,12 +150,18 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     !!activeRunId,
   );
 
-  const [notifications, setNotifications] = useState<Notification[]>(loadNotifications);
-  const [unreadCount, setUnreadCount] = useState(0);
+  const [state, dispatch] = useReducer(notificationReducer, undefined, () => ({
+    notifications: loadNotifications(),
+    unreadCount: 0,
+  }));
   const lastSeenEventIdRef = useRef<number>(loadLastSeenId());
   const initializedRef = useRef(false);
 
-  const markAllRead = useCallback(() => setUnreadCount(0), []);
+  const markAllRead = useCallback(() => dispatch({ type: 'mark_all_read' }), []);
+
+  useEffect(() => {
+    saveNotifications(state.notifications);
+  }, [state.notifications]);
 
   useEffect(() => {
     if (!eventsData?.data?.length) return;
@@ -166,12 +199,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
       });
     }
     if (incoming.length > 0) {
-      setNotifications((prev) => {
-        const next = [...incoming, ...prev].slice(0, MAX_NOTIFICATIONS);
-        saveNotifications(next);
-        return next;
-      });
-      setUnreadCount((prev) => prev + incoming.length);
+      dispatch({ type: 'append', incoming });
     }
   }, [eventsData]);
 
@@ -181,7 +209,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
 
   return (
     <NotificationContext.Provider
-      value={{ notifications, unreadCount, markAllRead }}
+      value={{ notifications: state.notifications, unreadCount: state.unreadCount, markAllRead }}
     >
       {children}
     </NotificationContext.Provider>

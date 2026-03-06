@@ -138,8 +138,7 @@ pub fn unix_now_secs() -> Result<i64> {
     Ok(now.as_secs() as i64)
 }
 
-const ORDER_TYPE_STR: &str =
-    "Order(uint256 salt,address maker,address signer,address taker,\
+const ORDER_TYPE_STR: &str = "Order(uint256 salt,address maker,address signer,address taker,\
      uint256 tokenId,uint256 makerAmount,uint256 takerAmount,\
      uint256 expiration,uint256 nonce,uint256 feeRateBps,\
      uint8 side,uint8 signatureType)";
@@ -182,13 +181,13 @@ pub fn sign_order_eip712(
         Token::FixedBytes(keccak256(ORDER_TYPE_STR).to_vec()),
         Token::Uint(salt),
         Token::Address(maker),
-        Token::Address(signer),        // EOA signer (may differ from maker for Gnosis Safe)
-        Token::Address(zero_addr),     // taker = zero (public order)
+        Token::Address(signer), // EOA signer (may differ from maker for Gnosis Safe)
+        Token::Address(zero_addr), // taker = zero (public order)
         Token::Uint(token_id),
         Token::Uint(maker_amount),
         Token::Uint(taker_amount),
-        Token::Uint(U256::zero()),     // expiration = 0 (GTC)
-        Token::Uint(U256::zero()),     // nonce = 0
+        Token::Uint(U256::zero()), // expiration = 0 (GTC)
+        Token::Uint(U256::zero()), // nonce = 0
         Token::Uint(U256::from(fee_rate_bps)),
         Token::Uint(U256::from(side as u64)),
         Token::Uint(U256::from(sig_type)), // 0=EOA, 2=GNOSIS_SAFE
@@ -207,13 +206,11 @@ pub fn sign_order_eip712(
         .map_err(|e| anyhow::anyhow!("EIP-712 sign_hash: {e}"))?;
 
     let sig_bytes: [u8; 65] = signature.into();
-    let sig_hex = sig_bytes
-        .iter()
-        .fold("0x".to_string(), |mut s: String, b| {
-            use std::fmt::Write;
-            write!(s, "{b:02x}").unwrap();
-            s
-        });
+    let sig_hex = sig_bytes.iter().fold("0x".to_string(), |mut s: String, b| {
+        use std::fmt::Write;
+        write!(s, "{b:02x}").unwrap();
+        s
+    });
 
     Ok(sig_hex)
 }

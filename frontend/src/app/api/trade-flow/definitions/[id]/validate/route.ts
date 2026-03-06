@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   getTradeFlowDefinitionById,
   normalizeTradeFlowGraph,
-  validateTradeFlowGraph,
+  validateTradeFlowGraphWithRuntimeConfig,
 } from '@/lib/queries/trade-flow';
 
 export const dynamic = 'force-dynamic';
@@ -30,7 +30,7 @@ export async function POST(
     }
 
     const normalized = normalizeTradeFlowGraph(graphJson);
-    const validation = validateTradeFlowGraph(normalized);
+    const validation = await validateTradeFlowGraphWithRuntimeConfig(normalized);
     return NextResponse.json({ data: validation });
   } catch (err) {
     console.error('Trade flow validate error:', err);

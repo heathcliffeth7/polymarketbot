@@ -18,6 +18,7 @@ import {
   validateTradeFlowDefinition,
 } from '@/hooks/use-trade-flow';
 import { useBotStatus } from '@/hooks/use-bot-status';
+import { useConfig } from '@/hooks/use-config';
 import { toast } from 'sonner';
 import { formatClientRequestError } from '@/lib/http-client';
 import {
@@ -85,6 +86,19 @@ function normalizeDualDcaTimeframe(config: Record<string, unknown>): '5m' | '15m
   return normalized as '5m' | '15m';
 }
 
+function mergeGraphContextPatch(
+  baseContext: unknown,
+  patch: Record<string, unknown>
+): Record<string, unknown> {
+  const merged = { ...(isRecord(baseContext) ? baseContext : {}), ...patch };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) {
+      delete merged[key];
+    }
+  }
+  return merged;
+}
+
 interface FlowEnginePanelProps {
   defaultMarketSlug: string | null;
   defaultOutcome: { token_id: string; label: string } | null;
@@ -126,6 +140,15 @@ export function FlowEnginePanel({
   const [hasPendingCanvasNodeDraft, setHasPendingCanvasNodeDraft] = useState(false);
   const [stoppingBot, setStoppingBot] = useState(false);
   const { data: botStatus, mutate: mutateBotStatus } = useBotStatus();
+  const { data: telegramConfig } = useConfig('telegram');
+  const globalTelegramBotTokenMasked = useMemo(() => {
+    const value = String(telegramConfig?.data?.bot_token ?? '').trim();
+    return value || null;
+  }, [telegramConfig?.data?.bot_token]);
+  const globalTelegramChatId = useMemo(() => {
+    const value = String(telegramConfig?.data?.chat_id ?? '').trim();
+    return value || null;
+  }, [telegramConfig?.data?.chat_id]);
 
   useEffect(() => {
     if (selectedDefinitionId != null) {
@@ -308,7 +331,7 @@ export function FlowEnginePanel({
   const openPositions = useMemo(() => openPositionsData?.data ?? [], [openPositionsData?.data]);
   const openPositionsMeta = useMemo(() => openPositionsData?.meta ?? null, [openPositionsData?.meta]);
 
-  const hydrateEditorFromDetail = (d: TradeFlowDefinitionDetail | null) => {
+  const hydrateEditorFromDetail = useCallback((d: TradeFlowDefinitionDetail | null) => {
     if (!d?.draftVersion) return;
     const normalized = deepCloneGraph(d.draftVersion.graph_json);
     setGraph(normalized);
@@ -318,7 +341,7 @@ export function FlowEnginePanel({
     setValidation(null);
     setIsGraphDirty(false);
     setLastHydratedSnapshotKey(buildDetailSnapshotKey(d));
-  };
+  }, []);
 
   const createFromTemplate = async (kind: TemplateKind) => {
     const name = createName.trim();
@@ -550,12 +573,19 @@ export function FlowEnginePanel({
       draftSaved = true;
       const published = await publishTradeFlowDefinition(publishDefinitionId);
       hydrateEditorFromDetail(published.data); setValidation(null);
+      const runnerSuffix = botStatus?.serviceActive
+        ? ' Aktif singleton runner bu flowu mevcut proseste otomatik alacak.'
+        : ' Runner aktif degilse tek bir runner prosesi baslat.';
       if (ensuredSourceTradeId != null && ensuredSourceTradeCreated) {
-        setMessage(`${publishLabel} publish edildi. Source Trade otomatik olusturuldu: #${ensuredSourceTradeId}.`);
+        setMessage(
+          `${publishLabel} publish edildi. Source Trade otomatik olusturuldu: #${ensuredSourceTradeId}.${runnerSuffix}`
+        );
       } else if (ensuredSourceTradeId != null) {
-        setMessage(`${publishLabel} publish edildi. Source Trade atandi: #${ensuredSourceTradeId}.`);
+        setMessage(
+          `${publishLabel} publish edildi. Source Trade atandi: #${ensuredSourceTradeId}.${runnerSuffix}`
+        );
       } else {
-        setMessage(`${publishLabel} publish edildi.`);
+        setMessage(`${publishLabel} publish edildi.${runnerSuffix}`);
       }
       toast.success(`${publishLabel} publish edildi.`);
       await mutateDefinitions(); await mutateDetail();
@@ -655,13 +685,52 @@ export function FlowEnginePanel({
 
   const isActionBusy = busyAction !== null || isSwitchingDefinition;
 
-  const applyCanvasContextPatch = (patch: Record<string, unknown>) => {
-    const merged = { ...(isRecord(graph.context) ? graph.context : {}), ...patch };
-    setGraph((prev) => ({ ...prev, context: merged }));
-    setIsGraphDirty(true);
-    setContextForm(parseContextToForm(merged));
-    setContextTab('basic'); setValidation(null); setError(null);
-  };
+  const applyCanvasContextPatch = useCallback(
+    async (patch: Record<string, unknown>, successMessage?: string) => {
+      const definitionId = selectedDefinitionIdRef.current;
+      if (!definitionId) {
+        setError('Once bir flow secin.');
+        return;
+      }
+
+      const previousGraph = graphRef.current;
+      const previousContext = isRecord(previousGraph.context) ? previousGraph.context : {};
+      const previousValidation = validation;
+      const previousIsGraphDirty = isGraphDirtyRef.current;
+      const mergedContext = mergeGraphContextPatch(previousGraph.context, patch);
+      const nextGraph: TradeFlowGraph = { ...previousGraph, context: mergedContext };
+      const fallbackName =
+        visibleDefinitions.find((definition) => definition.id === definitionId)?.name || 'Untitled';
+      const payload = {
+        name: draftNameRef.current.trim() || fallbackName,
+        description: draftDescriptionRef.current.trim() || null,
+        graphJson: nextGraph,
+      };
+
+      setGraph(nextGraph);
+      setIsGraphDirty(true);
+      setContextForm(parseContextToForm(mergedContext));
+      setValidation(null);
+      setError(null);
+      setMessage(null);
+
+      try {
+        const updated = await patchTradeFlowDefinitionDraft(definitionId, payload);
+        hydrateEditorFromDetail(updated.data);
+        if (successMessage) {
+          setMessage(successMessage);
+        }
+        await Promise.all([mutateDefinitions(), mutateDetail()]);
+      } catch (err) {
+        setGraph(previousGraph);
+        setContextForm(parseContextToForm(previousContext));
+        setValidation(previousValidation);
+        setIsGraphDirty(previousIsGraphDirty);
+        setError(formatOperationError(err, 'Autoclaim degisikligi kaydedilemedi.'));
+      }
+    },
+    [hydrateEditorFromDetail, mutateDefinitions, mutateDetail, validation, visibleDefinitions]
+  );
 
   return (
     <Card className="border-zinc-800 bg-zinc-900">
@@ -711,6 +780,14 @@ export function FlowEnginePanel({
               contextForm={contextForm} contextTab={contextTab}
               onContextFormChange={setContextForm} onContextTabChange={setContextTab}
               onApplyFromForm={applyContextFromForm} onApplyFromAdvanced={() => { applyContextFromAdvanced(); }}
+              onAutoClaimEnabledChange={(enabled) => {
+                void applyCanvasContextPatch(
+                  { autoClaimEnabled: enabled ? true : undefined },
+                  enabled
+                    ? 'Autoclaim aktif. Bir sonraki runner turunda claim kontrolu baslayacak.'
+                    : 'Autoclaim kapatildi. Bir sonraki runner turunda claim denenmeyecek.'
+                );
+              }}
             />
           </div>
 
@@ -738,6 +815,8 @@ export function FlowEnginePanel({
           openPositionsLoading={openPositionsLoading}
           onApplyContextPatch={applyCanvasContextPatch}
           onPendingNodeDraftChange={setHasPendingCanvasNodeDraft}
+          globalTelegramBotTokenMasked={globalTelegramBotTokenMasked}
+          globalTelegramChatId={globalTelegramChatId}
           leftPanelTopSlot={
             <CreateFlowSlot
               createName={createName} createDescription={createDescription}
@@ -768,6 +847,15 @@ export function FlowEnginePanel({
               onDeselectAllDefinitions={deselectAllDefinitions}
               onBulkArchive={bulkArchiveDefinitions}
               bulkArchiving={bulkArchiving}
+              autoClaimEnabled={contextForm.autoClaimEnabled}
+              onAutoClaimEnabledChange={(enabled) => {
+                void applyCanvasContextPatch(
+                  { autoClaimEnabled: enabled ? true : undefined },
+                  enabled
+                    ? 'Autoclaim aktif. Bir sonraki runner turunda claim kontrolu baslayacak.'
+                    : 'Autoclaim kapatildi. Bir sonraki runner turunda claim denenmeyecek.'
+                );
+              }}
             />
           }
         />

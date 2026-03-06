@@ -84,7 +84,7 @@ export function createDcaTradeFlowGraph(
         positionY: 140,
         config: {
           side: 'buy',
-          executionMode: 'limit',
+          executionMode: 'market',
           marketSlug: marketSlug || '',
           tokenId: outcome?.token_id || '',
           outcomeLabel: outcome?.label || '',
@@ -137,7 +137,7 @@ export function createStopLossTakeProfitGraph(
         positionY: 100,
         config: {
           side: 'sell', marketSlug: marketSlug || '', tokenId: outcome?.token_id || '',
-          executionMode: 'limit',
+          executionMode: 'market',
           outcomeLabel: outcome?.label || '', sizeMode: 'pct', sizePct: 100,
           minPriceDistanceCent: 1, maxTriggers: 1, refKey: 'take_profit',
         },
@@ -159,7 +159,7 @@ export function createStopLossTakeProfitGraph(
         positionY: 260,
         config: {
           side: 'sell', marketSlug: marketSlug || '', tokenId: outcome?.token_id || '',
-          executionMode: 'limit',
+          executionMode: 'market',
           outcomeLabel: outcome?.label || '', sizeMode: 'pct', sizePct: 100,
           minPriceDistanceCent: 1, maxTriggers: 1, refKey: 'stop_loss',
         },
@@ -247,7 +247,7 @@ export function createMultiLegHedgeGraph(
         positionY: 100,
         config: {
           side: 'sell', marketSlug: marketSlug || '', tokenId: outcome?.token_id || '',
-          executionMode: 'limit',
+          executionMode: 'market',
           outcomeLabel: outcome?.label || '', sizeMode: 'pct', sizePct: 50,
           minPriceDistanceCent: 1, maxTriggers: 1, refKey: 'hedge_sell',
         },
@@ -259,7 +259,7 @@ export function createMultiLegHedgeGraph(
         positionY: 260,
         config: {
           side: 'buy', marketSlug: marketSlug || '', tokenId: outcome?.token_id || '',
-          executionMode: 'limit',
+          executionMode: 'market',
           outcomeLabel: outcome?.label || '', sizeUsdc: 15,
           minPriceDistanceCent: 1, maxTriggers: 1, refKey: 'hedge_buy',
         },

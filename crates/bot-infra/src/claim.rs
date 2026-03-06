@@ -6,7 +6,7 @@ use ethers::contract::abigen;
 use ethers::middleware::SignerMiddleware;
 use ethers::providers::{Http, Provider};
 use ethers::signers::{LocalWallet, Signer};
-use ethers::types::{Address, H256, U256};
+use ethers::types::{Address, Bytes, H256, U256};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -25,20 +25,34 @@ abigen!(
     ]"#,
 );
 
+abigen!(
+    GnosisSafe,
+    r#"[
+        function execTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures) returns (bool success)
+    ]"#,
+);
+
 #[derive(Debug, Clone, Deserialize)]
 struct DataApiPosition {
+    #[serde(rename = "proxyWallet")]
+    proxy_wallet: Option<String>,
     #[serde(rename = "conditionId")]
     condition_id: Option<String>,
     #[serde(rename = "marketSlug")]
     market_slug: Option<String>,
     slug: Option<String>,
+    #[serde(rename = "currentValue")]
+    current_value: Option<Value>,
+    #[serde(rename = "curPrice")]
+    cur_price: Option<Value>,
     redeemable: Option<bool>,
     size: Option<Value>,
     balance: Option<Value>,
 }
 
 pub struct AutoClaimService {
-    user_address: String,
+    signer_address: String,
+    safe_address: Option<String>,
     positions_base_url: String,
     positions_page_size: i64,
     positions_max_pages: i64,
@@ -49,6 +63,7 @@ pub struct AutoClaimService {
     next_discovery_at: DateTime<Utc>,
     http: Client,
     ctf_contract: ConditionalTokens<ClaimSigner>,
+    safe_contract: Option<GnosisSafe<ClaimSigner>>,
     collateral_token: Address,
 }
 
@@ -100,16 +115,24 @@ impl AutoClaimService {
         );
 
         let middleware = Arc::new(SignerMiddleware::new(provider, wallet));
+        let safe_address = cfg
+            .exchange
+            .resolve_gnosis_safe_address()
+            .map(|raw| parse_address(&raw, "exchange.gnosis_safe_address"))
+            .transpose()?;
         let ctf_contract = ConditionalTokens::new(
             parse_address(
                 &cfg.claim.ctf_contract_address,
                 "claim.ctf_contract_address",
             )?,
-            middleware,
+            middleware.clone(),
         );
+        let safe_contract =
+            safe_address.map(|address| GnosisSafe::new(address, middleware.clone()));
 
         Ok(Some(Self {
-            user_address,
+            signer_address: user_address,
+            safe_address: safe_address.map(|address| format!("{:#x}", address)),
             positions_base_url: cfg.claim.data_api_base_url.clone(),
             positions_page_size: cfg.claim.positions_page_size.max(1),
             positions_max_pages: cfg.claim.positions_max_pages.max(1),
@@ -120,6 +143,7 @@ impl AutoClaimService {
             next_discovery_at: Utc::now(),
             http: Client::new(),
             ctf_contract,
+            safe_contract,
             collateral_token: parse_address(
                 &cfg.claim.collateral_token_address,
                 "claim.collateral_token_address",
@@ -136,7 +160,7 @@ impl AutoClaimService {
             if discovered > 0 {
                 info!(
                     discovered,
-                    user = %self.user_address,
+                    user = %self.signer_address,
                     "AUTO_CLAIM_JOBS_DISCOVERED"
                 );
             }
@@ -146,7 +170,7 @@ impl AutoClaimService {
         if processed > 0 {
             info!(
                 processed,
-                user = %self.user_address,
+                user = %self.signer_address,
                 "AUTO_CLAIM_JOBS_PROCESSED"
             );
         }
@@ -154,56 +178,81 @@ impl AutoClaimService {
     }
 
     async fn discover_redeemable_jobs(&self, repo: &PostgresRepository) -> Result<usize> {
-        let mut by_condition: HashMap<String, Option<String>> = HashMap::new();
+        let mut by_condition: HashMap<(String, String), Option<String>> = HashMap::new();
+        let discovery_addresses = self.discovery_addresses();
 
-        for page in 0..self.positions_max_pages {
-            let offset = page * self.positions_page_size;
-            let positions = self.fetch_redeemable_positions(offset).await?;
-            let positions_len = positions.len();
-            if positions_len == 0 {
-                break;
-            }
+        for discovery_address in discovery_addresses {
+            for page in 0..self.positions_max_pages {
+                let offset = page * self.positions_page_size;
+                let positions = self
+                    .fetch_redeemable_positions(&discovery_address, offset)
+                    .await?;
+                let positions_len = positions.len();
+                if positions_len == 0 {
+                    break;
+                }
 
-            for position in positions {
-                if position.redeemable == Some(false) {
-                    continue;
-                }
-                if parse_json_f64(position.size.as_ref())
-                    .or_else(|| parse_json_f64(position.balance.as_ref()))
-                    .unwrap_or(0.0)
-                    <= 0.0
-                {
-                    continue;
-                }
-                let Some(raw_condition_id) = position.condition_id.as_deref() else {
-                    continue;
-                };
-                let condition_id = match normalize_condition_id(raw_condition_id) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        warn!(
-                            user = %self.user_address,
-                            condition_id = raw_condition_id,
-                            error = %err,
-                            "AUTO_CLAIM_CONDITION_ID_INVALID"
-                        );
+                for position in positions {
+                    if position.redeemable == Some(false) {
                         continue;
                     }
-                };
-                let market_slug = position.market_slug.or(position.slug);
-                by_condition.entry(condition_id).or_insert(market_slug);
-            }
+                    if parse_json_f64(position.size.as_ref())
+                        .or_else(|| parse_json_f64(position.balance.as_ref()))
+                        .unwrap_or(0.0)
+                        <= 0.0
+                    {
+                        continue;
+                    }
+                    if !has_positive_claim_value(&position) {
+                        continue;
+                    }
+                    let Some(raw_condition_id) = position.condition_id.as_deref() else {
+                        continue;
+                    };
+                    let condition_id = match normalize_condition_id(raw_condition_id) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            warn!(
+                                user = %self.signer_address,
+                                condition_id = raw_condition_id,
+                                error = %err,
+                                "AUTO_CLAIM_CONDITION_ID_INVALID"
+                            );
+                            continue;
+                        }
+                    };
+                    let owner_address = match normalize_position_owner_address(
+                        position.proxy_wallet.as_deref(),
+                        &discovery_address,
+                    ) {
+                        Ok(value) => value,
+                        Err(err) => {
+                            warn!(
+                                user = %self.signer_address,
+                                queried_address = discovery_address,
+                                error = %err,
+                                "AUTO_CLAIM_OWNER_ADDRESS_INVALID"
+                            );
+                            continue;
+                        }
+                    };
+                    let market_slug = position.market_slug.or(position.slug);
+                    by_condition
+                        .entry((owner_address, condition_id))
+                        .or_insert(market_slug);
+                }
 
-            if positions_len < self.positions_page_size as usize {
-                break;
+                if positions_len < self.positions_page_size as usize {
+                    break;
+                }
             }
         }
 
         let mut upserted = 0usize;
-        for (condition_id, market_slug) in by_condition {
+        for ((owner_address, condition_id), market_slug) in by_condition {
             if repo
                 .upsert_auto_claim_job(
-                    &self.user_address,
+                    &owner_address,
                     market_slug.as_deref(),
                     &condition_id,
                     self.max_attempts,
@@ -217,7 +266,11 @@ impl AutoClaimService {
         Ok(upserted)
     }
 
-    async fn fetch_redeemable_positions(&self, offset: i64) -> Result<Vec<DataApiPosition>> {
+    async fn fetch_redeemable_positions(
+        &self,
+        discovery_address: &str,
+        offset: i64,
+    ) -> Result<Vec<DataApiPosition>> {
         let url = format!(
             "{}/positions",
             self.positions_base_url.trim_end_matches('/')
@@ -228,7 +281,7 @@ impl AutoClaimService {
         self.http
             .get(url)
             .query(&[
-                ("user", self.user_address.as_str()),
+                ("user", discovery_address),
                 ("redeemable", "true"),
                 ("sizeThreshold", "0"),
                 ("limit", limit.as_str()),
@@ -265,6 +318,7 @@ impl AutoClaimService {
             "processing_started",
             &json!({
                 "job_id": job.id,
+                "owner_address": job.owner_address,
                 "condition_id": job.condition_id,
                 "market_slug": job.market_slug,
                 "attempt": job.attempts + 1
@@ -272,7 +326,10 @@ impl AutoClaimService {
         )
         .await?;
 
-        match self.submit_redeem_tx(&job.condition_id).await {
+        match self
+            .submit_redeem_tx(&job.owner_address, &job.condition_id)
+            .await
+        {
             Ok(tx_hash) => {
                 repo.mark_auto_claim_job_claimed(job.id, &tx_hash).await?;
                 repo.append_auto_claim_event(
@@ -318,7 +375,14 @@ impl AutoClaimService {
         Ok(())
     }
 
-    async fn submit_redeem_tx(&self, condition_id: &str) -> Result<String> {
+    async fn submit_redeem_tx(&self, owner_address: &str, condition_id: &str) -> Result<String> {
+        if self.is_safe_owner_address(owner_address) {
+            return self.submit_redeem_tx_via_safe(condition_id).await;
+        }
+        self.submit_redeem_tx_direct(condition_id).await
+    }
+
+    async fn submit_redeem_tx_direct(&self, condition_id: &str) -> Result<String> {
         let condition = parse_condition_id(condition_id)?;
         let index_sets = AUTO_CLAIM_INDEX_SETS
             .iter()
@@ -338,6 +402,72 @@ impl AutoClaimService {
             .with_context(|| format!("redeemPositions send failed for {condition_id}"))?;
 
         Ok(format!("{:#x}", pending_tx.tx_hash()))
+    }
+
+    async fn submit_redeem_tx_via_safe(&self, condition_id: &str) -> Result<String> {
+        let safe_contract = self
+            .safe_contract
+            .as_ref()
+            .context("safe contract not configured for auto-claim")?;
+        let signer_address = parse_address(&self.signer_address, "claim.user_address")?;
+        let condition = parse_condition_id(condition_id)?;
+        let index_sets = AUTO_CLAIM_INDEX_SETS
+            .iter()
+            .copied()
+            .map(U256::from)
+            .collect::<Vec<_>>();
+        let redeem_call = self.ctf_contract.redeem_positions(
+            self.collateral_token,
+            [0u8; 32],
+            condition.to_fixed_bytes(),
+            index_sets,
+        );
+        let redeem_calldata = redeem_call
+            .calldata()
+            .context("failed to build redeemPositions calldata")?;
+        let signatures = build_safe_prevalidated_signature(signer_address);
+        let safe_call = safe_contract.exec_transaction(
+            self.ctf_contract.address(),
+            U256::zero(),
+            redeem_calldata,
+            0u8,
+            U256::zero(),
+            U256::zero(),
+            U256::zero(),
+            Address::zero(),
+            Address::zero(),
+            signatures,
+        );
+        let simulation_ok = safe_call.clone().call().await.with_context(|| {
+            format!("safe execTransaction simulation failed for {condition_id}")
+        })?;
+        anyhow::ensure!(
+            simulation_ok,
+            "safe execTransaction simulation returned false for {condition_id}"
+        );
+        let pending_tx = safe_call
+            .send()
+            .await
+            .with_context(|| format!("safe execTransaction send failed for {condition_id}"))?;
+
+        Ok(format!("{:#x}", pending_tx.tx_hash()))
+    }
+
+    fn discovery_addresses(&self) -> Vec<String> {
+        let mut out = vec![self.signer_address.clone()];
+        if let Some(safe_address) = &self.safe_address {
+            if safe_address != &self.signer_address {
+                out.push(safe_address.clone());
+            }
+        }
+        out
+    }
+
+    fn is_safe_owner_address(&self, owner_address: &str) -> bool {
+        self.safe_address
+            .as_deref()
+            .map(|safe| safe.eq_ignore_ascii_case(owner_address))
+            .unwrap_or(false)
     }
 }
 
@@ -374,10 +504,80 @@ fn parse_json_f64(value: Option<&Value>) -> Option<f64> {
     }
 }
 
+fn normalize_position_owner_address(
+    proxy_wallet: Option<&str>,
+    fallback_address: &str,
+) -> Result<String> {
+    if let Some(proxy_wallet) = proxy_wallet {
+        let trimmed = proxy_wallet.trim();
+        if !trimmed.is_empty() {
+            return normalize_address(trimmed);
+        }
+    }
+    normalize_address(fallback_address)
+}
+
+fn has_positive_claim_value(position: &DataApiPosition) -> bool {
+    if let Some(current_value) = parse_json_f64(position.current_value.as_ref()) {
+        return current_value > 0.0;
+    }
+    if let Some(cur_price) = parse_json_f64(position.cur_price.as_ref()) {
+        return cur_price > 0.0;
+    }
+    true
+}
+
+fn build_safe_prevalidated_signature(owner: Address) -> Bytes {
+    let mut signature = Vec::with_capacity(65);
+    signature.extend_from_slice(&[0u8; 12]);
+    signature.extend_from_slice(owner.as_bytes());
+    signature.extend_from_slice(&[0u8; 32]);
+    signature.push(1u8);
+    signature.into()
+}
+
 fn compact_error(err: anyhow::Error) -> String {
     let mut out = err.to_string().replace('\n', " ");
     if out.len() > AUTO_CLAIM_MAX_ERROR_LEN {
         out.truncate(AUTO_CLAIM_MAX_ERROR_LEN);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn positive_claim_value_requires_positive_current_value_or_price() {
+        let winner = DataApiPosition {
+            proxy_wallet: None,
+            condition_id: None,
+            market_slug: None,
+            slug: None,
+            current_value: Some(json!(5.32)),
+            cur_price: Some(json!(1)),
+            redeemable: Some(true),
+            size: Some(json!(5.32)),
+            balance: None,
+        };
+        assert!(has_positive_claim_value(&winner));
+
+        let loser = DataApiPosition {
+            current_value: Some(json!(0)),
+            cur_price: Some(json!(0)),
+            ..winner.clone()
+        };
+        assert!(!has_positive_claim_value(&loser));
+    }
+
+    #[test]
+    fn safe_prevalidated_signature_embeds_owner_and_marker() {
+        let owner = Address::from_str("0x38562e48f0e8ce1c1c7931b482d6e2145937e452").unwrap();
+        let signature = build_safe_prevalidated_signature(owner);
+        assert_eq!(signature.len(), 65);
+        assert_eq!(&signature[12..32], owner.as_bytes());
+        assert_eq!(signature[64], 1u8);
+    }
 }

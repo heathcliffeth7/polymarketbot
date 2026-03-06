@@ -51,7 +51,7 @@ export function createSellBuyIfElseTemplate(
         positionY: 120,
         config: {
           side: 'sell',
-          executionMode: 'limit',
+          executionMode: 'market',
           marketSlug: marketSlug || '',
           tokenId: outcome?.token_id || '',
           outcomeLabel: outcome?.label || '',
@@ -77,7 +77,7 @@ export function createSellBuyIfElseTemplate(
         positionY: 110,
         config: {
           side: 'buy',
-          executionMode: 'limit',
+          executionMode: 'market',
           marketSlug: marketSlug || '',
           tokenId: outcome?.token_id || '',
           outcomeLabel: outcome?.label || '',

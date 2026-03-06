@@ -163,7 +163,7 @@ export function ConfigEditor({ file, title, fields }: ConfigEditorProps) {
                     value={String(values[field.key] ?? '')}
                     onChange={(e) => {
                       const v = field.type === 'number' ? parseFloat(e.target.value) || 0 : e.target.value;
-                      if (isSensitiveExchangeField(file, field.key) && typeof v === 'string') {
+                      if (isSensitiveConfigField(file, field.key) && typeof v === 'string') {
                         updateSensitiveValue(field.key, v);
                         return;
                       }
@@ -175,12 +175,14 @@ export function ConfigEditor({ file, title, fields }: ConfigEditorProps) {
                     disabled={isReadOnly}
                     className="border-zinc-700 bg-zinc-800 text-zinc-200"
                   />
-                  {isSensitiveExchangeField(file, field.key) && (
+                  {isSensitiveConfigField(file, field.key) && (
                     <div className="mt-2 flex items-center justify-between text-xs">
                       <span className="text-zinc-500">
-                        {String(values[field.key] ?? '') === MASKED_SECRET
-                          ? 'Stored value is masked. Enter new value to replace.'
-                          : 'Leave unchanged or clear explicitly.'}
+                        {getSensitiveFieldHint(
+                          file,
+                          field.key,
+                          String(values[field.key] ?? '') === MASKED_SECRET
+                        )}
                       </span>
                       <Button
                         type="button"
@@ -204,7 +206,24 @@ export function ConfigEditor({ file, title, fields }: ConfigEditorProps) {
   );
 }
 
-function isSensitiveExchangeField(file: string, key: string): boolean {
-  if (file !== 'exchange') return false;
-  return ['api_address', 'api_key', 'api_secret', 'api_passphrase'].includes(key);
+function isSensitiveConfigField(file: string, key: string): boolean {
+  if (file === 'exchange') {
+    return ['api_address', 'api_key', 'api_secret', 'api_passphrase'].includes(key);
+  }
+  if (file === 'telegram') {
+    return key === 'bot_token';
+  }
+  return false;
+}
+
+function getSensitiveFieldHint(file: string, key: string, isMasked: boolean): string {
+  if (file === 'telegram' && key === 'bot_token') {
+    return isMasked
+      ? 'Stored value is masked. Enter new value to replace. The next Telegram send uses the saved token.'
+      : 'Leave unchanged or clear explicitly. The next Telegram send uses the saved token.';
+  }
+
+  return isMasked
+    ? 'Stored value is masked. Enter new value to replace.'
+    : 'Leave unchanged or clear explicitly.';
 }

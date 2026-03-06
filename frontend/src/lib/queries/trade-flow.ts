@@ -19,7 +19,11 @@ import type {
   TradeFlowValidationResult,
   TradeFlowVersion,
 } from '@/lib/types';
-import { readPositionWalletAddress } from '@/lib/config';
+import {
+  readPositionWalletAddress,
+  readTelegramBotTokenForServer,
+  readTelegramChatIdForServer,
+} from '@/lib/config';
 import { getMarketOutcomesBySlug, getTradeBuilderWorkflowById } from './trade-builder';
 
 type Queryable = {
@@ -43,6 +47,7 @@ const SUPPORTED_NODE_TYPES = new Set([
   'action.update_order',
   'action.set_state',
   'action.notify',
+  'action.telegram_notify',
 ]);
 
 const POLYMARKET_DATA_API_BASE =
@@ -128,6 +133,48 @@ function toFiniteNumber(value: unknown): number | null {
   return null;
 }
 
+function hasProvidedValue(value: unknown): boolean {
+  if (typeof value === 'string') return value.trim().length > 0;
+  return value != null;
+}
+
+function hasValidOptionalMaxPrice(maxPriceCentValue: unknown, legacyMaxPriceValue: unknown): boolean {
+  if (hasProvidedValue(maxPriceCentValue)) {
+    const maxPriceCent = toFiniteNumber(maxPriceCentValue);
+    return maxPriceCent != null && maxPriceCent > 0 && maxPriceCent <= 100;
+  }
+
+  if (hasProvidedValue(legacyMaxPriceValue)) {
+    const maxPrice = toFiniteNumber(legacyMaxPriceValue);
+    return maxPrice != null && maxPrice > 0 && maxPrice <= 1;
+  }
+
+  return true;
+}
+
+function resolveConfiguredBinaryPrice(
+  centValue: unknown,
+  rawValue: unknown
+): { provided: boolean; value: number | null } {
+  if (hasProvidedValue(centValue)) {
+    const cent = toFiniteNumber(centValue);
+    if (cent != null && cent > 0 && cent <= 100) {
+      return { provided: true, value: cent / 100 };
+    }
+    return { provided: true, value: null };
+  }
+
+  if (hasProvidedValue(rawValue)) {
+    const raw = toFiniteNumber(rawValue);
+    if (raw != null && raw > 0 && raw <= 1) {
+      return { provided: true, value: raw };
+    }
+    return { provided: true, value: null };
+  }
+
+  return { provided: false, value: null };
+}
+
 function countValidOutcomeConditions(config: Record<string, unknown>): number {
   const raw = config.outcomeConditions;
   if (!Array.isArray(raw)) return 0;
@@ -144,9 +191,11 @@ function countValidOutcomeConditions(config: Record<string, unknown>): number {
       triggerPriceCent != null && triggerPriceCent > 0 && triggerPriceCent <= 100;
     const hasValidTriggerPrice =
       triggerPrice != null && triggerPrice > 0 && triggerPrice <= 1;
+    const hasValidMaxPrice = hasValidOptionalMaxPrice(item.maxPriceCent, item.maxPrice);
     if (!tokenId || !outcomeLabel) continue;
     if (!isSupportedTriggerCondition(triggerCondition)) continue;
     if (!hasValidTriggerPriceCent && !hasValidTriggerPrice) continue;
+    if (!hasValidMaxPrice) continue;
     validCount += 1;
   }
 
@@ -843,6 +892,37 @@ function collectReachableFromTriggers(nodes: TradeFlowNode[], edges: TradeFlowEd
   return reachable;
 }
 
+function hasUpstreamAutoScopeMarketTrigger(nodeKey: string, graph: TradeFlowGraph): boolean {
+  const nodeMap = new Map(graph.nodes.map((node) => [node.key, node]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const list = incomingByTarget.get(edge.target) ?? [];
+    list.push(edge.source);
+    incomingByTarget.set(edge.target, list);
+  }
+
+  const visited = new Set<string>();
+  const queue = [nodeKey];
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const sourceKey of incomingByTarget.get(current) ?? []) {
+      const sourceNode = nodeMap.get(sourceKey);
+      if (!sourceNode) continue;
+      if (
+        sourceNode.type === 'trigger.market_price' &&
+        toTrimmedString((isRecord(sourceNode.config) ? sourceNode.config : {}).marketMode).toLowerCase() === 'auto_scope'
+      ) {
+        return true;
+      }
+      queue.push(sourceKey);
+    }
+  }
+
+  return false;
+}
+
 function validateNodeConfig(
   issues: TradeFlowValidationIssue[],
   node: TradeFlowNode,
@@ -854,10 +934,13 @@ function validateNodeConfig(
   const graphTokenId = String(graph.context.tokenId ?? '').trim();
   const graphOutcomeLabel = String(graph.context.outcomeLabel ?? '').trim();
   const hasResolveMarketNode = graph.nodes.some((candidate) => candidate.type === 'action.resolve_market');
+  const hasUpstreamMarketPriceAutoScope = hasUpstreamAutoScopeMarketTrigger(node.key, graph);
 
   if (node.type === 'trigger.market_price') {
     const marketMode = toTrimmedString(config.marketMode).toLowerCase();
     const autoScope = marketMode === 'auto_scope';
+    const protectionMode = toTrimmedString(config.protectionMode).toLowerCase();
+    const protectionPreset = toTrimmedString(config.protectionPreset).toLowerCase();
     if (autoScope) {
       const marketScope = toTrimmedString(config.marketScope).toLowerCase();
       if (!marketScope) {
@@ -884,12 +967,51 @@ function validateNodeConfig(
           'trigger.market_price marketSelection must be latest_by_slug.'
         );
       }
+      if (protectionMode && protectionMode !== 'off' && protectionMode !== 'underlying_confirm') {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_protection_mode',
+          'trigger.market_price protectionMode must be off or underlying_confirm.'
+        );
+      }
+      if (protectionMode === 'underlying_confirm') {
+        if (!marketScope || !RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[marketScope]) {
+          pushNodeError(
+            issues,
+            node,
+            'invalid_protection_scope',
+            'trigger.market_price underlying_confirm requires a supported auto_scope marketScope.'
+          );
+        }
+        if (
+          protectionPreset &&
+          protectionPreset !== 'loose' &&
+          protectionPreset !== 'balanced' &&
+          protectionPreset !== 'strict'
+        ) {
+          pushNodeError(
+            issues,
+            node,
+            'invalid_protection_preset',
+            'trigger.market_price protectionPreset must be loose, balanced, or strict.'
+          );
+        }
+      }
     } else if (!String(config.marketSlug ?? graphMarketSlug).trim()) {
       pushNodeError(
         issues,
         node,
         'missing_market_slug',
         'trigger.market_price requires marketSlug in node config or graph context.'
+      );
+    }
+    if (!autoScope && protectionMode === 'underlying_confirm') {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_protection_mode_scope',
+        'trigger.market_price underlying_confirm is only valid when marketMode is auto_scope.'
       );
     }
 
@@ -984,6 +1106,8 @@ function validateNodeConfig(
     if (isSupportedTriggerCondition(triggerConditionRaw)) {
       const triggerPriceCent = toFiniteNumber(config.triggerPriceCent);
       const triggerPrice = toFiniteNumber(config.triggerPrice);
+      const maxPriceCentProvided = hasProvidedValue(config.maxPriceCent);
+      const maxPriceProvided = !maxPriceCentProvided && hasProvidedValue(config.maxPrice);
       if (triggerPriceCent == null && triggerPrice == null) {
         pushNodeError(
           issues,
@@ -1007,6 +1131,27 @@ function validateNodeConfig(
           'invalid_trigger_price',
           'trigger.open_positions triggerPrice must be in (0, 1].'
         );
+      }
+      if (maxPriceCentProvided) {
+        const maxPriceCent = toFiniteNumber(config.maxPriceCent);
+        if (maxPriceCent == null || maxPriceCent <= 0 || maxPriceCent > 100) {
+          pushNodeError(
+            issues,
+            node,
+            'invalid_max_price_cent',
+            'trigger.open_positions maxPriceCent must be in (0, 100].'
+          );
+        }
+      } else if (maxPriceProvided) {
+        const maxPrice = toFiniteNumber(config.maxPrice);
+        if (maxPrice == null || maxPrice <= 0 || maxPrice > 1) {
+          pushNodeError(
+            issues,
+            node,
+            'invalid_max_price',
+            'trigger.open_positions maxPrice must be in (0, 1].'
+          );
+        }
       }
       const marketSlug = String(config.marketSlug ?? graph.context.marketSlug ?? '').trim();
       if (!marketSlug) {
@@ -1290,7 +1435,11 @@ function validateNodeConfig(
 
   if (node.type === 'action.place_order') {
     const sourceTradeId = toFiniteNumber(config.sourceTradeId);
-    if ((sourceTradeId ?? graphSourceTradeId ?? 0) <= 0) {
+    const side = String(config.side ?? '').trim().toLowerCase();
+    const effectiveSourceTradeId = sourceTradeId ?? graphSourceTradeId ?? 0;
+    const allowBuyAutoScopeSourceTrade =
+      side === 'buy' && hasUpstreamMarketPriceAutoScope;
+    if (effectiveSourceTradeId <= 0 && !allowBuyAutoScopeSourceTrade) {
       pushNodeError(
         issues,
         node,
@@ -1298,23 +1447,30 @@ function validateNodeConfig(
         'action.place_order requires sourceTradeId in node config or graph context.'
       );
     }
-    if (!String(config.marketSlug ?? graphMarketSlug).trim() && !hasResolveMarketNode) {
+    if (
+      !String(config.marketSlug ?? graphMarketSlug).trim() &&
+      !hasResolveMarketNode &&
+      !(side === 'buy' && hasUpstreamMarketPriceAutoScope)
+    ) {
       pushNodeError(
         issues,
         node,
         'missing_market_slug',
-        'action.place_order requires marketSlug in node config/graph context (or a preceding action.resolve_market node).'
+        'action.place_order requires marketSlug in node config/graph context. Buy auto_scope zincirinde runtime tetikten de cozulebilir.'
       );
     }
-    if (!String(config.tokenId ?? graphTokenId).trim() && !hasResolveMarketNode) {
+    if (
+      !String(config.tokenId ?? graphTokenId).trim() &&
+      !hasResolveMarketNode &&
+      !(side === 'buy' && hasUpstreamMarketPriceAutoScope)
+    ) {
       pushNodeError(
         issues,
         node,
         'missing_token_id',
-        'action.place_order requires tokenId in node config/graph context (or a preceding action.resolve_market node).'
+        'action.place_order requires tokenId in node config/graph context. Buy auto_scope zincirinde runtime tetikten de cozulebilir.'
       );
     }
-    const side = String(config.side ?? '').trim().toLowerCase();
     if (!side) {
       pushNodeError(issues, node, 'missing_side', 'action.place_order side is required (buy or sell).');
     } else if (side !== 'buy' && side !== 'sell') {
@@ -1415,8 +1571,10 @@ function validateNodeConfig(
     const sizeUsdc = toFiniteNumber(config.sizeUsdc ?? config.targetNotionalUsdc);
     const sizePct = toFiniteNumber(config.sizePct ?? config.sizePercent);
     const hasTriggerSizes = triggerSizes.length > 0;
+    const usesPctSizing =
+      sizeModeRaw === 'pct' || (!hasTriggerSizes && sizeUsdc == null && sizePct != null);
     if (!hasTriggerSizes) {
-      const usePct = sizeModeRaw === 'pct' || (sizeUsdc == null && sizePct != null);
+      const usePct = usesPctSizing;
       if (usePct) {
         if (sizePct == null || sizePct <= 0 || sizePct > 100) {
           pushNodeError(
@@ -1435,6 +1593,14 @@ function validateNodeConfig(
         );
       }
     }
+    if (side === 'buy' && usesPctSizing && effectiveSourceTradeId <= 0 && hasUpstreamMarketPriceAutoScope) {
+      pushNodeError(
+        issues,
+        node,
+        'pct_buy_requires_source_trade',
+        'action.place_order buy + auto_scope zincirinde pct sizing icin sourceTradeId gerekir. Buy auto source trade yalnizca usdc sizing ile desteklenir.'
+      );
+    }
     const minDistance = toFiniteNumber(config.minPriceDistanceCent);
     if (minDistance != null && minDistance <= 0) {
       pushNodeError(
@@ -1451,6 +1617,88 @@ function validateNodeConfig(
         node,
         'invalid_trigger_condition',
         'action.place_order triggerCondition must be cross_above or cross_below.'
+      );
+    }
+
+    const tpEnabled = toBooleanish(config.tpEnabled);
+    const slEnabled = toBooleanish(config.slEnabled);
+    const tpPrice = resolveConfiguredBinaryPrice(config.tpPriceCent, config.tpPrice);
+    const slPrice = resolveConfiguredBinaryPrice(config.slPriceCent, config.slPrice);
+
+    if (config.tpEnabled != null && tpEnabled == null) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_tp_enabled',
+        'action.place_order tpEnabled must be boolean (true/false).'
+      );
+    }
+    if (config.slEnabled != null && slEnabled == null) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_sl_enabled',
+        'action.place_order slEnabled must be boolean (true/false).'
+      );
+    }
+    if (tpEnabled === true && side !== 'buy') {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_tp_side',
+        'action.place_order tpEnabled is only valid for side=buy.'
+      );
+    }
+    if (slEnabled === true && side !== 'buy') {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_sl_side',
+        'action.place_order slEnabled is only valid for side=buy.'
+      );
+    }
+    if (tpEnabled === true && !tpPrice.provided) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_tp_price',
+        'action.place_order tpEnabled requires tpPriceCent (or legacy tpPrice).'
+      );
+    } else if (tpPrice.provided && tpPrice.value == null) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_tp_price',
+        'action.place_order tpPriceCent must be in (0, 100] or legacy tpPrice must be in (0, 1].'
+      );
+    }
+    if (slEnabled === true && !slPrice.provided) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_sl_price',
+        'action.place_order slEnabled requires slPriceCent (or legacy slPrice).'
+      );
+    } else if (slPrice.provided && slPrice.value == null) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_sl_price',
+        'action.place_order slPriceCent must be in (0, 100] or legacy slPrice must be in (0, 1].'
+      );
+    }
+    if (
+      tpEnabled === true &&
+      slEnabled === true &&
+      tpPrice.value != null &&
+      slPrice.value != null &&
+      slPrice.value >= tpPrice.value
+    ) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_sl_tp_band',
+        'action.place_order requires slPrice < tpPrice when both stop loss and take profit are enabled.'
       );
     }
   }
@@ -1714,6 +1962,7 @@ function validateNodeConfig(
       );
     }
   }
+
 }
 
 export function validateTradeFlowGraph(graphJson: unknown): TradeFlowValidationResult {
@@ -1725,6 +1974,15 @@ export function validateTradeFlowGraph(graphJson: unknown): TradeFlowValidationR
       severity: 'error',
       code: 'invalid_context',
       message: 'Graph context must be an object.',
+    });
+  } else if (
+    graph.context.autoClaimEnabled != null &&
+    toBooleanish(graph.context.autoClaimEnabled) == null
+  ) {
+    issues.push({
+      severity: 'error',
+      code: 'invalid_auto_claim_enabled',
+      message: 'Graph context autoClaimEnabled must be boolean (true/false).',
     });
   }
 
@@ -1878,6 +2136,79 @@ export function validateTradeFlowGraph(graphJson: unknown): TradeFlowValidationR
   };
 }
 
+export async function validateTradeFlowGraphWithRuntimeConfig(
+  graphJson: unknown
+): Promise<TradeFlowValidationResult> {
+  const graph = normalizeTradeFlowGraph(graphJson);
+  const baseValidation = validateTradeFlowGraph(graph);
+  const issues = [...baseValidation.issues];
+  const telegramNodes = graph.nodes.filter((node) => node.type === 'action.telegram_notify');
+
+  if (telegramNodes.length > 0) {
+    let globalTelegramBotToken = '';
+    let globalTelegramChatId = '';
+    let globalTelegramReadError: string | null = null;
+    try {
+      globalTelegramBotToken = (await readTelegramBotTokenForServer()).trim();
+      globalTelegramChatId = (await readTelegramChatIdForServer()).trim();
+    } catch (err) {
+      globalTelegramReadError =
+        err instanceof Error ? err.message : 'Failed to read telegram config';
+    }
+
+    for (const node of telegramNodes) {
+      const config = isRecord(node.config) ? node.config : {};
+      const legacyBotToken = String(config.botToken ?? '').trim();
+      const nodeChatId = String(config.chatId ?? '').trim();
+
+      if (globalTelegramReadError) {
+        issues.push({
+          severity: 'error',
+          code: 'telegram_config_invalid',
+          message: `Telegram config okunamadi: ${globalTelegramReadError}`,
+          nodeKey: node.key,
+        });
+        continue;
+      }
+
+      if (!globalTelegramBotToken && !legacyBotToken) {
+        issues.push({
+          severity: 'error',
+          code: 'missing_telegram_bot_token',
+          message: 'action.telegram_notify requires a global Telegram bot token in Settings -> Telegram.',
+          nodeKey: node.key,
+        });
+      }
+
+      if (!nodeChatId && !globalTelegramChatId) {
+        issues.push({
+          severity: 'error',
+          code: 'missing_telegram_chat_id',
+          message:
+            'action.telegram_notify requires chatId in node config or a global Telegram chat_id in Settings -> Telegram.',
+          nodeKey: node.key,
+        });
+      }
+
+      if (legacyBotToken) {
+        issues.push({
+          severity: 'warning',
+          code: 'legacy_inline_telegram_bot_token',
+          message:
+            'Bu node eski inline botToken kullaniyor. Global Telegram bot token tanimlayip node’u kaydederek yeni modele gec.',
+          nodeKey: node.key,
+        });
+      }
+    }
+  }
+
+  return {
+    ...baseValidation,
+    valid: !issues.some((issue) => issue.severity === 'error'),
+    issues,
+  };
+}
+
 function mapDefinitionRow(row: Record<string, unknown>): TradeFlowDefinition {
   return {
     id: Number(row.id),
@@ -1959,7 +2290,7 @@ function buildLegacyFlowGraph(workflow: NonNullable<Awaited<ReturnType<typeof ge
         positionY: 80,
         config: {
           side: sellLeg.side,
-          executionMode: 'limit',
+          executionMode: 'market',
           marketSlug: sellLeg.market_slug,
           tokenId: sellLeg.token_id,
           outcomeLabel: sellLeg.outcome_label,
@@ -1987,7 +2318,7 @@ function buildLegacyFlowGraph(workflow: NonNullable<Awaited<ReturnType<typeof ge
         positionY: 80,
         config: {
           side: buyLeg.side,
-          executionMode: 'limit',
+          executionMode: 'market',
           marketSlug: buyLeg.market_slug,
           tokenId: buyLeg.token_id,
           outcomeLabel: buyLeg.outcome_label,
@@ -2267,7 +2598,7 @@ export async function publishTradeFlowDefinition(definitionId: number): Promise<
       throw new Error('Draft version payload not found');
     }
 
-    const validation = validateTradeFlowGraph(draftVersion.graph_json);
+    const validation = await validateTradeFlowGraphWithRuntimeConfig(draftVersion.graph_json);
     if (!validation.valid) {
       throw new Error(
         validation.issues

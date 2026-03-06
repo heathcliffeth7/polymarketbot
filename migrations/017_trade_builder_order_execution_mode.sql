@@ -2,11 +2,11 @@ ALTER TABLE trade_builder_orders
   ADD COLUMN IF NOT EXISTS execution_mode TEXT;
 
 UPDATE trade_builder_orders
-SET execution_mode = 'limit'
+SET execution_mode = 'market'
 WHERE execution_mode IS NULL OR btrim(execution_mode) = '';
 
 ALTER TABLE trade_builder_orders
-  ALTER COLUMN execution_mode SET DEFAULT 'limit';
+  ALTER COLUMN execution_mode SET DEFAULT 'market';
 
 ALTER TABLE trade_builder_orders
   ALTER COLUMN execution_mode SET NOT NULL;

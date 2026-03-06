@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { PageShell } from '@/components/layout/page-shell';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -14,31 +14,33 @@ export default function TradeBuilderPage() {
   const [marketQuery, setMarketQuery] = useState('');
   const [selectedMarketSlug, setSelectedMarketSlug] = useState<string | null>(null);
   const [selectedOutcomeTokenId, setSelectedOutcomeTokenId] = useState<string>('');
-  const [selectedOutcomeLabel, setSelectedOutcomeLabel] = useState<string>('');
 
   const { data: marketsData } = useTradeBuilderMarketSearch(marketQuery);
   const markets = useMemo(() => marketsData?.data ?? [], [marketsData?.data]);
 
-  const { data: outcomesData } = useTradeBuilderOutcomes(selectedMarketSlug);
-  const outcomes = useMemo(() => outcomesData?.data ?? [], [outcomesData?.data]);
-
-  useEffect(() => {
-    if (!selectedMarketSlug && markets.length > 0) {
-      setSelectedMarketSlug(markets[0].slug);
+  const effectiveMarketSlug = useMemo(() => {
+    if (selectedMarketSlug && markets.some((market) => market.slug === selectedMarketSlug)) {
+      return selectedMarketSlug;
     }
+    return markets[0]?.slug ?? null;
   }, [markets, selectedMarketSlug]);
 
-  useEffect(() => {
-    if (outcomes.length === 0) return;
-    if (!selectedOutcomeTokenId || !outcomes.some((x) => x.token_id === selectedOutcomeTokenId)) {
-      setSelectedOutcomeTokenId(outcomes[0].token_id);
-      setSelectedOutcomeLabel(outcomes[0].label);
+  const { data: outcomesData } = useTradeBuilderOutcomes(effectiveMarketSlug);
+  const outcomes = useMemo(() => outcomesData?.data ?? [], [outcomesData?.data]);
+
+  const effectiveSelectedOutcomeTokenId = useMemo(() => {
+    if (
+      selectedOutcomeTokenId &&
+      outcomes.some((outcome) => outcome.token_id === selectedOutcomeTokenId)
+    ) {
+      return selectedOutcomeTokenId;
     }
+    return outcomes[0]?.token_id ?? '';
   }, [outcomes, selectedOutcomeTokenId]);
 
   const selectedOutcome = useMemo(
-    () => outcomes.find((x) => x.token_id === selectedOutcomeTokenId) || null,
-    [outcomes, selectedOutcomeTokenId]
+    () => outcomes.find((x) => x.token_id === effectiveSelectedOutcomeTokenId) || null,
+    [outcomes, effectiveSelectedOutcomeTokenId]
   );
 
   return (
@@ -62,7 +64,7 @@ export default function TradeBuilderPage() {
               <div className="space-y-2">
                 <p className="text-xs text-zinc-500">Piyasa Slug</p>
                 <select
-                  value={selectedMarketSlug ?? ''}
+                  value={effectiveMarketSlug ?? ''}
                   onChange={(e) => setSelectedMarketSlug(e.target.value || null)}
                   className="h-9 w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 text-sm text-zinc-200"
                 >
@@ -77,12 +79,9 @@ export default function TradeBuilderPage() {
               <div className="space-y-2">
                 <p className="text-xs text-zinc-500">Sonuc</p>
                 <select
-                  value={selectedOutcomeTokenId}
+                  value={effectiveSelectedOutcomeTokenId}
                   onChange={(e) => {
-                    const tokenId = e.target.value;
-                    setSelectedOutcomeTokenId(tokenId);
-                    const selected = outcomes.find((o) => o.token_id === tokenId);
-                    if (selected) setSelectedOutcomeLabel(selected.label);
+                    setSelectedOutcomeTokenId(e.target.value);
                   }}
                   className="h-9 w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 text-sm text-zinc-200"
                 >
@@ -95,16 +94,16 @@ export default function TradeBuilderPage() {
                 </select>
               </div>
             </div>
-            {selectedOutcomeLabel && (
+            {selectedOutcome?.label && (
               <p className="text-xs text-zinc-400">
-                Secilen sonuc: <span className="text-zinc-200">{selectedOutcomeLabel}</span>
+                Secilen sonuc: <span className="text-zinc-200">{selectedOutcome.label}</span>
               </p>
             )}
           </CardContent>
         </Card>
 
         <FlowEnginePanel
-          defaultMarketSlug={selectedMarketSlug}
+          defaultMarketSlug={effectiveMarketSlug}
           defaultOutcome={
             selectedOutcome
               ? { token_id: selectedOutcome.token_id, label: selectedOutcome.label }

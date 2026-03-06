@@ -1,4 +1,6 @@
-use crate::signer::{sign_order_eip712, unix_now_secs, ApiCredentials, ClobHeaderSigner, HeaderSigner};
+use crate::signer::{
+    sign_order_eip712, unix_now_secs, ApiCredentials, ClobHeaderSigner, HeaderSigner,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use ethers::{
@@ -7,7 +9,7 @@ use ethers::{
 };
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -104,6 +106,17 @@ pub struct FillInfo {
     pub ts: Option<i64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct DataApiInventoryPosition {
+    asset: Option<String>,
+    #[serde(rename = "tokenId")]
+    token_id: Option<String>,
+    #[serde(rename = "clobTokenId")]
+    clob_token_id: Option<String>,
+    size: Option<Value>,
+    balance: Option<Value>,
+}
+
 #[async_trait]
 pub trait GammaClient: Send + Sync {
     async fn list_active_updown_markets(&self) -> Result<Vec<GammaMarket>>;
@@ -120,6 +133,9 @@ pub trait ClobRestClient: Send + Sync {
     async fn list_open_orders(&self, market: Option<&str>) -> Result<Vec<OrderInfo>>;
     async fn list_fills(&self, next_cursor: Option<&str>) -> Result<Vec<FillInfo>>;
     async fn get_balance(&self) -> Result<f64>;
+    async fn get_token_inventory(&self, _token_id: &str) -> Result<Option<f64>> {
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
@@ -215,6 +231,30 @@ fn parse_string_array(v: &serde_json::Value) -> Vec<String> {
     }
 
     Vec::new()
+}
+
+fn parse_json_f64(value: Option<&Value>) -> Option<f64> {
+    match value {
+        Some(Value::Number(v)) => v.as_f64(),
+        Some(Value::String(v)) => v.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn data_api_position_matches_token(position: &DataApiInventoryPosition, token_id: &str) -> bool {
+    let normalized_token_id = token_id.trim();
+    if normalized_token_id.is_empty() {
+        return false;
+    }
+
+    [
+        position.asset.as_deref(),
+        position.token_id.as_deref(),
+        position.clob_token_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|candidate| candidate.trim() == normalized_token_id)
 }
 
 fn parse_gamma_market(item: &serde_json::Value) -> Option<GammaMarket> {
@@ -354,6 +394,9 @@ fn parse_yes_no_token_ids(item: &serde_json::Value) -> (Option<String>, Option<S
 #[derive(Clone)]
 pub struct ClobHttpClient {
     base_url: String,
+    positions_base_url: Option<String>,
+    positions_page_size: i64,
+    positions_max_pages: i64,
     http: Client,
     signer: Arc<dyn HeaderSigner>,
     wallet: LocalWallet,
@@ -367,6 +410,9 @@ pub struct ClobHttpClient {
 impl ClobHttpClient {
     pub fn from_credentials(
         base_url: String,
+        positions_base_url: Option<String>,
+        positions_page_size: i64,
+        positions_max_pages: i64,
         creds: ApiCredentials,
         wallet: LocalWallet,
         exchange_address: Address,
@@ -377,6 +423,9 @@ impl ClobHttpClient {
         let api_key = creds.key.clone();
         Self {
             base_url,
+            positions_base_url,
+            positions_page_size,
+            positions_max_pages,
             http: build_http_client(),
             signer: Arc::new(ClobHeaderSigner { creds }),
             wallet,
@@ -446,6 +495,12 @@ impl ClobHttpClient {
             request_path,
             summarized
         ))
+    }
+
+    fn inventory_lookup_address(&self) -> String {
+        self.gnosis_safe
+            .map(|addr| ethers::utils::to_checksum(&addr, None))
+            .unwrap_or_else(|| self.address.clone())
     }
 }
 
@@ -771,6 +826,66 @@ impl ClobRestClient for ClobHttpClient {
             .unwrap_or(0.0);
         Ok(balance)
     }
+
+    async fn get_token_inventory(&self, token_id: &str) -> Result<Option<f64>> {
+        let Some(base_url) = self.positions_base_url.as_deref() else {
+            return Ok(None);
+        };
+        if base_url.trim().is_empty() || token_id.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let limit = self.positions_page_size.max(1);
+        let max_pages = self.positions_max_pages.max(1);
+        let user = self.inventory_lookup_address();
+        let url = format!("{}/positions", base_url.trim_end_matches('/'));
+        let limit_str = limit.to_string();
+
+        let mut total_qty = 0.0_f64;
+        let mut saw_any_page = false;
+
+        for page in 0..max_pages {
+            let offset = page * limit;
+            let offset_str = offset.to_string();
+            let rows = self
+                .http
+                .get(url.clone())
+                .query(&[
+                    ("user", user.as_str()),
+                    ("sizeThreshold", "0"),
+                    ("limit", limit_str.as_str()),
+                    ("offset", offset_str.as_str()),
+                ])
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<Vec<DataApiInventoryPosition>>()
+                .await?;
+
+            if rows.is_empty() {
+                break;
+            }
+            saw_any_page = true;
+
+            for row in &rows {
+                if !data_api_position_matches_token(row, token_id) {
+                    continue;
+                }
+                total_qty += parse_json_f64(row.size.as_ref())
+                    .or_else(|| parse_json_f64(row.balance.as_ref()))
+                    .unwrap_or_default();
+            }
+
+            if rows.len() < limit as usize {
+                break;
+            }
+        }
+
+        if !saw_any_page {
+            return Ok(Some(0.0));
+        }
+        Ok(Some(total_qty.max(0.0)))
+    }
 }
 
 #[cfg(test)]
@@ -788,6 +903,9 @@ mod tests {
         let dummy_addr = Address::zero();
         let client = ClobHttpClient::from_credentials(
             mock.base_http(),
+            None,
+            0,
+            0,
             ApiCredentials {
                 address: "0x0000000000000000000000000000000000000000".to_string(),
                 key: "k".to_string(),

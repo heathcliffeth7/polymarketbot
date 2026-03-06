@@ -62,6 +62,7 @@ import {
   createGraphFingerprint,
   createNodeKey,
   hasRequiredPlaceOrderSeed,
+  hasUpstreamAutoScopeTrigger,
   isRecord,
   minimapColor,
   nodePaletteCategoryOf,
@@ -104,6 +105,8 @@ function FlowCanvasEditorBody({
   leftPanelTopSlot,
   executionStates,
   livePrices,
+  globalTelegramBotTokenMasked,
+  globalTelegramChatId,
 }: FlowCanvasEditorProps) {
   const graphFingerprint = useMemo(
     () => createGraphFingerprint(graph.nodes, graph.edges),
@@ -122,6 +125,10 @@ function FlowCanvasEditorBody({
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const selectedNodeUpstreamAutoScope = useMemo(() => {
+    if (!selectedNodeId) return false;
+    return hasUpstreamAutoScopeTrigger(selectedNodeId, canvasNodes, canvasEdges);
+  }, [selectedNodeId, canvasNodes, canvasEdges]);
   const [nodeInspectorTab, setNodeInspectorTab] = useState<'basic' | 'advanced'>('basic');
   const [edgeInspectorTab, setEdgeInspectorTab] = useState<'basic' | 'advanced'>('basic');
   const [openPositionApplyingKey, setOpenPositionApplyingKey] = useState<string | null>(null);
@@ -726,6 +733,19 @@ function FlowCanvasEditorBody({
     }
     if (nextType === 'action.place_order' && isPresetPlaceOrderMarker(parsedConfig.presetKind, parsedConfig.refKey)) {
       normalizePresetPlaceOrderConfig(parsedConfig);
+      const placeOrderSide = toTrimmedStringValue(parsedConfig.side).toLowerCase();
+      if (
+        selectedNodeUpstreamAutoScope &&
+        isPresetPlaceOrderMarker(parsedConfig.presetKind, parsedConfig.refKey) &&
+        placeOrderSide === 'buy'
+      ) {
+        delete parsedConfig.marketSlug;
+        delete parsedConfig.tokenId;
+        delete parsedConfig.outcomeLabel;
+      }
+    }
+    if (nextType === 'action.telegram_notify') {
+      delete parsedConfig.botToken;
     }
     if (outcomeRequired) {
       const outcomeConditions = Array.isArray(parsedConfig.outcomeConditions)
@@ -736,13 +756,19 @@ function FlowCanvasEditorBody({
         const outcomeLabel = toTrimmedStringValue(item.outcomeLabel);
         const triggerCondition = toTrimmedStringValue(item.triggerCondition);
         const triggerPriceCent = toFiniteNumberValue(item.triggerPriceCent);
+        const maxPriceCentRaw = toTrimmedStringValue(item.maxPriceCent);
+        const maxPriceCent = maxPriceCentRaw ? toFiniteNumberValue(item.maxPriceCent) : null;
         const hasValidPriceCent =
           triggerPriceCent != null && triggerPriceCent > 0 && triggerPriceCent <= 100;
+        const hasValidMaxPriceCent =
+          !maxPriceCentRaw ||
+          (maxPriceCent != null && maxPriceCent > 0 && maxPriceCent <= 100);
         return (
           !!tokenId &&
           !!outcomeLabel &&
           (triggerCondition === 'cross_above' || triggerCondition === 'cross_below') &&
-          hasValidPriceCent
+          hasValidPriceCent &&
+          hasValidMaxPriceCent
         );
       });
 
@@ -1205,6 +1231,9 @@ function FlowCanvasEditorBody({
               canApplyOpenPosition={canApplyOpenPosition}
               marketOutcomes={marketOutcomes}
               marketOutcomesLoading={outcomesLoading}
+              upstreamAutoScope={selectedNodeUpstreamAutoScope}
+              globalTelegramBotTokenMasked={globalTelegramBotTokenMasked ?? null}
+              globalTelegramChatId={globalTelegramChatId ?? null}
               actions={nodeInspectorActions}
             />
           ) : selectedEdge && edgeForm ? (
