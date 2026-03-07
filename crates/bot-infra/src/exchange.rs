@@ -127,6 +127,7 @@ pub trait GammaClient: Send + Sync {
 #[async_trait]
 pub trait ClobRestClient: Send + Sync {
     async fn get_price_snapshot(&self, market: &str) -> Result<PriceSnapshot>;
+    async fn get_fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>>;
     async fn place_order(&self, req: &PlaceOrderRequest) -> Result<OrderAck>;
     async fn cancel_order(&self, exchange_order_id: &str) -> Result<()>;
     async fn get_order(&self, exchange_order_id: &str) -> Result<OrderInfo>;
@@ -456,7 +457,7 @@ impl ClobHttpClient {
                 request_path,
                 body_str.as_deref(),
             )
-            .context("build signed headers")?;
+            .map_err(|err| anyhow::anyhow!("build signed headers: {err:#}"))?;
 
         let mut req = self.http.request(method, url);
         for (k, v) in headers {
@@ -530,6 +531,32 @@ impl ClobRestClient for ClobHttpClient {
             market: market.to_string(),
             price,
         })
+    }
+
+    async fn get_fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>> {
+        if token_id.trim().is_empty() {
+            return Ok(None);
+        }
+        let request_path = format!("/fee-rate?token_id={token_id}");
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), request_path);
+        let raw: serde_json::Value = self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let fee_rate_bps = raw
+            .get("fee_rate_bps")
+            .or_else(|| raw.get("feeRateBps"))
+            .and_then(|value| match value {
+                Value::Number(v) => v.as_u64(),
+                Value::String(v) => v.parse::<u64>().ok(),
+                _ => None,
+            });
+        Ok(fee_rate_bps)
     }
 
     async fn place_order(&self, req: &PlaceOrderRequest) -> Result<OrderAck> {

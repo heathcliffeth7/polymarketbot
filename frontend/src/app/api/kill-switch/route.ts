@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth';
 import { readConfig, writeConfig } from '@/lib/config';
 import { checkControlCapability, controlService } from '@/lib/systemctl';
 
@@ -6,8 +7,12 @@ export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const [risk, capability] = await Promise.all([
-      readConfig('risk'),
+      readConfig('risk', user),
       checkControlCapability(),
     ]);
     return NextResponse.json({
@@ -25,8 +30,12 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const { active } = await req.json();
-    const risk = await readConfig('risk');
+    const risk = await readConfig('risk', user);
 
     if (risk.kill_switch_mode === 'disabled' && active) {
       return NextResponse.json(
@@ -36,7 +45,7 @@ export async function POST(req: NextRequest) {
     }
 
     risk.manual_kill_switch_active = !!active;
-    await writeConfig('risk', risk);
+    await writeConfig('risk', risk, user);
     const restart = await controlService('restart');
 
     if (restart.controlAvailable && !restart.success) {

@@ -2,6 +2,7 @@ import { pool } from '@/lib/db';
 import type { Trade, PaginatedResponse } from '@/lib/types';
 
 interface TradeFilters {
+  userId: number;
   page?: number;
   limit?: number;
   state?: string;
@@ -14,9 +15,9 @@ export async function getTrades(filters: TradeFilters): Promise<PaginatedRespons
   const limit = Math.min(filters.limit || 20, 100);
   const offset = (page - 1) * limit;
 
-  const conditions: string[] = [];
-  const params: unknown[] = [];
-  let paramIdx = 1;
+  const conditions: string[] = [`t.user_id = $1`];
+  const params: unknown[] = [filters.userId];
+  let paramIdx = 2;
 
   if (filters.state) {
     conditions.push(`t.state = $${paramIdx++}`);

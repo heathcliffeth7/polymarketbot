@@ -59,8 +59,8 @@ export interface FlowCanvasEditorProps {
   leftPanelTopSlot?: ReactNode;
   executionStates?: import('@/lib/types').NodeExecutionState[];
   livePrices?: Record<string, number>;
-  globalTelegramBotTokenMasked?: string | null;
-  globalTelegramChatId?: string | null;
+  userTelegramBotTokenMasked?: string | null;
+  userTelegramDefaultChatId?: string | null;
 }
 
 export const NODE_TYPE_OPTIONS: Array<{ value: string; label: string }> = [

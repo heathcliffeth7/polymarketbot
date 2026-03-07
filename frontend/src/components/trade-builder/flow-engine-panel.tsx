@@ -141,11 +141,11 @@ export function FlowEnginePanel({
   const [stoppingBot, setStoppingBot] = useState(false);
   const { data: botStatus, mutate: mutateBotStatus } = useBotStatus();
   const { data: telegramConfig } = useConfig('telegram');
-  const globalTelegramBotTokenMasked = useMemo(() => {
+  const userTelegramBotTokenMasked = useMemo(() => {
     const value = String(telegramConfig?.data?.bot_token ?? '').trim();
     return value || null;
   }, [telegramConfig?.data?.bot_token]);
-  const globalTelegramChatId = useMemo(() => {
+  const userTelegramDefaultChatId = useMemo(() => {
     const value = String(telegramConfig?.data?.chat_id ?? '').trim();
     return value || null;
   }, [telegramConfig?.data?.chat_id]);
@@ -815,8 +815,8 @@ export function FlowEnginePanel({
           openPositionsLoading={openPositionsLoading}
           onApplyContextPatch={applyCanvasContextPatch}
           onPendingNodeDraftChange={setHasPendingCanvasNodeDraft}
-          globalTelegramBotTokenMasked={globalTelegramBotTokenMasked}
-          globalTelegramChatId={globalTelegramChatId}
+          userTelegramBotTokenMasked={userTelegramBotTokenMasked}
+          userTelegramDefaultChatId={userTelegramDefaultChatId}
           leftPanelTopSlot={
             <CreateFlowSlot
               createName={createName} createDescription={createDescription}

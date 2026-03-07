@@ -1,7 +1,16 @@
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use bot_core::{ExecutionMode, KillSwitchMode};
 use serde::Deserialize;
-use std::{fs, path::Path};
+use serde_json::Value;
+use std::{collections::HashMap, env, fs, path::Path};
+
+const CONFIG_ENC_PREFIX: &str = "enc:v1:";
+const CONFIG_ENC_NONCE_LEN: usize = 12;
+const CONFIG_ENC_TAG_LEN: usize = 16;
 
 const SUPPORTED_MARKET_SCOPE_SLUG_PREFIXES: [(&str, &str); 8] = [
     ("btc_5m_updown", "btc-updown-5m-"),
@@ -109,9 +118,13 @@ pub struct ExecutionConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExchangeConfig {
+    #[serde(default = "default_exchange_gamma_base_url")]
     pub gamma_base_url: String,
+    #[serde(default = "default_exchange_clob_base_url")]
     pub clob_base_url: String,
+    #[serde(default = "default_exchange_clob_ws_url")]
     pub clob_ws_url: String,
+    #[serde(default = "default_exchange_chain_id")]
     pub chain_id: u64,
     #[serde(default)]
     pub api_address: String,
@@ -137,13 +150,40 @@ pub struct ExchangeConfig {
     pub gnosis_safe_address_env: String,
 }
 
+impl Default for ExchangeConfig {
+    fn default() -> Self {
+        Self {
+            gamma_base_url: default_exchange_gamma_base_url(),
+            clob_base_url: default_exchange_clob_base_url(),
+            clob_ws_url: default_exchange_clob_ws_url(),
+            chain_id: default_exchange_chain_id(),
+            api_address: String::new(),
+            api_key: String::new(),
+            api_secret: String::new(),
+            api_passphrase: String::new(),
+            api_address_env: String::new(),
+            api_key_env: String::new(),
+            api_secret_env: String::new(),
+            api_passphrase_env: String::new(),
+            ctf_exchange_address: default_exchange_ctf_exchange_address(),
+            signer_private_key: String::new(),
+            signer_private_key_env: String::new(),
+            gnosis_safe_address: String::new(),
+            gnosis_safe_address_env: String::new(),
+        }
+    }
+}
+
 impl ExchangeConfig {
     pub fn resolve_signer_private_key(&self) -> Result<String> {
         if !self.signer_private_key.is_empty() {
-            return Ok(self.signer_private_key.clone());
+            return decrypt_config_string_if_needed(
+                "exchange.signer_private_key",
+                &self.signer_private_key,
+            );
         }
         if !self.signer_private_key_env.is_empty() {
-            if let Ok(val) = std::env::var(&self.signer_private_key_env) {
+            if let Ok(val) = env::var(&self.signer_private_key_env) {
                 if !val.is_empty() {
                     return Ok(val);
                 }
@@ -154,10 +194,15 @@ impl ExchangeConfig {
 
     pub fn resolve_gnosis_safe_address(&self) -> Option<String> {
         if !self.gnosis_safe_address.is_empty() {
-            return Some(self.gnosis_safe_address.clone());
+            return decrypt_config_string_if_needed(
+                "exchange.gnosis_safe_address",
+                &self.gnosis_safe_address,
+            )
+            .ok()
+            .filter(|value| !value.is_empty());
         }
         if !self.gnosis_safe_address_env.is_empty() {
-            if let Ok(val) = std::env::var(&self.gnosis_safe_address_env) {
+            if let Ok(val) = env::var(&self.gnosis_safe_address_env) {
                 if !val.is_empty() {
                     return Some(val);
                 }
@@ -229,6 +274,53 @@ impl Default for ClaimConfig {
     }
 }
 
+impl ClaimConfig {
+    pub fn resolve_user_address(&self) -> Result<String> {
+        if !self.user_address.trim().is_empty() {
+            return decrypt_config_string_if_needed("claim.user_address", &self.user_address);
+        }
+        if !self.user_address_env.trim().is_empty() {
+            return env::var(&self.user_address_env).with_context(|| {
+                format!(
+                    "missing env {} required for auto-claim user address",
+                    self.user_address_env
+                )
+            });
+        }
+        Err(anyhow::anyhow!("claim.user_address not configured"))
+    }
+
+    pub fn resolve_private_key(&self) -> Result<String> {
+        if !self.private_key.trim().is_empty() {
+            return decrypt_config_string_if_needed("claim.private_key", &self.private_key);
+        }
+        if !self.private_key_env.trim().is_empty() {
+            return env::var(&self.private_key_env).with_context(|| {
+                format!(
+                    "missing env {} required for auto-claim signer private key",
+                    self.private_key_env
+                )
+            });
+        }
+        Err(anyhow::anyhow!("claim.private_key not configured"))
+    }
+
+    pub fn resolve_rpc_url(&self) -> Result<String> {
+        if !self.rpc_url.trim().is_empty() {
+            return Ok(self.rpc_url.trim().to_string());
+        }
+        if !self.rpc_url_env.trim().is_empty() {
+            return env::var(&self.rpc_url_env).with_context(|| {
+                format!(
+                    "missing env {} required for claim rpc url",
+                    self.rpc_url_env
+                )
+            });
+        }
+        Err(anyhow::anyhow!("claim.rpc_url not configured"))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TelegramConfig {
     #[serde(default)]
@@ -278,6 +370,32 @@ impl AppConfig {
             telegram,
         })
     }
+
+    pub fn load_from_user_settings(dir: &Path, settings: &HashMap<String, Value>) -> Result<Self> {
+        let bot: BotConfig = load_json_or_toml(settings.get("bot"), &dir.join("bot.toml"))?;
+        let strategy: StrategyConfig =
+            load_json_or_toml(settings.get("strategy"), &dir.join("strategy.toml"))?;
+        let risk: RiskConfig = load_json_or_toml(settings.get("risk"), &dir.join("risk.toml"))?;
+        let execution: ExecutionConfig =
+            load_json_or_toml(settings.get("execution"), &dir.join("execution.toml"))?;
+        let exchange: ExchangeConfig = load_json_or_default(settings.get("exchange"))?;
+        let claim: ClaimConfig = load_json_or_default(settings.get("claim"))?;
+        let telegram: TelegramConfig = load_json_or_default(settings.get("telegram"))?;
+
+        validate(
+            &bot, &strategy, &risk, &execution, &exchange, &claim, &telegram,
+        )?;
+
+        Ok(Self {
+            bot,
+            strategy,
+            risk,
+            execution,
+            exchange,
+            claim,
+            telegram,
+        })
+    }
 }
 
 fn default_min_balance_usdc() -> f64 {
@@ -310,6 +428,26 @@ fn default_market_discovery_timeout_sec() -> u64 {
 
 fn default_market_selection() -> String {
     "latest_by_slug".to_string()
+}
+
+fn default_exchange_gamma_base_url() -> String {
+    "https://gamma-api.polymarket.com".to_string()
+}
+
+fn default_exchange_clob_base_url() -> String {
+    "https://clob.polymarket.com".to_string()
+}
+
+fn default_exchange_clob_ws_url() -> String {
+    "wss://ws-subscriptions-clob.polymarket.com/ws/".to_string()
+}
+
+fn default_exchange_chain_id() -> u64 {
+    137
+}
+
+fn default_exchange_ctf_exchange_address() -> String {
+    "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E".to_string()
 }
 
 fn default_tp_pct() -> f64 {
@@ -446,6 +584,26 @@ fn load_toml_or_default<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> 
         return Ok(T::default());
     }
     load_toml(path)
+}
+
+fn load_json_or_toml<T: for<'de> Deserialize<'de>>(
+    payload: Option<&Value>,
+    path: &Path,
+) -> Result<T> {
+    if let Some(value) = payload {
+        return serde_json::from_value(value.clone())
+            .with_context(|| format!("parsing stored config payload for {}", path.display()));
+    }
+    load_toml(path)
+}
+
+fn load_json_or_default<T: for<'de> Deserialize<'de> + Default>(
+    payload: Option<&Value>,
+) -> Result<T> {
+    if let Some(value) = payload {
+        return serde_json::from_value(value.clone()).context("parsing stored config payload");
+    }
+    Ok(T::default())
 }
 
 fn validate(
@@ -639,22 +797,10 @@ fn validate(
         is_hex_address(&claim.collateral_token_address),
         "claim.collateral_token_address must be a valid 0x address"
     );
-    if !claim.user_address.trim().is_empty() {
-        anyhow::ensure!(
-            is_hex_address(&claim.user_address),
-            "claim.user_address must be a valid 0x address when provided"
-        );
-    }
-    if !claim.private_key.trim().is_empty() {
-        anyhow::ensure!(
-            is_hex_private_key(&claim.private_key),
-            "claim.private_key must be a valid 0x private key when provided"
-        );
-    }
     if claim.enabled {
         anyhow::ensure!(
-            !claim.rpc_url_env.trim().is_empty(),
-            "claim.rpc_url_env is required when claim.enabled=true"
+            !claim.rpc_url.trim().is_empty() || !claim.rpc_url_env.trim().is_empty(),
+            "claim.rpc_url or claim.rpc_url_env is required when claim.enabled=true"
         );
         anyhow::ensure!(
             !claim.user_address.trim().is_empty() || !claim.user_address_env.trim().is_empty(),
@@ -664,6 +810,8 @@ fn validate(
             !claim.private_key.trim().is_empty() || !claim.private_key_env.trim().is_empty(),
             "claim.private_key or claim.private_key_env is required when claim.enabled=true"
         );
+        validate_claim_user_address(claim)?;
+        validate_claim_private_key(claim)?;
     }
 
     anyhow::ensure!(
@@ -686,4 +834,171 @@ fn is_hex_private_key(raw: &str) -> bool {
     trimmed.starts_with("0x")
         && trimmed.len() == 66
         && trimmed[2..].chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn validate_claim_user_address(claim: &ClaimConfig) -> Result<()> {
+    if !claim.enabled {
+        return Ok(());
+    }
+
+    let user_address = claim.resolve_user_address()?;
+    anyhow::ensure!(
+        is_hex_address(&user_address),
+        "claim.user_address must be a valid 0x address when provided"
+    );
+    Ok(())
+}
+
+fn validate_claim_private_key(claim: &ClaimConfig) -> Result<()> {
+    if !claim.enabled {
+        return Ok(());
+    }
+
+    let private_key = claim.resolve_private_key()?;
+    anyhow::ensure!(
+        is_hex_private_key(&private_key),
+        "claim.private_key must be a valid 0x private key when provided"
+    );
+    Ok(())
+}
+
+fn decrypt_config_string_if_needed(field_name: &str, raw_value: &str) -> Result<String> {
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+    if !trimmed.starts_with(CONFIG_ENC_PREFIX) {
+        return Ok(trimmed.to_string());
+    }
+
+    let payload = &trimmed[CONFIG_ENC_PREFIX.len()..];
+    let decoded = BASE64_STANDARD
+        .decode(payload)
+        .with_context(|| format!("decoding encrypted config value for {field_name}"))?;
+    anyhow::ensure!(
+        decoded.len() > CONFIG_ENC_NONCE_LEN + CONFIG_ENC_TAG_LEN,
+        "encrypted config value too short for {field_name}"
+    );
+
+    let key_material = load_config_encryption_key()?;
+    let cipher = Aes256Gcm::new_from_slice(&key_material)
+        .map_err(|_| anyhow::anyhow!("invalid config encryption key length"))?;
+
+    let nonce = Nonce::from_slice(&decoded[..CONFIG_ENC_NONCE_LEN]);
+    let ciphertext = &decoded[CONFIG_ENC_NONCE_LEN..];
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| anyhow::anyhow!("decrypting encrypted config value for {field_name}"))?;
+    String::from_utf8(plaintext)
+        .with_context(|| format!("encrypted config value is not valid utf-8 for {field_name}"))
+        .map(|value| value.trim().to_string())
+}
+
+fn load_config_encryption_key() -> Result<Vec<u8>> {
+    let encoded = env::var("CONFIG_ENCRYPTION_KEY")
+        .context("CONFIG_ENCRYPTION_KEY is required to decrypt stored config values")?;
+    let trimmed = encoded.trim();
+    anyhow::ensure!(
+        !trimmed.is_empty(),
+        "CONFIG_ENCRYPTION_KEY is required to decrypt stored config values"
+    );
+    let decoded = BASE64_STANDARD
+        .decode(trimmed)
+        .context("CONFIG_ENCRYPTION_KEY must be valid base64")?;
+    anyhow::ensure!(
+        decoded.len() == 32,
+        "CONFIG_ENCRYPTION_KEY must decode to exactly 32 bytes"
+    );
+    Ok(decoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn test_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ScopedConfigEncryptionKey {
+        previous: Option<String>,
+    }
+
+    impl ScopedConfigEncryptionKey {
+        fn set(encoded_key: &str) -> Self {
+            let previous = env::var("CONFIG_ENCRYPTION_KEY").ok();
+            env::set_var("CONFIG_ENCRYPTION_KEY", encoded_key);
+            Self { previous }
+        }
+    }
+
+    impl Drop for ScopedConfigEncryptionKey {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_deref() {
+                env::set_var("CONFIG_ENCRYPTION_KEY", previous);
+            } else {
+                env::remove_var("CONFIG_ENCRYPTION_KEY");
+            }
+        }
+    }
+
+    fn encrypt_config_string_for_test(raw: &str) -> (String, String) {
+        let key_material = [17_u8; 32];
+        let encoded_key = BASE64_STANDARD.encode(key_material);
+        let cipher = Aes256Gcm::new_from_slice(&key_material).unwrap();
+        let nonce_bytes = [9_u8; CONFIG_ENC_NONCE_LEN];
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher.encrypt(nonce, raw.as_bytes()).unwrap();
+        let encrypted = format!(
+            "{CONFIG_ENC_PREFIX}{}",
+            BASE64_STANDARD.encode([nonce_bytes.as_slice(), ciphertext.as_slice()].concat())
+        );
+        (encoded_key, encrypted)
+    }
+
+    #[test]
+    fn claim_private_key_validation_ignores_disabled_encrypted_value() {
+        let claim = ClaimConfig {
+            enabled: false,
+            private_key: "enc:v1:not-a-real-key".to_string(),
+            ..ClaimConfig::default()
+        };
+
+        assert!(validate_claim_private_key(&claim).is_ok());
+    }
+
+    #[test]
+    fn claim_private_key_validation_accepts_enabled_encrypted_value() {
+        let _guard = test_env_lock().lock().unwrap();
+        let (encoded_key, encrypted_key) = encrypt_config_string_for_test(
+            "0x1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let _env_guard = ScopedConfigEncryptionKey::set(&encoded_key);
+        let claim = ClaimConfig {
+            enabled: true,
+            private_key: encrypted_key,
+            ..ClaimConfig::default()
+        };
+
+        assert!(validate_claim_private_key(&claim).is_ok());
+    }
+
+    #[test]
+    fn claim_private_key_validation_rejects_invalid_decrypted_value() {
+        let _guard = test_env_lock().lock().unwrap();
+        let (encoded_key, encrypted_key) = encrypt_config_string_for_test("not-a-private-key");
+        let _env_guard = ScopedConfigEncryptionKey::set(&encoded_key);
+        let claim = ClaimConfig {
+            enabled: true,
+            private_key: encrypted_key,
+            ..ClaimConfig::default()
+        };
+
+        let err = validate_claim_private_key(&claim).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("claim.private_key must be a valid 0x private key when provided"));
+    }
 }

@@ -105,8 +105,8 @@ function FlowCanvasEditorBody({
   leftPanelTopSlot,
   executionStates,
   livePrices,
-  globalTelegramBotTokenMasked,
-  globalTelegramChatId,
+  userTelegramBotTokenMasked,
+  userTelegramDefaultChatId,
 }: FlowCanvasEditorProps) {
   const graphFingerprint = useMemo(
     () => createGraphFingerprint(graph.nodes, graph.edges),
@@ -1232,8 +1232,8 @@ function FlowCanvasEditorBody({
               marketOutcomes={marketOutcomes}
               marketOutcomesLoading={outcomesLoading}
               upstreamAutoScope={selectedNodeUpstreamAutoScope}
-              globalTelegramBotTokenMasked={globalTelegramBotTokenMasked ?? null}
-              globalTelegramChatId={globalTelegramChatId ?? null}
+              userTelegramBotTokenMasked={userTelegramBotTokenMasked ?? null}
+              userTelegramDefaultChatId={userTelegramDefaultChatId ?? null}
               actions={nodeInspectorActions}
             />
           ) : selectedEdge && edgeForm ? (

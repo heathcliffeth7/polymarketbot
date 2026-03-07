@@ -1,19 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth';
 import { pool } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const { searchParams } = new URL(req.url);
     let tradeId = parseInt(searchParams.get('tradeId') || '0', 10);
 
     if (!Number.isFinite(tradeId) || tradeId <= 0) {
       const active = await pool.query(
         `SELECT id FROM trades
-         WHERE state NOT IN ('Settled', 'Halted', 'Idle')
+         WHERE user_id = $1
+           AND state NOT IN ('Settled', 'Halted', 'Idle')
          ORDER BY opened_at DESC
-         LIMIT 1`
+         LIMIT 1`,
+        [user.userId]
       );
       tradeId = active.rows[0]?.id || 0;
     }
@@ -22,12 +29,22 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ tradeId: null, rules: [] });
     }
 
+    const tradeRes = await pool.query(
+      'SELECT id FROM trades WHERE id = $1 AND user_id = $2 LIMIT 1',
+      [tradeId, user.userId]
+    );
+    if ((tradeRes.rowCount ?? 0) === 0) {
+      return NextResponse.json({ error: 'Trade not found' }, { status: 404 });
+    }
+
     const { rows } = await pool.query(
-      `SELECT leg_side, drop_sell_pct, enabled, updated_at
-       FROM position_exit_rules
-       WHERE trade_id = $1
-       ORDER BY leg_side ASC`,
-      [tradeId]
+      `SELECT per.leg_side, per.drop_sell_pct, per.enabled, per.updated_at
+       FROM position_exit_rules per
+       JOIN trades t ON t.id = per.trade_id
+       WHERE per.trade_id = $1
+         AND t.user_id = $2
+       ORDER BY per.leg_side ASC`,
+      [tradeId, user.userId]
     );
 
     return NextResponse.json({
@@ -47,6 +64,10 @@ export async function GET(req: NextRequest) {
 
 export async function PUT(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const body = await req.json();
     const tradeId = Number(body?.tradeId);
     const rules = Array.isArray(body?.rules) ? body.rules : [];
@@ -57,6 +78,14 @@ export async function PUT(req: NextRequest) {
 
     if (rules.length === 0) {
       return NextResponse.json({ error: 'rules are required' }, { status: 400 });
+    }
+
+    const tradeRes = await pool.query(
+      'SELECT id FROM trades WHERE id = $1 AND user_id = $2 LIMIT 1',
+      [tradeId, user.userId]
+    );
+    if ((tradeRes.rowCount ?? 0) === 0) {
+      return NextResponse.json({ error: 'Trade not found' }, { status: 404 });
     }
 
     for (const item of rules) {

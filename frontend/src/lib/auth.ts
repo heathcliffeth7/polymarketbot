@@ -6,28 +6,47 @@ const COOKIE_NAME = 'polybot-session';
 const TRUE_ENV_VALUES = new Set(['1', 'true', 'yes', 'on']);
 const FALSE_ENV_VALUES = new Set(['0', 'false', 'no', 'off']);
 
-export async function createSession(): Promise<string> {
-  const token = await new SignJWT({ authenticated: true })
+export interface SessionUser {
+  userId: number;
+  username: string;
+}
+
+interface SessionPayload {
+  authenticated: true;
+  userId: number;
+  username: string;
+}
+
+export async function createSession(user: SessionUser): Promise<string> {
+  return new SignJWT({
+    authenticated: true,
+    userId: user.userId,
+    username: user.username,
+  } satisfies SessionPayload)
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime('24h')
     .sign(SECRET);
-  return token;
 }
 
-export async function verifySession(token: string): Promise<boolean> {
+export async function verifySession(token: string): Promise<SessionUser | null> {
   try {
-    await jwtVerify(token, SECRET);
-    return true;
+    const { payload } = await jwtVerify(token, SECRET);
+    const userId = Number(payload.userId);
+    const username = String(payload.username ?? '').trim();
+    if (!Number.isFinite(userId) || userId <= 0 || !username) {
+      return null;
+    }
+    return { userId, username };
   } catch {
-    return false;
+    return null;
   }
 }
 
-export async function getSession(): Promise<boolean> {
+export async function getSessionUser(): Promise<SessionUser | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(COOKIE_NAME)?.value;
-  if (!token) return false;
+  if (!token) return null;
   return verifySession(token);
 }
 

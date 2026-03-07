@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth';
 import { getTradeFlowRuns } from '@/lib/queries/trade-flow';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const { searchParams } = new URL(req.url);
     const page = Number(searchParams.get('page') || '1');
     const limit = Number(searchParams.get('limit') || '20');
@@ -28,6 +33,7 @@ export async function GET(req: NextRequest) {
     }
 
     const result = await getTradeFlowRuns({
+      userId: user.userId,
       page: Math.floor(page),
       limit: Math.floor(limit),
       definitionId,

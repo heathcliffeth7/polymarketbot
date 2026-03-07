@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth';
 import {
   createTradeBuilderWorkflow,
   getTradeBuilderWorkflows,
@@ -8,8 +9,13 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const { searchParams } = new URL(req.url);
     const result = await getTradeBuilderWorkflows({
+      userId: user.userId,
       page: parseInt(searchParams.get('page') || '1', 10),
       limit: parseInt(searchParams.get('limit') || '20', 10),
       status: searchParams.get('status') || undefined,
@@ -23,6 +29,10 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const body = await req.json();
 
     const sourceTradeId = Number(body?.sourceTradeId);
@@ -57,6 +67,7 @@ export async function POST(req: NextRequest) {
     if ('error' in normalizedBuyLeg) return NextResponse.json({ error: normalizedBuyLeg.error }, { status: 400 });
 
     const data = await createTradeBuilderWorkflow({
+      userId: user.userId,
       name: body?.name ? String(body.name) : undefined,
       sourceTradeId,
       sellTargetPct,

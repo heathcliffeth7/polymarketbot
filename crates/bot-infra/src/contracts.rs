@@ -10,6 +10,7 @@ use bot_core::TradeState;
 #[async_trait]
 pub trait OrderExecutor: Send + Sync {
     async fn midpoint(&self, market: &str) -> Result<PriceSnapshot>;
+    async fn fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>>;
     async fn place(&self, req: &PlaceOrderRequest) -> Result<OrderAck>;
     async fn cancel(&self, exchange_order_id: &str) -> Result<()>;
     async fn status(&self, exchange_order_id: &str) -> Result<OrderInfo>;
@@ -34,6 +35,10 @@ where
 
     async fn place(&self, req: &PlaceOrderRequest) -> Result<OrderAck> {
         ClobRestClient::place_order(self, req).await
+    }
+
+    async fn fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>> {
+        ClobRestClient::get_fee_rate_bps(self, token_id).await
     }
 
     async fn cancel(&self, exchange_order_id: &str) -> Result<()> {

@@ -98,8 +98,8 @@ interface NodeInspectorPanelProps {
   marketOutcomes: TradeBuilderOutcome[];
   marketOutcomesLoading: boolean;
   upstreamAutoScope: boolean;
-  globalTelegramBotTokenMasked: string | null;
-  globalTelegramChatId: string | null;
+  userTelegramBotTokenMasked: string | null;
+  userTelegramDefaultChatId: string | null;
   actions: NodeInspectorActions;
 }
 
@@ -123,8 +123,8 @@ export function NodeInspectorPanel({
   marketOutcomes,
   marketOutcomesLoading,
   upstreamAutoScope,
-  globalTelegramBotTokenMasked,
-  globalTelegramChatId,
+  userTelegramBotTokenMasked,
+  userTelegramDefaultChatId,
   actions,
 }: NodeInspectorPanelProps) {
   const [openFieldHelpState, setOpenFieldHelpState] = useState<{ nodeType: string; key: string } | null>(null);
@@ -186,13 +186,15 @@ export function NodeInspectorPanel({
     [marketOutcomes]
   );
   const telegramLegacyBotToken = (form.fields.botToken ?? '').trim();
-  const telegramGlobalBotToken = (globalTelegramBotTokenMasked ?? '').trim();
+  const telegramUserBotToken = (userTelegramBotTokenMasked ?? '').trim();
   const telegramNodeChatId = (form.fields.chatId ?? '').trim();
-  const telegramGlobalChatId = (globalTelegramChatId ?? '').trim();
-  const telegramBotTokenMasked =
-    telegramGlobalBotToken || (telegramLegacyBotToken ? '********' : '');
-  const telegramBotTokenSource =
-    telegramGlobalBotToken ? 'global' : telegramLegacyBotToken ? 'legacy' : 'missing';
+  const telegramUserDefaultChatId = (userTelegramDefaultChatId ?? '').trim();
+  const telegramBotTokenMasked = telegramUserBotToken;
+  const telegramBotTokenSource = telegramUserBotToken
+    ? 'user'
+    : telegramLegacyBotToken
+      ? 'legacy_ignored'
+      : 'missing';
   const visibleNodeSchema = nodeSchema.filter((field) => {
     if (nodeTypeDraft === 'action.place_order') {
       if (field.key === 'sizePct') return placeOrderSizeMode === 'pct';
@@ -321,11 +323,11 @@ export function NodeInspectorPanel({
                   className="h-8 border-slate-200 bg-slate-50 text-xs text-slate-500"
                 />
                 <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                  {telegramBotTokenSource === 'global'
-                    ? 'Bu token merkezi Telegram ayarindan gelir ve workflow icinde tekrar saklanmaz.'
-                    : telegramBotTokenSource === 'legacy'
-                      ? 'Bu workflow eski inline token ile acildi. Node kaydedilince global token modeline normalize olur.'
-                      : 'Global Telegram bot token henuz tanimli degil. Settings -> Telegram ekranindan ekle.'}
+                  {telegramBotTokenSource === 'user'
+                    ? 'Bu token mevcut kullanicinin Telegram ayarindan gelir ve workflow icinde tekrar saklanmaz.'
+                    : telegramBotTokenSource === 'legacy_ignored'
+                      ? 'Bu workflow eski inline token ile acildi, fakat artik kullanilmaz. Settings -> Telegram ekranindan mevcut kullanici tokenini kaydet.'
+                      : 'Telegram bot token henuz tanimli degil. Settings -> Telegram ekranindan ekle.'}
                 </p>
               </div>
             )}
@@ -333,20 +335,20 @@ export function NodeInspectorPanel({
             {nodeTypeDraft === 'action.telegram_notify' && (
               <div className="space-y-1">
                 <Label className="text-[11px] font-medium text-slate-600">
-                  Global Chat ID (Fallback)
+                  Default Chat ID (Fallback)
                 </Label>
                 <Input
-                  value={telegramGlobalChatId}
+                  value={telegramUserDefaultChatId}
                   disabled
                   placeholder="Settings -> Telegram"
                   className="h-8 border-slate-200 bg-slate-50 text-xs text-slate-500"
                 />
                 <p className="text-[10px] leading-relaxed text-slate-400 italic">
                   {telegramNodeChatId
-                    ? 'Node Chat ID doluysa runtime onu kullanir. Global Chat ID sadece node bos oldugunda fallback olur.'
-                    : telegramGlobalChatId
-                      ? 'Node Chat ID bos. Runtime bu global Chat ID fallback degerini kullanir.'
-                      : 'Global Chat ID opsiyoneldir. Burasi da bossa node icinde Chat ID doldurman gerekir.'}
+                    ? 'Node Chat ID doluysa runtime onu kullanir. Varsayilan Chat ID sadece node bos oldugunda fallback olur.'
+                    : telegramUserDefaultChatId
+                      ? 'Node Chat ID bos. Runtime bu kullanicinin varsayilan Chat ID degerini kullanir.'
+                      : 'Varsayilan Chat ID opsiyoneldir. Burasi da bossa node icinde Chat ID doldurman gerekir.'}
                 </p>
               </div>
             )}

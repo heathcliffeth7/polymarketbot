@@ -59,6 +59,13 @@ sudo chown root:dextrabot "$ENV_FILE"
 sudo chmod 0640 "$ENV_FILE"
 ok "Environment file installed at $ENV_FILE"
 
+configured_bot_config_dir="$(sudo sed -n 's/^BOT_CONFIG_DIR=//p' "$ENV_FILE" | tail -n1)"
+configured_bot_config_dir="${configured_bot_config_dir:-$ROOT_DIR/config}"
+
+step "Ensure dextrabot can write config directory"
+"$ROOT_DIR/scripts/ensure_config_permissions.sh" "$configured_bot_config_dir"
+ok "Config directory permissions ready at $configured_bot_config_dir"
+
 step "Install systemd service"
 sudo cp "$UNIT_SRC" "$UNIT_DST"
 sudo systemctl daemon-reload

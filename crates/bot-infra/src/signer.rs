@@ -78,9 +78,7 @@ impl HeaderSigner for ClobHeaderSigner {
         // signature = base64.urlsafe_b64encode(HMAC_SHA256(base64.urlsafe_b64decode(secret), message))
         // NOTE: Polymarket CLOB API expects only the path (no query string) in the HMAC message.
         let sign_path = request_path.split('?').next().unwrap_or(request_path);
-        let decoded_secret = URL_SAFE
-            .decode(self.creds.secret.as_bytes())
-            .context("decode POLY API secret as base64url")?;
+        let decoded_secret = decode_clob_api_secret(&self.creds.secret)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(&decoded_secret)?;
         let mut message = format!("{timestamp}{method}{sign_path}");
         if let Some(raw) = body {
@@ -120,6 +118,27 @@ impl HeaderSigner for ClobHeaderSigner {
         );
         Ok(headers)
     }
+}
+
+fn decode_clob_api_secret(raw: &str) -> Result<Vec<u8>> {
+    let trimmed = raw.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "POLY API secret is empty");
+
+    let remainder = trimmed.len() % 4;
+    anyhow::ensure!(
+        remainder != 1,
+        "POLY API secret has invalid base64url length"
+    );
+
+    let normalized = if remainder == 0 {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}{}", "=".repeat(4 - remainder))
+    };
+
+    URL_SAFE
+        .decode(normalized.as_bytes())
+        .context("decode POLY API secret as base64url")
 }
 
 fn masked_prefix(raw: &str, take: usize) -> String {
@@ -243,5 +262,63 @@ mod tests {
             headers.get(POLY_TIMESTAMP).map(String::as_str),
             Some("1700000000")
         );
+    }
+
+    #[test]
+    fn l2_hmac_accepts_unpadded_base64url_secret() {
+        let body = "{\"market\":\"btc-updown-5m-1\",\"side\":\"buy\"}";
+
+        let padded = ClobHeaderSigner {
+            creds: ApiCredentials {
+                address: "0xabc".to_string(),
+                key: "k".to_string(),
+                secret: "YWFhYQ==".to_string(),
+                passphrase: "p".to_string(),
+            },
+        };
+        let unpadded = ClobHeaderSigner {
+            creds: ApiCredentials {
+                address: "0xabc".to_string(),
+                key: "k".to_string(),
+                secret: "YWFhYQ".to_string(),
+                passphrase: "p".to_string(),
+            },
+        };
+
+        let padded_headers = padded
+            .signed_headers(1_700_000_000, "POST", "/order", Some(body))
+            .expect("padded headers");
+        let unpadded_headers = unpadded
+            .signed_headers(1_700_000_000, "POST", "/order", Some(body))
+            .expect("unpadded headers");
+
+        assert_eq!(
+            padded_headers.get(POLY_SIGNATURE),
+            unpadded_headers.get(POLY_SIGNATURE)
+        );
+        assert_eq!(
+            padded_headers.get(POLY_TIMESTAMP),
+            unpadded_headers.get(POLY_TIMESTAMP)
+        );
+    }
+
+    #[test]
+    fn l2_hmac_rejects_invalid_base64url_secret() {
+        let signer = ClobHeaderSigner {
+            creds: ApiCredentials {
+                address: "0xabc".to_string(),
+                key: "k".to_string(),
+                secret: "%%%".to_string(),
+                passphrase: "p".to_string(),
+            },
+        };
+
+        let err = signer
+            .signed_headers(1_700_000_000, "GET", "/data/trades", None)
+            .expect_err("invalid secret should fail");
+
+        assert!(err
+            .to_string()
+            .contains("decode POLY API secret as base64url"));
     }
 }

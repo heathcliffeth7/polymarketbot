@@ -208,7 +208,10 @@ export function ConfigEditor({ file, title, fields }: ConfigEditorProps) {
 
 function isSensitiveConfigField(file: string, key: string): boolean {
   if (file === 'exchange') {
-    return ['api_address', 'api_key', 'api_secret', 'api_passphrase'].includes(key);
+    return ['api_key', 'api_secret', 'api_passphrase', 'signer_private_key'].includes(key);
+  }
+  if (file === 'claim') {
+    return key === 'private_key';
   }
   if (file === 'telegram') {
     return key === 'bot_token';
@@ -217,6 +220,11 @@ function isSensitiveConfigField(file: string, key: string): boolean {
 }
 
 function getSensitiveFieldHint(file: string, key: string, isMasked: boolean): string {
+  if (file === 'claim' && key === 'private_key') {
+    return isMasked
+      ? 'Stored value is masked. Enter new value to replace. Auto-claim uses the saved key.'
+      : 'Leave unchanged or clear explicitly. Auto-claim uses the saved key.';
+  }
   if (file === 'telegram' && key === 'bot_token') {
     return isMasked
       ? 'Stored value is masked. Enter new value to replace. The next Telegram send uses the saved token.'

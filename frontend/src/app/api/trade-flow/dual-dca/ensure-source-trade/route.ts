@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth';
 import { ensureDualDcaSourceTrade } from '@/lib/queries/trade-flow';
 import type { TradeFlowEnsureDualDcaSourceTradeRequest } from '@/lib/types';
 
@@ -13,6 +14,10 @@ function parseOptionalPositiveInt(value: unknown): number | null {
 
 export async function POST(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const body = (await req.json()) as Partial<TradeFlowEnsureDualDcaSourceTradeRequest> | null;
     const payload: TradeFlowEnsureDualDcaSourceTradeRequest = {
       asset: String(body?.asset || '').trim().toLowerCase() as TradeFlowEnsureDualDcaSourceTradeRequest['asset'],
@@ -21,7 +26,7 @@ export async function POST(req: NextRequest) {
       nodeKey: body?.nodeKey == null ? null : String(body.nodeKey),
     };
 
-    const data = await ensureDualDcaSourceTrade(payload);
+    const data = await ensureDualDcaSourceTrade(user.userId, payload);
     return NextResponse.json({ data });
   } catch (err) {
     console.error('Trade flow dual_dca ensure source trade error:', err);

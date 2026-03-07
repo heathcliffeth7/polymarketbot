@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth';
 import { getTradeFlowRunEvents } from '@/lib/queries/trade-flow';
 
 export const dynamic = 'force-dynamic';
@@ -8,6 +9,10 @@ export async function GET(
   { params }: { params: Promise<{ runId: string }> }
 ) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const { runId: id } = await params;
     const runId = Number(id);
     if (!Number.isFinite(runId) || runId <= 0) {
@@ -25,7 +30,7 @@ export async function GET(
       return NextResponse.json({ error: 'limit must be in [1,200]' }, { status: 400 });
     }
 
-    const result = await getTradeFlowRunEvents(runId, Math.floor(page), Math.floor(limit));
+    const result = await getTradeFlowRunEvents(user.userId, runId, Math.floor(page), Math.floor(limit));
     return NextResponse.json(result);
   } catch (err) {
     console.error('Trade flow run events list error:', err);

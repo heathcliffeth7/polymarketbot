@@ -1,17 +1,47 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createSession, getSessionCookieName, shouldUseSecureAuthCookie } from '@/lib/auth';
+import {
+  createSession,
+  getSessionCookieName,
+  getSessionUser,
+  shouldUseSecureAuthCookie,
+} from '@/lib/auth';
+import {
+  authenticateUser,
+  getAuthStatusPayload,
+} from '@/lib/auth-db';
+
+export async function GET() {
+  try {
+    const user = await getSessionUser();
+    const payload = await getAuthStatusPayload(user);
+    return NextResponse.json(payload);
+  } catch {
+    return NextResponse.json(
+      {
+        authenticated: false,
+        user: null,
+        registrationOpen: false,
+        userCount: 0,
+        maxUsers: 2,
+      },
+      { status: 500 }
+    );
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const { password } = await req.json();
-    const secret = process.env.AUTH_SECRET;
+    const body = await req.json();
+    const username = String(body?.username || '');
+    const password = String(body?.password || '');
+    const user = await authenticateUser(username, password);
 
-    if (!secret || password !== secret) {
-      return NextResponse.json({ error: 'Invalid password' }, { status: 401 });
+    if (!user) {
+      return NextResponse.json({ error: 'Invalid username or password' }, { status: 401 });
     }
 
-    const token = await createSession();
-    const response = NextResponse.json({ success: true });
+    const token = await createSession(user);
+    const response = NextResponse.json({ success: true, user });
     const secureCookie = shouldUseSecureAuthCookie();
 
     response.cookies.set(getSessionCookieName(), token, {

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth';
 import {
   createTradeBuilderOrder,
   getTradeBuilderOrders,
@@ -8,8 +9,13 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const { searchParams } = new URL(req.url);
     const result = await getTradeBuilderOrders({
+      userId: user.userId,
       page: parseInt(searchParams.get('page') || '1', 10),
       limit: parseInt(searchParams.get('limit') || '20', 10),
       status: searchParams.get('status') || undefined,
@@ -23,6 +29,10 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const body = await req.json();
 
     const kind = String(body?.kind || '');
@@ -70,6 +80,7 @@ export async function POST(req: NextRequest) {
     }
 
     const order = await createTradeBuilderOrder({
+      userId: user.userId,
       kind: kind as 'immediate' | 'conditional',
       marketSlug,
       tokenId,

@@ -1,32 +1,42 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { jwtVerify } from 'jose';
+import { getSessionCookieName, verifySession } from '@/lib/auth';
 
-const PUBLIC_PATHS = ['/login', '/api/auth'];
-const COOKIE_NAME = 'polybot-session';
+const LOGIN_PATH = '/login';
+const AUTH_API_PATH = '/api/auth';
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
-
-  if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
-    return NextResponse.next();
-  }
 
   if (pathname.startsWith('/_next') || pathname.startsWith('/favicon')) {
     return NextResponse.next();
   }
 
-  const token = req.cookies.get(COOKIE_NAME)?.value;
-  if (!token) {
-    return redirectToLogin(req);
+  if (isAuthApiPath(pathname)) {
+    return NextResponse.next();
   }
 
-  try {
-    const secret = new TextEncoder().encode(process.env.AUTH_SECRET || 'fallback-secret');
-    await jwtVerify(token, secret);
+  const token = req.cookies.get(getSessionCookieName())?.value;
+  const session = token ? await verifySession(token) : null;
+
+  if (isLoginPath(pathname)) {
+    if (session) {
+      return NextResponse.redirect(new URL('/', req.url));
+    }
     return NextResponse.next();
-  } catch {
-    return redirectToLogin(req);
   }
+
+  if (session) {
+    return NextResponse.next();
+  }
+  return redirectToLogin(req);
+}
+
+function isLoginPath(pathname: string) {
+  return pathname === LOGIN_PATH || pathname.startsWith(`${LOGIN_PATH}/`);
+}
+
+function isAuthApiPath(pathname: string) {
+  return pathname === AUTH_API_PATH || pathname.startsWith(`${AUTH_API_PATH}/`);
 }
 
 function redirectToLogin(req: NextRequest) {

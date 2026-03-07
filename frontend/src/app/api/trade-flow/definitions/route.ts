@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth';
 import {
   createTradeFlowDefinition,
   getTradeFlowDefinitions,
@@ -9,6 +10,10 @@ export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const { searchParams } = new URL(req.url);
     const page = Number(searchParams.get('page') || '1');
     const limit = Number(searchParams.get('limit') || '20');
@@ -23,6 +28,7 @@ export async function GET(req: NextRequest) {
     }
 
     const result = await getTradeFlowDefinitions({
+      userId: user.userId,
       page: Math.floor(page),
       limit: Math.floor(limit),
       status,
@@ -38,6 +44,10 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const body = await req.json();
     const name = String(body?.name || '').trim();
     const description = body?.description == null ? null : String(body.description);
@@ -60,6 +70,7 @@ export async function POST(req: NextRequest) {
     const normalized = normalizeTradeFlowGraph(graphJson);
 
     const data = await createTradeFlowDefinition({
+      userId: user.userId,
       name,
       description,
       graphJson: normalized,

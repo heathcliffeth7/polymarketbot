@@ -671,7 +671,12 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
     { key: 'message', label: 'Mesaj', input: 'textarea' },
   ],
   'action.telegram_notify': [
-    { key: 'chatId', label: 'Chat ID', input: 'text', placeholder: '-1001234567890' },
+    {
+      key: 'chatId',
+      label: 'Chat ID (Opsiyonel Override)',
+      input: 'text',
+      placeholder: 'Bos birakirsan Settings -> Telegram chat_id kullanilir',
+    },
     { key: 'message', label: 'Mesaj', input: 'textarea', placeholder: 'Tetik: {{vars.trigger_1_price}}' },
   ],
 };

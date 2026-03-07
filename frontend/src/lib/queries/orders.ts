@@ -2,6 +2,7 @@ import { pool } from '@/lib/db';
 import type { Order, PaginatedResponse } from '@/lib/types';
 
 interface OrderFilters {
+  userId: number;
   page?: number;
   limit?: number;
   tradeId?: number;
@@ -14,32 +15,39 @@ export async function getOrders(filters: OrderFilters): Promise<PaginatedRespons
   const limit = Math.min(filters.limit || 20, 100);
   const offset = (page - 1) * limit;
 
-  const conditions: string[] = [];
-  const params: unknown[] = [];
-  let paramIdx = 1;
+  const conditions: string[] = [`t.user_id = $1`];
+  const params: unknown[] = [filters.userId];
+  let paramIdx = 2;
 
   if (filters.tradeId) {
-    conditions.push(`trade_id = $${paramIdx++}`);
+    conditions.push(`o.trade_id = $${paramIdx++}`);
     params.push(filters.tradeId);
   }
   if (filters.status) {
-    conditions.push(`status = $${paramIdx++}`);
+    conditions.push(`o.status = $${paramIdx++}`);
     params.push(filters.status);
   }
   if (filters.intent) {
-    conditions.push(`intent = $${paramIdx++}`);
+    conditions.push(`o.intent = $${paramIdx++}`);
     params.push(filters.intent);
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const countQuery = `SELECT COUNT(*) as total FROM orders ${where}`;
+  const countQuery = `
+    SELECT COUNT(*) as total
+    FROM orders o
+    JOIN trades t ON t.id = o.trade_id
+    ${where}
+  `;
   const dataQuery = `
-    SELECT id, trade_id, exchange_order_id, client_order_id, intent, side,
+    SELECT o.id, o.trade_id, o.exchange_order_id, o.client_order_id, o.intent, o.side,
            price, size, status, last_exchange_status, reject_reason,
            created_at, updated_at
-    FROM orders ${where}
-    ORDER BY created_at DESC
+    FROM orders o
+    JOIN trades t ON t.id = o.trade_id
+    ${where}
+    ORDER BY o.created_at DESC
     LIMIT $${paramIdx++} OFFSET $${paramIdx++}
   `;
 

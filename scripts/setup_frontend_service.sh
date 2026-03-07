@@ -130,6 +130,13 @@ if ! sudo grep -q "^BOT_CONFIG_DIR=" "$ENV_FILE"; then
   set_or_append_env_value "BOT_CONFIG_DIR" "$ROOT_DIR/config"
 fi
 
+configured_bot_config_dir="$(sudo sed -n 's/^BOT_CONFIG_DIR=//p' "$ENV_FILE" | tail -n1)"
+configured_bot_config_dir="${configured_bot_config_dir:-$ROOT_DIR/config}"
+
+step "Ensure dextrabot can write config directory"
+"$ROOT_DIR/scripts/ensure_config_permissions.sh" "$configured_bot_config_dir"
+ok "Config directory permissions ready at $configured_bot_config_dir"
+
 if [[ -n "${SYSTEMD_CONTROL_ENABLED:-}" ]]; then
   set_or_append_env_value "SYSTEMD_CONTROL_ENABLED" "$SYSTEMD_CONTROL_ENABLED"
 elif ! sudo grep -q "^SYSTEMD_CONTROL_ENABLED=" "$ENV_FILE"; then

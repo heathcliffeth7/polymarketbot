@@ -3,6 +3,7 @@ use bot_core::{can_transition, LegSide, MarketCycleId, TradeState};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{pool::PoolConnection, postgres::PgPoolOptions, PgPool, Postgres, Row};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -55,6 +56,7 @@ pub struct PressureSnapshot {
 pub struct TradeBuilderOrder {
     pub id: i64,
     pub trade_id: i64,
+    pub user_id: i64,
     pub kind: String,
     pub status: String,
     pub market_slug: String,
@@ -85,11 +87,65 @@ pub struct TradeBuilderOrder {
     pub tp_price: Option<f64>,
     pub sl_enabled: bool,
     pub sl_price: Option<f64>,
+    pub filled_qty: f64,
+    pub fee_rate_bps: i64,
+    pub trigger_latched: bool,
+    pub trigger_latched_reason: Option<String>,
+    pub submitted_dynamic_qty: Option<f64>,
+    pub submitted_dynamic_price: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderInventoryObservationInput {
+    pub parent_builder_order_id: i64,
+    pub observer_builder_order_id: Option<i64>,
+    pub user_id: i64,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub exchange_order_id: Option<String>,
+    pub observation_kind: String,
+    pub qty_source: Option<String>,
+    pub baseline_visible_qty: Option<f64>,
+    pub submitted_dynamic_qty: Option<f64>,
+    pub resolved_fill_qty: Option<f64>,
+    pub expected_fee_qty: Option<f64>,
+    pub expected_net_qty: Option<f64>,
+    pub expected_visible_qty: Option<f64>,
+    pub actual_visible_qty: Option<f64>,
+    pub visible_delta_qty: Option<f64>,
+    pub gap_vs_submit_qty: Option<f64>,
+    pub gap_vs_fill_qty: Option<f64>,
+    pub gap_vs_expected_qty: Option<f64>,
+    pub reference_price: Option<f64>,
+    pub fee_rate_bps: Option<i64>,
+    pub fill_to_inventory_ms: Option<i64>,
+    pub payload_json: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingTradeBuilderFirstVisibleInventoryObservation {
+    pub parent_builder_order_id: i64,
+    pub observer_builder_order_id: Option<i64>,
+    pub user_id: i64,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub exchange_order_id: Option<String>,
+    pub baseline_visible_qty: Option<f64>,
+    pub submitted_dynamic_qty: Option<f64>,
+    pub resolved_fill_qty: Option<f64>,
+    pub submit_reference_price: Option<f64>,
+    pub fill_reference_price: Option<f64>,
+    pub fill_qty_source: Option<String>,
+    pub fee_rate_bps: i64,
+    pub fill_observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TradeBuilderWorkflow {
     pub id: i64,
+    pub user_id: i64,
     pub name: String,
     pub status: String,
     pub source_trade_id: i64,
@@ -129,6 +185,7 @@ pub struct TradeBuilderWorkflowLeg {
 #[derive(Debug, Clone)]
 pub struct TradeFlowDefinitionRuntime {
     pub id: i64,
+    pub user_id: i64,
     pub name: String,
     pub status: String,
     pub draft_version_id: Option<i64>,
@@ -154,6 +211,7 @@ pub struct TradeFlowRun {
     pub id: i64,
     pub definition_id: i64,
     pub version_id: i64,
+    pub user_id: i64,
     pub status: String,
     pub trigger_source: Option<String>,
     pub context_json: Value,
@@ -384,8 +442,8 @@ impl PostgresRepository {
         reference_price: f64,
     ) -> Result<i64> {
         let id: i64 = sqlx::query_scalar(
-            "INSERT INTO trades (market_id, state, entry_price, notional_usdc, strategy_mode, opened_at) \
-             VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING id",
+            "INSERT INTO trades (market_id, user_id, state, entry_price, notional_usdc, strategy_mode, opened_at) \
+             VALUES ($1, (SELECT id FROM app_users ORDER BY id ASC LIMIT 1), $2, $3, $4, $5, NOW()) RETURNING id",
         )
         .bind(market_id)
         .bind(format!("{:?}", TradeState::Idle))
@@ -399,6 +457,7 @@ impl PostgresRepository {
 
     pub async fn find_latest_active_trade_by_market_token(
         &self,
+        user_id: i64,
         market_slug: &str,
         token_id: &str,
     ) -> Result<Option<i64>> {
@@ -409,12 +468,14 @@ impl PostgresRepository {
              LEFT JOIN leg_positions lp ON lp.trade_id = t.id
              WHERE LOWER(m.market_slug) = LOWER($1)
                AND LOWER(COALESCE(lp.token_id, '')) = LOWER($2)
+               AND t.user_id = $3
                AND t.state NOT IN ('Settled', 'Halted')
              ORDER BY t.opened_at DESC NULLS LAST, t.id DESC
              LIMIT 1",
         )
         .bind(market_slug)
         .bind(token_id)
+        .bind(user_id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(trade_id)
@@ -422,6 +483,7 @@ impl PostgresRepository {
 
     pub async fn ensure_manual_builder_source_trade(
         &self,
+        user_id: i64,
         market_slug: &str,
         token_id: &str,
         outcome_label: &str,
@@ -429,7 +491,7 @@ impl PostgresRepository {
         notional_usdc: f64,
     ) -> Result<i64> {
         if let Some(existing_trade_id) = self
-            .find_latest_active_trade_by_market_token(market_slug, token_id)
+            .find_latest_active_trade_by_market_token(user_id, market_slug, token_id)
             .await?
         {
             return Ok(existing_trade_id);
@@ -465,11 +527,12 @@ impl PostgresRepository {
         .fetch_one(&mut *tx)
         .await?;
         let trade_id: i64 = sqlx::query_scalar(
-            "INSERT INTO trades (market_id, state, entry_price, notional_usdc, strategy_mode, opened_at)
-             VALUES ($1, $2, $3, $4, $5, NOW())
+            "INSERT INTO trades (market_id, user_id, state, entry_price, notional_usdc, strategy_mode, opened_at)
+             VALUES ($1, $2, $3, $4, $5, $6, NOW())
              RETURNING id",
         )
         .bind(market_id)
+        .bind(user_id)
         .bind(format!("{:?}", TradeState::Idle))
         .bind(price)
         .bind(notional)
@@ -508,7 +571,8 @@ impl PostgresRepository {
         notional: f64,
     ) -> Result<i64> {
         let id: i64 = sqlx::query_scalar(
-            "INSERT INTO trades (market_id, state, entry_price, notional_usdc, opened_at) VALUES ($1, $2, $3, $4, NOW()) RETURNING id",
+            "INSERT INTO trades (market_id, user_id, state, entry_price, notional_usdc, opened_at) \
+             VALUES ($1, (SELECT id FROM app_users ORDER BY id ASC LIMIT 1), $2, $3, $4, NOW()) RETURNING id",
         )
         .bind(market_id)
         .bind(format!("{:?}", TradeState::Idle))
@@ -528,8 +592,8 @@ impl PostgresRepository {
         basket_sl: f64,
     ) -> Result<i64> {
         let id: i64 = sqlx::query_scalar(
-            "INSERT INTO trades (market_id, state, entry_price, notional_usdc, strategy_mode, basket_tp, basket_sl, opened_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) RETURNING id",
+            "INSERT INTO trades (market_id, user_id, state, entry_price, notional_usdc, strategy_mode, basket_tp, basket_sl, opened_at) \
+             VALUES ($1, (SELECT id FROM app_users ORDER BY id ASC LIMIT 1), $2, $3, $4, $5, $6, $7, NOW()) RETURNING id",
         )
         .bind(market_id)
         .bind(format!("{:?}", TradeState::Idle))
@@ -799,6 +863,20 @@ impl PostgresRepository {
         Ok(count as u32)
     }
 
+    pub async fn open_order_count_for_user(&self, user_id: i64) -> Result<u32> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM orders o
+             JOIN trades t ON t.id = o.trade_id
+             WHERE o.status IN ('open', 'partially_filled')
+               AND t.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count as u32)
+    }
+
     pub async fn daily_realized_pnl(&self) -> Result<f64> {
         let pnl: Option<f64> = sqlx::query_scalar(
             "SELECT SUM(COALESCE(realized_pnl, 0.0)) FROM trades WHERE closed_at::date = CURRENT_DATE",
@@ -808,10 +886,48 @@ impl PostgresRepository {
         Ok(pnl.unwrap_or(0.0))
     }
 
+    pub async fn daily_realized_pnl_for_user(&self, user_id: i64) -> Result<f64> {
+        let pnl: Option<f64> = sqlx::query_scalar(
+            "SELECT SUM(COALESCE(realized_pnl, 0.0))
+             FROM trades
+             WHERE closed_at::date = CURRENT_DATE
+               AND user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(pnl.unwrap_or(0.0))
+    }
+
     pub async fn consecutive_losses(&self, limit: i64) -> Result<u32> {
         let rows: Vec<Option<f64>> = sqlx::query_scalar(
             "SELECT realized_pnl FROM trades WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT $1",
         )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut losses = 0u32;
+        for pnl in rows {
+            if pnl.unwrap_or(0.0) < 0.0 {
+                losses += 1;
+            } else {
+                break;
+            }
+        }
+        Ok(losses)
+    }
+
+    pub async fn consecutive_losses_for_user(&self, user_id: i64, limit: i64) -> Result<u32> {
+        let rows: Vec<Option<f64>> = sqlx::query_scalar(
+            "SELECT realized_pnl
+             FROM trades
+             WHERE closed_at IS NOT NULL
+               AND user_id = $1
+             ORDER BY closed_at DESC
+             LIMIT $2",
+        )
+        .bind(user_id)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -877,6 +993,201 @@ impl PostgresRepository {
             .fetch_optional(&self.pool)
             .await?;
         Ok(id)
+    }
+
+    pub async fn aggregate_fill_qty_by_exchange_order_id(
+        &self,
+        exchange_order_id: &str,
+    ) -> Result<f64> {
+        let filled_qty = sqlx::query_scalar::<_, f64>(
+            "SELECT COALESCE(SUM(f.size), 0)::double precision \
+             FROM fills f \
+             JOIN orders o ON o.id = f.order_id \
+             WHERE o.exchange_order_id = $1",
+        )
+        .bind(exchange_order_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(filled_qty)
+    }
+
+    pub async fn order_size_by_exchange_order_id(
+        &self,
+        exchange_order_id: &str,
+    ) -> Result<Option<f64>> {
+        let size =
+            sqlx::query_scalar::<_, f64>("SELECT size FROM orders WHERE exchange_order_id = $1")
+                .bind(exchange_order_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(size)
+    }
+
+    pub async fn insert_trade_builder_inventory_observation_if_absent(
+        &self,
+        observation: &TradeBuilderInventoryObservationInput,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO trade_builder_inventory_observations \
+              (parent_builder_order_id, observer_builder_order_id, user_id, market_slug, token_id, outcome_label, exchange_order_id, observation_kind, qty_source, baseline_visible_qty, submitted_dynamic_qty, resolved_fill_qty, expected_fee_qty, expected_net_qty, expected_visible_qty, actual_visible_qty, visible_delta_qty, gap_vs_submit_qty, gap_vs_fill_qty, gap_vs_expected_qty, reference_price, fee_rate_bps, fill_to_inventory_ms, payload_json, created_at, updated_at) \
+             VALUES \
+              ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW(), NOW()) \
+             ON CONFLICT (parent_builder_order_id, observation_kind) DO NOTHING",
+        )
+        .bind(observation.parent_builder_order_id)
+        .bind(observation.observer_builder_order_id)
+        .bind(observation.user_id)
+        .bind(&observation.market_slug)
+        .bind(&observation.token_id)
+        .bind(&observation.outcome_label)
+        .bind(&observation.exchange_order_id)
+        .bind(&observation.observation_kind)
+        .bind(&observation.qty_source)
+        .bind(observation.baseline_visible_qty)
+        .bind(observation.submitted_dynamic_qty)
+        .bind(observation.resolved_fill_qty)
+        .bind(observation.expected_fee_qty)
+        .bind(observation.expected_net_qty)
+        .bind(observation.expected_visible_qty)
+        .bind(observation.actual_visible_qty)
+        .bind(observation.visible_delta_qty)
+        .bind(observation.gap_vs_submit_qty)
+        .bind(observation.gap_vs_fill_qty)
+        .bind(observation.gap_vs_expected_qty)
+        .bind(observation.reference_price)
+        .bind(observation.fee_rate_bps)
+        .bind(observation.fill_to_inventory_ms)
+        .bind(&observation.payload_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn upsert_trade_builder_inventory_observation(
+        &self,
+        observation: &TradeBuilderInventoryObservationInput,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO trade_builder_inventory_observations \
+              (parent_builder_order_id, observer_builder_order_id, user_id, market_slug, token_id, outcome_label, exchange_order_id, observation_kind, qty_source, baseline_visible_qty, submitted_dynamic_qty, resolved_fill_qty, expected_fee_qty, expected_net_qty, expected_visible_qty, actual_visible_qty, visible_delta_qty, gap_vs_submit_qty, gap_vs_fill_qty, gap_vs_expected_qty, reference_price, fee_rate_bps, fill_to_inventory_ms, payload_json, created_at, updated_at) \
+             VALUES \
+              ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, NOW(), NOW()) \
+             ON CONFLICT (parent_builder_order_id, observation_kind) DO UPDATE SET \
+               observer_builder_order_id = EXCLUDED.observer_builder_order_id, \
+               user_id = EXCLUDED.user_id, \
+               market_slug = EXCLUDED.market_slug, \
+               token_id = EXCLUDED.token_id, \
+               outcome_label = EXCLUDED.outcome_label, \
+               exchange_order_id = EXCLUDED.exchange_order_id, \
+               qty_source = EXCLUDED.qty_source, \
+               baseline_visible_qty = EXCLUDED.baseline_visible_qty, \
+               submitted_dynamic_qty = EXCLUDED.submitted_dynamic_qty, \
+               resolved_fill_qty = EXCLUDED.resolved_fill_qty, \
+               expected_fee_qty = EXCLUDED.expected_fee_qty, \
+               expected_net_qty = EXCLUDED.expected_net_qty, \
+               expected_visible_qty = EXCLUDED.expected_visible_qty, \
+               actual_visible_qty = EXCLUDED.actual_visible_qty, \
+               visible_delta_qty = EXCLUDED.visible_delta_qty, \
+               gap_vs_submit_qty = EXCLUDED.gap_vs_submit_qty, \
+               gap_vs_fill_qty = EXCLUDED.gap_vs_fill_qty, \
+               gap_vs_expected_qty = EXCLUDED.gap_vs_expected_qty, \
+               reference_price = EXCLUDED.reference_price, \
+               fee_rate_bps = EXCLUDED.fee_rate_bps, \
+               fill_to_inventory_ms = EXCLUDED.fill_to_inventory_ms, \
+               payload_json = EXCLUDED.payload_json, \
+               updated_at = NOW()",
+        )
+        .bind(observation.parent_builder_order_id)
+        .bind(observation.observer_builder_order_id)
+        .bind(observation.user_id)
+        .bind(&observation.market_slug)
+        .bind(&observation.token_id)
+        .bind(&observation.outcome_label)
+        .bind(&observation.exchange_order_id)
+        .bind(&observation.observation_kind)
+        .bind(&observation.qty_source)
+        .bind(observation.baseline_visible_qty)
+        .bind(observation.submitted_dynamic_qty)
+        .bind(observation.resolved_fill_qty)
+        .bind(observation.expected_fee_qty)
+        .bind(observation.expected_net_qty)
+        .bind(observation.expected_visible_qty)
+        .bind(observation.actual_visible_qty)
+        .bind(observation.visible_delta_qty)
+        .bind(observation.gap_vs_submit_qty)
+        .bind(observation.gap_vs_fill_qty)
+        .bind(observation.gap_vs_expected_qty)
+        .bind(observation.reference_price)
+        .bind(observation.fee_rate_bps)
+        .bind(observation.fill_to_inventory_ms)
+        .bind(&observation.payload_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_pending_trade_builder_first_visible_inventory_observations(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingTradeBuilderFirstVisibleInventoryObservation>> {
+        let rows = sqlx::query(
+            "SELECT \
+                fill_obs.parent_builder_order_id, \
+                fill_obs.observer_builder_order_id, \
+                fill_obs.user_id, \
+                fill_obs.market_slug, \
+                fill_obs.token_id, \
+                fill_obs.outcome_label, \
+                COALESCE(fill_obs.exchange_order_id, submit.exchange_order_id) AS exchange_order_id, \
+                baseline.baseline_visible_qty AS baseline_visible_qty, \
+                COALESCE(submit.submitted_dynamic_qty, o.submitted_dynamic_qty) AS submitted_dynamic_qty, \
+                fill_obs.resolved_fill_qty AS resolved_fill_qty, \
+                COALESCE(submit.reference_price, o.submitted_dynamic_price) AS submit_reference_price, \
+                fill_obs.reference_price AS fill_reference_price, \
+                fill_obs.qty_source AS fill_qty_source, \
+                COALESCE(fill_obs.fee_rate_bps, submit.fee_rate_bps, o.fee_rate_bps, 0) AS fee_rate_bps, \
+                fill_obs.created_at AS fill_observed_at \
+             FROM trade_builder_inventory_observations fill_obs \
+             JOIN trade_builder_orders o \
+               ON o.id = fill_obs.parent_builder_order_id \
+             LEFT JOIN trade_builder_inventory_observations baseline \
+               ON baseline.parent_builder_order_id = fill_obs.parent_builder_order_id \
+              AND baseline.observation_kind = 'buy_inventory_baseline' \
+             LEFT JOIN trade_builder_inventory_observations submit \
+               ON submit.parent_builder_order_id = fill_obs.parent_builder_order_id \
+              AND submit.observation_kind = 'buy_submit_dynamic_qty' \
+             LEFT JOIN trade_builder_inventory_observations first_visible \
+               ON first_visible.parent_builder_order_id = fill_obs.parent_builder_order_id \
+              AND first_visible.observation_kind = 'first_visible_inventory' \
+             WHERE fill_obs.observation_kind = 'buy_fill_resolution' \
+               AND first_visible.id IS NULL \
+             ORDER BY fill_obs.updated_at ASC \
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| PendingTradeBuilderFirstVisibleInventoryObservation {
+                parent_builder_order_id: row.get("parent_builder_order_id"),
+                observer_builder_order_id: row.get("observer_builder_order_id"),
+                user_id: row.get("user_id"),
+                market_slug: row.get("market_slug"),
+                token_id: row.get("token_id"),
+                outcome_label: row.get("outcome_label"),
+                exchange_order_id: row.get("exchange_order_id"),
+                baseline_visible_qty: row.get("baseline_visible_qty"),
+                submitted_dynamic_qty: row.get("submitted_dynamic_qty"),
+                resolved_fill_qty: row.get("resolved_fill_qty"),
+                submit_reference_price: row.get("submit_reference_price"),
+                fill_reference_price: row.get("fill_reference_price"),
+                fill_qty_source: row.get("fill_qty_source"),
+                fee_rate_bps: row.get("fee_rate_bps"),
+                fill_observed_at: row.get("fill_observed_at"),
+            })
+            .collect())
     }
 
     pub async fn try_record_idempotency_key(&self, event_key: &str) -> Result<bool> {
@@ -1142,12 +1453,13 @@ impl PostgresRepository {
         tp_price: Option<f64>,
         sl_enabled: bool,
         sl_price: Option<f64>,
+        fee_rate_bps: i64,
     ) -> Result<i64> {
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO trade_builder_orders \
-              (trade_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, size_basis, size_usdc, target_qty, remaining_qty, min_price_distance_cent, expires_at, max_triggers, triggers_fired, parent_order_id, tp_enabled, tp_price, sl_enabled, sl_price, created_at, updated_at) \
+              (trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, size_basis, size_usdc, target_qty, remaining_qty, min_price_distance_cent, expires_at, max_triggers, triggers_fired, parent_order_id, tp_enabled, tp_price, sl_enabled, sl_price, fee_rate_bps, created_at, updated_at) \
              VALUES \
-              ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 0, $19, $20, $21, $22, $23, NOW(), NOW()) \
+              ($1, (SELECT user_id FROM trades WHERE id = $1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 0, $19, $20, $21, $22, $23, $24, NOW(), NOW()) \
              RETURNING id",
         )
         .bind(trade_id)
@@ -1173,6 +1485,7 @@ impl PostgresRepository {
         .bind(tp_price)
         .bind(sl_enabled)
         .bind(sl_price)
+        .bind(fee_rate_bps)
         .fetch_one(&self.pool)
         .await?;
         Ok(id)
@@ -1202,9 +1515,10 @@ impl PostgresRepository {
         limit: i64,
     ) -> Result<Vec<TradeBuilderOrder>> {
         let rows = sqlx::query(
-            "SELECT id, trade_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, tp_enabled, tp_price, sl_enabled, sl_price \
+            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, submitted_dynamic_qty, submitted_dynamic_price \
              FROM trade_builder_orders \
              WHERE status IN ('pending', 'armed', 'triggered', 'open', 'partially_filled', 'canceled_requested', 'inventory_pending') \
+                OR (status = 'error' AND trigger_latched = TRUE AND trigger_latched_reason = 'stop_loss') \
              ORDER BY created_at ASC \
              LIMIT $1",
         )
@@ -1217,6 +1531,7 @@ impl PostgresRepository {
             .map(|row| TradeBuilderOrder {
                 id: row.get("id"),
                 trade_id: row.get("trade_id"),
+                user_id: row.get("user_id"),
                 kind: row.get("kind"),
                 status: row.get("status"),
                 market_slug: row.get("market_slug"),
@@ -1247,6 +1562,12 @@ impl PostgresRepository {
                 tp_price: row.get("tp_price"),
                 sl_enabled: row.get("sl_enabled"),
                 sl_price: row.get("sl_price"),
+                filled_qty: row.get("filled_qty"),
+                fee_rate_bps: row.get("fee_rate_bps"),
+                trigger_latched: row.get("trigger_latched"),
+                trigger_latched_reason: row.get("trigger_latched_reason"),
+                submitted_dynamic_qty: row.get("submitted_dynamic_qty"),
+                submitted_dynamic_price: row.get("submitted_dynamic_price"),
             })
             .collect())
     }
@@ -1258,11 +1579,12 @@ impl PostgresRepository {
     ) -> Result<Vec<TradeBuilderOrder>> {
         let rows = sqlx::query(
             "SELECT DISTINCT \
-                o.id, o.trade_id, o.kind, o.status, o.market_slug, o.token_id, o.outcome_label, o.side, \
+                o.id, o.trade_id, o.user_id, o.kind, o.status, o.market_slug, o.token_id, o.outcome_label, o.side, \
                 o.execution_mode, o.trigger_condition, o.trigger_price, o.max_price, o.size_basis, o.size_usdc, o.target_qty, o.min_price_distance_cent, o.expires_at, \
                 o.max_triggers, o.triggers_fired, o.active_exchange_order_id, o.remaining_size, o.remaining_qty, o.working_price, \
                 o.last_seen_price, o.last_error, o.created_at, o.updated_at, \
-                o.parent_order_id, o.tp_enabled, o.tp_price, o.sl_enabled, o.sl_price \
+                o.parent_order_id, o.tp_enabled, o.tp_price, o.sl_enabled, o.sl_price, \
+                o.filled_qty, o.fee_rate_bps, o.trigger_latched, o.trigger_latched_reason, o.submitted_dynamic_qty, o.submitted_dynamic_price \
              FROM trade_builder_orders o \
              JOIN trade_flow_dual_dca_legs l ON l.builder_order_id = o.id \
              WHERE l.job_id = $1 \
@@ -1281,6 +1603,7 @@ impl PostgresRepository {
             .map(|row| TradeBuilderOrder {
                 id: row.get("id"),
                 trade_id: row.get("trade_id"),
+                user_id: row.get("user_id"),
                 kind: row.get("kind"),
                 status: row.get("status"),
                 market_slug: row.get("market_slug"),
@@ -1311,6 +1634,12 @@ impl PostgresRepository {
                 tp_price: row.get("tp_price"),
                 sl_enabled: row.get("sl_enabled"),
                 sl_price: row.get("sl_price"),
+                filled_qty: row.get("filled_qty"),
+                fee_rate_bps: row.get("fee_rate_bps"),
+                trigger_latched: row.get("trigger_latched"),
+                trigger_latched_reason: row.get("trigger_latched_reason"),
+                submitted_dynamic_qty: row.get("submitted_dynamic_qty"),
+                submitted_dynamic_price: row.get("submitted_dynamic_price"),
             })
             .collect())
     }
@@ -1394,6 +1723,74 @@ impl PostgresRepository {
         Ok(())
     }
 
+    pub async fn set_trade_builder_order_fee_rate_bps(
+        &self,
+        builder_order_id: i64,
+        fee_rate_bps: i64,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders SET fee_rate_bps = $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(fee_rate_bps)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_trade_builder_order_filled_qty(
+        &self,
+        builder_order_id: i64,
+        filled_qty: f64,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders SET filled_qty = $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(filled_qty)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_trade_builder_order_submitted_dynamic(
+        &self,
+        builder_order_id: i64,
+        submitted_dynamic_qty: Option<f64>,
+        submitted_dynamic_price: Option<f64>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders \
+             SET submitted_dynamic_qty = $2, submitted_dynamic_price = $3, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(submitted_dynamic_qty)
+        .bind(submitted_dynamic_price)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_trade_builder_order_trigger_latched(
+        &self,
+        builder_order_id: i64,
+        trigger_latched: bool,
+        trigger_latched_reason: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders \
+             SET trigger_latched = $2, trigger_latched_reason = $3, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(trigger_latched)
+        .bind(trigger_latched_reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn set_trade_builder_last_seen_price(
         &self,
         builder_order_id: i64,
@@ -1429,6 +1826,59 @@ impl PostgresRepository {
         .bind(remaining_size)
         .bind(remaining_qty)
         .bind(status)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn update_trade_builder_order_sizing_and_state(
+        &self,
+        builder_order_id: i64,
+        size_basis: &str,
+        size_usdc: f64,
+        target_qty: Option<f64>,
+        remaining_size: Option<f64>,
+        remaining_qty: Option<f64>,
+        status: &str,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders \
+             SET size_basis = $2, size_usdc = $3, target_qty = $4, remaining_size = $5, remaining_qty = $6, \
+                 active_exchange_order_id = NULL, working_price = NULL, status = $7, last_error = $8, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(size_basis)
+        .bind(size_usdc)
+        .bind(target_qty)
+        .bind(remaining_size)
+        .bind(remaining_qty)
+        .bind(status)
+        .bind(last_error)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_trade_builder_order_retry_state(
+        &self,
+        builder_order_id: i64,
+        status: &str,
+        last_error: Option<&str>,
+        remaining_size: Option<f64>,
+        remaining_qty: Option<f64>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders \
+             SET active_exchange_order_id = NULL, working_price = NULL, remaining_size = $2, remaining_qty = $3, status = $4, last_error = $5, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(remaining_size)
+        .bind(remaining_qty)
+        .bind(status)
+        .bind(last_error)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1483,7 +1933,7 @@ impl PostgresRepository {
         builder_order_id: i64,
     ) -> Result<Option<TradeBuilderOrder>> {
         let row = sqlx::query(
-            "SELECT id, trade_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, tp_enabled, tp_price, sl_enabled, sl_price \
+            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, submitted_dynamic_qty, submitted_dynamic_price \
              FROM trade_builder_orders WHERE id = $1",
         )
         .bind(builder_order_id)
@@ -1493,6 +1943,7 @@ impl PostgresRepository {
         Ok(row.map(|row| TradeBuilderOrder {
             id: row.get("id"),
             trade_id: row.get("trade_id"),
+            user_id: row.get("user_id"),
             kind: row.get("kind"),
             status: row.get("status"),
             market_slug: row.get("market_slug"),
@@ -1523,6 +1974,12 @@ impl PostgresRepository {
             tp_price: row.get("tp_price"),
             sl_enabled: row.get("sl_enabled"),
             sl_price: row.get("sl_price"),
+            filled_qty: row.get("filled_qty"),
+            fee_rate_bps: row.get("fee_rate_bps"),
+            trigger_latched: row.get("trigger_latched"),
+            trigger_latched_reason: row.get("trigger_latched_reason"),
+            submitted_dynamic_qty: row.get("submitted_dynamic_qty"),
+            submitted_dynamic_price: row.get("submitted_dynamic_price"),
         }))
     }
 
@@ -1532,7 +1989,7 @@ impl PostgresRepository {
         exclude_order_id: Option<i64>,
     ) -> Result<Vec<TradeBuilderOrder>> {
         let rows = sqlx::query(
-            "SELECT id, trade_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, tp_enabled, tp_price, sl_enabled, sl_price \
+            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, submitted_dynamic_qty, submitted_dynamic_price \
              FROM trade_builder_orders \
              WHERE parent_order_id = $1
                AND ($2::bigint IS NULL OR id <> $2)
@@ -1548,6 +2005,7 @@ impl PostgresRepository {
             .map(|row| TradeBuilderOrder {
                 id: row.get("id"),
                 trade_id: row.get("trade_id"),
+                user_id: row.get("user_id"),
                 kind: row.get("kind"),
                 status: row.get("status"),
                 market_slug: row.get("market_slug"),
@@ -1578,6 +2036,12 @@ impl PostgresRepository {
                 tp_price: row.get("tp_price"),
                 sl_enabled: row.get("sl_enabled"),
                 sl_price: row.get("sl_price"),
+                filled_qty: row.get("filled_qty"),
+                fee_rate_bps: row.get("fee_rate_bps"),
+                trigger_latched: row.get("trigger_latched"),
+                trigger_latched_reason: row.get("trigger_latched_reason"),
+                submitted_dynamic_qty: row.get("submitted_dynamic_qty"),
+                submitted_dynamic_price: row.get("submitted_dynamic_price"),
             })
             .collect())
     }
@@ -1598,7 +2062,7 @@ impl PostgresRepository {
         limit: i64,
     ) -> Result<Vec<TradeBuilderWorkflow>> {
         let rows = sqlx::query(
-            "SELECT id, name, status, source_trade_id, sell_target_pct, buy_start_after_sell_progress_pct, buy_trigger_mode, buy_allocation_pct, expires_at, last_error, created_at, updated_at \
+            "SELECT id, user_id, name, status, source_trade_id, sell_target_pct, buy_start_after_sell_progress_pct, buy_trigger_mode, buy_allocation_pct, expires_at, last_error, created_at, updated_at \
              FROM trade_builder_workflows \
              WHERE status IN ('armed', 'running') \
              ORDER BY created_at ASC \
@@ -1612,6 +2076,7 @@ impl PostgresRepository {
             .into_iter()
             .map(|row| TradeBuilderWorkflow {
                 id: row.get("id"),
+                user_id: row.get("user_id"),
                 name: row.get("name"),
                 status: row.get("status"),
                 source_trade_id: row.get("source_trade_id"),
@@ -1912,7 +2377,7 @@ impl PostgresRepository {
         limit: i64,
     ) -> Result<Vec<TradeFlowDefinitionRuntime>> {
         let rows = sqlx::query(
-            "SELECT id, name, status, draft_version_id, published_version_id, last_error, created_at, updated_at \
+            "SELECT id, user_id, name, status, draft_version_id, published_version_id, last_error, created_at, updated_at \
              FROM trade_flow_definitions \
              WHERE status = 'published' AND published_version_id IS NOT NULL \
              ORDER BY updated_at ASC \
@@ -1926,6 +2391,7 @@ impl PostgresRepository {
             .into_iter()
             .map(|row| TradeFlowDefinitionRuntime {
                 id: row.get("id"),
+                user_id: row.get("user_id"),
                 name: row.get("name"),
                 status: row.get("status"),
                 draft_version_id: row.get("draft_version_id"),
@@ -1971,7 +2437,7 @@ impl PostgresRepository {
         definition_id: i64,
     ) -> Result<Option<TradeFlowDefinitionRuntime>> {
         let row = sqlx::query(
-            "SELECT id, name, status, draft_version_id, published_version_id, last_error, created_at, updated_at \
+            "SELECT id, user_id, name, status, draft_version_id, published_version_id, last_error, created_at, updated_at \
              FROM trade_flow_definitions \
              WHERE id = $1 \
              LIMIT 1",
@@ -1982,6 +2448,7 @@ impl PostgresRepository {
 
         Ok(row.map(|row| TradeFlowDefinitionRuntime {
             id: row.get("id"),
+            user_id: row.get("user_id"),
             name: row.get("name"),
             status: row.get("status"),
             draft_version_id: row.get("draft_version_id"),
@@ -2034,7 +2501,7 @@ impl PostgresRepository {
         definition_id: i64,
     ) -> Result<Option<TradeFlowRun>> {
         let row = sqlx::query(
-            "SELECT id, definition_id, version_id, status, trigger_source, context_json, started_at, ended_at, last_error, created_at, updated_at \
+            "SELECT id, definition_id, version_id, user_id, status, trigger_source, context_json, started_at, ended_at, last_error, created_at, updated_at \
              FROM trade_flow_runs \
              WHERE definition_id = $1 AND status = 'running' \
              ORDER BY created_at DESC \
@@ -2048,6 +2515,7 @@ impl PostgresRepository {
             id: row.get("id"),
             definition_id: row.get("definition_id"),
             version_id: row.get("version_id"),
+            user_id: row.get("user_id"),
             status: row.get("status"),
             trigger_source: row.get("trigger_source"),
             context_json: row.get("context_json"),
@@ -2068,10 +2536,10 @@ impl PostgresRepository {
     ) -> Result<TradeFlowRun> {
         let row = sqlx::query(
             "INSERT INTO trade_flow_runs \
-              (definition_id, version_id, status, trigger_source, context_json, started_at, created_at, updated_at) \
+              (definition_id, version_id, user_id, status, trigger_source, context_json, started_at, created_at, updated_at) \
              VALUES \
-              ($1, $2, 'running', $3, $4, NOW(), NOW(), NOW()) \
-             RETURNING id, definition_id, version_id, status, trigger_source, context_json, started_at, ended_at, last_error, created_at, updated_at",
+              ($1, $2, (SELECT user_id FROM trade_flow_definitions WHERE id = $1), 'running', $3, $4, NOW(), NOW(), NOW()) \
+             RETURNING id, definition_id, version_id, user_id, status, trigger_source, context_json, started_at, ended_at, last_error, created_at, updated_at",
         )
         .bind(definition_id)
         .bind(version_id)
@@ -2084,6 +2552,7 @@ impl PostgresRepository {
             id: row.get("id"),
             definition_id: row.get("definition_id"),
             version_id: row.get("version_id"),
+            user_id: row.get("user_id"),
             status: row.get("status"),
             trigger_source: row.get("trigger_source"),
             context_json: row.get("context_json"),
@@ -2097,7 +2566,7 @@ impl PostgresRepository {
 
     pub async fn get_trade_flow_run(&self, run_id: i64) -> Result<Option<TradeFlowRun>> {
         let row = sqlx::query(
-            "SELECT id, definition_id, version_id, status, trigger_source, context_json, started_at, ended_at, last_error, created_at, updated_at \
+            "SELECT id, definition_id, version_id, user_id, status, trigger_source, context_json, started_at, ended_at, last_error, created_at, updated_at \
              FROM trade_flow_runs \
              WHERE id = $1 \
              LIMIT 1",
@@ -2110,6 +2579,7 @@ impl PostgresRepository {
             id: row.get("id"),
             definition_id: row.get("definition_id"),
             version_id: row.get("version_id"),
+            user_id: row.get("user_id"),
             status: row.get("status"),
             trigger_source: row.get("trigger_source"),
             context_json: row.get("context_json"),
@@ -2119,6 +2589,28 @@ impl PostgresRepository {
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         }))
+    }
+
+    pub async fn load_user_settings_payloads(
+        &self,
+        user_id: i64,
+    ) -> Result<HashMap<String, Value>> {
+        let rows = sqlx::query(
+            "SELECT config_name, payload_json
+             FROM user_settings
+             WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = HashMap::new();
+        for row in rows {
+            let name: String = row.get("config_name");
+            let payload: Value = row.get("payload_json");
+            out.insert(name, payload);
+        }
+        Ok(out)
     }
 
     pub async fn set_trade_flow_run_status(

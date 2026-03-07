@@ -14,6 +14,7 @@ export default function SettingsPage() {
           <TabsTrigger value="execution" className="data-[state=active]:bg-zinc-700">Execution</TabsTrigger>
           <TabsTrigger value="bot" className="data-[state=active]:bg-zinc-700">Bot</TabsTrigger>
           <TabsTrigger value="exchange" className="data-[state=active]:bg-zinc-700">Exchange</TabsTrigger>
+          <TabsTrigger value="claim" className="data-[state=active]:bg-zinc-700">Claim</TabsTrigger>
           <TabsTrigger value="telegram" className="data-[state=active]:bg-zinc-700">Telegram</TabsTrigger>
         </TabsList>
 
@@ -113,14 +114,35 @@ export default function SettingsPage() {
               { key: 'clob_base_url', label: 'CLOB URL', type: 'text' },
               { key: 'clob_ws_url', label: 'CLOB WS URL', type: 'text' },
               { key: 'chain_id', label: 'Chain ID', type: 'number' },
-              { key: 'api_address', label: 'POLY Address', type: 'text' },
+              { key: 'api_address', label: 'Wallet Address', type: 'text' },
               { key: 'api_key', label: 'POLY API Key', type: 'text' },
               { key: 'api_secret', label: 'POLY API Secret', type: 'text' },
               { key: 'api_passphrase', label: 'POLY API Passphrase', type: 'text' },
-              { key: 'api_address_env', label: 'Address Env (fallback)', type: 'text' },
-              { key: 'api_key_env', label: 'Key Env (fallback)', type: 'text' },
-              { key: 'api_secret_env', label: 'Secret Env (fallback)', type: 'text' },
-              { key: 'api_passphrase_env', label: 'Passphrase Env (fallback)', type: 'text' },
+              { key: 'signer_private_key', label: 'Signer Private Key', type: 'text' },
+              { key: 'gnosis_safe_address', label: 'Gnosis Safe Address (Optional)', type: 'text' },
+            ]}
+          />
+        </TabsContent>
+
+        <TabsContent value="claim">
+          <ConfigEditor
+            file="claim"
+            title="Claim Config"
+            fields={[
+              { key: 'enabled', label: 'Auto Claim Enabled', type: 'boolean' },
+              { key: 'rpc_url', label: 'RPC URL', type: 'text' },
+              { key: 'data_api_base_url', label: 'Data API Base URL', type: 'text' },
+              { key: 'user_address', label: 'Claim Wallet Address', type: 'text' },
+              { key: 'private_key', label: 'Claim Private Key', type: 'text' },
+              { key: 'chain_id', label: 'Chain ID', type: 'number', min: 1 },
+              { key: 'ctf_contract_address', label: 'CTF Contract Address', type: 'text' },
+              { key: 'collateral_token_address', label: 'Collateral Token Address', type: 'text' },
+              { key: 'discovery_interval_sec', label: 'Discovery Interval (sec)', type: 'number', min: 5 },
+              { key: 'positions_page_size', label: 'Positions Page Size', type: 'number', min: 1 },
+              { key: 'positions_max_pages', label: 'Positions Max Pages', type: 'number', min: 1 },
+              { key: 'process_batch_size', label: 'Process Batch Size', type: 'number', min: 1 },
+              { key: 'max_attempts', label: 'Max Attempts', type: 'number', min: 1 },
+              { key: 'retry_backoff_ms', label: 'Retry Backoff (ms)', type: 'number', min: 1000, step: 1000 },
             ]}
           />
         </TabsContent>

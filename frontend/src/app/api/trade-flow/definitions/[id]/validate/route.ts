@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth';
 import {
   getTradeFlowDefinitionById,
   normalizeTradeFlowGraph,
@@ -12,6 +13,10 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const { id } = await params;
     const definitionId = Number(id);
     if (!Number.isFinite(definitionId) || definitionId <= 0) {
@@ -22,7 +27,7 @@ export async function POST(
     let graphJson: unknown = body?.graphJson;
 
     if (graphJson === undefined) {
-      const detail = await getTradeFlowDefinitionById(definitionId);
+      const detail = await getTradeFlowDefinitionById(user.userId, definitionId);
       if (!detail || !detail.draftVersion) {
         return NextResponse.json({ error: 'Flow definition/draft not found' }, { status: 404 });
       }
@@ -30,7 +35,7 @@ export async function POST(
     }
 
     const normalized = normalizeTradeFlowGraph(graphJson);
-    const validation = await validateTradeFlowGraphWithRuntimeConfig(normalized);
+    const validation = await validateTradeFlowGraphWithRuntimeConfig(normalized, user);
     return NextResponse.json({ data: validation });
   } catch (err) {
     console.error('Trade flow validate error:', err);

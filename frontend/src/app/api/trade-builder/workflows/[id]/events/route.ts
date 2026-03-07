@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth';
 import { getTradeBuilderWorkflowEvents } from '@/lib/queries/trade-builder';
 
 export const dynamic = 'force-dynamic';
@@ -8,6 +9,10 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
+    const user = await getSessionUser();
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
     const { id } = await params;
     const workflowId = Number(id);
     if (!Number.isFinite(workflowId) || workflowId <= 0) {
@@ -27,6 +32,7 @@ export async function GET(
     }
 
     const result = await getTradeBuilderWorkflowEvents({
+      userId: user.userId,
       workflowId,
       page: Math.floor(rawPage),
       limit: Math.floor(rawLimit),

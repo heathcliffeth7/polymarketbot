@@ -31,12 +31,14 @@ interface ActiveUpdownMarketsCacheEntry {
 let activeUpdownMarketsCache: ActiveUpdownMarketsCacheEntry | null = null;
 
 interface TradeBuilderFilters {
+  userId: number;
   page?: number;
   limit?: number;
   status?: string;
 }
 
 interface TradeBuilderOrderEventFilters {
+  userId: number;
   orderId: number;
   page?: number;
   limit?: number;
@@ -44,12 +46,14 @@ interface TradeBuilderOrderEventFilters {
 }
 
 interface TradeBuilderWorkflowFilters {
+  userId: number;
   page?: number;
   limit?: number;
   status?: string;
 }
 
 interface TradeBuilderWorkflowEventFilters {
+  userId: number;
   workflowId: number;
   page?: number;
   limit?: number;
@@ -57,6 +61,7 @@ interface TradeBuilderWorkflowEventFilters {
 }
 
 interface CreateTradeBuilderOrderInput {
+  userId: number;
   kind: 'immediate' | 'conditional';
   marketSlug: string;
   tokenId: string;
@@ -72,6 +77,7 @@ interface CreateTradeBuilderOrderInput {
 }
 
 interface CreateTradeBuilderWorkflowInput {
+  userId: number;
   name?: string;
   sourceTradeId: number;
   sellTargetPct: number;
@@ -106,9 +112,9 @@ export async function getTradeBuilderOrders(
   const limit = Math.min(filters.limit || 20, 100);
   const offset = (page - 1) * limit;
 
-  const whereParts: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
+  const whereParts: string[] = ['user_id = $1'];
+  const params: unknown[] = [filters.userId];
+  let idx = 2;
 
   if (filters.status) {
     whereParts.push(`status = $${idx++}`);
@@ -142,24 +148,31 @@ export async function getTradeBuilderOrderEvents(
   const limit = Math.min(filters.limit || 25, 100);
   const offset = (page - 1) * limit;
 
-  const whereParts: string[] = ['builder_order_id = $1'];
-  const params: unknown[] = [filters.orderId];
-  let idx = 2;
+  const whereParts: string[] = ['o.user_id = $1', 'e.builder_order_id = $2'];
+  const params: unknown[] = [filters.userId, filters.orderId];
+  let idx = 3;
 
   if (filters.eventType) {
-    whereParts.push(`event_type = $${idx++}`);
+    whereParts.push(`e.event_type = $${idx++}`);
     params.push(filters.eventType);
   }
 
   const where = `WHERE ${whereParts.join(' AND ')}`;
 
   const [countRes, dataRes] = await Promise.all([
-    pool.query(`SELECT COUNT(*)::int AS total FROM trade_builder_order_events ${where}`, params),
     pool.query(
-      `SELECT id, builder_order_id, event_type, payload_json, created_at
-       FROM trade_builder_order_events
+      `SELECT COUNT(*)::int AS total
+       FROM trade_builder_order_events e
+       JOIN trade_builder_orders o ON o.id = e.builder_order_id
+       ${where}`,
+      params
+    ),
+    pool.query(
+      `SELECT e.id, e.builder_order_id, e.event_type, e.payload_json, e.created_at
+       FROM trade_builder_order_events e
+       JOIN trade_builder_orders o ON o.id = e.builder_order_id
        ${where}
-       ORDER BY created_at DESC
+       ORDER BY e.created_at DESC
        LIMIT $${idx++} OFFSET $${idx++}`,
       [...params, limit, offset]
     ),
@@ -206,23 +219,24 @@ export async function createTradeBuilderOrder(
     const referencePrice = triggerPrice ? Number(triggerPrice) : 0.5;
 
     const tradeRes = await client.query(
-      `INSERT INTO trades (market_id, state, entry_price, notional_usdc, strategy_mode, opened_at)
-       VALUES ($1, 'Idle', $2, $3, 'manual_trade_builder', NOW())
+      `INSERT INTO trades (market_id, user_id, state, entry_price, notional_usdc, strategy_mode, opened_at)
+       VALUES ($1, $2, 'Idle', $3, $4, 'manual_trade_builder', NOW())
        RETURNING id`,
-      [marketId, referencePrice, input.sizeUsdc]
+      [marketId, input.userId, referencePrice, input.sizeUsdc]
     );
 
     const tradeId = tradeRes.rows[0].id;
 
     const orderRes = await client.query(
       `INSERT INTO trade_builder_orders
-         (trade_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price,
+         (trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price,
           size_usdc, min_price_distance_cent, expires_at, max_triggers, triggers_fired, created_at, updated_at)
        VALUES
-         ($1, $2, 'pending', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 0, NOW(), NOW())
+         ($1, $2, $3, 'pending', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 0, NOW(), NOW())
        RETURNING *`,
       [
         tradeId,
+        input.userId,
         input.kind,
         input.marketSlug,
         input.tokenId,
@@ -268,12 +282,13 @@ export async function createTradeBuilderOrder(
 }
 
 export async function updateTradeBuilderOrder(
+  userId: number,
   id: number,
   updates: { minPriceDistanceCent?: number; maxTriggers?: number; expiresAt?: string | null }
 ): Promise<void> {
   const fields: string[] = [];
-  const params: unknown[] = [id];
-  let idx = 2;
+  const params: unknown[] = [id, userId];
+  let idx = 3;
 
   if (updates.minPriceDistanceCent !== undefined) {
     fields.push(`min_price_distance_cent = $${idx++}`);
@@ -291,25 +306,42 @@ export async function updateTradeBuilderOrder(
   if (fields.length === 0) return;
 
   fields.push('updated_at = NOW()');
-  await pool.query(`UPDATE trade_builder_orders SET ${fields.join(', ')} WHERE id = $1`, params);
+  const result = await pool.query(
+    `UPDATE trade_builder_orders
+     SET ${fields.join(', ')}
+     WHERE id = $1 AND user_id = $2`,
+    params
+  );
+  if ((result.rowCount ?? 0) === 0) {
+    throw new Error('Trade builder order not found');
+  }
 }
 
-export async function requestCancelTradeBuilderOrder(id: number): Promise<void> {
-  await pool.query(
+export async function requestCancelTradeBuilderOrder(userId: number, id: number): Promise<void> {
+  const result = await pool.query(
     `UPDATE trade_builder_orders
      SET status = CASE WHEN active_exchange_order_id IS NULL THEN 'canceled' ELSE 'canceled_requested' END,
          updated_at = NOW()
-     WHERE id = $1`,
-    [id]
+     WHERE id = $1 AND user_id = $2`,
+    [id, userId]
   );
+  if ((result.rowCount ?? 0) === 0) {
+    throw new Error('Trade builder order not found');
+  }
 }
 
-export async function hardDeleteAllTradeBuilderOrders(): Promise<number> {
+export async function hardDeleteAllTradeBuilderOrders(userId: number): Promise<number> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query('DELETE FROM trade_builder_order_events');
-    const res = await client.query('DELETE FROM trade_builder_orders');
+    await client.query(
+      `DELETE FROM trade_builder_order_events
+       WHERE builder_order_id IN (
+         SELECT id FROM trade_builder_orders WHERE user_id = $1
+       )`,
+      [userId]
+    );
+    const res = await client.query('DELETE FROM trade_builder_orders WHERE user_id = $1', [userId]);
     await client.query('COMMIT');
     return res.rowCount ?? 0;
   } catch (err) {
@@ -320,12 +352,19 @@ export async function hardDeleteAllTradeBuilderOrders(): Promise<number> {
   }
 }
 
-export async function hardDeleteTradeBuilderOrder(id: number): Promise<void> {
+export async function hardDeleteTradeBuilderOrder(userId: number, id: number): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const orderRes = await client.query(
+      `SELECT id FROM trade_builder_orders WHERE id = $1 AND user_id = $2 LIMIT 1`,
+      [id, userId]
+    );
+    if ((orderRes.rowCount ?? 0) === 0) {
+      throw new Error('Trade builder order not found');
+    }
     await client.query('DELETE FROM trade_builder_order_events WHERE builder_order_id = $1', [id]);
-    await client.query('DELETE FROM trade_builder_orders WHERE id = $1', [id]);
+    await client.query('DELETE FROM trade_builder_orders WHERE id = $1 AND user_id = $2', [id, userId]);
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -342,9 +381,9 @@ export async function getTradeBuilderWorkflows(
   const limit = Math.min(filters.limit || 20, 100);
   const offset = (page - 1) * limit;
 
-  const whereParts: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
+  const whereParts: string[] = ['user_id = $1'];
+  const params: unknown[] = [filters.userId];
+  let idx = 2;
 
   if (filters.status) {
     whereParts.push(`status = $${idx++}`);
@@ -391,11 +430,12 @@ export async function getTradeBuilderWorkflows(
 }
 
 export async function getTradeBuilderWorkflowById(
+  userId: number,
   workflowId: number
 ): Promise<TradeBuilderWorkflowDetail | null> {
   const workflowRes = await pool.query(
-    `SELECT * FROM trade_builder_workflows WHERE id = $1 LIMIT 1`,
-    [workflowId]
+    `SELECT * FROM trade_builder_workflows WHERE id = $1 AND user_id = $2 LIMIT 1`,
+    [workflowId, userId]
   );
   if (workflowRes.rowCount === 0) return null;
 
@@ -430,17 +470,19 @@ export async function createTradeBuilderWorkflow(
 
     const tokenNotionalRes = await client.query(
       `SELECT COALESCE(SUM(qty * COALESCE(last_fill_price, avg_entry)), 0)::double precision AS notional
-       FROM leg_positions
-       WHERE trade_id = $1 AND token_id = $2`,
-      [input.sourceTradeId, input.sellLeg.tokenId]
+       FROM leg_positions lp
+       JOIN trades t ON t.id = lp.trade_id
+       WHERE lp.trade_id = $1 AND lp.token_id = $2 AND t.user_id = $3`,
+      [input.sourceTradeId, input.sellLeg.tokenId, input.userId]
     );
     let sourceNotional = Number(tokenNotionalRes.rows[0]?.notional || 0);
     if (sourceNotional <= 0) {
       const fallbackNotionalRes = await client.query(
         `SELECT COALESCE(SUM(qty * COALESCE(last_fill_price, avg_entry)), 0)::double precision AS notional
-         FROM leg_positions
-         WHERE trade_id = $1`,
-        [input.sourceTradeId]
+         FROM leg_positions lp
+         JOIN trades t ON t.id = lp.trade_id
+         WHERE lp.trade_id = $1 AND t.user_id = $2`,
+        [input.sourceTradeId, input.userId]
       );
       sourceNotional = Number(fallbackNotionalRes.rows[0]?.notional || 0);
     }
@@ -456,11 +498,12 @@ export async function createTradeBuilderWorkflow(
 
     const workflowRes = await client.query(
       `INSERT INTO trade_builder_workflows
-         (name, status, source_trade_id, sell_target_pct, buy_start_after_sell_progress_pct, buy_trigger_mode, buy_allocation_pct, expires_at, created_at, updated_at)
+         (user_id, name, status, source_trade_id, sell_target_pct, buy_start_after_sell_progress_pct, buy_trigger_mode, buy_allocation_pct, expires_at, created_at, updated_at)
        VALUES
-         ($1, 'armed', $2, $3, $4, $5, $6, $7, NOW(), NOW())
+         ($1, $2, 'armed', $3, $4, $5, $6, $7, $8, NOW(), NOW())
        RETURNING *`,
       [
+        input.userId,
         input.name?.trim() || 'workflow',
         input.sourceTradeId,
         input.sellTargetPct,
@@ -565,6 +608,7 @@ export async function createTradeBuilderWorkflow(
 }
 
 export async function updateTradeBuilderWorkflow(
+  userId: number,
   workflowId: number,
   updates: {
     buyStartAfterSellProgressPct?: number;
@@ -574,8 +618,8 @@ export async function updateTradeBuilderWorkflow(
   }
 ): Promise<void> {
   const fields: string[] = [];
-  const params: unknown[] = [workflowId];
-  let idx = 2;
+  const params: unknown[] = [workflowId, userId];
+  let idx = 3;
 
   if (updates.buyStartAfterSellProgressPct !== undefined) {
     fields.push(`buy_start_after_sell_progress_pct = $${idx++}`);
@@ -597,16 +641,32 @@ export async function updateTradeBuilderWorkflow(
   if (fields.length === 0) return;
   fields.push('updated_at = NOW()');
 
-  await pool.query(
-    `UPDATE trade_builder_workflows SET ${fields.join(', ')} WHERE id = $1`,
+  const result = await pool.query(
+    `UPDATE trade_builder_workflows
+     SET ${fields.join(', ')}
+     WHERE id = $1 AND user_id = $2`,
     params
   );
+  if ((result.rowCount ?? 0) === 0) {
+    throw new Error('Trade builder workflow not found');
+  }
 }
 
-export async function requestCancelTradeBuilderWorkflow(workflowId: number): Promise<void> {
+export async function requestCancelTradeBuilderWorkflow(
+  userId: number,
+  workflowId: number
+): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    const workflowRes = await client.query(
+      `SELECT id FROM trade_builder_workflows WHERE id = $1 AND user_id = $2 LIMIT 1`,
+      [workflowId, userId]
+    );
+    if ((workflowRes.rowCount ?? 0) === 0) {
+      throw new Error('Trade builder workflow not found');
+    }
 
     const legRes = await client.query(
       `SELECT id, builder_order_id FROM trade_builder_workflow_legs WHERE workflow_id = $1`,
@@ -619,8 +679,8 @@ export async function requestCancelTradeBuilderWorkflow(workflowId: number): Pro
           `UPDATE trade_builder_orders
            SET status = CASE WHEN active_exchange_order_id IS NULL THEN 'canceled' ELSE 'canceled_requested' END,
                updated_at = NOW()
-           WHERE id = $1`,
-          [leg.builder_order_id]
+           WHERE id = $1 AND user_id = $2`,
+          [leg.builder_order_id, userId]
         );
       }
     }
@@ -634,8 +694,8 @@ export async function requestCancelTradeBuilderWorkflow(workflowId: number): Pro
     await client.query(
       `UPDATE trade_builder_workflows
        SET status = 'canceled', updated_at = NOW()
-       WHERE id = $1`,
-      [workflowId]
+       WHERE id = $1 AND user_id = $2`,
+      [workflowId, userId]
     );
     await client.query(
       `INSERT INTO trade_builder_workflow_events (workflow_id, leg_id, event_type, payload_json, created_at)
@@ -652,10 +712,20 @@ export async function requestCancelTradeBuilderWorkflow(workflowId: number): Pro
   }
 }
 
-export async function hardDeleteTradeBuilderWorkflow(workflowId: number): Promise<void> {
+export async function hardDeleteTradeBuilderWorkflow(
+  userId: number,
+  workflowId: number
+): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const workflowRes = await client.query(
+      'SELECT id FROM trade_builder_workflows WHERE id = $1 AND user_id = $2 LIMIT 1',
+      [workflowId, userId]
+    );
+    if ((workflowRes.rowCount ?? 0) === 0) {
+      throw new Error('Trade builder workflow not found');
+    }
     const legRes = await client.query(
       'SELECT builder_order_id FROM trade_builder_workflow_legs WHERE workflow_id = $1',
       [workflowId]
@@ -668,7 +738,7 @@ export async function hardDeleteTradeBuilderWorkflow(workflowId: number): Promis
     }
     await client.query('DELETE FROM trade_builder_workflow_events WHERE workflow_id = $1', [workflowId]);
     await client.query('DELETE FROM trade_builder_workflow_legs WHERE workflow_id = $1', [workflowId]);
-    await client.query('DELETE FROM trade_builder_workflows WHERE id = $1', [workflowId]);
+    await client.query('DELETE FROM trade_builder_workflows WHERE id = $1 AND user_id = $2', [workflowId, userId]);
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -685,23 +755,30 @@ export async function getTradeBuilderWorkflowEvents(
   const limit = Math.min(filters.limit || 25, 100);
   const offset = (page - 1) * limit;
 
-  const whereParts: string[] = ['workflow_id = $1'];
-  const params: unknown[] = [filters.workflowId];
-  let idx = 2;
+  const whereParts: string[] = ['w.user_id = $1', 'e.workflow_id = $2'];
+  const params: unknown[] = [filters.userId, filters.workflowId];
+  let idx = 3;
 
   if (filters.eventType) {
-    whereParts.push(`event_type = $${idx++}`);
+    whereParts.push(`e.event_type = $${idx++}`);
     params.push(filters.eventType);
   }
 
   const where = `WHERE ${whereParts.join(' AND ')}`;
   const [countRes, dataRes] = await Promise.all([
-    pool.query(`SELECT COUNT(*)::int AS total FROM trade_builder_workflow_events ${where}`, params),
     pool.query(
-      `SELECT id, workflow_id, leg_id, event_type, payload_json, created_at
-       FROM trade_builder_workflow_events
+      `SELECT COUNT(*)::int AS total
+       FROM trade_builder_workflow_events e
+       JOIN trade_builder_workflows w ON w.id = e.workflow_id
+       ${where}`,
+      params
+    ),
+    pool.query(
+      `SELECT e.id, e.workflow_id, e.leg_id, e.event_type, e.payload_json, e.created_at
+       FROM trade_builder_workflow_events e
+       JOIN trade_builder_workflows w ON w.id = e.workflow_id
        ${where}
-       ORDER BY created_at DESC
+       ORDER BY e.created_at DESC
        LIMIT $${idx++} OFFSET $${idx++}`,
       [...params, limit, offset]
     ),

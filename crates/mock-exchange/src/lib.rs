@@ -77,6 +77,7 @@ pub async fn spawn_mock_exchange() -> Result<MockExchangeHandle> {
 
     let app = Router::new()
         .route("/midpoint", get(get_midpoint))
+        .route("/fee-rate", get(get_fee_rate))
         .route("/order", post(post_order).delete(delete_order))
         .route("/data/order/:id", get(get_order))
         .route("/data/orders", get(get_orders))
@@ -114,6 +115,10 @@ async fn get_midpoint(
         .unwrap_or_else(|| "unknown".to_string());
     let price = state.inner.lock().await.midpoint;
     Json(json!({ "market": market, "price": price }))
+}
+
+async fn get_fee_rate() -> impl IntoResponse {
+    Json(json!({ "fee_rate_bps": 1000 }))
 }
 
 async fn post_order(

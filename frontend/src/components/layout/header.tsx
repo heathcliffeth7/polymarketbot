@@ -5,6 +5,7 @@ import { useBotStatus } from '@/hooks/use-bot-status';
 import { useNotifications } from '@/contexts/notification-context';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { useAuthState } from '@/lib/auth-client';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,6 +28,7 @@ function formatTimeAgo(iso: string): string {
 
 export function Header({ title }: { title: string }) {
   const { data } = useBotStatus();
+  const { data: auth } = useAuthState();
   const { notifications, unreadCount, markAllRead } = useNotifications();
 
   return (
@@ -73,6 +75,12 @@ export function Header({ title }: { title: string }) {
             </ScrollArea>
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {auth?.user?.username && (
+          <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-300">
+            @{auth.user.username}
+          </span>
+        )}
 
         {data && (
           <>

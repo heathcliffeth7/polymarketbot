@@ -2,20 +2,22 @@ import { pool } from '@/lib/db';
 import type { BotRun, Trade, DashboardData } from '@/lib/types';
 import { readConfig } from '@/lib/config';
 
-export async function getDashboardData(): Promise<DashboardData> {
+export async function getDashboardData(
+  context: { userId: number; username: string }
+): Promise<DashboardData> {
   const [lastRun, activeTrade, dailyPnl, recentTrades, riskSummary] = await Promise.all([
     getLastRun(),
-    getActiveTrade(),
-    getDailyPnl(),
-    getRecentTrades(),
-    getRiskSummary(),
+    getActiveTrade(context.userId),
+    getDailyPnl(context.userId),
+    getRecentTrades(context.userId),
+    getRiskSummary(context),
   ]);
 
   const [activePosition, pressure, positionExitRules] = activeTrade
     ? await Promise.all([
-        getActivePosition(activeTrade.id),
-        getPressureSnapshot(activeTrade.id),
-        getPositionExitRules(activeTrade.id),
+        getActivePosition(context.userId, activeTrade.id),
+        getPressureSnapshot(context.userId, activeTrade.id),
+        getPositionExitRules(context.userId, activeTrade.id),
       ])
     : [null, null, [] as NonNullable<DashboardData['positionExitRules']>];
 
@@ -47,17 +49,19 @@ async function getLastRun(): Promise<BotRun | null> {
   return rows[0] || null;
 }
 
-async function getActiveTrade(): Promise<Trade | null> {
+async function getActiveTrade(userId: number): Promise<Trade | null> {
   const { rows } = await pool.query(
     `SELECT t.*, m.market_slug FROM trades t
      JOIN markets m ON m.id = t.market_id
      WHERE t.state NOT IN ('Settled', 'Halted', 'Idle')
-     ORDER BY t.opened_at DESC LIMIT 1`
+       AND t.user_id = $1
+     ORDER BY t.opened_at DESC LIMIT 1`,
+    [userId]
   );
   return rows[0] || null;
 }
 
-async function getDailyPnl() {
+async function getDailyPnl(userId: number) {
   const { rows } = await pool.query(
     `SELECT
        COALESCE(SUM(realized_pnl), 0) as total_pnl,
@@ -65,7 +69,9 @@ async function getDailyPnl() {
        COUNT(*) FILTER (WHERE realized_pnl > 0) as win_count,
        COUNT(*) FILTER (WHERE realized_pnl < 0) as loss_count
      FROM trades
-     WHERE closed_at::date = CURRENT_DATE`
+     WHERE closed_at::date = CURRENT_DATE
+       AND user_id = $1`,
+    [userId]
   );
   const r = rows[0];
   return {
@@ -76,25 +82,46 @@ async function getDailyPnl() {
   };
 }
 
-async function getRecentTrades(): Promise<Trade[]> {
+async function getRecentTrades(userId: number): Promise<Trade[]> {
   const { rows } = await pool.query(
     `SELECT t.*, m.market_slug FROM trades t
      JOIN markets m ON m.id = t.market_id
-     ORDER BY t.opened_at DESC NULLS LAST LIMIT 10`
+     WHERE t.user_id = $1
+     ORDER BY t.opened_at DESC NULLS LAST LIMIT 10`,
+    [userId]
   );
   return rows;
 }
 
-async function getRiskSummary() {
+async function getRiskSummary(context: { userId: number; username: string }) {
   const [openOrders, consecutiveLosses, haltCount, riskConfig] = await Promise.all([
-    pool.query("SELECT COUNT(*) as cnt FROM orders WHERE status IN ('open', 'partially_filled')"),
     pool.query(
-      'SELECT realized_pnl FROM trades WHERE closed_at IS NOT NULL ORDER BY closed_at DESC LIMIT 10'
+      `SELECT COUNT(*) as cnt
+       FROM orders o
+       JOIN trades t ON t.id = o.trade_id
+       WHERE o.status IN ('open', 'partially_filled')
+         AND t.user_id = $1`,
+      [context.userId]
     ),
     pool.query(
-      "SELECT COUNT(*) as cnt FROM risk_events WHERE decision = 'halt' AND created_at::date = CURRENT_DATE"
+      `SELECT realized_pnl
+       FROM trades
+       WHERE closed_at IS NOT NULL
+         AND user_id = $1
+       ORDER BY closed_at DESC
+       LIMIT 10`,
+      [context.userId]
     ),
-    readConfig('risk').catch(() => ({ manual_kill_switch_active: false })),
+    pool.query(
+      `SELECT COUNT(*) as cnt
+       FROM risk_events r
+       JOIN trades t ON t.id = r.trade_id
+       WHERE r.decision = 'halt'
+         AND r.created_at::date = CURRENT_DATE
+         AND t.user_id = $1`,
+      [context.userId]
+    ),
+    readConfig('risk', context).catch(() => ({ manual_kill_switch_active: false })),
   ]);
 
   let losses = 0;
@@ -111,13 +138,25 @@ async function getRiskSummary() {
   };
 }
 
-async function getActivePosition(tradeId: number): Promise<DashboardData['activePosition']> {
+async function getActivePosition(
+  userId: number,
+  tradeId: number
+): Promise<DashboardData['activePosition']> {
   try {
     const [tradeRes, legsRes] = await Promise.all([
-      pool.query('SELECT t.id, m.market_slug FROM trades t JOIN markets m ON m.id = t.market_id WHERE t.id = $1', [tradeId]),
+      pool.query(
+        `SELECT t.id, m.market_slug
+         FROM trades t
+         JOIN markets m ON m.id = t.market_id
+         WHERE t.id = $1
+           AND t.user_id = $2`,
+        [tradeId, userId]
+      ),
       pool.query(
         `SELECT leg_side, token_id, qty, avg_entry, levels_filled, last_fill_price, updated_at
-         FROM leg_positions WHERE trade_id = $1 ORDER BY leg_side ASC`,
+         FROM leg_positions
+         WHERE trade_id = $1
+         ORDER BY leg_side ASC`,
         [tradeId]
       ),
     ]);
@@ -143,13 +182,18 @@ async function getActivePosition(tradeId: number): Promise<DashboardData['active
   }
 }
 
-async function getPressureSnapshot(tradeId: number): Promise<DashboardData['pressure']> {
+async function getPressureSnapshot(
+  userId: number,
+  tradeId: number
+): Promise<DashboardData['pressure']> {
   try {
     const { rows } = await pool.query(
-      `SELECT trade_id, pressure_score, bid_ask_imbalance, sell_ratio, yes_price, no_price, trigger_reason, triggered, updated_at
-       FROM pressure_snapshots
-       WHERE trade_id = $1`,
-      [tradeId]
+      `SELECT ps.trade_id, ps.pressure_score, ps.bid_ask_imbalance, ps.sell_ratio, ps.yes_price, ps.no_price, ps.trigger_reason, ps.triggered, ps.updated_at
+       FROM pressure_snapshots ps
+       JOIN trades t ON t.id = ps.trade_id
+       WHERE ps.trade_id = $1
+         AND t.user_id = $2`,
+      [tradeId, userId]
     );
     if (rows.length === 0) return null;
     const row = rows[0];
@@ -170,15 +214,18 @@ async function getPressureSnapshot(tradeId: number): Promise<DashboardData['pres
 }
 
 async function getPositionExitRules(
+  userId: number,
   tradeId: number
 ): Promise<NonNullable<DashboardData['positionExitRules']>> {
   try {
     const { rows } = await pool.query(
-      `SELECT leg_side, drop_sell_pct, enabled, updated_at
-       FROM position_exit_rules
-       WHERE trade_id = $1
-       ORDER BY leg_side ASC`,
-      [tradeId]
+      `SELECT per.leg_side, per.drop_sell_pct, per.enabled, per.updated_at
+       FROM position_exit_rules per
+       JOIN trades t ON t.id = per.trade_id
+       WHERE per.trade_id = $1
+         AND t.user_id = $2
+       ORDER BY per.leg_side ASC`,
+      [tradeId, userId]
     );
 
     return rows.map((row) => ({

@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
+import { useAuthState } from '@/lib/auth-client';
 import {
   LayoutDashboard,
   Settings,
@@ -20,6 +21,7 @@ const navItems = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { data } = useAuthState();
 
   const handleLogout = async () => {
     await fetch('/api/auth', { method: 'DELETE' });
@@ -53,6 +55,12 @@ export function Sidebar() {
         })}
       </nav>
       <div className="border-t border-zinc-800 p-3">
+        <div className="mb-3 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2">
+          <p className="text-[11px] uppercase tracking-wide text-zinc-500">Current User</p>
+          <p className="mt-1 text-sm text-zinc-200">
+            {data?.user?.username || 'Unknown'}
+          </p>
+        </div>
         <button
           onClick={handleLogout}
           className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-red-400"

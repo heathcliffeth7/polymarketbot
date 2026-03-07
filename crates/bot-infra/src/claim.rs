@@ -10,7 +10,7 @@ use ethers::types::{Address, Bytes, H256, U256};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, env, str::FromStr, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tracing::{info, warn};
 
 const AUTO_CLAIM_INDEX_SETS: [u64; 2] = [1, 2];
@@ -73,33 +73,11 @@ impl AutoClaimService {
             return Ok(None);
         }
 
-        let user_address_raw = if cfg.claim.user_address.trim().is_empty() {
-            env::var(&cfg.claim.user_address_env).with_context(|| {
-                format!(
-                    "missing env {} required for auto-claim user address",
-                    cfg.claim.user_address_env
-                )
-            })?
-        } else {
-            cfg.claim.user_address.clone()
-        };
+        let user_address_raw = cfg.claim.resolve_user_address()?;
         let user_address = normalize_address(&user_address_raw)?;
 
-        let private_key = if cfg.claim.private_key.trim().is_empty() {
-            env::var(&cfg.claim.private_key_env).with_context(|| {
-                format!(
-                    "missing env {} required for auto-claim signer private key",
-                    cfg.claim.private_key_env
-                )
-            })?
-        } else {
-            cfg.claim.private_key.clone()
-        };
-
-        let rpc_url = env::var(&cfg.claim.rpc_url_env)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| cfg.claim.rpc_url.clone());
+        let private_key = cfg.claim.resolve_private_key()?;
+        let rpc_url = cfg.claim.resolve_rpc_url()?;
 
         let provider = Provider::<Http>::try_from(rpc_url.trim())
             .with_context(|| format!("invalid claim rpc url: {rpc_url}"))?;

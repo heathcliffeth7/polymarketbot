@@ -352,10 +352,10 @@ export function CreateFlowSlot({
                   <span className="block text-[11px] font-medium text-emerald-900">Autoclaim</span>
                   <span className="block text-[10px] text-emerald-800">
                     Kazandigin prediction varsa checkbox&apos;i isaretledigin anda ayar kaydolur.
-                    Runner bir sonraki turda wallet-wide claim dener.
+                    Runner bir sonraki turda bu kullaniciya ait claim ayarlariyla kontrol baslatir.
                   </span>
                   <span className="block text-[10px] text-emerald-700">
-                    claim.toml ve claim env ayarlari yine zorunlu.
+                    Gerekli wallet, private key ve RPC ayarlari Settings -&gt; Claim ekranindan gelir.
                   </span>
                 </span>
               </label>

@@ -133,6 +133,7 @@ Credentials değerlerini UI'da `Settings -> Exchange` bölümünden gir; dosyada
 Telegram action node için global bot tokeni UI'da `Settings -> Telegram` bölümünden gir; opsiyonel global `chat_id` de aynı ekrandan tanımlanabilir.
 Node icinde `chatId` varsa runtime onu kullanir; node bos ise global `chat_id` fallback olur.
 Telegram token/chat ayarlari settings autosave tamamlandıktan sonra bir sonraki Telegram action çalışmasında restart olmadan kullanılır.
+UI save akisi `dextrabot` kullanicisinin `BOT_CONFIG_DIR` altina yazabilmesine baglidir; `scripts/setup_frontend_service.sh` ve `scripts/setup_server.sh` bu ACL'i otomatik ayarlar.
 3. Çalıştır:
 ```bash
 cargo run -p bot-runner

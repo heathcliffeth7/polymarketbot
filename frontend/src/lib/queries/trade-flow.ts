@@ -20,9 +20,11 @@ import type {
   TradeFlowVersion,
 } from '@/lib/types';
 import {
+  isValidTelegramChatTarget,
   readPositionWalletAddress,
   readTelegramBotTokenForServer,
   readTelegramChatIdForServer,
+  type UserConfigContext,
 } from '@/lib/config';
 import { getMarketOutcomesBySlug, getTradeBuilderWorkflowById } from './trade-builder';
 
@@ -90,6 +92,7 @@ const DEFAULT_GRAPH: TradeFlowGraph = {
 };
 
 interface TradeFlowListFilters {
+  userId: number;
   page?: number;
   limit?: number;
   status?: string;
@@ -97,6 +100,7 @@ interface TradeFlowListFilters {
 }
 
 interface TradeFlowRunFilters {
+  userId: number;
   page?: number;
   limit?: number;
   definitionId?: number;
@@ -104,6 +108,7 @@ interface TradeFlowRunFilters {
 }
 
 interface CreateTradeFlowDefinitionInput {
+  userId: number;
   name: string;
   description?: string | null;
   graphJson?: unknown;
@@ -393,17 +398,20 @@ interface OpenTradeMatchCandidate {
   tokenId: string;
 }
 
-async function loadOpenTradeMatchCandidates(): Promise<OpenTradeMatchCandidate[]> {
+async function loadOpenTradeMatchCandidates(userId: number): Promise<OpenTradeMatchCandidate[]> {
   const res = await pool.query(
     `SELECT t.id AS trade_id, m.market_slug, lp.token_id
      FROM trades t
      JOIN markets m ON m.id = t.market_id
      LEFT JOIN leg_positions lp ON lp.trade_id = t.id
-     WHERE (
-       t.state NOT IN ('Settled', 'Halted', 'Idle')
-       OR (t.state = 'Idle' AND COALESCE(t.strategy_mode, '') = 'manual_trade_builder')
-     )
+     WHERE t.user_id = $1
+       AND (
+         t.state NOT IN ('Settled', 'Halted', 'Idle')
+         OR (t.state = 'Idle' AND COALESCE(t.strategy_mode, '') = 'manual_trade_builder')
+       )
      ORDER BY t.opened_at DESC NULLS LAST, t.id DESC`
+    ,
+    [userId]
   );
 
   const out: OpenTradeMatchCandidate[] = [];
@@ -538,6 +546,7 @@ function estimateSourceTradeValues(input: TradeFlowEnsureSourceTradeRequest): {
 }
 
 export async function ensureSourceTradeForOpenPosition(
+  userId: number,
   input: TradeFlowEnsureSourceTradeRequest
 ): Promise<TradeFlowEnsureSourceTradeResult> {
   const marketSlug = toTrimmedString(input.marketSlug);
@@ -558,10 +567,11 @@ export async function ensureSourceTradeForOpenPosition(
      LEFT JOIN leg_positions lp ON lp.trade_id = t.id
      WHERE LOWER(m.market_slug) = LOWER($1)
        AND LOWER(COALESCE(lp.token_id, '')) = LOWER($2)
+       AND t.user_id = $3
        AND t.state NOT IN ('Settled', 'Halted')
      ORDER BY t.opened_at DESC NULLS LAST, t.id DESC
      LIMIT 1`,
-    [marketSlug, tokenId]
+    [marketSlug, tokenId, userId]
   );
   const existingTradeId = Number(exactRes.rows[0]?.id);
   if (Number.isFinite(existingTradeId) && existingTradeId > 0) {
@@ -597,10 +607,10 @@ export async function ensureSourceTradeForOpenPosition(
     }
 
     const tradeRes = await client.query(
-      `INSERT INTO trades (market_id, state, entry_price, notional_usdc, strategy_mode, opened_at)
-       VALUES ($1, 'Idle', $2, $3, 'manual_trade_builder', NOW())
+      `INSERT INTO trades (market_id, user_id, state, entry_price, notional_usdc, strategy_mode, opened_at)
+       VALUES ($1, $2, 'Idle', $3, $4, 'manual_trade_builder', NOW())
        RETURNING id`,
-      [marketId, entryPrice, notionalUsdc]
+      [marketId, userId, entryPrice, notionalUsdc]
     );
     const tradeId = Number(tradeRes.rows[0]?.id);
     if (!Number.isFinite(tradeId) || tradeId <= 0) {
@@ -636,6 +646,7 @@ export async function ensureSourceTradeForOpenPosition(
 }
 
 export async function ensureDualDcaSourceTrade(
+  userId: number,
   input: TradeFlowEnsureDualDcaSourceTradeRequest
 ): Promise<TradeFlowEnsureDualDcaSourceTradeResult> {
   const asset = normalizeDualDcaAsset(input.asset);
@@ -654,7 +665,7 @@ export async function ensureDualDcaSourceTrade(
   const tokenId = `dual-dca-seed-${asset}-${timeframe}`;
   const marketTitle = `Dual DCA Source ${asset.toUpperCase()} ${timeframe}`;
 
-  return ensureSourceTradeForOpenPosition({
+  return ensureSourceTradeForOpenPosition(userId, {
     marketSlug,
     tokenId,
     outcomeLabel: 'yes',
@@ -665,17 +676,19 @@ export async function ensureDualDcaSourceTrade(
   });
 }
 
-export async function getTradeFlowOpenPositions(): Promise<TradeFlowOpenPositionsResponse> {
-  const walletAddress = (await readPositionWalletAddress()).trim();
+export async function getTradeFlowOpenPositions(
+  context: UserConfigContext
+): Promise<TradeFlowOpenPositionsResponse> {
+  const walletAddress = (await readPositionWalletAddress(context)).trim();
   if (!walletAddress) {
     throw new Error(
-      'Open positions için cüzdan adresi bulunamadı. exchange.api_address_env veya exchange.api_address tanımlayın.'
+      'Open positions için cüzdan adresi bulunamadı. Settings -> Exchange ekranindan Wallet Address veya Gnosis Safe Address tanimlayin.'
     );
   }
 
   const [openRows, candidates] = await Promise.all([
     fetchPolymarketOpenPositions(walletAddress),
-    loadOpenTradeMatchCandidates(),
+    loadOpenTradeMatchCandidates(context.userId),
   ]);
   const outcomeLabelIndex = await buildOpenPositionOutcomeLabelIndex(openRows);
 
@@ -2137,7 +2150,8 @@ export function validateTradeFlowGraph(graphJson: unknown): TradeFlowValidationR
 }
 
 export async function validateTradeFlowGraphWithRuntimeConfig(
-  graphJson: unknown
+  graphJson: unknown,
+  context: UserConfigContext
 ): Promise<TradeFlowValidationResult> {
   const graph = normalizeTradeFlowGraph(graphJson);
   const baseValidation = validateTradeFlowGraph(graph);
@@ -2145,57 +2159,76 @@ export async function validateTradeFlowGraphWithRuntimeConfig(
   const telegramNodes = graph.nodes.filter((node) => node.type === 'action.telegram_notify');
 
   if (telegramNodes.length > 0) {
-    let globalTelegramBotToken = '';
-    let globalTelegramChatId = '';
-    let globalTelegramReadError: string | null = null;
+    let userTelegramBotToken = '';
+    let userTelegramDefaultChatId = '';
+    let userTelegramReadError: string | null = null;
     try {
-      globalTelegramBotToken = (await readTelegramBotTokenForServer()).trim();
-      globalTelegramChatId = (await readTelegramChatIdForServer()).trim();
+      userTelegramBotToken = (await readTelegramBotTokenForServer(context)).trim();
+      userTelegramDefaultChatId = (await readTelegramChatIdForServer(context)).trim();
     } catch (err) {
-      globalTelegramReadError =
+      userTelegramReadError =
         err instanceof Error ? err.message : 'Failed to read telegram config';
     }
 
     for (const node of telegramNodes) {
       const config = isRecord(node.config) ? node.config : {};
-      const legacyBotToken = String(config.botToken ?? '').trim();
       const nodeChatId = String(config.chatId ?? '').trim();
 
-      if (globalTelegramReadError) {
+      if (userTelegramReadError) {
         issues.push({
           severity: 'error',
           code: 'telegram_config_invalid',
-          message: `Telegram config okunamadi: ${globalTelegramReadError}`,
+          message: `Telegram config okunamadi: ${userTelegramReadError}`,
           nodeKey: node.key,
         });
         continue;
       }
 
-      if (!globalTelegramBotToken && !legacyBotToken) {
+      if (!userTelegramBotToken) {
         issues.push({
           severity: 'error',
           code: 'missing_telegram_bot_token',
-          message: 'action.telegram_notify requires a global Telegram bot token in Settings -> Telegram.',
+          message: 'action.telegram_notify requires a Telegram bot token in Settings -> Telegram for the current user.',
           nodeKey: node.key,
         });
       }
 
-      if (!nodeChatId && !globalTelegramChatId) {
+      if (!nodeChatId && !userTelegramDefaultChatId) {
         issues.push({
           severity: 'error',
           code: 'missing_telegram_chat_id',
           message:
-            'action.telegram_notify requires chatId in node config or a global Telegram chat_id in Settings -> Telegram.',
+            'action.telegram_notify requires chatId in node config or a default Telegram chat_id in Settings -> Telegram for the current user.',
           nodeKey: node.key,
         });
       }
 
-      if (legacyBotToken) {
+      if (nodeChatId && !isValidTelegramChatTarget(nodeChatId)) {
+        issues.push({
+          severity: 'error',
+          code: 'invalid_telegram_chat_id',
+          message:
+            'action.telegram_notify chatId must be a Telegram chat ID like -1001234567890 or a @channelusername.',
+          nodeKey: node.key,
+        });
+      }
+
+      if (!nodeChatId && userTelegramDefaultChatId && !isValidTelegramChatTarget(userTelegramDefaultChatId)) {
+        issues.push({
+          severity: 'error',
+          code: 'invalid_default_telegram_chat_id',
+          message:
+            'Settings -> Telegram chat_id must be a Telegram chat ID like -1001234567890 or a @channelusername.',
+          nodeKey: node.key,
+        });
+      }
+
+      if (String(config.botToken ?? '').trim()) {
         issues.push({
           severity: 'warning',
           code: 'legacy_inline_telegram_bot_token',
           message:
-            'Bu node eski inline botToken kullaniyor. Global Telegram bot token tanimlayip node’u kaydederek yeni modele gec.',
+            'Bu node eski inline botToken tasiyor, fakat artik kullanilmaz. Settings -> Telegram ekraninda kullanici tokenini tanimlayip node’u kaydederek yeni modele gec.',
           nodeKey: node.key,
         });
       }
@@ -2431,11 +2464,24 @@ export async function createTradeFlowDefinition(
   try {
     await client.query('BEGIN');
 
+    if (input.legacyWorkflowId) {
+      const legacyWorkflowRes = await client.query(
+        `SELECT id
+         FROM trade_builder_workflows
+         WHERE id = $1 AND user_id = $2
+         LIMIT 1`,
+        [input.legacyWorkflowId, input.userId]
+      );
+      if ((legacyWorkflowRes.rowCount ?? 0) === 0) {
+        throw new Error('Legacy workflow not found');
+      }
+    }
+
     const defRes = await client.query(
-      `INSERT INTO trade_flow_definitions (name, description, status, created_at, updated_at)
-       VALUES ($1, $2, 'draft', NOW(), NOW())
+      `INSERT INTO trade_flow_definitions (user_id, name, description, status, created_at, updated_at)
+       VALUES ($1, $2, $3, 'draft', NOW(), NOW())
        RETURNING *`,
-      [name, input.description ?? null]
+      [input.userId, name, input.description ?? null]
     );
     const definition = defRes.rows[0] as Record<string, unknown>;
 
@@ -2469,7 +2515,7 @@ export async function createTradeFlowDefinition(
     }
 
     await client.query('COMMIT');
-    return (await getTradeFlowDefinitionById(Number(definition.id))) as TradeFlowDefinitionDetail;
+    return (await getTradeFlowDefinitionById(input.userId, Number(definition.id))) as TradeFlowDefinitionDetail;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -2479,6 +2525,7 @@ export async function createTradeFlowDefinition(
 }
 
 export async function updateTradeFlowDefinitionDraft(
+  userId: number,
   definitionId: number,
   updates: UpdateTradeFlowDefinitionInput
 ): Promise<TradeFlowDefinitionDetail> {
@@ -2490,9 +2537,10 @@ export async function updateTradeFlowDefinitionDraft(
       `SELECT *
        FROM trade_flow_definitions
        WHERE id = $1
+         AND user_id = $2
        LIMIT 1
        FOR UPDATE`,
-      [definitionId]
+      [definitionId, userId]
     );
     if ((defRes.rowCount ?? 0) === 0) {
       throw new Error('Flow definition not found');
@@ -2537,8 +2585,8 @@ export async function updateTradeFlowDefinitionDraft(
     }
 
     const fields: string[] = ['updated_at = NOW()'];
-    const params: unknown[] = [definitionId];
-    let idx = 2;
+    const params: unknown[] = [definitionId, userId];
+    let idx = 3;
 
     if (updates.name !== undefined) {
       const nextName = updates.name.trim();
@@ -2560,12 +2608,12 @@ export async function updateTradeFlowDefinitionDraft(
     await client.query(
       `UPDATE trade_flow_definitions
        SET ${fields.join(', ')}
-       WHERE id = $1`,
+       WHERE id = $1 AND user_id = $2`,
       params
     );
 
     await client.query('COMMIT');
-    return (await getTradeFlowDefinitionById(definitionId)) as TradeFlowDefinitionDetail;
+    return (await getTradeFlowDefinitionById(userId, definitionId)) as TradeFlowDefinitionDetail;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -2574,14 +2622,17 @@ export async function updateTradeFlowDefinitionDraft(
   }
 }
 
-export async function publishTradeFlowDefinition(definitionId: number): Promise<TradeFlowDefinitionDetail> {
+export async function publishTradeFlowDefinition(
+  context: { userId: number; username: string },
+  definitionId: number
+): Promise<TradeFlowDefinitionDetail> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
     const defRes = await client.query(
-      `SELECT * FROM trade_flow_definitions WHERE id = $1 LIMIT 1 FOR UPDATE`,
-      [definitionId]
+      `SELECT * FROM trade_flow_definitions WHERE id = $1 AND user_id = $2 LIMIT 1 FOR UPDATE`,
+      [definitionId, context.userId]
     );
     if ((defRes.rowCount ?? 0) === 0) {
       throw new Error('Flow definition not found');
@@ -2598,7 +2649,7 @@ export async function publishTradeFlowDefinition(definitionId: number): Promise<
       throw new Error('Draft version payload not found');
     }
 
-    const validation = await validateTradeFlowGraphWithRuntimeConfig(draftVersion.graph_json);
+    const validation = await validateTradeFlowGraphWithRuntimeConfig(draftVersion.graph_json, context);
     if (!validation.valid) {
       throw new Error(
         validation.issues
@@ -2670,7 +2721,7 @@ export async function publishTradeFlowDefinition(definitionId: number): Promise<
     );
 
     await client.query('COMMIT');
-    return (await getTradeFlowDefinitionById(definitionId)) as TradeFlowDefinitionDetail;
+    return (await getTradeFlowDefinitionById(context.userId, definitionId)) as TradeFlowDefinitionDetail;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -2680,6 +2731,7 @@ export async function publishTradeFlowDefinition(definitionId: number): Promise<
 }
 
 export async function archiveTradeFlowDefinition(
+  userId: number,
   definitionId: number
 ): Promise<TradeFlowDefinitionDetail> {
   const client = await pool.connect();
@@ -2687,8 +2739,8 @@ export async function archiveTradeFlowDefinition(
     await client.query('BEGIN');
 
     const defRes = await client.query(
-      `SELECT * FROM trade_flow_definitions WHERE id = $1 LIMIT 1 FOR UPDATE`,
-      [definitionId]
+      `SELECT * FROM trade_flow_definitions WHERE id = $1 AND user_id = $2 LIMIT 1 FOR UPDATE`,
+      [definitionId, userId]
     );
     if ((defRes.rowCount ?? 0) === 0) {
       throw new Error('Flow definition not found');
@@ -2698,7 +2750,7 @@ export async function archiveTradeFlowDefinition(
     const currentStatus = String(current.status || '');
     if (currentStatus === 'archived') {
       await client.query('COMMIT');
-      return (await getTradeFlowDefinitionById(definitionId)) as TradeFlowDefinitionDetail;
+      return (await getTradeFlowDefinitionById(userId, definitionId)) as TradeFlowDefinitionDetail;
     }
 
     await client.query(
@@ -2708,16 +2760,17 @@ export async function archiveTradeFlowDefinition(
            updated_at = NOW(),
            last_error = COALESCE(last_error, 'definition_archived')
        WHERE definition_id = $1
+         AND user_id = $2
          AND status = 'running'`,
-      [definitionId]
+      [definitionId, userId]
     );
 
     await client.query(
       `UPDATE trade_flow_definitions
        SET status = 'archived',
            updated_at = NOW()
-       WHERE id = $1`,
-      [definitionId]
+       WHERE id = $1 AND user_id = $2`,
+      [definitionId, userId]
     );
 
     await client.query(
@@ -2733,7 +2786,7 @@ export async function archiveTradeFlowDefinition(
     );
 
     await client.query('COMMIT');
-    return (await getTradeFlowDefinitionById(definitionId)) as TradeFlowDefinitionDetail;
+    return (await getTradeFlowDefinitionById(userId, definitionId)) as TradeFlowDefinitionDetail;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -2742,14 +2795,18 @@ export async function archiveTradeFlowDefinition(
   }
 }
 
-export async function getTradeFlowDefinitionById(definitionId: number): Promise<TradeFlowDefinitionDetail | null> {
+export async function getTradeFlowDefinitionById(
+  userId: number,
+  definitionId: number
+): Promise<TradeFlowDefinitionDetail | null> {
   const defRes = await pool.query(
     `SELECT d.*, m.legacy_workflow_id
      FROM trade_flow_definitions d
      LEFT JOIN trade_flow_legacy_mappings m ON m.definition_id = d.id
      WHERE d.id = $1
+       AND d.user_id = $2
      LIMIT 1`,
-    [definitionId]
+    [definitionId, userId]
   );
   if ((defRes.rowCount ?? 0) === 0) return null;
 
@@ -2770,16 +2827,16 @@ export async function getTradeFlowDefinitions(
   filters: TradeFlowListFilters
 ): Promise<PaginatedResponse<TradeFlowDefinition>> {
   if (filters.autoMigrateLegacy !== false) {
-    await migrateLegacyWorkflowsToFlows(25);
+    await migrateLegacyWorkflowsToFlows(filters.userId, 25);
   }
 
   const page = filters.page || 1;
   const limit = Math.min(filters.limit || 20, 100);
   const offset = (page - 1) * limit;
 
-  const whereParts: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
+  const whereParts: string[] = ['d.user_id = $1'];
+  const params: unknown[] = [filters.userId];
+  let idx = 2;
 
   if (filters.status) {
     whereParts.push(`d.status = $${idx++}`);
@@ -2811,10 +2868,14 @@ export async function getTradeFlowDefinitions(
   };
 }
 
-export async function getTradeFlowVersions(definitionId: number): Promise<TradeFlowVersion[]> {
+export async function getTradeFlowVersions(userId: number, definitionId: number): Promise<TradeFlowVersion[]> {
   const res = await pool.query(
-    `SELECT * FROM trade_flow_versions WHERE definition_id = $1 ORDER BY version_no DESC`,
-    [definitionId]
+    `SELECT v.*
+     FROM trade_flow_versions v
+     JOIN trade_flow_definitions d ON d.id = v.definition_id
+     WHERE v.definition_id = $1 AND d.user_id = $2
+     ORDER BY v.version_no DESC`,
+    [definitionId, userId]
   );
   return res.rows.map((row) => mapVersionRow(row as Record<string, unknown>));
 }
@@ -2826,9 +2887,9 @@ export async function getTradeFlowRuns(
   const limit = Math.min(filters.limit || 20, 100);
   const offset = (page - 1) * limit;
 
-  const whereParts: string[] = [];
-  const params: unknown[] = [];
-  let idx = 1;
+  const whereParts: string[] = ['user_id = $1'];
+  const params: unknown[] = [filters.userId];
+  let idx = 2;
 
   if (filters.definitionId) {
     whereParts.push(`definition_id = $${idx++}`);
@@ -2860,6 +2921,7 @@ export async function getTradeFlowRuns(
 }
 
 export async function getTradeFlowRunEvents(
+  userId: number,
   runId: number,
   page = 1,
   limit = 50
@@ -2869,13 +2931,21 @@ export async function getTradeFlowRunEvents(
   const offset = (safePage - 1) * safeLimit;
 
   const [countRes, dataRes] = await Promise.all([
-    pool.query('SELECT COUNT(*)::int AS total FROM trade_flow_events WHERE run_id = $1', [runId]),
     pool.query(
-      `SELECT * FROM trade_flow_events
-       WHERE run_id = $1
-       ORDER BY created_at DESC
-       LIMIT $2 OFFSET $3`,
-      [runId, safeLimit, offset]
+      `SELECT COUNT(*)::int AS total
+       FROM trade_flow_events e
+       JOIN trade_flow_runs r ON r.id = e.run_id
+       WHERE e.run_id = $1 AND r.user_id = $2`,
+      [runId, userId]
+    ),
+    pool.query(
+      `SELECT e.*
+       FROM trade_flow_events e
+       JOIN trade_flow_runs r ON r.id = e.run_id
+       WHERE e.run_id = $1 AND r.user_id = $2
+       ORDER BY e.created_at DESC
+       LIMIT $3 OFFSET $4`,
+      [runId, userId, safeLimit, offset]
     ),
   ]);
 
@@ -2889,15 +2959,16 @@ export async function getTradeFlowRunEvents(
   };
 }
 
-export async function migrateLegacyWorkflowsToFlows(limit = 50): Promise<number> {
+export async function migrateLegacyWorkflowsToFlows(userId: number, limit = 50): Promise<number> {
   const pendingRes = await pool.query(
     `SELECT w.id
      FROM trade_builder_workflows w
      LEFT JOIN trade_flow_legacy_mappings m ON m.legacy_workflow_id = w.id
      WHERE m.legacy_workflow_id IS NULL
+       AND w.user_id = $1
      ORDER BY w.id ASC
-     LIMIT $1`,
-    [Math.max(1, limit)]
+     LIMIT $2`,
+    [userId, Math.max(1, limit)]
   );
 
   let migrated = 0;
@@ -2906,7 +2977,7 @@ export async function migrateLegacyWorkflowsToFlows(limit = 50): Promise<number>
     if (!Number.isFinite(workflowId) || workflowId <= 0) continue;
 
     try {
-      const created = await createFlowFromLegacyWorkflow(workflowId);
+      const created = await createFlowFromLegacyWorkflow(userId, workflowId);
       if (created) migrated += 1;
     } catch (err) {
       console.error('Legacy workflow migration error:', workflowId, err);
@@ -2916,7 +2987,7 @@ export async function migrateLegacyWorkflowsToFlows(limit = 50): Promise<number>
   return migrated;
 }
 
-export async function createFlowFromLegacyWorkflow(workflowId: number): Promise<boolean> {
+export async function createFlowFromLegacyWorkflow(userId: number, workflowId: number): Promise<boolean> {
   const existingMapRes = await pool.query(
     'SELECT definition_id FROM trade_flow_legacy_mappings WHERE legacy_workflow_id = $1 LIMIT 1',
     [workflowId]
@@ -2925,7 +2996,7 @@ export async function createFlowFromLegacyWorkflow(workflowId: number): Promise<
     return false;
   }
 
-  const legacy = await getTradeBuilderWorkflowById(workflowId);
+  const legacy = await getTradeBuilderWorkflowById(userId, workflowId);
   if (!legacy) {
     throw new Error(`Legacy workflow not found: ${workflowId}`);
   }
@@ -2942,6 +3013,7 @@ export async function createFlowFromLegacyWorkflow(workflowId: number): Promise<
   }
 
   await createTradeFlowDefinition({
+    userId,
     name: `Legacy ${legacy.workflow.name} (#${legacy.workflow.id})`,
     description: 'Migrated from trade_builder_workflows',
     graphJson: graph,
