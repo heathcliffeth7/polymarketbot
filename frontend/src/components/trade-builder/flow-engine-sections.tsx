@@ -9,12 +9,15 @@ import {
 } from '@/lib/trade-flow-config-mappers';
 import type {
   TradeFlowDefinition,
+  TradeFlowDefinitionDetail,
   TradeFlowGraph,
   TradeFlowValidationResult,
 } from '@/lib/types';
-
-type BusyAction = 'create' | 'save' | 'validate' | 'publish' | 'archive' | null;
-type TemplateKind = 'starter' | 'sell_buy_if' | 'dca' | 'sl_tp' | 'position_monitor' | 'multi_leg_hedge';
+import {
+  buildGraphFingerprint,
+  summarizeTradeFlowGraph,
+} from './flow-engine-utils';
+import type { BusyAction, TemplateKind } from './flow-engine-types';
 
 interface FlowContextEditorProps {
   contextForm: ContextFormState;
@@ -193,11 +196,51 @@ export function FlowContextEditor({
 interface FlowSummaryBarProps {
   graph: TradeFlowGraph;
   validation: TradeFlowValidationResult | null;
+  detail?: TradeFlowDefinitionDetail | null;
+  autoSaveError?: string | null;
 }
 
-export function FlowSummaryBar({ graph, validation }: FlowSummaryBarProps) {
+function renderGraphSummaryLine(label: string, summary: ReturnType<typeof summarizeTradeFlowGraph>, versionLabel?: string | null) {
+  if (!summary) {
+    return (
+      <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-2">
+        <p className="text-[11px] font-medium text-zinc-300">{label}</p>
+        <p className="mt-1 text-[11px] text-zinc-500">Yok</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-2">
+      <p className="text-[11px] font-medium text-zinc-300">
+        {label}
+        {versionLabel ? <span className="ml-1 text-zinc-500">{versionLabel}</span> : null}
+      </p>
+      <p className="mt-1 text-[11px] text-zinc-400">
+        Node {summary.nodes} • Edge {summary.edges} • Trigger {summary.triggers} • Action {summary.actions}
+      </p>
+      <p className="text-[11px] text-zinc-500">
+        Telegram: {summary.hasTelegramNotify ? 'Var' : 'Yok'}
+      </p>
+    </div>
+  );
+}
+
+export function FlowSummaryBar({ graph, validation, detail, autoSaveError }: FlowSummaryBarProps) {
   const autoClaimEnabled =
     graph.context?.autoClaimEnabled === true || graph.context?.autoClaimEnabled === 'true';
+  const localSummary = summarizeTradeFlowGraph(graph);
+  const draftSummary = summarizeTradeFlowGraph(detail?.draftVersion?.graph_json);
+  const publishedSummary = summarizeTradeFlowGraph(detail?.publishedVersion?.graph_json);
+  const localFingerprint = buildGraphFingerprint(graph);
+  const draftFingerprint = buildGraphFingerprint(detail?.draftVersion?.graph_json);
+  const publishedFingerprint = buildGraphFingerprint(detail?.publishedVersion?.graph_json);
+  const hasLocalDraftDiff =
+    localFingerprint != null && draftFingerprint != null && localFingerprint !== draftFingerprint;
+  const hasDraftPublishedDiff =
+    draftFingerprint != null &&
+    publishedFingerprint != null &&
+    draftFingerprint !== publishedFingerprint;
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
@@ -208,6 +251,36 @@ export function FlowSummaryBar({ graph, validation }: FlowSummaryBarProps) {
         <span>Trigger: {graph.nodes.filter((n) => n.type.startsWith('trigger.')).length}</span>
         <span>Action: {graph.nodes.filter((n) => n.type.startsWith('action.')).length}</span>
         <span>AutoClaim: {autoClaimEnabled ? 'Acik' : 'Kapali'}</span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+        {autoSaveError && (
+          <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-amber-300">
+            Autosave failed
+          </span>
+        )}
+        {hasLocalDraftDiff && (
+          <span className="rounded-full border border-red-500/40 bg-red-500/10 px-2 py-1 text-red-300">
+            Local != Draft
+          </span>
+        )}
+        {hasDraftPublishedDiff && (
+          <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-sky-300">
+            Draft != Published
+          </span>
+        )}
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-3">
+        {renderGraphSummaryLine('Local Canvas', localSummary)}
+        {renderGraphSummaryLine(
+          'Draft',
+          draftSummary,
+          detail?.draftVersion ? `v${detail.draftVersion.version_no}` : null
+        )}
+        {renderGraphSummaryLine(
+          'Published',
+          publishedSummary,
+          detail?.publishedVersion ? `v${detail.publishedVersion.version_no}` : null
+        )}
       </div>
       {validation && (
         <div className="mt-3 space-y-2 rounded-md border border-zinc-800 bg-zinc-900/70 p-2">
@@ -253,12 +326,13 @@ interface CreateFlowSlotProps {
   workflowActionsDisabled?: boolean;
   onSaveDraft?: () => void;
   onValidate?: () => void;
+  onReloadDraft?: () => void;
   onPublish?: () => void;
   onArchiveFlow?: () => void;
-  botActive?: boolean;
-  botControlAvailable?: boolean;
-  onStopBot?: () => void;
-  stoppingBot?: boolean;
+  publishDisabled?: boolean;
+  canStopFlow?: boolean;
+  onStopFlow?: () => void;
+  stoppingFlow?: boolean;
   selectedDefinitionIds?: Set<number>;
   onToggleDefinitionSelection?: (id: number) => void;
   onSelectAllDefinitions?: () => void;
@@ -277,8 +351,8 @@ export function CreateFlowSlot({
   onCreateFromTemplate, onToggleWorkflowList, onWorkflowListQueryChange,
   onSelectDefinition, onArchiveFromList,
   showWorkflowActions = false, workflowActionsDisabled = false,
-  onSaveDraft, onValidate, onPublish, onArchiveFlow,
-  botActive, botControlAvailable, onStopBot, stoppingBot,
+  onSaveDraft, onValidate, onReloadDraft, onPublish, onArchiveFlow, publishDisabled = false,
+  canStopFlow, onStopFlow, stoppingFlow,
   selectedDefinitionIds, onToggleDefinitionSelection, onSelectAllDefinitions, onDeselectAllDefinitions, onBulkArchive, bulkArchiving,
   autoClaimEnabled = false, onAutoClaimEnabledChange,
 }: CreateFlowSlotProps) {
@@ -312,7 +386,17 @@ export function CreateFlowSlot({
               size="sm"
               variant="outline"
               className="h-8 w-full border-slate-300 text-slate-700 hover:bg-slate-100"
-              disabled={workflowActionsDisabled || !onPublish}
+              disabled={workflowActionsDisabled || !onReloadDraft}
+              onClick={onReloadDraft}
+            >
+              Taslagi Sunucudan Yukle
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8 w-full border-slate-300 text-slate-700 hover:bg-slate-100"
+              disabled={workflowActionsDisabled || publishDisabled || !onPublish}
               onClick={onPublish}
             >
               Publish
@@ -327,16 +411,16 @@ export function CreateFlowSlot({
             >
               Sil (Arsivle)
             </Button>
-            {onStopBot && (
+            {onStopFlow && (
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
-                className={`h-8 w-full ${botActive ? 'border-orange-300 text-orange-600 hover:bg-orange-50' : 'border-green-300 text-green-600'}`}
-                disabled={workflowActionsDisabled || stoppingBot || !botControlAvailable || !botActive}
-                onClick={onStopBot}
+                className="h-8 w-full border-orange-300 text-orange-600 hover:bg-orange-50"
+                disabled={workflowActionsDisabled || stoppingFlow || !canStopFlow}
+                onClick={onStopFlow}
               >
-                {stoppingBot ? 'Durduruluyor...' : botActive ? 'Botu Durdur' : 'Bot Durmus'}
+                {stoppingFlow ? 'Durduruluyor...' : "Workflow'u Durdur"}
               </Button>
             )}
             {onAutoClaimEnabledChange && (

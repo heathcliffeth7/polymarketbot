@@ -21,6 +21,65 @@ export function deepCloneGraph(graph: TradeFlowGraph): TradeFlowGraph {
   };
 }
 
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(',')}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function buildGraphFingerprint(graph: TradeFlowGraph | null | undefined): string | null {
+  if (!graph) return null;
+  return stableSerialize({
+    context: isRecord(graph.context) ? graph.context : {},
+    nodes: [...graph.nodes]
+      .map((node) => ({
+        key: node.key,
+        type: node.type,
+        positionX: node.positionX,
+        positionY: node.positionY,
+        config: isRecord(node.config) ? node.config : {},
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key)),
+    edges: [...graph.edges]
+      .map((edge) => ({
+        key: edge.key,
+        source: edge.source,
+        target: edge.target,
+        type: edge.type,
+        condition: edge.condition && isRecord(edge.condition) ? edge.condition : null,
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key)),
+  });
+}
+
+export interface TradeFlowGraphSummary {
+  nodes: number;
+  edges: number;
+  triggers: number;
+  actions: number;
+  hasTelegramNotify: boolean;
+}
+
+export function summarizeTradeFlowGraph(
+  graph: TradeFlowGraph | null | undefined
+): TradeFlowGraphSummary | null {
+  if (!graph) return null;
+  return {
+    nodes: graph.nodes.length,
+    edges: graph.edges.length,
+    triggers: graph.nodes.filter((node) => node.type.startsWith('trigger.')).length,
+    actions: graph.nodes.filter((node) => node.type.startsWith('action.')).length,
+    hasTelegramNotify: graph.nodes.some((node) => node.type === 'action.telegram_notify'),
+  };
+}
+
 export function createSellBuyIfElseTemplate(
   marketSlug: string | null,
   outcome: { token_id: string; label: string } | null

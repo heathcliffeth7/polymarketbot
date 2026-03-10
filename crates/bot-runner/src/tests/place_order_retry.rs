@@ -1,0 +1,361 @@
+use super::support::*;
+use super::*;
+
+#[test]
+fn optimistic_exit_stage_defaults_to_dynamic_gross() {
+    let mut child_sell = test_builder_order("sell", Some(9));
+    child_sell.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    child_sell.target_qty = Some(5.10);
+    child_sell.remaining_qty = Some(5.10);
+
+    assert_eq!(
+        trade_builder_current_exit_submit_stage(&child_sell),
+        TradeBuilderExitSubmitStage::DynamicGross
+    );
+}
+
+#[test]
+fn optimistic_exit_stage_parses_last_error_marker() {
+    let mut child_sell = test_builder_order("sell", Some(9));
+    child_sell.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    child_sell.target_qty = Some(5.10);
+    child_sell.remaining_qty = Some(5.10);
+    child_sell.last_error =
+        Some("not enough balance / allowance [exit_submit_stage=visible_inventory]".to_string());
+
+    assert_eq!(
+        trade_builder_current_exit_submit_stage(&child_sell),
+        TradeBuilderExitSubmitStage::VisibleInventory
+    );
+}
+
+#[test]
+fn optimistic_exit_submit_scope_targets_child_share_sells() {
+    let mut child_sell = test_builder_order("sell", Some(9));
+    child_sell.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    child_sell.target_qty = Some(5.10);
+    child_sell.remaining_qty = Some(5.10);
+
+    let mut buy_child = child_sell.clone();
+    buy_child.side = "buy".to_string();
+
+    let mut parent_sell = child_sell.clone();
+    parent_sell.parent_order_id = None;
+
+    let mut notional_child = child_sell.clone();
+    notional_child.size_basis = TRADE_BUILDER_SIZE_BASIS_NOTIONAL_USDC.to_string();
+    notional_child.target_qty = None;
+    notional_child.remaining_qty = None;
+
+    assert!(trade_builder_should_use_optimistic_exit_submit(&child_sell));
+    assert!(!trade_builder_should_use_optimistic_exit_submit(&buy_child));
+    assert!(!trade_builder_should_use_optimistic_exit_submit(
+        &parent_sell
+    ));
+    assert!(!trade_builder_should_use_optimistic_exit_submit(
+        &notional_child
+    ));
+}
+
+#[test]
+fn midpoint_404_processing_error_is_retryable_for_exit_sell() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.last_error = Some(
+            "HTTP status client error (404 Not Found) for url (https://clob.polymarket.com/midpoint?token_id=tok)"
+                .to_string(),
+        );
+
+    assert!(trade_builder_should_retry_after_processing_error(&order));
+}
+
+#[test]
+fn runtime_price_fallback_prefers_last_seen_price() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.last_seen_price = Some(0.74);
+    order.working_price = Some(0.81);
+
+    let fallback = trade_builder_runtime_price_fallback(&order).unwrap();
+    assert_eq!(fallback.source, "last_seen_price");
+    assert_eq!(fallback.price, 0.74);
+    assert_eq!(fallback.best_bid, None);
+    assert_eq!(fallback.best_ask, None);
+    assert_eq!(fallback.last_trade_price, None);
+}
+
+#[test]
+fn runtime_price_fallback_uses_working_price_when_last_seen_missing() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.last_seen_price = None;
+    order.working_price = Some(0.81);
+
+    let fallback = trade_builder_runtime_price_fallback(&order).unwrap();
+    assert_eq!(fallback.source, "working_price");
+    assert_eq!(fallback.price, 0.81);
+}
+
+#[test]
+fn fast_runtime_price_rest_partial_failure_uses_last_trade_only() {
+    let (runtime_price, runtime_warning) =
+        resolve_trade_builder_fast_runtime_price_from_rest_results(
+            Err(anyhow::anyhow!("book offline")),
+            Ok(Some(0.73)),
+        );
+
+    let runtime_price = runtime_price.expect("runtime price");
+    assert_eq!(runtime_price.source, "rest_fast_last_trade");
+    assert_eq!(runtime_price.price, 0.73);
+    assert_eq!(runtime_price.best_bid, None);
+    assert_eq!(runtime_price.best_ask, None);
+    assert_eq!(runtime_price.last_trade_price, Some(0.73));
+    assert!(runtime_warning.unwrap().contains("best_bid_ask"));
+}
+
+#[test]
+fn fast_runtime_price_rest_partial_failure_uses_book_only() {
+    let (runtime_price, runtime_warning) =
+        resolve_trade_builder_fast_runtime_price_from_rest_results(
+            Ok((Some(0.61), Some(0.63))),
+            Err(anyhow::anyhow!("trade offline")),
+        );
+
+    let runtime_price = runtime_price.expect("runtime price");
+    assert_eq!(runtime_price.source, "rest_fast_book");
+    assert_eq!(runtime_price.price, 0.61);
+    assert_eq!(runtime_price.best_bid, Some(0.61));
+    assert_eq!(runtime_price.best_ask, Some(0.63));
+    assert_eq!(runtime_price.last_trade_price, None);
+    assert!(runtime_warning.unwrap().contains("last_trade_price"));
+}
+
+#[test]
+fn exit_sell_price_floor_uses_trigger_buffer() {
+    let mut tp_order = test_builder_order("sell", Some(9));
+    tp_order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    tp_order.target_qty = Some(7.35);
+    tp_order.remaining_qty = Some(7.35);
+    tp_order.trigger_condition = Some("cross_above".to_string());
+    tp_order.trigger_price = Some(0.98);
+
+    let mut sl_order = tp_order.clone();
+    sl_order.trigger_condition = Some("cross_below".to_string());
+    sl_order.trigger_price = Some(0.60);
+
+    assert_eq!(trade_builder_exit_sell_price_floor(&tp_order), Some(0.93));
+    assert_eq!(trade_builder_exit_sell_price_floor(&sl_order), Some(0.55));
+}
+
+#[test]
+fn exit_sell_price_cap_never_chases_beyond_trigger_buffer() {
+    let mut tp_order = test_builder_order("sell", Some(9));
+    tp_order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    tp_order.target_qty = Some(7.35);
+    tp_order.remaining_qty = Some(7.35);
+    tp_order.trigger_condition = Some("cross_above".to_string());
+    tp_order.trigger_price = Some(0.98);
+
+    let mut sl_order = tp_order.clone();
+    sl_order.trigger_condition = Some("cross_below".to_string());
+    sl_order.trigger_price = Some(0.60);
+
+    assert_eq!(trade_builder_cap_exit_sell_price(&tp_order, 0.27), 0.93);
+    assert_eq!(trade_builder_cap_exit_sell_price(&sl_order, 0.27), 0.55);
+    assert_eq!(trade_builder_cap_exit_sell_price(&tp_order, 0.97), 0.97);
+}
+
+#[test]
+fn take_profit_child_detection_distinguishes_tp_from_sl() {
+    let mut tp_order = test_builder_order("sell", Some(9));
+    tp_order.trigger_condition = Some("cross_above".to_string());
+
+    let mut sl_order = tp_order.clone();
+    sl_order.trigger_condition = Some("cross_below".to_string());
+
+    assert!(trade_builder_is_take_profit_child(&tp_order));
+    assert!(!trade_builder_is_take_profit_child(&sl_order));
+    assert!(trade_builder_is_stop_loss_child(&sl_order));
+}
+
+#[test]
+fn share_basis_remaining_qty_does_not_expand_at_low_price() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(5.10);
+    order.remaining_qty = Some(5.10);
+
+    let order_info = OrderInfo {
+        order_id: "ord-1".to_string(),
+        client_order_id: None,
+        status: "live".to_string(),
+        price: Some(0.01),
+        size: Some(5.10),
+        filled_size: Some(0.0),
+    };
+
+    let (remaining_usdc, remaining_qty) =
+        estimate_remaining_trade_builder_sizing(&order, &order_info, 0.01);
+    assert_eq!(remaining_qty, Some(5.10));
+    assert_eq!(remaining_usdc, Some(0.051));
+}
+
+#[test]
+fn visible_share_qty_is_clamped_with_floor_precision() {
+    assert_eq!(
+        clamp_trade_builder_visible_share_qty(6.02, Some(5.9815)),
+        Some(5.98)
+    );
+    assert_eq!(
+        clamp_trade_builder_visible_share_qty(6.02, Some(6.50)),
+        Some(6.02)
+    );
+    assert_eq!(
+        clamp_trade_builder_visible_share_qty(6.02, Some(0.009)),
+        None
+    );
+}
+
+#[test]
+fn visible_inventory_submit_clamps_requested_qty() {
+    let resolution = resolve_trade_builder_visible_inventory_submit(6.02, Some(5.9815)).unwrap();
+    assert_eq!(resolution.submit_qty, 5.98);
+    assert!(resolution.submit_partial_visible_inventory);
+}
+
+#[test]
+fn stop_loss_local_inventory_fallback_shaves_buy_fee_and_buffer() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(11.63);
+    order.remaining_qty = Some(11.63);
+    order.size_usdc = 10.0018;
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_latched = true;
+    order.trigger_latched_reason = Some("stop_loss".to_string());
+    order.fee_rate_bps = 1000;
+
+    let fallback = trade_builder_local_inventory_fallback(&order, 11.63).unwrap();
+    assert_eq!(fallback.submit_qty, 11.57);
+    assert!(fallback.estimated_fee_qty > 0.04);
+    assert!(fallback.estimated_fee_qty < 0.06);
+}
+
+#[test]
+fn estimated_visible_exit_qty_applies_to_take_profit_children() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(11.63);
+    order.remaining_qty = Some(11.63);
+    order.size_usdc = 10.0018;
+    order.trigger_condition = Some("cross_above".to_string());
+    order.fee_rate_bps = 1000;
+
+    let estimate = trade_builder_estimated_visible_exit_qty(&order, 11.63).unwrap();
+    assert_eq!(estimate.submit_qty, 11.57);
+    assert!(estimate.estimated_fee_qty > 0.04);
+    assert!(estimate.estimated_fee_qty < 0.06);
+}
+
+#[test]
+fn optimistic_exit_retry_qty_prefers_estimated_visible_qty() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(11.63);
+    order.remaining_qty = Some(11.63);
+    order.size_usdc = 10.0018;
+    order.trigger_condition = Some("cross_above".to_string());
+    order.fee_rate_bps = 1000;
+
+    let resolution = resolve_trade_builder_exit_retry_qty(&order, 11.63).unwrap();
+    assert_eq!(
+        resolution.source,
+        TradeBuilderExitRetryQtySource::EstimatedVisibleQty
+    );
+    assert_eq!(resolution.next_qty, 11.57);
+    assert!(resolution.estimated_fee_qty.unwrap() > 0.04);
+}
+
+#[test]
+fn optimistic_exit_retry_qty_accepts_one_tick_estimated_decrement() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(5.05);
+    order.remaining_qty = Some(5.05);
+    order.size_usdc = 4.949;
+    order.trigger_condition = Some("cross_above".to_string());
+    order.fee_rate_bps = 1000;
+
+    let resolution = resolve_trade_builder_exit_retry_qty(&order, 5.05).unwrap();
+    assert_eq!(
+        resolution.source,
+        TradeBuilderExitRetryQtySource::EstimatedVisibleQty
+    );
+    assert_eq!(resolution.formula_qty, Some(5.04));
+    assert_eq!(resolution.next_qty, 5.04);
+    assert_eq!(resolution.forced_tick_qty, None);
+}
+
+#[test]
+fn optimistic_exit_retry_qty_forces_one_tick_when_formula_does_not_reduce() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(10.00);
+    order.remaining_qty = Some(10.00);
+    order.size_usdc = 9.80;
+    order.trigger_condition = Some("cross_above".to_string());
+    order.fee_rate_bps = 1000;
+
+    let resolution = resolve_trade_builder_exit_retry_qty(&order, 5.05).unwrap();
+    assert_eq!(
+        resolution.source,
+        TradeBuilderExitRetryQtySource::ForcedTickQty
+    );
+    assert_eq!(resolution.formula_qty, Some(5.05));
+    assert_eq!(resolution.forced_tick_qty, Some(5.04));
+    assert_eq!(resolution.next_qty, 5.04);
+}
+
+#[test]
+fn next_retry_share_qty_shaves_one_tick() {
+    assert_eq!(trade_builder_next_retry_share_qty(5.05), Some(5.04));
+    assert_eq!(trade_builder_next_retry_share_qty(0.01), None);
+}
+
+#[test]
+fn stop_loss_inventory_resolution_prefers_local_fallback_when_visible_zero() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(12.05);
+    order.remaining_qty = Some(12.05);
+    order.size_usdc = 10.0015;
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_latched = true;
+    order.trigger_latched_reason = Some("stop_loss".to_string());
+    order.fee_rate_bps = 1000;
+
+    let resolution = resolve_trade_builder_exit_inventory(&order, 12.05, Some(0.0)).unwrap();
+    assert_eq!(resolution.submit_qty, 11.97);
+    assert_eq!(resolution.local_fallback_qty, Some(11.97));
+    assert!(resolution.submit_partial_visible_inventory);
+}
+
+#[test]
+fn inventory_pending_tp_trigger_price_applies_slack_only_to_tp_children() {
+    let mut tp_order = test_builder_order("sell", Some(9));
+    tp_order.status = "inventory_pending".to_string();
+    tp_order.trigger_condition = Some("cross_above".to_string());
+    tp_order.trigger_price = Some(0.98);
+
+    let mut sl_order = test_builder_order("sell", Some(9));
+    sl_order.status = "inventory_pending".to_string();
+    sl_order.trigger_condition = Some("cross_below".to_string());
+    sl_order.trigger_price = Some(0.60);
+
+    assert_eq!(
+        trade_builder_inventory_pending_tp_trigger_price(&tp_order),
+        Some(0.93)
+    );
+    assert_eq!(
+        trade_builder_inventory_pending_tp_trigger_price(&sl_order),
+        Some(0.60)
+    );
+}

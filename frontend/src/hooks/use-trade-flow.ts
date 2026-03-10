@@ -112,6 +112,19 @@ export function useTradeFlowRunEvents(
   return usePolling<PaginatedResponse<TradeFlowEvent>>(endpoint, 3000);
 }
 
+export function useTradeFlowRecentEvents(
+  status: TradeFlowRun['status'] | undefined = 'running',
+  limit = 100,
+  enabled = true
+) {
+  const query = buildSearchParams({
+    status,
+    limit: String(limit),
+  });
+  const endpoint = enabled ? `/api/trade-flow/events/recent?${query}` : null;
+  return usePolling<{ data: TradeFlowEvent[] }>(endpoint, 3000);
+}
+
 export async function createTradeFlowDefinition(payload: Record<string, unknown>) {
   return requestJson<{ data: TradeFlowDefinitionDetail }>(
     '/api/trade-flow/definitions',
@@ -157,6 +170,14 @@ export async function validateTradeFlowDefinition(
 export async function publishTradeFlowDefinition(definitionId: number) {
   return requestJson<{ data: TradeFlowDefinitionDetail }>(
     `/api/trade-flow/definitions/${definitionId}/publish`,
+    { method: 'POST' },
+    { timeoutMs: 15_000 }
+  );
+}
+
+export async function stopTradeFlowDefinition(definitionId: number) {
+  return requestJson<{ data: TradeFlowDefinitionDetail }>(
+    `/api/trade-flow/definitions/${definitionId}/stop`,
     { method: 'POST' },
     { timeoutMs: 15_000 }
   );

@@ -7,19 +7,21 @@ import {
   useEffect,
   useReducer,
   useRef,
+  useMemo,
   type ReactNode,
 } from 'react';
 import { toast } from 'sonner';
-import { useTradeFlowRuns, useTradeFlowRunEvents } from '@/hooks/use-trade-flow';
+import { useTradeFlowRecentEvents } from '@/hooks/use-trade-flow';
+import { useTradeFlowRealtime } from '@/contexts/trade-flow-realtime-context';
 import type { TradeFlowEvent } from '@/lib/types';
 
 export interface Notification {
   id: number;
-  label: string;
-  price: string;
-  condition: string;
+  title: string;
+  detail: string;
   market: string;
   time: string;
+  tone: 'trigger' | 'success' | 'error';
 }
 
 interface NotificationContextValue {
@@ -45,47 +47,91 @@ const NotificationContext = createContext<NotificationContextValue>({
 
 export const useNotifications = () => useContext(NotificationContext);
 
-function parseTriggerEvent(
-  evt: TradeFlowEvent,
-): Notification | null {
+function formatPriceLabel(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${(value * 100).toFixed(1)}c`
+    : '?';
+}
+
+function resolveDefinitionLabel(evt: TradeFlowEvent, payload: Record<string, unknown>): string {
+  const definitionName =
+    typeof evt.definition_name === 'string' && evt.definition_name.trim().length > 0
+      ? evt.definition_name.trim()
+      : typeof payload.definition_name === 'string' && payload.definition_name.trim().length > 0
+        ? payload.definition_name.trim()
+        : '';
+  return definitionName || `Flow #${evt.definition_id}`;
+}
+
+function parseEvent(evt: TradeFlowEvent): Notification | null {
   const p = evt.payload_json;
-  if (evt.event_type === 'trigger_once_fired') {
-    const rawPrice = p.price;
-    const price =
-      typeof rawPrice === 'number' ? (Number(rawPrice) * 100).toFixed(1) : '?';
-    const cond = p.triggered_condition === 'cross_above' ? '↑' : '↓';
-    const label = String(
-      p.triggered_outcome_label || p.node_key || 'Trigger',
-    );
-    return {
-      id: evt.id,
-      label,
-      price,
-      condition: cond,
-      market: String(p.market_slug ?? ''),
-      time: evt.created_at,
-    };
-  }
+  const definitionLabel = resolveDefinitionLabel(evt, p);
+  const market = String(p.market_slug ?? '').trim();
+
   if (
-    evt.event_type === 'step_completed' &&
-    p.triggered === true &&
-    typeof p.node_type === 'string' &&
-    (p.node_type as string).startsWith('trigger.')
+    evt.event_type === 'trigger_once_fired' ||
+    evt.event_type === 'trigger_ws_price_enqueued' ||
+    (
+      evt.event_type === 'step_completed' &&
+      p.triggered === true &&
+      typeof p.node_type === 'string' &&
+      (p.node_type as string).startsWith('trigger.')
+    )
   ) {
-    const rawPrice = p.current_price;
-    const price =
-      typeof rawPrice === 'number' ? (Number(rawPrice) * 100).toFixed(1) : '?';
-    const cond = p.trigger_condition === 'cross_above' ? '↑' : '↓';
-    const label = String(p.node_key || 'Trigger');
+    const rawPrice =
+      typeof p.triggered_price === 'number'
+        ? p.triggered_price
+        : typeof p.price === 'number'
+          ? p.price
+          : p.current_price;
+    const price = formatPriceLabel(rawPrice);
+    const triggerCondition =
+      typeof p.triggered_condition === 'string'
+        ? p.triggered_condition
+        : typeof p.trigger_condition === 'string'
+          ? p.trigger_condition
+          : '';
+    const direction = triggerCondition === 'cross_below' ? '↓' : '↑';
+    const outcome = String(
+      p.triggered_outcome_label || p.outcome_label || p.node_key || 'Trigger'
+    );
+    const evaluationMode =
+      typeof p.evaluation_mode === 'string'
+        ? p.evaluation_mode
+        : typeof p.ws_evaluation_mode_from_step === 'string'
+          ? p.ws_evaluation_mode_from_step
+          : '';
+
     return {
       id: evt.id,
-      label,
-      price,
-      condition: cond,
-      market: String(p.market_slug ?? ''),
+      title: `${definitionLabel}: ${outcome} ${direction} @ ${price}`,
+      detail: evaluationMode ? `${market || 'market?'} • ${evaluationMode}` : market || String(p.node_key || ''),
+      market,
       time: evt.created_at,
+      tone: 'trigger',
     };
   }
+
+  if (evt.event_type === 'telegram_notify') {
+    const status = String(p.status ?? '').trim().toLowerCase();
+    const message = String(p.message ?? '').trim();
+    const error = String(p.error ?? '').trim();
+    const chatId = String(p.chat_id ?? '').trim();
+    const sent = status === 'sent';
+    const detail = sent
+      ? [chatId ? `chat ${chatId}` : null, message || null].filter(Boolean).join(' • ')
+      : error || 'Telegram gonderimi basarisiz.';
+
+    return {
+      id: evt.id,
+      title: `${definitionLabel}: Telegram ${sent ? 'gonderildi' : 'hatasi'}`,
+      detail,
+      market,
+      time: evt.created_at,
+      tone: sent ? 'success' : 'error',
+    };
+  }
+
   return null;
 }
 
@@ -93,10 +139,42 @@ const MAX_NOTIFICATIONS = 50;
 const STORAGE_KEY = 'polybot_notifications';
 const STORAGE_LAST_SEEN_KEY = 'polybot_notif_last_seen_id';
 
+function normalizeStoredNotification(raw: unknown): Notification | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const item = raw as Record<string, unknown>;
+  const id = Number(item.id);
+  if (!Number.isFinite(id)) return null;
+
+  const legacyLabel = String(item.label ?? '').trim();
+  const legacyCondition = String(item.condition ?? '').trim();
+  const legacyPrice = String(item.price ?? '').trim();
+  const legacyTitle =
+    legacyLabel && legacyCondition && legacyPrice
+      ? `${legacyLabel} ${legacyCondition} @ ${legacyPrice}c`
+      : legacyLabel;
+
+  return {
+    id,
+    title: String(item.title ?? legacyTitle ?? `Event #${id}`),
+    detail: String(item.detail ?? item.market ?? '').trim(),
+    market: String(item.market ?? '').trim(),
+    time: String(item.time ?? ''),
+    tone:
+      item.tone === 'error' || item.tone === 'success' || item.tone === 'trigger'
+        ? item.tone
+        : 'trigger',
+  };
+}
+
 function loadNotifications(): Notification[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => normalizeStoredNotification(item))
+      .filter((item): item is Notification => item != null);
   } catch {
     return [];
   }
@@ -141,14 +219,18 @@ function saveLastSeenId(id: number) {
 }
 
 export function NotificationProvider({ children }: { children: ReactNode }) {
-  const { data: runsData } = useTradeFlowRuns(1, 1, undefined, 'running');
-  const activeRunId = runsData?.data?.[0]?.id ?? null;
-  const { data: eventsData } = useTradeFlowRunEvents(
-    activeRunId,
-    1,
-    50,
-    !!activeRunId,
-  );
+  const { flowEvents: streamEvents } = useTradeFlowRealtime();
+  const { data: eventsData } = useTradeFlowRecentEvents('running', 100, true);
+  const events = useMemo(() => {
+    const merged = new Map<number, TradeFlowEvent>();
+    for (const evt of eventsData?.data ?? []) {
+      merged.set(evt.id, evt);
+    }
+    for (const evt of streamEvents) {
+      merged.set(evt.id, evt);
+    }
+    return Array.from(merged.values()).sort((a, b) => b.id - a.id);
+  }, [eventsData?.data, streamEvents]);
 
   const [state, dispatch] = useReducer(notificationReducer, undefined, () => ({
     notifications: loadNotifications(),
@@ -164,8 +246,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   }, [state.notifications]);
 
   useEffect(() => {
-    if (!eventsData?.data?.length) return;
-    const events = eventsData.data;
+    if (!events.length) return;
     if (!initializedRef.current) {
       if (lastSeenEventIdRef.current === 0) {
         lastSeenEventIdRef.current = Math.max(...events.map((e) => e.id));
@@ -182,30 +263,27 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
 
     const incoming: Notification[] = [];
     const seenKeys = new Set<string>();
-    // trigger_once_fired önce gelsin (daha iyi label verisi)
-    const sorted = [...newEvents].sort((a, b) =>
-      a.event_type === 'trigger_once_fired' ? -1 : b.event_type === 'trigger_once_fired' ? 1 : 0,
-    );
+    const sorted = [...newEvents].sort((a, b) => a.id - b.id);
     for (const evt of sorted) {
-      const n = parseTriggerEvent(evt);
+      const n = parseEvent(evt);
       if (!n) continue;
-      const key = `${n.market}:${n.price}:${n.condition}`;
+      const key = `${n.title}:${n.detail}:${n.market}`;
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
       incoming.push(n);
-      toast.success(`${n.label} tetiklendi ${n.condition} @ ${n.price}¢`, {
-        description: `Market: ${n.market}`,
-        duration: 8000,
-      });
+      const description = [n.detail, n.market && n.market !== n.detail ? n.market : null]
+        .filter(Boolean)
+        .join(' • ');
+      if (n.tone === 'error') {
+        toast.error(n.title, { description, duration: 8000 });
+      } else {
+        toast.success(n.title, { description, duration: 8000 });
+      }
     }
     if (incoming.length > 0) {
       dispatch({ type: 'append', incoming });
     }
-  }, [eventsData]);
-
-  useEffect(() => {
-    initializedRef.current = false;
-  }, [activeRunId]);
+  }, [events]);
 
   return (
     <NotificationContext.Provider

@@ -502,10 +502,50 @@ export interface TradeFlowEvent {
   run_id: number | null;
   definition_id: number;
   version_id: number | null;
+  definition_name?: string | null;
   event_type: string;
   payload_json: Record<string, unknown>;
   created_at: string;
 }
+
+export interface TradeFlowRealtimePriceTick {
+  kind: 'price_tick';
+  run_id: number;
+  definition_id: number;
+  version_id: number;
+  node_key: string;
+  node_type: string;
+  market_slug: string | null;
+  token_id: string;
+  outcome_label: string | null;
+  price: number;
+  best_bid: number | null;
+  best_ask: number | null;
+  last_trade_price: number | null;
+  price_mode: string;
+  price_source: string;
+  price_source_detail: string | null;
+  evaluation_mode: string | null;
+  snapshot_age_ms: number | null;
+  event_ts: number | null;
+  created_at: string;
+}
+
+export interface TradeFlowRealtimeHeartbeat {
+  kind: 'heartbeat';
+  now: string;
+}
+
+export interface TradeFlowRealtimeReady {
+  kind: 'ready';
+  connected_at: string;
+}
+
+export type TradeFlowRealtimePayload =
+  | TradeFlowEvent
+  | TradeFlowRealtimePriceTick
+  | TradeFlowRealtimeHeartbeat
+  | TradeFlowRealtimeReady;
 
 export type NodeExecutionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'skipped';
 

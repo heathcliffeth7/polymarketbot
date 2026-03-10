@@ -47,9 +47,16 @@ export type PlaceOrderPresetSeed = {
 
 export type NodePaletteCategory = 'all' | 'trigger' | 'logic' | 'action';
 
+export interface FlowCanvasGraphChangeOptions {
+  allowGraphShrink?: boolean;
+}
+
 export interface FlowCanvasEditorProps {
   graph: import('@/lib/types').TradeFlowGraph;
-  onGraphChange: (nextGraph: import('@/lib/types').TradeFlowGraph) => void;
+  onGraphChange: (
+    nextGraph: import('@/lib/types').TradeFlowGraph,
+    options?: FlowCanvasGraphChangeOptions
+  ) => void;
   onError: (message: string | null) => void;
   onPendingNodeDraftChange?: (hasPending: boolean) => void;
   openPositions: TradeFlowOpenPositionOption[];

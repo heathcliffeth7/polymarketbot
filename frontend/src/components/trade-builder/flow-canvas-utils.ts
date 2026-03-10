@@ -150,19 +150,37 @@ function normalizedPosition(value: number | null | undefined): number {
   return Math.round(parsed);
 }
 
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(',')}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 export function createGraphFingerprint(nodes: TradeFlowNode[], edges: TradeFlowEdge[]): string {
   const nodePart = nodes
     .map(
       (node) =>
         `${node.key}:${node.type}:${normalizedPosition(node.positionX)}:${normalizedPosition(
           node.positionY
-        )}`
+        )}:${stableSerialize(cloneRecord(node.config))}`
     )
     .sort()
     .join('|');
 
   const edgePart = edges
-    .map((edge) => `${edge.key}:${edge.source}:${edge.target}:${edge.type}`)
+    .map(
+      (edge) =>
+        `${edge.key}:${edge.source}:${edge.target}:${edge.type}:${stableSerialize(
+          edge.condition ? cloneRecord(edge.condition) : null
+        )}`
+    )
     .sort()
     .join('|');
 

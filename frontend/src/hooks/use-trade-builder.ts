@@ -18,7 +18,7 @@ export function useTradeBuilderOutcomes(slug: string | null) {
   return usePolling<{ data: TradeBuilderOutcome[] }>(endpoint, 60000);
 }
 
-const LIVE_PRICE_INTERVAL = 60_000;
+const LIVE_PRICE_INTERVAL = 3_000;
 
 export function useCanvasLivePrices(slugs: string[]): Record<string, number> {
   const [prices, setPrices] = useState<Record<string, number>>({});

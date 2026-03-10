@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AppShell } from "@/components/layout/app-shell";
 import { NotificationProvider } from "@/contexts/notification-context";
+import { TradeFlowRealtimeProvider } from "@/contexts/trade-flow-realtime-context";
 import { Toaster } from "@/components/ui/sonner";
 
 const geistSans = Geist({
@@ -30,9 +31,11 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-zinc-950 text-zinc-100`}
       >
-        <NotificationProvider>
-          <AppShell>{children}</AppShell>
-        </NotificationProvider>
+        <TradeFlowRealtimeProvider>
+          <NotificationProvider>
+            <AppShell>{children}</AppShell>
+          </NotificationProvider>
+        </TradeFlowRealtimeProvider>
         <Toaster position="top-right" richColors />
       </body>
     </html>

@@ -1,0 +1,80 @@
+import type { ConditionOperator } from './types';
+
+export const RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME: Record<string, { asset: string; timeframe: string }> = {
+  btc_5m_updown: { asset: 'btc', timeframe: '5m' },
+  btc_15m_updown: { asset: 'btc', timeframe: '15m' },
+  eth_5m_updown: { asset: 'eth', timeframe: '5m' },
+  eth_15m_updown: { asset: 'eth', timeframe: '15m' },
+  sol_5m_updown: { asset: 'sol', timeframe: '5m' },
+  sol_15m_updown: { asset: 'sol', timeframe: '15m' },
+  xrp_5m_updown: { asset: 'xrp', timeframe: '5m' },
+  xrp_15m_updown: { asset: 'xrp', timeframe: '15m' },
+};
+
+export const QUICK_PRESET_BUY_SELL_REF_KEYS = new Set([
+  'preset_sell_current_position',
+  'preset_buy_current_position',
+]);
+
+export const QUICK_PRESET_BUY_SELL_KINDS = new Set([
+  'sell_current_position',
+  'buy_current_position',
+]);
+
+export const PRESET_PLACE_ORDER_KINDS = new Set([
+  'place_order',
+  ...QUICK_PRESET_BUY_SELL_KINDS,
+]);
+
+export const TRIGGER_MARKET_ONCE_SCOPE_VERSION = 2;
+export const CONDITION_OPERATORS: ConditionOperator[] = ['>', '>=', '<', '<=', '==', '!='];
+
+export const NUMERIC_KEYS = new Set([
+  'pollIntervalMs',
+  'minIntervalMs',
+  'triggerPrice',
+  'triggerPriceCent',
+  'maxPriceCent',
+  'sourceTradeId',
+  'minProgressPct',
+  'minPositionQty',
+  'delayMs',
+  'maxAttempts',
+  'sizeUsdc',
+  'sizePct',
+  'targetNotionalUsdc',
+  'minPriceDistanceCent',
+  'maxTriggers',
+  'builderOrderId',
+  'baseShares',
+  'baseUsdc',
+  'basePriceUsdc',
+  'dcaLevels',
+  'nearStep',
+  'stepMult',
+  'sizeMult',
+  'cutoffMin',
+  'tpProfitPct',
+  'slLossPct',
+  'slSpreadPct',
+  'confirmationMs',
+  'entryPriceCent',
+  'tpPriceCent',
+  'slPriceCent',
+]);
+
+export const BOOLEAN_KEYS = new Set([
+  'failOnMissingMarket',
+  'requireYesNoTokens',
+  'requireTokenId',
+  'tpEnabled',
+  'slEnabled',
+]);
+
+export const CONTEXT_BASE_KEYS = new Set([
+  'sourceTradeId',
+  'marketSlug',
+  'tokenId',
+  'outcomeLabel',
+  'autoClaimEnabled',
+]);
