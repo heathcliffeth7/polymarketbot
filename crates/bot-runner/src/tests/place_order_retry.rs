@@ -58,6 +58,34 @@ fn optimistic_exit_submit_scope_targets_child_share_sells() {
 }
 
 #[test]
+fn optimistic_exit_submit_scope_targets_flow_immediate_share_sells() {
+    let mut flow_sell = test_builder_order("sell", None);
+    flow_sell.kind = "immediate".to_string();
+    flow_sell.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    flow_sell.target_qty = Some(5.10);
+    flow_sell.remaining_qty = Some(5.10);
+    flow_sell.origin_flow_run_id = Some(42);
+
+    let mut flow_buy = flow_sell.clone();
+    flow_buy.side = "buy".to_string();
+
+    let mut no_origin = flow_sell.clone();
+    no_origin.origin_flow_run_id = None;
+
+    let mut notional_flow = flow_sell.clone();
+    notional_flow.size_basis = TRADE_BUILDER_SIZE_BASIS_NOTIONAL_USDC.to_string();
+    notional_flow.target_qty = None;
+    notional_flow.remaining_qty = None;
+
+    assert!(trade_builder_should_use_optimistic_exit_submit(&flow_sell));
+    assert!(!trade_builder_should_use_optimistic_exit_submit(&flow_buy));
+    assert!(!trade_builder_should_use_optimistic_exit_submit(&no_origin));
+    assert!(!trade_builder_should_use_optimistic_exit_submit(
+        &notional_flow
+    ));
+}
+
+#[test]
 fn midpoint_404_processing_error_is_retryable_for_exit_sell() {
     let mut order = test_builder_order("sell", Some(9));
     order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
@@ -67,6 +95,65 @@ fn midpoint_404_processing_error_is_retryable_for_exit_sell() {
         );
 
     assert!(trade_builder_should_retry_after_processing_error(&order));
+}
+
+#[test]
+fn fatal_exchange_rejection_catches_invalid_signature() {
+    assert!(trade_builder_error_is_fatal_exchange_rejection(
+        r#"HTTP status 400 Bad Request for POST /order | body: {"error":"invalid signature"}"#
+    ));
+}
+
+#[test]
+fn fatal_exchange_rejection_does_not_catch_balance() {
+    assert!(!trade_builder_error_is_fatal_exchange_rejection(
+        "not enough balance / allowance"
+    ));
+}
+
+#[test]
+fn should_retry_exit_sell_false_on_fatal_error() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(5.10);
+    order.remaining_qty = Some(5.10);
+    order.last_error = Some("invalid signature".to_string());
+
+    assert!(!trade_builder_should_retry_exit_sell(&order));
+}
+
+#[test]
+fn should_retry_after_processing_error_false_on_fatal() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(5.10);
+    order.remaining_qty = Some(5.10);
+    order.last_error = Some("invalid signature".to_string());
+
+    assert!(!trade_builder_should_retry_after_processing_error(&order));
+}
+
+#[test]
+fn trade_flow_should_inline_submit_only_when_flagged() {
+    assert!(trade_flow_should_inline_submit(&json!({
+        "builder_order_id": 7,
+        "should_inline_submit": true
+    })));
+    assert!(!trade_flow_should_inline_submit(&json!({
+        "builder_order_id": 7,
+        "should_inline_submit": false
+    })));
+    assert!(!trade_flow_should_inline_submit(&json!({
+        "builder_order_id": 7
+    })));
+}
+
+#[test]
+fn trade_builder_order_processing_guard_serializes_same_order_id() {
+    let first_guard = try_acquire_trade_builder_order_processing_guard(99).expect("first guard");
+    assert!(try_acquire_trade_builder_order_processing_guard(99).is_none());
+    drop(first_guard);
+    assert!(try_acquire_trade_builder_order_processing_guard(99).is_some());
 }
 
 #[test]
@@ -164,6 +251,62 @@ fn exit_sell_price_cap_never_chases_beyond_trigger_buffer() {
 }
 
 #[test]
+fn post_cancel_fill_qty_prefers_status_filled_size() {
+    assert_eq!(
+        trade_builder_detected_cancel_fill_qty(Some(5.811), 2.81),
+        Some(5.81)
+    );
+}
+
+#[test]
+fn post_cancel_fill_qty_falls_back_to_db_aggregate() {
+    assert_eq!(
+        trade_builder_detected_cancel_fill_qty(None, 2.814),
+        Some(2.81)
+    );
+    assert_eq!(trade_builder_detected_cancel_fill_qty(None, 0.0), None);
+}
+
+#[test]
+fn post_cancel_fill_notional_prefers_db_then_price_fallback() {
+    assert_eq!(
+        trade_builder_detected_cancel_fill_notional(4.91, Some(5.81), Some(0.83), Some(0.86), 0.9),
+        4.91
+    );
+    assert!(
+        (trade_builder_detected_cancel_fill_notional(0.0, Some(5.81), Some(0.83), Some(0.86), 0.9)
+            - 4.8223)
+            .abs()
+            < 0.000001
+    );
+    assert!(
+        (trade_builder_detected_cancel_fill_notional(0.0, Some(5.81), None, Some(0.86), 0.9)
+            - 4.9966)
+            .abs()
+            < 0.000001
+    );
+}
+
+#[test]
+fn post_cancel_full_fill_detection_uses_status_or_size_match() {
+    assert!(trade_builder_cancel_fill_is_full("filled", None, 2.0));
+    assert!(trade_builder_cancel_fill_is_full("open", Some(5.812), 5.81));
+    assert!(!trade_builder_cancel_fill_is_full("open", Some(6.25), 5.81));
+}
+
+#[test]
+fn post_cancel_partial_fill_remaining_usdc_clamps_at_zero() {
+    assert_eq!(
+        trade_builder_remaining_usdc_after_partial_fill(Some(5.0), None, 5.0, 2.24),
+        2.76
+    );
+    assert_eq!(
+        trade_builder_remaining_usdc_after_partial_fill(None, Some(5.0), 5.0, 8.0),
+        0.0
+    );
+}
+
+#[test]
 fn take_profit_child_detection_distinguishes_tp_from_sl() {
     let mut tp_order = test_builder_order("sell", Some(9));
     tp_order.trigger_condition = Some("cross_above".to_string());
@@ -234,7 +377,7 @@ fn stop_loss_local_inventory_fallback_shaves_buy_fee_and_buffer() {
     order.fee_rate_bps = 1000;
 
     let fallback = trade_builder_local_inventory_fallback(&order, 11.63).unwrap();
-    assert_eq!(fallback.submit_qty, 11.57);
+    assert_eq!(fallback.submit_qty, 11.46);
     assert!(fallback.estimated_fee_qty > 0.04);
     assert!(fallback.estimated_fee_qty < 0.06);
 }
@@ -250,7 +393,7 @@ fn estimated_visible_exit_qty_applies_to_take_profit_children() {
     order.fee_rate_bps = 1000;
 
     let estimate = trade_builder_estimated_visible_exit_qty(&order, 11.63).unwrap();
-    assert_eq!(estimate.submit_qty, 11.57);
+    assert_eq!(estimate.submit_qty, 11.46);
     assert!(estimate.estimated_fee_qty > 0.04);
     assert!(estimate.estimated_fee_qty < 0.06);
 }
@@ -270,7 +413,7 @@ fn optimistic_exit_retry_qty_prefers_estimated_visible_qty() {
         resolution.source,
         TradeBuilderExitRetryQtySource::EstimatedVisibleQty
     );
-    assert_eq!(resolution.next_qty, 11.57);
+    assert_eq!(resolution.next_qty, 11.46);
     assert!(resolution.estimated_fee_qty.unwrap() > 0.04);
 }
 
@@ -289,8 +432,8 @@ fn optimistic_exit_retry_qty_accepts_one_tick_estimated_decrement() {
         resolution.source,
         TradeBuilderExitRetryQtySource::EstimatedVisibleQty
     );
-    assert_eq!(resolution.formula_qty, Some(5.04));
-    assert_eq!(resolution.next_qty, 5.04);
+    assert_eq!(resolution.formula_qty, Some(5.0));
+    assert_eq!(resolution.next_qty, 5.0);
     assert_eq!(resolution.forced_tick_qty, None);
 }
 
@@ -333,9 +476,17 @@ fn stop_loss_inventory_resolution_prefers_local_fallback_when_visible_zero() {
     order.fee_rate_bps = 1000;
 
     let resolution = resolve_trade_builder_exit_inventory(&order, 12.05, Some(0.0)).unwrap();
-    assert_eq!(resolution.submit_qty, 11.97);
-    assert_eq!(resolution.local_fallback_qty, Some(11.97));
+    assert_eq!(resolution.submit_qty, 11.86);
+    assert_eq!(resolution.local_fallback_qty, Some(11.86));
     assert!(resolution.submit_partial_visible_inventory);
+}
+
+#[test]
+fn exit_qty_buffer_uses_floor_and_rate() {
+    assert_eq!(trade_builder_exit_qty_buffer(2.0), 0.03);
+    assert_eq!(trade_builder_exit_qty_buffer(5.0), 0.05);
+    assert_eq!(trade_builder_exit_qty_buffer(10.0), 0.1);
+    assert_eq!(trade_builder_exit_qty_buffer(15.0), 0.15);
 }
 
 #[test]

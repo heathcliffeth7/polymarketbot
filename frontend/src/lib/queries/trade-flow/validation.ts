@@ -1,5 +1,6 @@
 import {
   isValidTelegramChatTarget,
+  readEffectiveClaimConfigForServer,
   readTelegramBotTokenForServer,
   readTelegramChatIdForServer,
   type UserConfigContext,
@@ -217,6 +218,8 @@ export async function validateTradeFlowGraphWithRuntimeConfig(
   const graph = normalizeTradeFlowGraph(graphJson);
   const baseValidation = validateTradeFlowGraph(graph);
   const issues = [...baseValidation.issues];
+  const autoClaimEnabled =
+    isRecord(graph.context) && toBooleanish(graph.context.autoClaimEnabled) === true;
   const telegramNodes = graph.nodes.filter((node) => node.type === 'action.telegram_notify');
 
   if (telegramNodes.length > 0) {
@@ -293,6 +296,50 @@ export async function validateTradeFlowGraphWithRuntimeConfig(
           nodeKey: node.key,
         });
       }
+    }
+  }
+
+  if (autoClaimEnabled) {
+    try {
+      const claim = await readEffectiveClaimConfigForServer(context);
+      if (!claim.enabled) {
+        issues.push({
+          severity: 'error',
+          code: 'auto_claim_enabled_but_claim_disabled',
+          message:
+            'autoClaimEnabled=true but claim config is disabled or missing. Go to Settings -> Claim and enable auto-claiming first.',
+        });
+      } else {
+        const missingSources: string[] = [];
+        if (!claim.hasRpcSource) missingSources.push('rpc_url/rpc_url_env');
+        if (!claim.hasUserAddressSource) missingSources.push('user_address/user_address_env');
+        if (!claim.hasPrivateKeySource) {
+          missingSources.push('private_key/private_key_env');
+        }
+        if (claim.executionMode === 'builder_relayer') {
+          if (!claim.hasSafeAddressSource) {
+            missingSources.push('exchange.gnosis_safe_address');
+          }
+          if (!claim.hasBuilderCredsSource) {
+            missingSources.push(
+              'exchange.builder_api_key/builder_api_secret/builder_api_passphrase'
+            );
+          }
+        }
+        if (missingSources.length > 0) {
+          issues.push({
+            severity: 'error',
+            code: 'auto_claim_enabled_but_claim_incomplete',
+            message: `autoClaimEnabled=true but claim config is incomplete: missing ${missingSources.join(', ')}.`,
+          });
+        }
+      }
+    } catch {
+      issues.push({
+        severity: 'error',
+        code: 'auto_claim_config_read_failed',
+        message: 'Failed to read claim config for validation.',
+      });
     }
   }
 

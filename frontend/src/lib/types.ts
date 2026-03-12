@@ -30,6 +30,7 @@ export type BuilderOrderStatus =
   | 'canceled'
   | 'expired'
   | 'blocked'
+  | 'guard_blocked'
   | 'error';
 export type TriggerCondition = 'cross_above' | 'cross_below';
 export type BuilderWorkflowStatus =
@@ -253,6 +254,8 @@ export interface TradeBuilderOrder {
   trigger_condition: TriggerCondition | null;
   trigger_price: number | null;
   max_price: number | null;
+  guard_trigger_price: number | null;
+  best_ask_floor_price: number | null;
   size_usdc: number;
   min_price_distance_cent: number;
   expires_at: string | null;

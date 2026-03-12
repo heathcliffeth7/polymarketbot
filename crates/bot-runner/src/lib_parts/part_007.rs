@@ -60,11 +60,8 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
             .parse::<LocalWallet>()
             .context("parse signer private key")?
             .with_chain_id(cfg.exchange.chain_id);
-        let exchange_address: Address = cfg
-            .exchange
-            .ctf_exchange_address
-            .parse()
-            .context("parse ctf_exchange_address")?;
+        let (exchange_address, neg_risk_exchange_address) =
+            resolve_clob_exchange_addresses(cfg)?;
         let gnosis_safe: Option<Address> = cfg
             .exchange
             .resolve_gnosis_safe_address()
@@ -78,6 +75,7 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
             creds.clone(),
             wallet,
             exchange_address,
+            neg_risk_exchange_address,
             cfg.exchange.chain_id,
             gnosis_safe,
         );
@@ -94,9 +92,10 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
             Err(e) => {
                 warn!(run_id, market = %cycle_slug, error = %e, "WS_USER_CONNECT_FAILED_USING_REST_RECONCILE")
             }
-        }
+    }
     }
     let mut auto_claim_runtimes: HashMap<i64, FlowAutoClaimRuntime> = HashMap::new();
+    let mut flow_runtime_caches = FlowRuntimeCaches::default();
 
     run_daily_pnl_startup_check(run_id, repo, cfg.risk.max_daily_loss_usdc).await?;
     if let Some(client) = clob_client.as_ref() {
@@ -160,6 +159,7 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
                 .as_ref()
                 .map(|client| client as &dyn OrderExecutor),
             &ws,
+            &mut flow_runtime_caches,
             &mut auto_claim_runtimes,
         )
         .await
@@ -212,6 +212,7 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
                     client_order_id: client_order_id.clone(),
                     leg_side: None,
                     fee_rate_bps: 1000,
+                    neg_risk: false,
                 };
 
                 let ack = client.place(&req).await?;
@@ -577,11 +578,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         .parse::<LocalWallet>()
         .context("parse signer private key")?
         .with_chain_id(cfg.exchange.chain_id);
-    let exchange_address: Address = cfg
-        .exchange
-        .ctf_exchange_address
-        .parse()
-        .context("parse ctf_exchange_address")?;
+    let (exchange_address, neg_risk_exchange_address) = resolve_clob_exchange_addresses(cfg)?;
     let gnosis_safe: Option<Address> = cfg
         .exchange
         .resolve_gnosis_safe_address()
@@ -595,6 +592,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         creds.clone(),
         wallet,
         exchange_address,
+        neg_risk_exchange_address,
         cfg.exchange.chain_id,
         gnosis_safe,
     );
@@ -603,6 +601,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
     run_balance_preflight(run_id, repo, &client, cfg.risk.min_balance_usdc).await;
     let ws = ClobWsClient::new(cfg.exchange.clob_ws_url.clone());
     let mut auto_claim_runtimes: HashMap<i64, FlowAutoClaimRuntime> = HashMap::new();
+    let mut flow_runtime_caches = FlowRuntimeCaches::default();
 
     info!(run_id, "FLOW_ONLY_LOOP_STARTED");
 
@@ -617,6 +616,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         let now = Instant::now();
         if now >= next_housekeeping_at {
             loop_count += 1;
+            flow_runtime_caches.prune_stale();
             if let Err(e) = process_trade_builder_orders(repo, run_id, cfg, &client, &ws).await {
                 warn!(run_id, error = %e, "TRADE_BUILDER_PROCESS_FAILED");
             }
@@ -638,6 +638,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                 cfg,
                 Some(&client),
                 &ws,
+                &mut flow_runtime_caches,
                 &mut auto_claim_runtimes,
             )
             .await
@@ -667,6 +668,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                 run_id,
                 Some(&client),
                 &ws,
+                &mut flow_runtime_caches,
             ).await {
                 warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_TIMER_READY");
             }
@@ -690,6 +692,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                         run_id,
                         Some(&client),
                         &ws,
+                        &mut flow_runtime_caches,
                     ).await {
                         warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_TIMER_READY");
                     }
@@ -700,13 +703,27 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                         next_housekeeping_at = Instant::now();
                         continue;
                     }
+                    let dirty_token_ids = ws.take_dirty_market_tokens().await;
+                    ws.clear_dirty_market_tokens(&dirty_token_ids).await;
                     if let Err(e) = process_trade_flow_ws_fast_path(
                         repo,
                         run_id,
                         Some(&client),
                         &ws,
+                        &mut flow_runtime_caches,
+                        &dirty_token_ids,
                     ).await {
                         warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_FAST_WAKE");
+                    }
+                    if let Err(e) = evaluate_armed_builder_orders_for_dirty_tokens(
+                        repo,
+                        run_id,
+                        &ws,
+                        &dirty_token_ids,
+                    )
+                    .await
+                    {
+                        warn!(run_id, error = %e, "ARMED_ORDER_WS_EVAL_FAILED");
                     }
                 }
                 _ = FLOW_PROCESS_NOTIFY.notified() => {
@@ -715,6 +732,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                         run_id,
                         Some(&client),
                         &ws,
+                        &mut flow_runtime_caches,
                     ).await {
                         warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_NOTIFY_WAKE");
                     }
@@ -729,13 +747,27 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                         next_housekeeping_at = Instant::now();
                         continue;
                     }
+                    let dirty_token_ids = ws.take_dirty_market_tokens().await;
+                    ws.clear_dirty_market_tokens(&dirty_token_ids).await;
                     if let Err(e) = process_trade_flow_ws_fast_path(
                         repo,
                         run_id,
                         Some(&client),
                         &ws,
+                        &mut flow_runtime_caches,
+                        &dirty_token_ids,
                     ).await {
                         warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_FAST_WAKE");
+                    }
+                    if let Err(e) = evaluate_armed_builder_orders_for_dirty_tokens(
+                        repo,
+                        run_id,
+                        &ws,
+                        &dirty_token_ids,
+                    )
+                    .await
+                    {
+                        warn!(run_id, error = %e, "ARMED_ORDER_WS_EVAL_FAILED");
                     }
                 }
                 _ = FLOW_PROCESS_NOTIFY.notified() => {
@@ -744,6 +776,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                         run_id,
                         Some(&client),
                         &ws,
+                        &mut flow_runtime_caches,
                     ).await {
                         warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_NOTIFY_WAKE");
                     }

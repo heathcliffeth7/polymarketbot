@@ -20,7 +20,7 @@ import {
   type NodePaletteCategory,
   type FlowCanvasEditorProps,
 } from '../flow-canvas-constants';
-import { minimapColor } from '../flow-canvas-utils';
+import { minimapColor, type UpstreamMaxPriceResolution } from '../flow-canvas-utils';
 import { NODE_TYPES } from '../flow-canvas-node-card';
 import type { TradeBuilderOutcome, TradeFlowOpenPositionOption } from '@/lib/types';
 
@@ -79,6 +79,8 @@ interface FlowCanvasEditorLayoutProps {
   marketOutcomes: TradeBuilderOutcome[];
   outcomesLoading: boolean;
   selectedNodeUpstreamAutoScope: boolean;
+  selectedNodeUpstreamTriggerPrice: boolean;
+  selectedNodeUpstreamMaxPriceResolution: UpstreamMaxPriceResolution;
   userTelegramBotTokenMasked: string | null;
   userTelegramDefaultChatId: string | null;
   nodeInspectorActions: NodeInspectorActions;
@@ -143,6 +145,8 @@ export function FlowCanvasEditorLayout({
   marketOutcomes,
   outcomesLoading,
   selectedNodeUpstreamAutoScope,
+  selectedNodeUpstreamTriggerPrice,
+  selectedNodeUpstreamMaxPriceResolution,
   userTelegramBotTokenMasked,
   userTelegramDefaultChatId,
   nodeInspectorActions,
@@ -302,6 +306,8 @@ export function FlowCanvasEditorLayout({
               marketOutcomes={marketOutcomes}
               marketOutcomesLoading={outcomesLoading}
               upstreamAutoScope={selectedNodeUpstreamAutoScope}
+              upstreamHasTriggerPrice={selectedNodeUpstreamTriggerPrice}
+              upstreamMaxPriceResolution={selectedNodeUpstreamMaxPriceResolution}
               userTelegramBotTokenMasked={userTelegramBotTokenMasked ?? null}
               userTelegramDefaultChatId={userTelegramDefaultChatId ?? null}
               actions={nodeInspectorActions}

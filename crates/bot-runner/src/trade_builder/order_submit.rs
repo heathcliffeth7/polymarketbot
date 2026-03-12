@@ -1,3 +1,89 @@
+const TRADE_BUILDER_MARKET_SPEC_CACHE_TTL_SECS: u64 = 300;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TradeBuilderMarketSpec {
+    neg_risk: bool,
+    order_price_min_tick_size: Option<f64>,
+    order_min_size: Option<f64>,
+}
+
+static TRADE_BUILDER_MARKET_SPEC_CACHE: LazyLock<
+    StdMutex<HashMap<String, (Instant, TradeBuilderMarketSpec)>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn normalize_trade_builder_market_spec_number(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value > 0.0)
+}
+
+fn trade_builder_market_spec_slug_candidates(market_slug: &str) -> Vec<String> {
+    let normalized = market_slug.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = vec![normalized.clone()];
+    if let Some((parent, _)) = normalized.rsplit_once('-') {
+        if !parent.is_empty() {
+            let parent = parent.to_string();
+            if !candidates.contains(&parent) {
+                candidates.push(parent);
+            }
+        }
+    }
+    candidates
+}
+
+fn trade_builder_market_spec_cache_get(market_slug: &str) -> Option<TradeBuilderMarketSpec> {
+    let cache = TRADE_BUILDER_MARKET_SPEC_CACHE.lock().ok()?;
+    let (cached_at, spec) = cache.get(market_slug)?;
+    if cached_at.elapsed().as_secs() > TRADE_BUILDER_MARKET_SPEC_CACHE_TTL_SECS {
+        return None;
+    }
+    Some(*spec)
+}
+
+fn trade_builder_market_spec_cache_put(market_slug: &str, spec: TradeBuilderMarketSpec) {
+    if let Ok(mut cache) = TRADE_BUILDER_MARKET_SPEC_CACHE.lock() {
+        cache.insert(market_slug.to_string(), (Instant::now(), spec));
+    }
+}
+
+async fn resolve_trade_builder_market_spec(
+    cfg: &AppConfig,
+    market_slug: &str,
+) -> Option<TradeBuilderMarketSpec> {
+    let candidates = trade_builder_market_spec_slug_candidates(market_slug);
+    if candidates.is_empty() {
+        return None;
+    }
+
+    for candidate in &candidates {
+        if let Some(spec) = trade_builder_market_spec_cache_get(candidate) {
+            trade_builder_market_spec_cache_put(&candidates[0], spec);
+            return Some(spec);
+        }
+    }
+
+    let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
+    for candidate in &candidates {
+        let Ok(Some(market)) = gamma.get_market_spec_by_slug(candidate).await else {
+            continue;
+        };
+        let spec = TradeBuilderMarketSpec {
+            neg_risk: market.neg_risk,
+            order_price_min_tick_size: normalize_trade_builder_market_spec_number(
+                market.order_price_min_tick_size,
+            ),
+            order_min_size: normalize_trade_builder_market_spec_number(market.order_min_size),
+        };
+        trade_builder_market_spec_cache_put(candidate, spec);
+        trade_builder_market_spec_cache_put(&candidates[0], spec);
+        return Some(spec);
+    }
+
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn submit_trade_builder_trigger_order(
     repo: &PostgresRepository,
@@ -6,8 +92,10 @@ async fn submit_trade_builder_trigger_order(
     limits: &RiskLimits,
     policy: &impl RiskPolicy,
     client: &dyn OrderExecutor,
+    ws: &ClobWsClient,
     order: &mut TradeBuilderOrder,
     current_price: f64,
+    best_ask: Option<f64>,
     fee_rate_bps: u64,
     resolved_size_usdc: f64,
     trigger_size_mode: Option<String>,
@@ -47,27 +135,225 @@ async fn submit_trade_builder_trigger_order(
         };
     anyhow::ensure!(size > 0.0, "computed builder order size is zero");
 
-    if trade_builder_price_exceeds_max_price(order, desired_price) {
-        repo.set_trade_builder_order_status(order.id, "canceled", Some("above_max_price"))
+    if trade_builder_price_below_guard_trigger(order, current_price) {
+        if order.retry_on_trigger_guard_block {
+            let notification_message = order.notify_on_trigger_guard_blocked.then(|| {
+                build_trigger_guard_waiting_notification_message(order, current_price)
+            });
+            transition_trade_builder_order_to_guard_waiting(
+                repo,
+                order,
+                "below_trigger_price_guard",
+                "trigger_price_waiting",
+                &json!({
+                    "reason_code": "below_trigger_price_guard",
+                    "reason_message": "Current price is below the trigger price guard floor. Order is waiting for recovery.",
+                    "market_slug": &order.market_slug,
+                    "token_id": &order.token_id,
+                    "trigger_condition": order.trigger_condition.as_deref(),
+                    "trigger_price": order.trigger_price,
+                    "guard_trigger_price": order.guard_trigger_price,
+                    "current_price": current_price,
+                    "desired_price": desired_price,
+                    "status_before": &order.status,
+                    "status_after": TRADE_BUILDER_GUARD_BLOCKED_STATUS
+                }),
+                remaining_usdc,
+                remaining_qty,
+                order
+                    .notify_on_trigger_guard_blocked
+                    .then_some("trigger_price_waiting"),
+                notification_message,
+            )
             .await?;
-        repo.append_trade_builder_order_event(
-            order.id,
-            "max_price_blocked",
-            &json!({
-                "reason_code": "above_max_price",
-                "reason_message": "Order price would exceed the configured max price.",
-                "market_slug": &order.market_slug,
-                "token_id": &order.token_id,
-                "trigger_condition": order.trigger_condition.as_deref(),
-                "trigger_price": order.trigger_price,
-                "max_price": order.max_price,
-                "current_price": current_price,
-                "desired_price": desired_price,
-                "status_before": &order.status,
-                "status_after": "canceled"
-            }),
-        )
-        .await?;
+        } else {
+            repo.set_trade_builder_order_status(order.id, "canceled", Some("below_trigger_price_guard"))
+                .await?;
+            repo.append_trade_builder_order_event(
+                order.id,
+                "trigger_price_blocked",
+                &json!({
+                    "reason_code": "below_trigger_price_guard",
+                    "reason_message": "Current price is below the trigger price guard floor.",
+                    "market_slug": &order.market_slug,
+                    "token_id": &order.token_id,
+                    "trigger_condition": order.trigger_condition.as_deref(),
+                    "trigger_price": order.trigger_price,
+                    "guard_trigger_price": order.guard_trigger_price,
+                    "current_price": current_price,
+                    "desired_price": desired_price,
+                    "status_before": &order.status,
+                    "status_after": "canceled"
+                }),
+            )
+            .await?;
+            if order.notify_on_trigger_guard_blocked {
+                let message = build_trigger_guard_blocked_notification_message(order, current_price);
+                send_trade_builder_notification(repo, order, "trigger_price_blocked", &message)
+                    .await;
+            }
+        }
+        warn!(
+            run_id,
+            builder_order_id = order.id,
+            market = %order.market_slug,
+            token_id = %order.token_id,
+            current_price,
+            desired_price,
+            guard_trigger_price = ?order.guard_trigger_price,
+            waiting = order.retry_on_trigger_guard_block,
+            reason_code = "below_trigger_price_guard",
+            "TRADE_BUILDER_ORDER_TRIGGER_PRICE_BLOCKED"
+        );
+        return Ok(());
+    }
+
+    let execution_floor_reason = if trade_builder_execution_floor_missing_best_ask(order, best_ask) {
+        Some("best_ask_unavailable")
+    } else {
+        trade_builder_execution_floor_block_reason(order, best_ask)
+    };
+    if let Some(reason_code) = execution_floor_reason {
+        let reason_message = match reason_code {
+            "best_ask_unavailable" => {
+                "Best ask is unavailable, so the execution floor guard blocked the buy order."
+            }
+            "below_best_ask_floor" => {
+                "Best ask is below the configured execution floor."
+            }
+            _ => "Execution floor guard blocked the buy order.",
+        };
+        if order.retry_on_execution_floor_guard_block {
+            let notification_message = order.notify_on_execution_floor_blocked.then(|| {
+                build_execution_floor_waiting_notification_message(order, best_ask)
+            });
+            transition_trade_builder_order_to_guard_waiting(
+                repo,
+                order,
+                reason_code,
+                "execution_floor_waiting",
+                &json!({
+                    "reason_code": reason_code,
+                    "reason_message": "Execution floor guard moved the order into waiting mode.",
+                    "market_slug": &order.market_slug,
+                    "token_id": &order.token_id,
+                    "trigger_condition": order.trigger_condition.as_deref(),
+                    "trigger_price": order.trigger_price,
+                    "best_ask_floor_price": order.best_ask_floor_price,
+                    "best_ask": best_ask,
+                    "current_price": current_price,
+                    "desired_price": desired_price,
+                    "status_before": &order.status,
+                    "status_after": TRADE_BUILDER_GUARD_BLOCKED_STATUS
+                }),
+                remaining_usdc,
+                remaining_qty,
+                order
+                    .notify_on_execution_floor_blocked
+                    .then_some("execution_floor_waiting"),
+                notification_message,
+            )
+            .await?;
+        } else {
+            repo.set_trade_builder_order_status(order.id, "canceled", Some(reason_code))
+                .await?;
+            repo.append_trade_builder_order_event(
+                order.id,
+                "execution_floor_blocked",
+                &json!({
+                    "reason_code": reason_code,
+                    "reason_message": reason_message,
+                    "market_slug": &order.market_slug,
+                    "token_id": &order.token_id,
+                    "trigger_condition": order.trigger_condition.as_deref(),
+                    "trigger_price": order.trigger_price,
+                    "best_ask_floor_price": order.best_ask_floor_price,
+                    "best_ask": best_ask,
+                    "current_price": current_price,
+                    "desired_price": desired_price,
+                    "status_before": &order.status,
+                    "status_after": "canceled"
+                }),
+            )
+            .await?;
+            if order.notify_on_execution_floor_blocked {
+                let message = build_execution_floor_blocked_notification_message(order, best_ask);
+                send_trade_builder_notification(repo, order, "execution_floor_blocked", &message)
+                    .await;
+            }
+        }
+        warn!(
+            run_id,
+            builder_order_id = order.id,
+            market = %order.market_slug,
+            token_id = %order.token_id,
+            current_price,
+            best_ask,
+            desired_price,
+            best_ask_floor_price = ?order.best_ask_floor_price,
+            waiting = order.retry_on_execution_floor_guard_block,
+            reason_code,
+            "TRADE_BUILDER_ORDER_EXECUTION_FLOOR_BLOCKED"
+        );
+        return Ok(());
+    }
+
+    if trade_builder_price_exceeds_max_price(order, desired_price) {
+        if order.retry_on_max_price_block {
+            let notification_message = order.notify_on_max_price_blocked.then(|| {
+                build_max_price_waiting_notification_message(order, current_price, desired_price)
+            });
+            transition_trade_builder_order_to_guard_waiting(
+                repo,
+                order,
+                "above_max_price",
+                "max_price_waiting",
+                &json!({
+                    "reason_code": "above_max_price",
+                    "reason_message": "Max price guard moved the order into waiting mode.",
+                    "market_slug": &order.market_slug,
+                    "token_id": &order.token_id,
+                    "trigger_condition": order.trigger_condition.as_deref(),
+                    "trigger_price": order.trigger_price,
+                    "max_price": order.max_price,
+                    "current_price": current_price,
+                    "desired_price": desired_price,
+                    "status_before": &order.status,
+                    "status_after": TRADE_BUILDER_GUARD_BLOCKED_STATUS
+                }),
+                remaining_usdc,
+                remaining_qty,
+                order.notify_on_max_price_blocked.then_some("max_price_waiting"),
+                notification_message,
+            )
+            .await?;
+        } else {
+            repo.set_trade_builder_order_status(order.id, "canceled", Some("above_max_price"))
+                .await?;
+            repo.append_trade_builder_order_event(
+                order.id,
+                "max_price_blocked",
+                &json!({
+                    "reason_code": "above_max_price",
+                    "reason_message": "Order price would exceed the configured max price.",
+                    "market_slug": &order.market_slug,
+                    "token_id": &order.token_id,
+                    "trigger_condition": order.trigger_condition.as_deref(),
+                    "trigger_price": order.trigger_price,
+                    "max_price": order.max_price,
+                    "current_price": current_price,
+                    "desired_price": desired_price,
+                    "status_before": &order.status,
+                    "status_after": "canceled"
+                }),
+            )
+            .await?;
+            if let Some((notification_type, message)) =
+                build_max_price_blocked_notification(order, current_price, desired_price)
+            {
+                send_trade_builder_notification(repo, order, notification_type, &message).await;
+            }
+        }
         warn!(
             run_id,
             builder_order_id = order.id,
@@ -76,6 +362,7 @@ async fn submit_trade_builder_trigger_order(
             current_price,
             desired_price,
             max_price = ?order.max_price,
+            waiting = order.retry_on_max_price_block,
             reason_code = "above_max_price",
             "TRADE_BUILDER_ORDER_MAX_PRICE_BLOCKED"
         );
@@ -138,6 +425,32 @@ async fn submit_trade_builder_trigger_order(
     let mut submit_size = size;
     let mut submit_remaining_usdc = remaining_usdc;
     let mut submit_remaining_qty = remaining_qty;
+
+    if optimistic_exit_submit
+        && optimistic_exit_stage == Some(TradeBuilderExitSubmitStage::DynamicGross)
+    {
+        if let Some(estimated) = trade_builder_estimated_visible_exit_qty(order, size) {
+            if estimated.submit_qty < submit_size {
+                submit_size = estimated.submit_qty;
+                submit_remaining_qty = Some(estimated.submit_qty);
+                submit_remaining_usdc = Some((estimated.submit_qty * desired_price).max(0.0));
+                repo.append_trade_builder_order_event(
+                    order.id,
+                    "dynamic_gross_fee_adjusted",
+                    &json!({
+                        "submit_kind": "submit",
+                        "original_qty": size,
+                        "adjusted_qty": estimated.submit_qty,
+                        "estimated_fee_qty": estimated.estimated_fee_qty,
+                        "execution_price": estimated.execution_price,
+                        "fee_rate_bps": estimated.fee_rate_bps,
+                        "buffer_qty": trade_builder_exit_qty_buffer(order.target_qty.unwrap_or(size)),
+                    }),
+                )
+                .await?;
+            }
+        }
+    }
 
     if order.side == "sell"
         && size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES
@@ -264,6 +577,7 @@ async fn submit_trade_builder_trigger_order(
     let normalized_execution_mode = normalize_trade_builder_execution_mode(&order.execution_mode);
     let order_type = clob_order_type_for_execution_mode(normalized_execution_mode);
     let client_order_id = format!("tb-{}", Uuid::new_v4());
+    let market_spec = resolve_trade_builder_market_spec(cfg, &order.market_slug).await;
     let req = PlaceOrderRequest {
         market: order.market_slug.clone(),
         token_id: Some(order.token_id.clone()),
@@ -275,6 +589,7 @@ async fn submit_trade_builder_trigger_order(
         client_order_id: client_order_id.clone(),
         leg_side: None,
         fee_rate_bps,
+        neg_risk: market_spec.is_some_and(|spec| spec.neg_risk),
     };
 
     maybe_record_trade_builder_buy_inventory_baseline(
@@ -310,6 +625,43 @@ async fn submit_trade_builder_trigger_order(
         Ok(ack) => ack,
         Err(err) => {
             let error_text = err.to_string();
+            if trade_builder_error_is_fatal_exchange_rejection(&error_text) {
+                repo.set_trade_builder_order_status(order.id, "error", Some(&error_text))
+                    .await?;
+                repo.append_trade_builder_order_event(
+                    order.id,
+                    "fatal_exchange_rejection",
+                    &json!({
+                        "error": error_text,
+                        "status_before": &order.status,
+                        "side": &order.side,
+                        "market_slug": &order.market_slug,
+                        "token_id": &order.token_id,
+                        "attempted_qty": submit_size,
+                        "desired_price": desired_price,
+                        "neg_risk": req.neg_risk,
+                        "order_price_min_tick_size": market_spec.and_then(|spec| spec.order_price_min_tick_size),
+                        "order_min_size": market_spec.and_then(|spec| spec.order_min_size),
+                    }),
+                )
+                .await?;
+                warn!(
+                    run_id,
+                    builder_order_id = order.id,
+                    market = %order.market_slug,
+                    error = %error_text,
+                    neg_risk = req.neg_risk,
+                    "TRADE_BUILDER_FATAL_EXCHANGE_REJECTION"
+                );
+                maybe_send_trade_builder_system_alert(
+                    repo,
+                    order,
+                    "fatal_exchange_rejection",
+                    &error_text,
+                )
+                .await;
+                return Ok(());
+            }
             if order.side == "sell"
                 && size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES
                 && trade_builder_error_indicates_balance_or_allowance(&error_text)
@@ -317,21 +669,10 @@ async fn submit_trade_builder_trigger_order(
                 if optimistic_exit_submit {
                     let current_attempt_stage =
                         optimistic_exit_stage.unwrap_or(TradeBuilderExitSubmitStage::DynamicGross);
-                    let retry_resolution = match current_attempt_stage {
-                        TradeBuilderExitSubmitStage::DynamicGross => {
-                            resolve_trade_builder_exit_retry_qty(order, submit_size)
-                        }
-                        _ => None,
-                    };
-                    let next_attempt_stage = match current_attempt_stage {
-                        TradeBuilderExitSubmitStage::DynamicGross => retry_resolution
-                            .map(|_| TradeBuilderExitSubmitStage::EstimatedVisible)
-                            .unwrap_or(TradeBuilderExitSubmitStage::VisibleInventory),
-                        TradeBuilderExitSubmitStage::EstimatedVisible
-                        | TradeBuilderExitSubmitStage::VisibleInventory => {
-                            TradeBuilderExitSubmitStage::VisibleInventory
-                        }
-                    };
+                    let next_attempt_stage =
+                        trade_builder_next_optimistic_exit_stage_after_balance_reject(
+                            current_attempt_stage,
+                        );
                     repo.append_trade_builder_order_event(
                         order.id,
                         "optimistic_exit_balance_rejected",
@@ -345,67 +686,24 @@ async fn submit_trade_builder_trigger_order(
                             "requested_qty": requested_share_qty,
                             "attempted_qty": submit_size,
                             "available_qty": available_qty,
-                            "retry_qty": retry_resolution.map(|resolution| resolution.next_qty),
-                            "retry_qty_source": retry_resolution.map(|resolution| resolution.source.as_str()),
-                            "formula_qty": retry_resolution.and_then(|resolution| resolution.formula_qty),
-                            "forced_tick_qty": retry_resolution.and_then(|resolution| resolution.forced_tick_qty),
                         }),
                     )
                     .await?;
-                    if current_attempt_stage == TradeBuilderExitSubmitStage::DynamicGross {
-                        let selection_reason = retry_resolution
-                            .map(|resolution| resolution.source.as_str())
-                            .unwrap_or("unresolved");
-                        repo.append_trade_builder_order_event(
-                            order.id,
-                            "optimistic_exit_retry_estimated_qty",
-                            &json!({
-                                "attempt_stage": current_attempt_stage.as_str(),
-                                "next_attempt_stage": next_attempt_stage.as_str(),
-                                "attempted_qty": submit_size,
-                                "available_qty": available_qty,
-                                "formula_qty": retry_resolution.and_then(|resolution| resolution.formula_qty),
-                                "forced_tick_qty": retry_resolution.and_then(|resolution| resolution.forced_tick_qty),
-                                "selected_retry_qty": retry_resolution.map(|resolution| resolution.next_qty),
-                                "selection_reason": selection_reason,
-                                "estimated_fee_qty": retry_resolution.and_then(|resolution| resolution.estimated_fee_qty),
-                                "entry_price": retry_resolution.and_then(|resolution| resolution.execution_price),
-                                "fee_rate_bps": retry_resolution.and_then(|resolution| resolution.fee_rate_bps),
-                            }),
-                        )
-                        .await?;
-                        schedule_trade_builder_exit_sell_retry(
-                            repo,
-                            order,
-                            "submit_retry_scheduled",
-                            &error_text,
-                            current_price,
-                            desired_price,
-                            requested_share_qty,
-                            available_qty,
-                            Some(submit_size),
-                            retry_resolution.map(|resolution| resolution.next_qty),
-                            Some(current_attempt_stage),
-                            Some(next_attempt_stage),
-                        )
-                        .await?;
-                    } else {
-                        schedule_trade_builder_exit_sell_retry(
-                            repo,
-                            order,
-                            "submit_retry_scheduled",
-                            &error_text,
-                            current_price,
-                            desired_price,
-                            requested_share_qty,
-                            available_qty,
-                            Some(submit_size),
-                            None,
-                            Some(current_attempt_stage),
-                            Some(next_attempt_stage),
-                        )
-                        .await?;
-                    }
+                    schedule_trade_builder_exit_sell_retry(
+                        repo,
+                        order,
+                        "submit_retry_scheduled",
+                        &error_text,
+                        current_price,
+                        desired_price,
+                        requested_share_qty,
+                        available_qty,
+                        Some(submit_size),
+                        None,
+                        Some(current_attempt_stage),
+                        Some(next_attempt_stage),
+                    )
+                    .await?;
                     return Ok(());
                 }
                 if trade_builder_stop_loss_latched(order) {
@@ -491,7 +789,10 @@ async fn submit_trade_builder_trigger_order(
         "normalized_status": normalized_status,
         "trigger_price": order.trigger_price,
         "max_price": order.max_price,
+        "guard_trigger_price": order.guard_trigger_price,
+        "best_ask_floor_price": order.best_ask_floor_price,
         "current_price": current_price,
+        "best_ask": best_ask,
         "execution_price": desired_price,
         "execution_mode": normalized_execution_mode,
         "order_type": order_type,
@@ -591,6 +892,7 @@ async fn submit_trade_builder_trigger_order(
         };
         finalize_builder_fill(
             repo,
+            ws,
             order,
             &exchange_order_id,
             canonical_entry_qty,

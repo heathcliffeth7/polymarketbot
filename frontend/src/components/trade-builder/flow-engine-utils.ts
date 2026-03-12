@@ -1,24 +1,75 @@
-import type { TradeFlowDefinitionDetail, TradeFlowGraph } from '@/lib/types';
+import type {
+  TradeFlowDefinitionDetail,
+  TradeFlowEdge,
+  TradeFlowGraph,
+  TradeFlowNode,
+} from '@/lib/types';
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-export function deepCloneGraph(graph: TradeFlowGraph): TradeFlowGraph {
+function toFinitePosition(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeNode(raw: unknown, index: number): TradeFlowNode | null {
+  if (!isRecord(raw)) return null;
+  const key = String(raw.key ?? '').trim();
+  const type = String(raw.type ?? '').trim();
+  if (!key || !type) return null;
+
   return {
-    context: isRecord(graph.context) ? JSON.parse(JSON.stringify(graph.context)) : {},
-    nodes: graph.nodes.map((node) => ({
-      ...node,
-      config: isRecord(node.config) ? JSON.parse(JSON.stringify(node.config)) : {},
-    })),
-    edges: graph.edges.map((edge) => ({
-      ...edge,
-      condition:
-        edge.condition && isRecord(edge.condition)
-          ? (JSON.parse(JSON.stringify(edge.condition)) as Record<string, unknown>)
-          : null,
-    })),
+    key,
+    type,
+    positionX: toFinitePosition(raw.positionX, index * 220),
+    positionY: toFinitePosition(raw.positionY, 80),
+    config: isRecord(raw.config) ? JSON.parse(JSON.stringify(raw.config)) : {},
   };
+}
+
+function normalizeEdge(raw: unknown, index: number): TradeFlowEdge | null {
+  if (!isRecord(raw)) return null;
+  const source = String(raw.source ?? '').trim();
+  const target = String(raw.target ?? '').trim();
+  if (!source || !target) return null;
+
+  return {
+    key: String(raw.key ?? '').trim() || `edge_${index + 1}`,
+    source,
+    target,
+    type: String(raw.type ?? 'default').trim() || 'default',
+    condition:
+      raw.condition && isRecord(raw.condition)
+        ? (JSON.parse(JSON.stringify(raw.condition)) as Record<string, unknown>)
+        : null,
+  };
+}
+
+function normalizeGraph(graph: unknown): TradeFlowGraph {
+  const source = isRecord(graph) ? graph : {};
+  const nodesRaw = Array.isArray(source.nodes) ? source.nodes : [];
+  const edgesRaw = Array.isArray(source.edges) ? source.edges : [];
+
+  return {
+    context: isRecord(source.context) ? JSON.parse(JSON.stringify(source.context)) : {},
+    nodes: nodesRaw
+      .map((node, index) => normalizeNode(node, index))
+      .filter((node): node is TradeFlowNode => !!node),
+    edges: edgesRaw
+      .map((edge, index) => normalizeEdge(edge, index))
+      .filter((edge): edge is TradeFlowEdge => !!edge),
+  };
+}
+
+export function deepCloneGraph(graph: unknown): TradeFlowGraph {
+  return normalizeGraph(graph);
+}
+
+function normalizeGraphForRead(graph: unknown): TradeFlowGraph | null {
+  if (!graph) return null;
+  return normalizeGraph(graph);
 }
 
 function stableSerialize(value: unknown): string {
@@ -34,11 +85,12 @@ function stableSerialize(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function buildGraphFingerprint(graph: TradeFlowGraph | null | undefined): string | null {
-  if (!graph) return null;
+export function buildGraphFingerprint(graph: unknown): string | null {
+  const normalized = normalizeGraphForRead(graph);
+  if (!normalized) return null;
   return stableSerialize({
-    context: isRecord(graph.context) ? graph.context : {},
-    nodes: [...graph.nodes]
+    context: isRecord(normalized.context) ? normalized.context : {},
+    nodes: [...normalized.nodes]
       .map((node) => ({
         key: node.key,
         type: node.type,
@@ -47,7 +99,7 @@ export function buildGraphFingerprint(graph: TradeFlowGraph | null | undefined):
         config: isRecord(node.config) ? node.config : {},
       }))
       .sort((a, b) => a.key.localeCompare(b.key)),
-    edges: [...graph.edges]
+    edges: [...normalized.edges]
       .map((edge) => ({
         key: edge.key,
         source: edge.source,
@@ -68,15 +120,16 @@ export interface TradeFlowGraphSummary {
 }
 
 export function summarizeTradeFlowGraph(
-  graph: TradeFlowGraph | null | undefined
+  graph: unknown
 ): TradeFlowGraphSummary | null {
-  if (!graph) return null;
+  const normalized = normalizeGraphForRead(graph);
+  if (!normalized) return null;
   return {
-    nodes: graph.nodes.length,
-    edges: graph.edges.length,
-    triggers: graph.nodes.filter((node) => node.type.startsWith('trigger.')).length,
-    actions: graph.nodes.filter((node) => node.type.startsWith('action.')).length,
-    hasTelegramNotify: graph.nodes.some((node) => node.type === 'action.telegram_notify'),
+    nodes: normalized.nodes.length,
+    edges: normalized.edges.length,
+    triggers: normalized.nodes.filter((node) => node.type.startsWith('trigger.')).length,
+    actions: normalized.nodes.filter((node) => node.type.startsWith('action.')).length,
+    hasTelegramNotify: normalized.nodes.some((node) => node.type === 'action.telegram_notify'),
   };
 }
 

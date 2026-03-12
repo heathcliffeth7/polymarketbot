@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
+    "@polymarket/builder-relayer-client": "^0.0.8",
+    "@polymarket/builder-signing-sdk": "^1.0.0",
     "@types/pg": "^8.16.0",
     "@xyflow/react": "^12.10.1",
     "class-variance-authority": "^0.7.1",
@@ -27,7 +29,8 @@
     "react-dom": "19.2.3",
     "sonner": "^2.0.7",
     "swr": "^2.4.0",
-    "tailwind-merge": "^3.4.1"
+    "tailwind-merge": "^3.4.1",
+    "viem": "^2.47.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

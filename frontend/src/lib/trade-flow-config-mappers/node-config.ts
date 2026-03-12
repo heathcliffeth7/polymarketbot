@@ -39,6 +39,21 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
         fields.slPriceCent = String(Math.round(legacySlPrice * 100));
       }
     }
+    if (!fields.slTriggerPriceMode || !fields.slTriggerPriceMode.trim()) {
+      fields.slTriggerPriceMode = 'best_bid';
+    }
+    if (
+      (fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
+      !(fields.notifyOnPriceToBeatGapBlocked ?? '').trim()
+    ) {
+      fields.notifyOnPriceToBeatGapBlocked = 'true';
+    }
+    if (
+      (fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
+      !['usd', 'cent'].includes((fields.priceToBeatMaxDiffUnit ?? '').trim().toLowerCase())
+    ) {
+      fields.priceToBeatMaxDiffUnit = 'usd';
+    }
     if (!fields.sizePct.trim()) {
       fields.sizePct = toStringValue(cfg.sizePercent);
     }
@@ -158,8 +173,8 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     const marketMode = marketModeRaw === 'auto_scope' ? 'auto_scope' : 'fixed';
     fields.marketMode = marketMode;
     const priceModeRaw = toStringValue(cfg.priceMode).trim().toLowerCase();
-    const validPriceModes = ['midpoint', 'raw', 'last_trade', 'site_display', 'best_bid', 'best_ask'];
-    fields.priceMode = validPriceModes.includes(priceModeRaw) ? priceModeRaw : 'midpoint';
+    const validPriceModes = ['composite', 'midpoint', 'raw', 'last_trade', 'site_display', 'best_bid', 'best_ask'];
+    fields.priceMode = validPriceModes.includes(priceModeRaw) ? priceModeRaw : 'composite';
 
     const scopeRaw = toStringValue(cfg.marketScope).trim().toLowerCase();
     if (scopeRaw && RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[scopeRaw]) {
@@ -390,16 +405,55 @@ export function buildNodeConfigFromForm(
       delete config.slEnabled;
       delete config.slPriceCent;
       delete config.slPrice;
+      delete config.slTriggerPriceMode;
+      delete config.notifyOnTriggerPriceBlocked;
+      delete config.notifyOnExecutionFloorBlocked;
+      delete config.notifyOnMaxPriceBlocked;
+      delete config.retryOnMaxPriceBlock;
+      delete config.retryOnTriggerPriceGuardBlock;
+      delete config.retryOnExecutionFloorGuardBlock;
+      delete config.retryOnPriceToBeatGuardBlock;
+      delete config.priceToBeatGuardEnabled;
+      delete config.priceToBeatMaxDiff;
+      delete config.priceToBeatMaxDiffUnit;
+      delete config.notifyOnPriceToBeatGapBlocked;
+      delete config.notifyOnTpHit;
+      delete config.notifyOnSlHit;
     } else {
+      if (config.triggerPriceGuardEnabled !== true) {
+        delete config.notifyOnTriggerPriceBlocked;
+        delete config.retryOnTriggerPriceGuardBlock;
+      }
+      if (config.executionFloorGuardEnabled !== true) {
+        delete config.notifyOnExecutionFloorBlocked;
+        delete config.retryOnExecutionFloorGuardBlock;
+      }
+      if (config.priceToBeatGuardEnabled !== true) {
+        delete config.priceToBeatMaxDiff;
+        delete config.priceToBeatMaxDiffUnit;
+        delete config.notifyOnPriceToBeatGapBlocked;
+        delete config.retryOnPriceToBeatGuardBlock;
+      } else {
+        const priceToBeatUnitRaw = toStringValue(config.priceToBeatMaxDiffUnit).trim().toLowerCase();
+        config.priceToBeatMaxDiffUnit =
+          priceToBeatUnitRaw === 'cent' ? 'cent' : 'usd';
+      }
+      if (config.maxPriceCent == null) {
+        delete config.notifyOnMaxPriceBlocked;
+        delete config.retryOnMaxPriceBlock;
+      }
       if (!tpEnabled) {
         delete config.tpEnabled;
         delete config.tpPriceCent;
         delete config.tpPrice;
+        delete config.notifyOnTpHit;
       }
       if (!slEnabled) {
         delete config.slEnabled;
         delete config.slPriceCent;
         delete config.slPrice;
+        delete config.slTriggerPriceMode;
+        delete config.notifyOnSlHit;
       }
     }
   }
@@ -494,8 +548,8 @@ export function buildNodeConfigFromForm(
     const marketMode = marketModeRaw === 'auto_scope' ? 'auto_scope' : 'fixed';
     config.marketMode = marketMode;
     const priceModeRaw = toStringValue(config.priceMode).trim().toLowerCase();
-    const validPriceModes2 = ['midpoint', 'raw', 'last_trade', 'site_display', 'best_bid', 'best_ask'];
-    config.priceMode = validPriceModes2.includes(priceModeRaw) ? priceModeRaw : 'midpoint';
+    const validPriceModes2 = ['composite', 'midpoint', 'raw', 'last_trade', 'site_display', 'best_bid', 'best_ask'];
+    config.priceMode = validPriceModes2.includes(priceModeRaw) ? priceModeRaw : 'composite';
 
     const repeatModeRaw = toStringValue(config.repeatMode).trim().toLowerCase();
     config.repeatMode = repeatModeRaw === 'once' ? 'once' : 'loop';

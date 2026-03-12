@@ -10,7 +10,7 @@ fn open_position_ws_price_node_specs(
     let price_mode = if node.node_type == "trigger.market_price" {
         WsPriceMode::parse(
             node.config.get("priceMode").and_then(|v| v.as_str()),
-            WsPriceMode::Midpoint,
+            WsPriceMode::Composite,
         )
     } else {
         WsPriceMode::Raw

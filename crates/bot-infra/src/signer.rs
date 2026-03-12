@@ -9,9 +9,8 @@ use ethers::{
 };
 use hmac::{Hmac, Mac as _};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::env;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{collections::HashMap, env, sync::LazyLock};
 use tracing::debug;
 
 pub const POLY_ADDRESS: &str = "POLY_ADDRESS";
@@ -165,6 +164,74 @@ const ORDER_TYPE_STR: &str = "Order(uint256 salt,address maker,address signer,ad
 const DOMAIN_TYPE_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
 
+static ORDER_TYPE_HASH: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256(ORDER_TYPE_STR));
+static DOMAIN_TYPE_HASH: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256(DOMAIN_TYPE_STR));
+static DOMAIN_NAME_HASH: LazyLock<[u8; 32]> =
+    LazyLock::new(|| keccak256("Polymarket CTF Exchange"));
+static DOMAIN_VERSION_HASH: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("1"));
+
+pub fn domain_separator_for_exchange(chain_id: u64, exchange_address: Address) -> [u8; 32] {
+    keccak256(encode(&[
+        Token::FixedBytes(DOMAIN_TYPE_HASH.to_vec()),
+        Token::FixedBytes(DOMAIN_NAME_HASH.to_vec()),
+        Token::FixedBytes(DOMAIN_VERSION_HASH.to_vec()),
+        Token::Uint(U256::from(chain_id)),
+        Token::Address(exchange_address),
+    ]))
+}
+
+pub fn sign_order_eip712_with_domain_separator(
+    wallet: &LocalWallet,
+    domain_separator: [u8; 32],
+    salt: U256,
+    maker: Address,
+    signer: Address,
+    token_id: U256,
+    maker_amount: U256,
+    taker_amount: U256,
+    side: u8,
+    fee_rate_bps: u64,
+    sig_type: u64,
+) -> Result<String> {
+    let zero_addr = Address::zero();
+
+    let struct_hash: [u8; 32] = keccak256(encode(&[
+        Token::FixedBytes(ORDER_TYPE_HASH.to_vec()),
+        Token::Uint(salt),
+        Token::Address(maker),
+        Token::Address(signer),
+        Token::Address(zero_addr),
+        Token::Uint(token_id),
+        Token::Uint(maker_amount),
+        Token::Uint(taker_amount),
+        Token::Uint(U256::zero()),
+        Token::Uint(U256::zero()),
+        Token::Uint(U256::from(fee_rate_bps)),
+        Token::Uint(U256::from(side as u64)),
+        Token::Uint(U256::from(sig_type)),
+    ]));
+
+    let mut digest_input = [0u8; 66];
+    digest_input[0] = 0x19;
+    digest_input[1] = 0x01;
+    digest_input[2..34].copy_from_slice(&domain_separator);
+    digest_input[34..].copy_from_slice(&struct_hash);
+    let final_hash = keccak256(digest_input);
+
+    let signature = wallet
+        .sign_hash(H256::from(final_hash))
+        .map_err(|e| anyhow::anyhow!("EIP-712 sign_hash: {e}"))?;
+
+    let sig_bytes: [u8; 65] = signature.into();
+    let sig_hex = sig_bytes.iter().fold("0x".to_string(), |mut s: String, b| {
+        use std::fmt::Write;
+        write!(s, "{b:02x}").unwrap();
+        s
+    });
+
+    Ok(sig_hex)
+}
+
 /// Signs an order using EIP-712 structured data signing.
 /// Returns the hex-encoded signature string (0x-prefixed, 65 bytes).
 ///
@@ -184,54 +251,19 @@ pub fn sign_order_eip712(
     fee_rate_bps: u64,
     sig_type: u64,
 ) -> Result<String> {
-    let zero_addr = Address::zero();
-
-    // Domain separator
-    let domain_separator: [u8; 32] = keccak256(encode(&[
-        Token::FixedBytes(keccak256(DOMAIN_TYPE_STR).to_vec()),
-        Token::FixedBytes(keccak256("Polymarket CTF Exchange").to_vec()),
-        Token::FixedBytes(keccak256("1").to_vec()),
-        Token::Uint(U256::from(chain_id)),
-        Token::Address(exchange_address),
-    ]));
-
-    // Struct hash
-    let struct_hash: [u8; 32] = keccak256(encode(&[
-        Token::FixedBytes(keccak256(ORDER_TYPE_STR).to_vec()),
-        Token::Uint(salt),
-        Token::Address(maker),
-        Token::Address(signer), // EOA signer (may differ from maker for Gnosis Safe)
-        Token::Address(zero_addr), // taker = zero (public order)
-        Token::Uint(token_id),
-        Token::Uint(maker_amount),
-        Token::Uint(taker_amount),
-        Token::Uint(U256::zero()), // expiration = 0 (GTC)
-        Token::Uint(U256::zero()), // nonce = 0
-        Token::Uint(U256::from(fee_rate_bps)),
-        Token::Uint(U256::from(side as u64)),
-        Token::Uint(U256::from(sig_type)), // 0=EOA, 2=GNOSIS_SAFE
-    ]));
-
-    // Final hash: "\x19\x01" || domain_separator || struct_hash
-    let mut digest_input = [0u8; 66];
-    digest_input[0] = 0x19;
-    digest_input[1] = 0x01;
-    digest_input[2..34].copy_from_slice(&domain_separator);
-    digest_input[34..].copy_from_slice(&struct_hash);
-    let final_hash = keccak256(&digest_input);
-
-    let signature = wallet
-        .sign_hash(H256::from(final_hash))
-        .map_err(|e| anyhow::anyhow!("EIP-712 sign_hash: {e}"))?;
-
-    let sig_bytes: [u8; 65] = signature.into();
-    let sig_hex = sig_bytes.iter().fold("0x".to_string(), |mut s: String, b| {
-        use std::fmt::Write;
-        write!(s, "{b:02x}").unwrap();
-        s
-    });
-
-    Ok(sig_hex)
+    sign_order_eip712_with_domain_separator(
+        wallet,
+        domain_separator_for_exchange(chain_id, exchange_address),
+        salt,
+        maker,
+        signer,
+        token_id,
+        maker_amount,
+        taker_amount,
+        side,
+        fee_rate_bps,
+        sig_type,
+    )
 }
 
 #[cfg(test)]
@@ -320,5 +352,51 @@ mod tests {
         assert!(err
             .to_string()
             .contains("decode POLY API secret as base64url"));
+    }
+
+    #[test]
+    fn cached_domain_separator_signing_matches_legacy_signing() {
+        let wallet = "0000000000000000000000000000000000000000000000000000000000000001"
+            .parse::<LocalWallet>()
+            .unwrap();
+        let exchange_address = Address::from_low_u64_be(1);
+        let salt = U256::from(7u64);
+        let maker = Address::from_low_u64_be(2);
+        let signer = Address::from_low_u64_be(3);
+        let token_id = U256::from(4u64);
+        let maker_amount = U256::from(5u64);
+        let taker_amount = U256::from(6u64);
+
+        let legacy = sign_order_eip712(
+            &wallet,
+            137,
+            exchange_address,
+            salt,
+            maker,
+            signer,
+            token_id,
+            maker_amount,
+            taker_amount,
+            0,
+            1000,
+            2,
+        )
+        .unwrap();
+        let cached = sign_order_eip712_with_domain_separator(
+            &wallet,
+            domain_separator_for_exchange(137, exchange_address),
+            salt,
+            maker,
+            signer,
+            token_id,
+            maker_amount,
+            taker_amount,
+            0,
+            1000,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(cached, legacy);
     }
 }

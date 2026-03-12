@@ -278,13 +278,14 @@ async fn fetch_trade_flow_market_price(
     market_slug: &str,
     token_id: Option<&str>,
     price_mode: WsPriceMode,
+    trigger_condition: Option<&str>,
 ) -> Result<f64> {
     let token_id = token_id.filter(|v| !v.trim().is_empty());
     if let Some(token_id) = token_id {
         ws.ensure_market_stream(&[token_id.to_string()]).await?;
         if let Some(snapshot) = ws.get_market_snapshot(token_id).await {
             if let Some(resolved) =
-                resolve_trigger_price_from_market_snapshot(&snapshot, price_mode)
+                resolve_trigger_price_from_market_snapshot(&snapshot, price_mode, trigger_condition)
             {
                 return Ok(resolved.price);
             }
@@ -296,7 +297,8 @@ async fn fetch_trade_flow_market_price(
                 "trigger.market_price requires tokenId for REST fallback (marketSlug={market_slug})"
             )
         })?;
-        let resolved = resolve_trigger_price_from_rest(client, token_id, price_mode).await?;
+        let resolved =
+            resolve_trigger_price_from_rest(client, token_id, price_mode, trigger_condition).await?;
         if resolved.detail.source_detail == "rest_midpoint" {
             warn!(
                 %market_slug,
@@ -377,6 +379,13 @@ fn flow_context_string(context: &Value, key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn flow_context_f64(context: &Value, key: &str) -> Option<f64> {
+    context
+        .get("flowContext")
+        .and_then(|v| v.get(key))
+        .and_then(value_as_f64)
+}
+
 fn step_input_value<'a>(step: &'a TradeFlowRunStep, keys: &[&str]) -> Option<&'a Value> {
     let input = step.input_json.as_ref()?;
     keys.iter().find_map(|key| input.get(*key))
@@ -396,6 +405,18 @@ fn step_input_f64(step: &TradeFlowRunStep, keys: &[&str]) -> Option<f64> {
 
 fn step_input_i64(step: &TradeFlowRunStep, keys: &[&str]) -> Option<i64> {
     step_input_value(step, keys).and_then(value_as_i64)
+}
+
+fn resolve_action_place_order_datetime(
+    step: &TradeFlowRunStep,
+    context: &Value,
+    step_keys: &[&str],
+    context_key: &str,
+) -> Option<DateTime<Utc>> {
+    step_input_string(step, step_keys)
+        .or_else(|| flow_context_string(context, context_key))
+        .and_then(|raw| DateTime::parse_from_rfc3339(&raw).ok())
+        .map(|parsed| parsed.with_timezone(&Utc))
 }
 
 fn resolve_action_place_order_string(
@@ -449,11 +470,23 @@ fn resolve_action_place_order_reference_price(
         .map(clamp_probability)
 }
 
-fn resolve_action_place_order_max_price(context: &Value, step: &TradeFlowRunStep) -> Option<f64> {
-    flow_context_value(context, "maxPrice")
-        .as_ref()
-        .and_then(value_as_f64)
+fn resolve_action_place_order_max_price(
+    node: &TradeFlowNode,
+    step: &TradeFlowRunStep,
+    context: &Value,
+) -> Option<f64> {
+    node_config_f64(node, "maxPriceCent")
+        .map(|value| value / 100.0)
+        .or_else(|| node_config_f64(node, "maxPrice"))
         .or_else(|| step_input_f64(step, &["max_price", "maxPrice"]))
+        // Global fallback for flows that insert logic nodes between trigger and place_order.
+        .or_else(|| flow_context_f64(context, "maxPrice"))
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+        .map(clamp_probability)
+}
+
+fn resolve_action_place_order_guard_trigger_price(step: &TradeFlowRunStep) -> Option<f64> {
+    step_input_f64(step, &["trigger_price", "triggerPrice"])
         .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
         .map(clamp_probability)
 }

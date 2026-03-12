@@ -151,6 +151,7 @@ async fn execute_trigger_open_positions(
     let mut triggered_token_id = String::new();
     let mut triggered_outcome_label = String::new();
     let mut triggered_condition = String::new();
+    let mut triggered_trigger_price: Option<f64> = None;
     let mut triggered_price: Option<f64> = None;
     let mut triggered_max_price: Option<f64> = None;
     let mut current_price: Option<f64> = None;
@@ -240,6 +241,7 @@ async fn execute_trigger_open_positions(
                         &market_slug,
                         Some(cond_token_id.as_str()),
                         WsPriceMode::Raw,
+                        Some(cond_trigger_condition.as_str()),
                     )
                     .await?,
                 )
@@ -268,6 +270,7 @@ async fn execute_trigger_open_positions(
                 triggered_token_id = cond_token_id.clone();
                 triggered_outcome_label = cond_outcome_label;
                 triggered_condition = cond_trigger_condition;
+                triggered_trigger_price = Some(tp);
                 triggered_price = cur;
                 triggered_max_price = cond_max_price;
                 current_price = cur;
@@ -343,6 +346,7 @@ async fn execute_trigger_open_positions(
                             &market_slug,
                             token_id_ref,
                             WsPriceMode::Raw,
+                            Some("cross_above"),
                         )
                         .await?,
                     )
@@ -374,6 +378,7 @@ async fn execute_trigger_open_positions(
                             &market_slug,
                             token_id_ref,
                             WsPriceMode::Raw,
+                            Some("cross_below"),
                         )
                         .await?,
                     )
@@ -403,6 +408,7 @@ async fn execute_trigger_open_positions(
         triggered_token_id = token_id;
         triggered_outcome_label = outcome_label;
         triggered_condition = trigger_condition.unwrap_or_default();
+        triggered_trigger_price = trigger_price;
         triggered_price = cur;
         triggered_max_price = legacy_max_price;
         if let Some(p) = cur {
@@ -502,6 +508,7 @@ async fn execute_trigger_open_positions(
         "triggered_condition": triggered_condition,
         "triggered_token_id": triggered_token_id,
         "triggered_outcome_label": triggered_outcome_label,
+        "trigger_price": triggered_trigger_price,
         "triggered_price": triggered_price,
         "max_price": triggered_max_price,
         "maxPrice": triggered_max_price,
@@ -528,4 +535,3 @@ async fn execute_trigger_open_positions(
         repeat_idempotency_key: None,
     })
 }
-

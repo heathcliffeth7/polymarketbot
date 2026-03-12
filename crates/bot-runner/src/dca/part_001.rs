@@ -483,6 +483,7 @@ async fn process_trade_flow_dual_dca_job(
             client_order_id: client_order_id.clone(),
             leg_side: None,
             fee_rate_bps: fee_rate,
+            neg_risk: false,
         };
 
         let ack = client.place(&req).await?;
@@ -624,4 +625,3 @@ async fn process_trade_flow_dual_dca_job(
 // ---------------------------------------------------------------------------
 // Cancel active CLOB orders for DCA legs
 // ---------------------------------------------------------------------------
-

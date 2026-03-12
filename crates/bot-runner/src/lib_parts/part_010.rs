@@ -4,9 +4,9 @@ async fn process_trade_flows(
     _cfg: &AppConfig,
     client: Option<&dyn OrderExecutor>,
     ws: &ClobWsClient,
+    flow_runtime_caches: &mut FlowRuntimeCaches,
     auto_claim_runtimes: &mut HashMap<i64, FlowAutoClaimRuntime>,
 ) -> Result<()> {
-    let mut user_cfg_cache: HashMap<i64, AppConfig> = HashMap::new();
     let definitions = repo
         .list_published_trade_flow_definitions(FLOW_DEFINITION_PROCESS_LIMIT)
         .await?;
@@ -16,12 +16,19 @@ async fn process_trade_flows(
         "TRADE_FLOW_DEFINITIONS_LOADED"
     );
     if definitions.is_empty() {
-        refresh_trade_flow_ws_fast_path_cache(repo, run_id, ws, &definitions, &mut user_cfg_cache)
-            .await?;
+        refresh_trade_flow_ws_fast_path_cache(
+            repo,
+            run_id,
+            ws,
+            &definitions,
+            &mut flow_runtime_caches.user_cfg,
+        )
+        .await?;
         return Ok(());
     }
 
     for definition in &definitions {
+        flow_runtime_caches.touch(definition.user_id);
         if let Err(err) = sync_trade_flow_definition_run(repo, run_id, definition).await {
             warn!(
                 run_id,
@@ -31,8 +38,14 @@ async fn process_trade_flows(
             );
         }
     }
-    refresh_trade_flow_ws_fast_path_cache(repo, run_id, ws, &definitions, &mut user_cfg_cache)
-        .await?;
+    refresh_trade_flow_ws_fast_path_cache(
+        repo,
+        run_id,
+        ws,
+        &definitions,
+        &mut flow_runtime_caches.user_cfg,
+    )
+    .await?;
     if let Err(err) =
         enqueue_trade_flow_ws_open_position_price_steps_from_cache(repo, run_id, ws, client, None)
             .await
@@ -48,12 +61,12 @@ async fn process_trade_flows(
         repo,
         run_id,
         &definitions,
-        &mut user_cfg_cache,
+        &mut flow_runtime_caches.user_cfg,
         auto_claim_runtimes,
     )
     .await;
 
-    process_trade_flow_ready_steps(repo, run_id, client, ws).await
+    process_trade_flow_ready_steps(repo, run_id, client, ws, flow_runtime_caches).await
 }
 
 async fn process_trade_flow_ws_fast_path(
@@ -61,25 +74,25 @@ async fn process_trade_flow_ws_fast_path(
     run_id: i64,
     client: Option<&dyn OrderExecutor>,
     ws: &ClobWsClient,
+    flow_runtime_caches: &mut FlowRuntimeCaches,
+    dirty_token_ids: &[String],
 ) -> Result<()> {
-    let dirty_token_ids = ws.take_dirty_market_tokens().await;
     if dirty_token_ids.is_empty() {
         return Ok(());
     }
-    ws.clear_dirty_market_tokens(&dirty_token_ids).await;
 
     if let Err(err) = enqueue_trade_flow_ws_open_position_price_steps_from_cache(
         repo,
         run_id,
         ws,
         client,
-        Some(&dirty_token_ids),
+        Some(dirty_token_ids),
     )
     .await
     {
         warn!(run_id, error = %err, "TRADE_FLOW_WS_FAST_PATH_ENQUEUE_FAILED");
     }
-    process_trade_flow_ready_steps(repo, run_id, client, ws).await
+    process_trade_flow_ready_steps(repo, run_id, client, ws, flow_runtime_caches).await
 }
 
 async fn process_trade_flow_ready_steps(
@@ -87,10 +100,9 @@ async fn process_trade_flow_ready_steps(
     run_id: i64,
     client: Option<&dyn OrderExecutor>,
     ws: &ClobWsClient,
+    flow_runtime_caches: &mut FlowRuntimeCaches,
 ) -> Result<()> {
     let policy = DefaultRiskPolicy;
-    let mut user_cfg_cache: HashMap<i64, AppConfig> = HashMap::new();
-    let mut user_executor_cache: HashMap<i64, SharedOrderExecutor> = HashMap::new();
     let mut claim_pass = 0u8;
     loop {
         claim_pass += 1;
@@ -106,16 +118,21 @@ async fn process_trade_flow_ready_steps(
                 continue;
             };
             let result = async {
-                let flow_cfg =
-                    load_user_app_config_cached(repo, run.user_id, &mut user_cfg_cache).await?;
+                flow_runtime_caches.touch(run.user_id);
+                let flow_cfg = load_user_app_config_cached(
+                    repo,
+                    run.user_id,
+                    &mut flow_runtime_caches.user_cfg,
+                )
+                .await?;
                 let limits = to_risk_limits(&flow_cfg);
                 let flow_client = if client.is_some() {
                     Some(
                         load_user_order_executor_cached(
                             repo,
                             run.user_id,
-                            &mut user_cfg_cache,
-                            &mut user_executor_cache,
+                            &mut flow_runtime_caches.user_cfg,
+                            &mut flow_runtime_caches.user_executor,
                         )
                         .await?,
                     )
@@ -128,7 +145,7 @@ async fn process_trade_flow_ready_steps(
                     &flow_cfg,
                     &limits,
                     &policy,
-                    flow_client.as_deref(),
+                    flow_client,
                     ws,
                     &step,
                 )
@@ -301,27 +318,68 @@ fn is_auto_scope_market_in_resolution_window(slug: &str, grace_secs: i64) -> boo
 /// Cycle window focus: returns true if current time is OUTSIDE the configured sub-window.
 /// - mode "first": active window is [start_ts, start_ts + window_secs)
 /// - mode "last":  active window is [end_ts - window_secs, end_ts)
-fn is_outside_cycle_window_focus(slug: &str, mode: &str, window_secs: i64) -> bool {
+fn resolve_updown_market_cycle_bounds(slug: &str) -> Option<(DateTime<Utc>, DateTime<Utc>, i64)> {
     let parts: Vec<&str> = slug.rsplit('-').collect();
-    let ts: i64 = match parts.first().and_then(|s| s.parse().ok()) {
-        Some(v) => v,
-        None => return false,
-    };
+    let ts: i64 = parts.first().and_then(|s| s.parse().ok())?;
     let duration = if slug.contains("-5m-") {
         300i64
     } else if slug.contains("-15m-") {
         900i64
     } else {
+        return None;
+    };
+    let start = DateTime::<Utc>::from_timestamp(ts, 0)?;
+    let end = start + ChronoDuration::seconds(duration);
+    Some((start, end, duration))
+}
+
+fn resolve_cycle_window_absolute_bounds(
+    market_slug: &str,
+    mode: &str,
+    window_secs: i64,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let (start, end, duration) = resolve_updown_market_cycle_bounds(market_slug)?;
+    let effective = window_secs.clamp(1, duration);
+    match mode {
+        "first" => Some((start, start + ChronoDuration::seconds(effective))),
+        "last" => Some((end - ChronoDuration::seconds(effective), end)),
+        _ => None,
+    }
+}
+
+fn is_outside_cycle_window_focus(slug: &str, mode: &str, window_secs: i64) -> bool {
+    let Some((cycle_start, cycle_end, duration)) = resolve_updown_market_cycle_bounds(slug) else {
         return false;
     };
+    let now = Utc::now();
+    // Outside the market cycle implies outside any focused sub-window.
+    if now < cycle_start || now >= cycle_end {
+        return true;
+    }
     if window_secs >= duration {
         return false;
     }
-    let now = Utc::now().timestamp();
-    match mode {
-        "first" => now >= ts + window_secs,
-        "last" => now < ts + duration - window_secs,
-        _ => false,
+    let Some((window_open, window_end)) =
+        resolve_cycle_window_absolute_bounds(slug, mode, window_secs)
+    else {
+        return false;
+    };
+    now < window_open || now >= window_end
+}
+
+fn should_skip_for_cycle_window(
+    market_slug: Option<&str>,
+    cycle_window_mode: Option<&str>,
+    cycle_window_secs: Option<i64>,
+) -> bool {
+    let Some(cycle_window_mode) = cycle_window_mode else {
+        return false;
+    };
+    match (market_slug, cycle_window_secs) {
+        (Some(slug), Some(window_secs)) => {
+            is_outside_cycle_window_focus(slug, cycle_window_mode, window_secs)
+        }
+        _ => true,
     }
 }
 

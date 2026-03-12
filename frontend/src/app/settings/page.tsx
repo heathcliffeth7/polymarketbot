@@ -118,6 +118,9 @@ export default function SettingsPage() {
               { key: 'api_key', label: 'POLY API Key', type: 'text' },
               { key: 'api_secret', label: 'POLY API Secret', type: 'text' },
               { key: 'api_passphrase', label: 'POLY API Passphrase', type: 'text' },
+              { key: 'builder_api_key', label: 'Builder API Key', type: 'text' },
+              { key: 'builder_api_secret', label: 'Builder API Secret', type: 'text' },
+              { key: 'builder_api_passphrase', label: 'Builder API Passphrase', type: 'text' },
               { key: 'signer_private_key', label: 'Signer Private Key', type: 'text' },
               { key: 'gnosis_safe_address', label: 'Gnosis Safe Address (Optional)', type: 'text' },
             ]}
@@ -130,6 +133,7 @@ export default function SettingsPage() {
             title="Claim Config"
             fields={[
               { key: 'enabled', label: 'Auto Claim Enabled', type: 'boolean' },
+              { key: 'execution_mode', label: 'Execution Mode', type: 'select', options: ['direct', 'builder_relayer'] },
               { key: 'rpc_url', label: 'RPC URL', type: 'text' },
               { key: 'data_api_base_url', label: 'Data API Base URL', type: 'text' },
               { key: 'user_address', label: 'Claim Wallet Address', type: 'text' },

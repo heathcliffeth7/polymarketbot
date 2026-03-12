@@ -305,6 +305,10 @@ async fn seed_trade_flow_trigger_steps(
     Ok(())
 }
 
+fn trade_flow_repeat_step_input(step: &TradeFlowRunStep) -> Option<&Value> {
+    step.input_json.as_ref()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_trade_flow_step(
     repo: &PostgresRepository,
@@ -312,10 +316,21 @@ async fn process_trade_flow_step(
     cfg: &AppConfig,
     limits: &RiskLimits,
     policy: &impl RiskPolicy,
-    client: Option<&dyn OrderExecutor>,
+    client: Option<SharedOrderExecutor>,
     ws: &ClobWsClient,
     step: &TradeFlowRunStep,
 ) -> Result<()> {
+    let step_started = Instant::now();
+    let processing_started_at = Utc::now();
+    let claim_to_start_ms = step
+        .started_at
+        .map(|started_at| {
+            processing_started_at
+                .signed_duration_since(started_at)
+                .num_milliseconds()
+                .max(0)
+        })
+        .unwrap_or(0);
     let run = match repo.get_trade_flow_run(step.run_id).await? {
         Some(run) => run,
         None => {
@@ -374,13 +389,14 @@ async fn process_trade_flow_step(
         .ok_or_else(|| anyhow::anyhow!("flow node not found for step"))?;
 
     let mut context = normalize_trade_flow_context(run.context_json.clone(), &graph.context);
+    let execute_started = Instant::now();
     let result = execute_trade_flow_node(
         repo,
         run_id,
         cfg,
         limits,
         policy,
-        client,
+        client.as_deref(),
         ws,
         &run,
         step,
@@ -389,9 +405,11 @@ async fn process_trade_flow_step(
         &mut context,
     )
     .await;
+    let execute_ms = execute_started.elapsed().as_millis() as i64;
 
     match result {
         Ok(execution) => {
+            let completion_started = Instant::now();
             let latest_run = repo.get_trade_flow_run(run.id).await?;
             let run_still_running = matches!(
                 latest_run.as_ref().map(|current| current.status.as_str()),
@@ -407,12 +425,33 @@ async fn process_trade_flow_step(
                     node_key = %node.key,
                     "TRADE_FLOW_STEP_ABORTED_RUN_STOPPED"
                 );
+                info!(
+                    run_id,
+                    flow_run_id = run.id,
+                    step_id = step.id,
+                    node_key = %node.key,
+                    node_type = %node.node_type,
+                    outcome = "aborted_run_stopped",
+                    claim_to_start_ms,
+                    execute_ms,
+                    completion_ms = completion_started.elapsed().as_millis() as i64,
+                    total_ms = step_started.elapsed().as_millis() as i64,
+                    "STEP_LATENCY_TRACE"
+                );
                 return Ok(());
             }
 
             repo.update_trade_flow_run_context(run.id, &context).await?;
             repo.mark_trade_flow_step_completed(step.id, Some(&execution.output))
                 .await?;
+            spawn_trade_flow_immediate_submit_if_needed(
+                repo,
+                run_id,
+                cfg,
+                ws,
+                client.clone(),
+                &execution.output,
+            );
             repo.append_trade_flow_event(
                 Some(run.id),
                 run.definition_id,
@@ -424,7 +463,8 @@ async fn process_trade_flow_step(
                     "node_type": node.node_type,
                     "routes": execution.routes.iter().map(|r| r.edge_type.clone()).collect::<Vec<_>>(),
                     "triggered": !execution.routes.is_empty(),
-                    "trigger_price": execution.output.get("triggered_price"),
+                    "trigger_price": execution.output.get("trigger_price"),
+                    "triggered_price": execution.output.get("triggered_price"),
                     "max_price": execution.output.get("max_price"),
                     "trigger_condition": execution.output.get("triggered_condition"),
                     "current_price": execution.output.get("price"),
@@ -455,15 +495,29 @@ async fn process_trade_flow_step(
                         &node.key,
                         &node.node_type,
                         step.attempt,
-                        None,
+                        trade_flow_repeat_step_input(step),
                         repeat_at,
                         Some(step.id),
                         execution.repeat_idempotency_key.as_deref(),
                     )
                     .await?;
             }
+            info!(
+                run_id,
+                flow_run_id = run.id,
+                step_id = step.id,
+                node_key = %node.key,
+                node_type = %node.node_type,
+                outcome = "completed",
+                claim_to_start_ms,
+                execute_ms,
+                completion_ms = completion_started.elapsed().as_millis() as i64,
+                total_ms = step_started.elapsed().as_millis() as i64,
+                "STEP_LATENCY_TRACE"
+            );
         }
         Err(err) => {
+            let completion_started = Instant::now();
             let output_json = json!({
                 "error": err.to_string(),
                 "node_key": node.key,
@@ -495,10 +549,75 @@ async fn process_trade_flow_step(
                 &context,
             )
             .await?;
+            info!(
+                run_id,
+                flow_run_id = run.id,
+                step_id = step.id,
+                node_key = %node.key,
+                node_type = %node.node_type,
+                outcome = "failed",
+                claim_to_start_ms,
+                execute_ms,
+                completion_ms = completion_started.elapsed().as_millis() as i64,
+                total_ms = step_started.elapsed().as_millis() as i64,
+                error = %err,
+                "STEP_LATENCY_TRACE"
+            );
         }
     }
 
     Ok(())
+}
+
+fn trade_flow_should_inline_submit(output: &Value) -> bool {
+    output
+        .get("should_inline_submit")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn spawn_trade_flow_immediate_submit_if_needed(
+    repo: &PostgresRepository,
+    run_id: i64,
+    cfg: &AppConfig,
+    ws: &ClobWsClient,
+    client: Option<SharedOrderExecutor>,
+    output: &Value,
+) {
+    let Some(builder_order_id) = output.get("builder_order_id").and_then(Value::as_i64) else {
+        return;
+    };
+    if !trade_flow_should_inline_submit(output) {
+        return;
+    }
+    let Some(client) = client else {
+        return;
+    };
+
+    let repo = repo.clone();
+    let cfg = cfg.clone();
+    let ws = ws.clone();
+    tokio::spawn(async move {
+        if let Err(err) =
+            try_immediate_submit_single_builder_order(
+                &repo,
+                run_id,
+                &cfg,
+                &ws,
+                client,
+                builder_order_id,
+                "immediate",
+            )
+                .await
+        {
+            warn!(
+                run_id,
+                builder_order_id,
+                error = %err,
+                "IMMEDIATE_SUBMIT_FAILED_WILL_RETRY_IN_HOUSEKEEPING"
+            );
+        }
+    });
 }
 
 async fn cancel_flow_step_side_effects_after_stop(
@@ -735,4 +854,48 @@ async fn enqueue_trade_flow_edges(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod part_012_tests {
+    use super::*;
+
+    fn test_repeat_step(input_json: Option<Value>) -> TradeFlowRunStep {
+        TradeFlowRunStep {
+            id: 1,
+            run_id: 42,
+            node_key: "action_1".to_string(),
+            node_type: "action.place_order".to_string(),
+            status: "queued".to_string(),
+            attempt: 1,
+            input_json,
+            output_json: None,
+            error_text: None,
+            started_at: None,
+            ended_at: None,
+            available_at: Utc::now(),
+            parent_step_id: None,
+            idempotency_key: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn trade_flow_repeat_step_input_preserves_original_payload() {
+        let input_json = json!({
+            "market_slug": "sol-updown-5m-1773315300",
+            "trigger_price": 0.77,
+            "triggered_token_id": "tok-up"
+        });
+        let step = test_repeat_step(Some(input_json.clone()));
+
+        assert_eq!(trade_flow_repeat_step_input(&step), Some(&input_json));
+    }
+
+    #[test]
+    fn trade_flow_repeat_step_input_returns_none_without_original_payload() {
+        let step = test_repeat_step(None);
+
+        assert_eq!(trade_flow_repeat_step_input(&step), None);
+    }
 }

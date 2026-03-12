@@ -262,6 +262,7 @@ fn market_price_confirmation_ms(node_spec: &WsOpenPositionPriceNodeSpec) -> Opti
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum WsPriceMode {
+    Composite,
     Midpoint,
     Raw,
     LastTrade,
@@ -274,6 +275,7 @@ impl WsPriceMode {
     fn parse(raw: Option<&str>, default: Self) -> Self {
         let normalized = raw.map(str::trim).unwrap_or_default().to_ascii_lowercase();
         match normalized.as_str() {
+            "composite" => Self::Composite,
             "midpoint" | "orderbook_midpoint" | "mid" => Self::Midpoint,
             "raw" | "trade" => Self::Raw,
             "last_trade" | "last_trade_price" => Self::LastTrade,
@@ -286,6 +288,7 @@ impl WsPriceMode {
 
     fn as_str(self) -> &'static str {
         match self {
+            Self::Composite => "composite",
             Self::Midpoint => "midpoint",
             Self::Raw => "raw",
             Self::LastTrade => "last_trade",

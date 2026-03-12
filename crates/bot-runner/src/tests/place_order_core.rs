@@ -21,6 +21,25 @@ fn place_order_existing_order_reuses_active_matching_order() {
 }
 
 #[test]
+fn place_order_existing_order_reuses_guard_blocked_matching_order() {
+    let mut order = test_builder_order("buy", None);
+    order.status = "guard_blocked".to_string();
+
+    assert_eq!(
+        classify_action_place_order_existing_order(
+            &order,
+            "buy",
+            77,
+            "btc-updown-5m-1",
+            "tok-up",
+            "conditional",
+            "market",
+        ),
+        ActionPlaceOrderExistingOrderDecision::ReuseActive
+    );
+}
+
+#[test]
 fn place_order_existing_order_rearms_matching_sell_error() {
     let mut order = test_builder_order("sell", Some(9));
     order.status = "error".to_string();
@@ -160,16 +179,187 @@ fn place_order_resolves_runtime_binding_from_step_input() {
         resolve_action_place_order_reference_price(&node, &step),
         Some(0.875)
     );
+    assert_eq!(resolve_action_place_order_guard_trigger_price(&step), None);
 }
 
 #[test]
-fn place_order_resolves_inherited_max_price_from_context_before_step_input() {
+fn place_order_resolves_max_price_from_node_config_cent_only() {
+    let ctx = json!({});
+    let step = test_step(json!({}));
+    let node = test_node(json!({
+        "maxPriceCent": 90,
+        "maxPrice": 0.95
+    }));
+    assert_eq!(
+        resolve_action_place_order_max_price(&node, &step, &ctx),
+        Some(0.9)
+    );
+
+    let empty_node = test_node(json!({}));
+    assert_eq!(
+        resolve_action_place_order_max_price(&empty_node, &step, &ctx),
+        None
+    );
+}
+
+#[test]
+fn place_order_resolves_max_price_from_node_config_raw_legacy() {
+    let ctx = json!({});
+    let step = test_step(json!({}));
+    let node = test_node(json!({ "maxPrice": 0.88 }));
+    assert_eq!(
+        resolve_action_place_order_max_price(&node, &step, &ctx),
+        Some(0.88)
+    );
+}
+
+#[test]
+fn place_order_resolves_max_price_from_step_input_fallback() {
+    let ctx = json!({});
+    let step = test_step(json!({ "max_price": 0.90 }));
+    let node = test_node(json!({}));
+    assert_eq!(
+        resolve_action_place_order_max_price(&node, &step, &ctx),
+        Some(0.9)
+    );
+}
+
+#[test]
+fn place_order_resolves_max_price_from_flow_context_fallback() {
+    let ctx = json!({ "flowContext": { "maxPrice": 0.90 } });
+    let step = test_step(json!({}));
+    let node = test_node(json!({}));
+    assert_eq!(
+        resolve_action_place_order_max_price(&node, &step, &ctx),
+        Some(0.9)
+    );
+}
+
+#[test]
+fn place_order_max_price_priority_order() {
+    let ctx = json!({ "flowContext": { "maxPrice": 0.95 } });
+    let step = test_step(json!({ "max_price": 0.90 }));
+
+    let node_cent = test_node(json!({ "maxPriceCent": 85, "maxPrice": 0.88 }));
+    assert_eq!(
+        resolve_action_place_order_max_price(&node_cent, &step, &ctx),
+        Some(0.85)
+    );
+
+    let node_raw = test_node(json!({ "maxPrice": 0.88 }));
+    assert_eq!(
+        resolve_action_place_order_max_price(&node_raw, &step, &ctx),
+        Some(0.88)
+    );
+
+    let empty_node = test_node(json!({}));
+    assert_eq!(
+        resolve_action_place_order_max_price(&empty_node, &step, &ctx),
+        Some(0.90)
+    );
+
+    let empty_step = test_step(json!({}));
+    assert_eq!(
+        resolve_action_place_order_max_price(&empty_node, &empty_step, &ctx),
+        Some(0.95)
+    );
+}
+
+#[test]
+fn place_order_max_price_invalid_values_filtered() {
+    let node = test_node(json!({}));
+    let empty_step = test_step(json!({}));
+
+    assert_eq!(
+        resolve_action_place_order_max_price(
+            &node,
+            &empty_step,
+            &json!({ "flowContext": { "maxPrice": 0.0 } })
+        ),
+        None
+    );
+    assert_eq!(
+        resolve_action_place_order_max_price(
+            &node,
+            &empty_step,
+            &json!({ "flowContext": { "maxPrice": 1.5 } })
+        ),
+        None
+    );
+    assert_eq!(
+        resolve_action_place_order_max_price(
+            &node,
+            &empty_step,
+            &json!({ "flowContext": { "maxPrice": null } })
+        ),
+        None
+    );
+
+    let step_zero = test_step(json!({ "max_price": 0.0 }));
+    assert_eq!(
+        resolve_action_place_order_max_price(&node, &step_zero, &json!({})),
+        None
+    );
+
+    let step_nan = test_step(json!({ "max_price": "not_a_number" }));
+    assert_eq!(
+        resolve_action_place_order_max_price(&node, &step_nan, &json!({})),
+        None
+    );
+}
+
+#[test]
+fn place_order_inherits_trigger_max_price_via_step_input() {
+    let trigger_output = json!({
+        "market_slug": "btc-updown-5m-1",
+        "token_id": "tok-up",
+        "outcome_label": "Up",
+        "triggered_price": 0.89,
+        "trigger_price": 0.80,
+        "max_price": 0.90,
+        "maxPrice": 0.90,
+        "triggered_condition": "cross_above"
+    });
+    let step = test_step(trigger_output);
+    let node = test_node(json!({
+        "side": "buy",
+        "executionMode": "market",
+        "sizeUsdc": 10.0
+    }));
+    let ctx = json!({ "flowContext": { "maxPrice": 0.90 } });
+
+    let resolved = resolve_action_place_order_max_price(&node, &step, &ctx);
+    assert_eq!(resolved, Some(0.90));
+
+    let mut order = test_builder_order("buy", None);
+    order.max_price = resolved;
+    assert!(trade_builder_price_exceeds_max_price(&order, 0.91));
+    assert!(!trade_builder_price_exceeds_max_price(&order, 0.90));
+}
+
+#[test]
+fn place_order_resolves_guard_trigger_price_from_step_input() {
     let step = test_step(json!({
-        "max_price": 0.95,
-        "maxPrice": 0.94
+        "trigger_price": 0.77,
+        "triggerPrice": 0.76,
+        "triggered_price": 0.81
+    }));
+    assert_eq!(
+        resolve_action_place_order_guard_trigger_price(&step),
+        Some(0.77)
+    );
+}
+
+#[test]
+fn place_order_resolves_cycle_window_datetime_from_step_then_context() {
+    let step = test_step(json!({
+        "cycleWindowOpenAt": "2026-03-12T12:44:00Z"
     }));
     let context = json!({
-        "flowContext": { "maxPrice": 0.9 },
+        "flowContext": {
+            "cycleWindowOpenAt": "2026-03-12T12:43:00Z",
+            "cycleWindowEndAt": "2026-03-12T12:45:00Z"
+        },
         "vars": {},
         "state": {},
         "refs": {},
@@ -177,20 +367,61 @@ fn place_order_resolves_inherited_max_price_from_context_before_step_input() {
     });
 
     assert_eq!(
-        resolve_action_place_order_max_price(&context, &step),
-        Some(0.9)
+        resolve_action_place_order_datetime(
+            &step,
+            &context,
+            &["cycleWindowOpenAt"],
+            "cycleWindowOpenAt",
+        )
+        .map(|value| value.to_rfc3339()),
+        Some("2026-03-12T12:44:00+00:00".to_string())
     );
+    assert_eq!(
+        resolve_action_place_order_datetime(
+            &step,
+            &context,
+            &["cycleWindowEndAt"],
+            "cycleWindowEndAt",
+        )
+        .map(|value| value.to_rfc3339()),
+        Some("2026-03-12T12:45:00+00:00".to_string())
+    );
+}
 
-    let empty_context = json!({
+#[test]
+fn place_order_retry_snapshot_preserves_guard_and_market_inputs() {
+    let node = test_node(json!({}));
+    let step = test_step(json!({
+        "market_slug": "sol-updown-5m-1773315300",
+        "trigger_price": 0.77,
+        "triggered_token_id": "tok-up",
+        "triggered_outcome_label": "Up",
+        "triggered_price": 0.78,
+        "sourceTradeId": 77
+    }));
+    let context = json!({
         "flowContext": {},
         "vars": {},
         "state": {},
         "refs": {},
         "nodeState": {}
     });
+
     assert_eq!(
-        resolve_action_place_order_max_price(&empty_context, &step),
-        Some(0.95)
+        resolve_action_place_order_string(
+            &node,
+            &context,
+            &step,
+            "marketSlug",
+            "marketSlug",
+            &["market_slug", "marketSlug", "wsMarketSlug"],
+        )
+        .as_deref(),
+        Some("sol-updown-5m-1773315300")
+    );
+    assert_eq!(
+        resolve_action_place_order_guard_trigger_price(&step),
+        Some(0.77)
     );
 }
 
@@ -313,6 +544,62 @@ fn desired_price_above_builder_max_price_is_blocked() {
 
     assert!(!trade_builder_price_exceeds_max_price(&order, 0.90));
     assert!(trade_builder_price_exceeds_max_price(&order, 0.91));
+}
+
+#[test]
+fn current_price_below_guard_trigger_is_blocked_for_buys_only() {
+    let mut buy_order = test_builder_order("buy", None);
+    buy_order.guard_trigger_price = Some(0.77);
+    assert!(trade_builder_price_below_guard_trigger(&buy_order, 0.76));
+    assert!(!trade_builder_price_below_guard_trigger(&buy_order, 0.77));
+
+    let mut sell_order = test_builder_order("sell", None);
+    sell_order.guard_trigger_price = Some(0.77);
+    assert!(!trade_builder_price_below_guard_trigger(&sell_order, 0.50));
+}
+
+#[test]
+fn best_ask_below_execution_floor_blocks_buy_orders_only() {
+    let mut buy_order = test_builder_order("buy", None);
+    buy_order.best_ask_floor_price = Some(0.77);
+    assert_eq!(
+        trade_builder_execution_floor_block_reason(&buy_order, Some(0.76)),
+        Some("below_best_ask_floor")
+    );
+    assert_eq!(
+        trade_builder_execution_floor_block_reason(&buy_order, Some(0.77)),
+        None
+    );
+    assert_eq!(
+        trade_builder_execution_floor_block_reason(&buy_order, Some(0.90)),
+        None
+    );
+
+    let mut sell_order = test_builder_order("sell", None);
+    sell_order.best_ask_floor_price = Some(0.77);
+    assert_eq!(
+        trade_builder_execution_floor_block_reason(&sell_order, Some(0.50)),
+        None
+    );
+}
+
+#[test]
+fn missing_best_ask_blocks_when_execution_floor_is_enabled() {
+    let mut buy_order = test_builder_order("buy", None);
+    buy_order.best_ask_floor_price = Some(0.77);
+    assert!(trade_builder_execution_floor_missing_best_ask(
+        &buy_order, None
+    ));
+    assert!(!trade_builder_execution_floor_missing_best_ask(
+        &buy_order,
+        Some(0.80)
+    ));
+
+    let sell_order = test_builder_order("sell", None);
+    assert!(!trade_builder_execution_floor_missing_best_ask(
+        &sell_order,
+        None
+    ));
 }
 
 #[test]

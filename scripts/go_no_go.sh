@@ -54,10 +54,8 @@ if ! command -v psql >/dev/null 2>&1; then
 fi
 
 ok "running migration gate"
-for f in "$ROOT_DIR"/migrations/*.sql; do
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f" >/dev/null
-  ok "applied $(basename "$f")"
-done
+DATABASE_URL="$DATABASE_URL" "$ROOT_DIR/scripts/apply_migrations.sh" >/dev/null
+ok "tracked migrations checked"
 
 if ! psql "$DATABASE_URL" -tAc "SELECT COUNT(*) FROM reconcile_runs" >/dev/null 2>&1; then
   fail "reconcile_runs table check failed"

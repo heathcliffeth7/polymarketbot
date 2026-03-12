@@ -1,6 +1,30 @@
 import type { TradeFlowEdge, TradeFlowGraph, TradeFlowNode } from '@/lib/types';
 import { DEFAULT_GRAPH, isRecord, toTrimmedString } from './shared';
 
+function normalizeNodeConfig(
+  nodeType: string,
+  config: Record<string, unknown>
+): Record<string, unknown> {
+  if (nodeType !== 'trigger.market_price') {
+    return config;
+  }
+
+  const priceModeRaw = toTrimmedString(config.priceMode).toLowerCase();
+  const validPriceModes = new Set([
+    'composite',
+    'midpoint',
+    'raw',
+    'last_trade',
+    'site_display',
+    'best_bid',
+    'best_ask',
+  ]);
+  return {
+    ...config,
+    priceMode: validPriceModes.has(priceModeRaw) ? priceModeRaw : 'composite',
+  };
+}
+
 function toNode(raw: unknown, idx: number): TradeFlowNode | null {
   if (!isRecord(raw)) return null;
   const keyRaw = String(raw.key ?? '').trim();
@@ -15,7 +39,7 @@ function toNode(raw: unknown, idx: number): TradeFlowNode | null {
     type: typeRaw,
     positionX: Number.isFinite(positionX) ? positionX : idx * 220,
     positionY: Number.isFinite(positionY) ? positionY : 80,
-    config: isRecord(raw.config) ? raw.config : {},
+    config: normalizeNodeConfig(typeRaw, isRecord(raw.config) ? raw.config : {}),
   };
 }
 
@@ -154,6 +178,62 @@ function hasUpstreamAutoScopeMarketTrigger(nodeKey: string, graph: TradeFlowGrap
   return false;
 }
 
+function hasValidTriggerPriceConfig(config: Record<string, unknown>): boolean {
+  const triggerPriceCent = Number(config.triggerPriceCent);
+  if (Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100) {
+    return true;
+  }
+
+  const triggerPrice = Number(config.triggerPrice);
+  return Number.isFinite(triggerPrice) && triggerPrice > 0 && triggerPrice <= 1;
+}
+
+function hasValidOutcomeTriggerPrice(config: Record<string, unknown>): boolean {
+  const rows = config.outcomeConditions;
+  if (!Array.isArray(rows)) return false;
+
+  return rows.some((row) => {
+    if (!isRecord(row)) return false;
+    const triggerCondition = toTrimmedString(row.triggerCondition).toLowerCase();
+    if (triggerCondition !== 'cross_above' && triggerCondition !== 'cross_below') {
+      return false;
+    }
+    return hasValidTriggerPriceConfig(row);
+  });
+}
+
+function hasUpstreamTriggerWithTriggerPrice(nodeKey: string, graph: TradeFlowGraph): boolean {
+  const nodeMap = new Map(graph.nodes.map((node) => [node.key, node]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const list = incomingByTarget.get(edge.target) ?? [];
+    list.push(edge.source);
+    incomingByTarget.set(edge.target, list);
+  }
+
+  const visited = new Set<string>();
+  const queue = [nodeKey];
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const sourceKey of incomingByTarget.get(current) ?? []) {
+      const sourceNode = nodeMap.get(sourceKey);
+      if (!sourceNode) continue;
+      const sourceConfig = isRecord(sourceNode.config) ? sourceNode.config : {};
+      if (
+        (sourceNode.type === 'trigger.market_price' || sourceNode.type === 'trigger.open_positions') &&
+        (hasValidTriggerPriceConfig(sourceConfig) || hasValidOutcomeTriggerPrice(sourceConfig))
+      ) {
+        return true;
+      }
+      queue.push(sourceKey);
+    }
+  }
+
+  return false;
+}
+
 
 export {
   toNode,
@@ -162,4 +242,5 @@ export {
   collectRootNodeKeys,
   collectReachableFromTriggers,
   hasUpstreamAutoScopeMarketTrigger,
+  hasUpstreamTriggerWithTriggerPrice,
 };

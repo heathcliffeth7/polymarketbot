@@ -385,8 +385,13 @@ fn apply_trigger_market_price_context_updates(
     triggered_token_id: &str,
     triggered_outcome_label: &str,
     triggered_condition: &str,
+    triggered_trigger_price: Option<f64>,
     triggered_price: Option<f64>,
     triggered_max_price: Option<f64>,
+    cycle_window_mode: Option<&str>,
+    cycle_window_secs: Option<i64>,
+    cycle_window_open_at: Option<DateTime<Utc>>,
+    cycle_window_end_at: Option<DateTime<Utc>>,
     pass: bool,
 ) {
     if let Some(price) = current_price {
@@ -420,6 +425,9 @@ fn apply_trigger_market_price_context_updates(
             json!(triggered_condition),
         );
     }
+    if let Some(trigger_price) = triggered_trigger_price {
+        set_flow_var(context, &format!("{var_key}_trigger_price"), json!(trigger_price));
+    }
     if let Some(tp) = triggered_price {
         set_flow_var(context, &format!("{var_key}_triggered_price"), json!(tp));
     }
@@ -432,6 +440,30 @@ fn apply_trigger_market_price_context_updates(
         } else {
             set_flow_context(context, "maxPrice", Value::Null);
         }
+        set_flow_context(
+            context,
+            "cycleWindowMode",
+            cycle_window_mode.map_or(Value::Null, |value| json!(value)),
+        );
+        set_flow_context(
+            context,
+            "cycleWindowSecs",
+            cycle_window_secs.map_or(Value::Null, |value| json!(value)),
+        );
+        set_flow_context(
+            context,
+            "cycleWindowOpenAt",
+            cycle_window_open_at
+                .map(|value| json!(value.to_rfc3339()))
+                .unwrap_or(Value::Null),
+        );
+        set_flow_context(
+            context,
+            "cycleWindowEndAt",
+            cycle_window_end_at
+                .map(|value| json!(value.to_rfc3339()))
+                .unwrap_or(Value::Null),
+        );
     }
 }
 
@@ -444,6 +476,7 @@ fn build_trigger_market_price_output(
     triggered_token_id: &str,
     triggered_outcome_label: &str,
     triggered_condition: &str,
+    triggered_trigger_price: Option<f64>,
     triggered_price: Option<f64>,
     triggered_max_price: Option<f64>,
     protection_output: &Value,
@@ -470,6 +503,10 @@ fn build_trigger_market_price_output(
     once_mode: bool,
     once_scope_market: bool,
     queued_at_from_step: Option<&str>,
+    cycle_window_mode: Option<&str>,
+    cycle_window_secs: Option<i64>,
+    cycle_window_open_at: Option<DateTime<Utc>>,
+    cycle_window_end_at: Option<DateTime<Utc>>,
 ) -> Value {
     json!({
         "run_id": run.id,
@@ -479,6 +516,7 @@ fn build_trigger_market_price_output(
         "triggered_token_id": triggered_token_id,
         "triggered_outcome_label": triggered_outcome_label,
         "triggered_condition": triggered_condition,
+        "trigger_price": triggered_trigger_price,
         "triggered_price": triggered_price,
         "max_price": triggered_max_price,
         "maxPrice": triggered_max_price,
@@ -507,6 +545,10 @@ fn build_trigger_market_price_output(
         "once_mode": once_mode,
         "once_scope": if once_scope_market { "market" } else { "run" },
         "queued_at": queued_at_from_step,
+        "cycleWindowMode": cycle_window_mode,
+        "cycleWindowSecs": cycle_window_secs,
+        "cycleWindowOpenAt": cycle_window_open_at.map(|value| value.to_rfc3339()),
+        "cycleWindowEndAt": cycle_window_end_at.map(|value| value.to_rfc3339()),
         "once_fired": trade_flow_market_price_once_fired_for_scope(
             context,
             &node.key,
@@ -525,6 +567,7 @@ fn finish_trigger_market_price_execution(
     triggered_token_id: &str,
     triggered_outcome_label: &str,
     triggered_condition: &str,
+    triggered_trigger_price: Option<f64>,
     triggered_price: Option<f64>,
     triggered_max_price: Option<f64>,
     protection_output: &Value,
@@ -551,6 +594,10 @@ fn finish_trigger_market_price_execution(
     once_mode: bool,
     once_scope_market: bool,
     queued_at_from_step: Option<&str>,
+    cycle_window_mode: Option<&str>,
+    cycle_window_secs: Option<i64>,
+    cycle_window_open_at: Option<DateTime<Utc>>,
+    cycle_window_end_at: Option<DateTime<Utc>>,
     interval_ms: i64,
 ) -> TradeFlowNodeExecution {
     let repeat_at = if ws_sourced {
@@ -577,6 +624,7 @@ fn finish_trigger_market_price_execution(
         triggered_token_id,
         triggered_outcome_label,
         triggered_condition,
+        triggered_trigger_price,
         triggered_price,
         triggered_max_price,
         protection_output,
@@ -603,6 +651,10 @@ fn finish_trigger_market_price_execution(
         once_mode,
         once_scope_market,
         queued_at_from_step,
+        cycle_window_mode,
+        cycle_window_secs,
+        cycle_window_open_at,
+        cycle_window_end_at,
     );
     info!(
         flow_run_id = run.id,

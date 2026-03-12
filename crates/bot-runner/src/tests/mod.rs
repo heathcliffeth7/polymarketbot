@@ -1,10 +1,12 @@
 use super::*;
 
 mod confirmation_gate;
+mod cycle_window_focus;
 mod dual_runtime;
 mod flow_state_market_selection;
 mod place_order_core;
 mod place_order_inventory;
+mod place_order_notifications;
 mod place_order_retry;
 mod price_integrity;
 mod support;

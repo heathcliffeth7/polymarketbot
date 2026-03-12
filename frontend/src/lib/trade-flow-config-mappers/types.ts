@@ -33,6 +33,13 @@ export interface DrawdownRuleRow {
   durationValue: string;
 }
 
+export interface PlaceOrderMaxPriceUiState {
+  isInheritedValue: boolean;
+  upstreamKind: 'none' | 'single' | 'multiple';
+  upstreamMaxPriceCent: string | null;
+  distinctUpstreamMaxPriceCents: string[];
+}
+
 export interface NodeConfigFormState {
   fields: Record<string, string>;
   triggerSizeRows: string[];
@@ -44,6 +51,7 @@ export interface NodeConfigFormState {
   nestedExprMode: boolean;
   nestedExprGroup: import('@/lib/types').ExpressionGroup | null;
   statePatchRows: KeyValueDraft[];
+  placeOrderMaxPriceUi?: PlaceOrderMaxPriceUiState;
   advancedJson: string;
 }
 
@@ -72,7 +80,7 @@ export interface NodeFieldOption {
 export interface NodeFieldSchema {
   key: string;
   label: string;
-  input: 'text' | 'number' | 'datetime-local' | 'textarea' | 'select';
+  input: 'text' | 'number' | 'datetime-local' | 'textarea' | 'select' | 'checkbox';
   help?: string;
   placeholder?: string;
   options?: NodeFieldOption[];

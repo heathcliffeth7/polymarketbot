@@ -1,4 +1,5 @@
 pub mod claim;
+mod claim_relayer;
 pub mod config;
 pub mod contracts;
 pub mod db;

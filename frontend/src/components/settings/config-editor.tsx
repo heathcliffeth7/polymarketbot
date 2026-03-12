@@ -208,7 +208,15 @@ export function ConfigEditor({ file, title, fields }: ConfigEditorProps) {
 
 function isSensitiveConfigField(file: string, key: string): boolean {
   if (file === 'exchange') {
-    return ['api_key', 'api_secret', 'api_passphrase', 'signer_private_key'].includes(key);
+    return [
+      'api_key',
+      'api_secret',
+      'api_passphrase',
+      'builder_api_key',
+      'builder_api_secret',
+      'builder_api_passphrase',
+      'signer_private_key',
+    ].includes(key);
   }
   if (file === 'claim') {
     return key === 'private_key';

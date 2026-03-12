@@ -47,6 +47,10 @@ fn extract_price_midpoint_mode_prefers_best_bid_ask_over_price_changes() {
 #[test]
 fn ws_price_mode_parse_best_bid_ask_aliases() {
     assert_eq!(
+        WsPriceMode::parse(Some("composite"), WsPriceMode::Midpoint),
+        WsPriceMode::Composite
+    );
+    assert_eq!(
         WsPriceMode::parse(Some("site_display"), WsPriceMode::Midpoint),
         WsPriceMode::SiteDisplay
     );
@@ -97,6 +101,121 @@ fn ws_price_mode_parse_best_bid_ask_aliases() {
     assert_eq!(
         WsPriceMode::parse(Some("trade"), WsPriceMode::Midpoint),
         WsPriceMode::Raw
+    );
+}
+
+#[test]
+fn extract_price_composite_mode_uses_direction_aware_bid_and_last_trade() {
+    let events = vec![WsEvent {
+        channel: WsChannel::Market,
+        payload: json!({
+            "asset_id": "tok-yes",
+            "best_bid": "0.57",
+            "best_ask": "0.59",
+            "price": "0.61"
+        }),
+        event_type: WsEventType::PriceChange,
+        market: Some("tok-yes".to_string()),
+        order_id: None,
+        fill_id: None,
+        status: None,
+        price: None,
+        size: None,
+        ts: Some(12345),
+    }];
+
+    let cross_above = extract_price_from_market_events_with_mode_and_condition(
+        &events,
+        "tok-yes",
+        WsPriceMode::Composite,
+        Some("cross_above"),
+    );
+    assert_eq!(
+        cross_above,
+        Some(ExtractedWsPrice {
+            price: 0.61,
+            ts: Some(12345),
+            source: "composite_max_bid_last_trade",
+        })
+    );
+
+    let cross_below = extract_price_from_market_events_with_mode_and_condition(
+        &events,
+        "tok-yes",
+        WsPriceMode::Composite,
+        Some("cross_below"),
+    );
+    assert_eq!(
+        cross_below,
+        Some(ExtractedWsPrice {
+            price: 0.57,
+            ts: Some(12345),
+            source: "composite_min_bid_last_trade",
+        })
+    );
+}
+
+#[test]
+fn extract_price_composite_mode_uses_single_available_source() {
+    let bid_only_events = vec![WsEvent {
+        channel: WsChannel::Market,
+        payload: json!({
+            "asset_id": "tok-yes",
+            "best_bid": "0.57",
+            "best_ask": "0.59"
+        }),
+        event_type: WsEventType::PriceChange,
+        market: Some("tok-yes".to_string()),
+        order_id: None,
+        fill_id: None,
+        status: None,
+        price: None,
+        size: None,
+        ts: Some(12345),
+    }];
+    let bid_only = extract_price_from_market_events_with_mode_and_condition(
+        &bid_only_events,
+        "tok-yes",
+        WsPriceMode::Composite,
+        Some("cross_above"),
+    );
+    assert_eq!(
+        bid_only,
+        Some(ExtractedWsPrice {
+            price: 0.57,
+            ts: Some(12345),
+            source: "composite_best_bid_only",
+        })
+    );
+
+    let trade_only_events = vec![WsEvent {
+        channel: WsChannel::Market,
+        payload: json!({
+            "asset_id": "tok-yes",
+            "price": "0.61"
+        }),
+        event_type: WsEventType::PriceChange,
+        market: Some("tok-yes".to_string()),
+        order_id: None,
+        fill_id: None,
+        status: None,
+        price: None,
+        size: None,
+        ts: Some(12346),
+    }];
+    let trade_only = extract_price_from_market_events_with_mode_and_condition(
+        &trade_only_events,
+        "tok-yes",
+        WsPriceMode::Composite,
+        Some("cross_below"),
+    );
+    assert_eq!(
+        trade_only,
+        Some(ExtractedWsPrice {
+            price: 0.61,
+            ts: Some(12346),
+            source: "composite_last_trade_only",
+        })
     );
 }
 

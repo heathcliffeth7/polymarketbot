@@ -30,6 +30,8 @@ async fn maybe_resize_trade_builder_pending_exit_order(
         Some(next_qty),
         &order.status,
         order.last_error.as_deref(),
+        order.eligible_after_at,
+        order.eligible_before_at,
         None,
         None,
         None,
@@ -172,6 +174,24 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
         trade_builder_is_stop_loss_child(sibling)
             && !trade_builder_is_terminal_status(&sibling.status)
     }) {
+        if let Some(mode) = sibling.sl_trigger_price_mode.as_deref() {
+            if sl_trigger_eval_price_for_mode(mode, runtime_price).is_none() {
+                repo.append_trade_builder_order_event(
+                    sibling.id,
+                    "selected_trigger_source_missing",
+                    &json!({
+                        "sl_trigger_price_mode": mode,
+                        "best_bid": runtime_price.best_bid,
+                        "last_trade_price": runtime_price.last_trade_price,
+                        "context": "tp_preemption_check",
+                        "status": &sibling.status,
+                    }),
+                )
+                .await?;
+                continue;
+            }
+        }
+
         let sibling_current_price =
             trade_builder_trigger_eval_price_for_order(sibling, runtime_price);
         let evaluation = evaluate_trade_builder_order_trigger(
@@ -196,6 +216,9 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
                     "priority_source": "tp_guard",
                     "trigger_price": sibling.trigger_price,
                     "current_price": sibling_current_price,
+                    "sl_trigger_price_mode": &sibling.sl_trigger_price_mode,
+                    "best_bid": runtime_price.best_bid,
+                    "last_trade_price": runtime_price.last_trade_price,
                     "status_before": &sibling.status
                 }),
             )
@@ -314,6 +337,7 @@ async fn maybe_latch_trade_builder_stop_loss(
             "reason": "stop_loss",
             "trigger_price": order.trigger_price,
             "current_price": current_price,
+            "sl_trigger_price_mode": &order.sl_trigger_price_mode,
             "status_before": &order.status
         }),
     )

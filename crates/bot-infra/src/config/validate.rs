@@ -114,6 +114,18 @@ pub(crate) fn validate(
         "ctf_exchange_address required"
     );
     anyhow::ensure!(
+        !exchange.neg_risk_ctf_exchange_address.is_empty(),
+        "neg_risk_ctf_exchange_address required"
+    );
+    anyhow::ensure!(
+        is_hex_address(&exchange.ctf_exchange_address),
+        "ctf_exchange_address must be a valid 0x address"
+    );
+    anyhow::ensure!(
+        is_hex_address(&exchange.neg_risk_ctf_exchange_address),
+        "neg_risk_ctf_exchange_address must be a valid 0x address"
+    );
+    anyhow::ensure!(
         exchange.resolve_signer_private_key().is_ok(),
         "signer_private_key required"
     );
@@ -157,10 +169,13 @@ pub(crate) fn validate(
         claim.data_api_base_url.starts_with("http"),
         "claim.data_api_base_url must start with http"
     );
-    anyhow::ensure!(
-        claim.rpc_url.starts_with("http"),
-        "claim.rpc_url must start with http"
-    );
+    if !claim.rpc_url.trim().is_empty() {
+        anyhow::ensure!(
+            claim.rpc_url.starts_with("http"),
+            "claim.rpc_url must start with http"
+        );
+    }
+    let claim_execution_mode = claim.execution_mode()?;
     anyhow::ensure!(claim.chain_id > 0, "claim.chain_id must be > 0");
     anyhow::ensure!(
         claim.discovery_interval_sec >= 5,
@@ -206,6 +221,21 @@ pub(crate) fn validate(
         );
         validate_claim_user_address(claim)?;
         validate_claim_private_key(claim)?;
+        if matches!(claim_execution_mode, ClaimExecutionMode::BuilderRelayer) {
+            anyhow::ensure!(
+                exchange.resolve_gnosis_safe_address().is_some(),
+                "exchange.gnosis_safe_address is required when claim.execution_mode=builder_relayer"
+            );
+            exchange.resolve_builder_api_key().with_context(|| {
+                "exchange.builder_api_key is required when claim.execution_mode=builder_relayer"
+            })?;
+            exchange.resolve_builder_api_secret().with_context(|| {
+                "exchange.builder_api_secret is required when claim.execution_mode=builder_relayer"
+            })?;
+            exchange.resolve_builder_api_passphrase().with_context(|| {
+                "exchange.builder_api_passphrase is required when claim.execution_mode=builder_relayer"
+            })?;
+        }
     }
 
     anyhow::ensure!(

@@ -61,11 +61,52 @@ fn trade_builder_submitted_dynamic_price(order: &TradeBuilderOrder) -> Option<f6
     normalize_trade_builder_reference_price(order.submitted_dynamic_price)
 }
 
+fn trade_builder_cumulative_fill_qty(
+    order: &TradeBuilderOrder,
+    latest_fill_qty: Option<f64>,
+) -> Option<f64> {
+    if !trade_builder_should_track_buy_inventory_observation(order) || order.filled_qty <= 0.0 {
+        return None;
+    }
+
+    let latest_fill_qty = normalize_trade_builder_terminal_fill_qty_candidate(latest_fill_qty)?;
+    let cumulative = round_trade_builder_share_qty(order.filled_qty + latest_fill_qty);
+    (cumulative.is_finite() && cumulative > 0.0).then_some(cumulative)
+}
+
+fn trade_builder_observed_submit_qty(
+    order: &TradeBuilderOrder,
+    submitted_dynamic_qty: Option<f64>,
+) -> Option<(f64, &'static str)> {
+    if let Some(cumulative_fill_qty) = trade_builder_cumulative_fill_qty(order, submitted_dynamic_qty)
+    {
+        return Some((cumulative_fill_qty, "cumulative_fill_qty"));
+    }
+
+    normalize_trade_builder_terminal_fill_qty_candidate(submitted_dynamic_qty)
+        .map(|qty| (qty, "submitted_dynamic_qty"))
+}
+
+fn trade_builder_observed_fill_qty(
+    order: &TradeBuilderOrder,
+    resolved_fill_qty: Option<f64>,
+) -> Option<(f64, &'static str)> {
+    if let Some(cumulative_fill_qty) = trade_builder_cumulative_fill_qty(order, resolved_fill_qty) {
+        return Some((cumulative_fill_qty, "cumulative_fill_qty"));
+    }
+
+    normalize_trade_builder_terminal_fill_qty_candidate(resolved_fill_qty)
+        .map(|qty| (qty, "resolved_fill_qty"))
+}
+
 fn trade_builder_canonical_entry_qty(
     order: &TradeBuilderOrder,
     fallback_qty: Option<f64>,
 ) -> Option<(f64, &'static str)> {
     if trade_builder_should_track_buy_inventory_observation(order) {
+        if let Some(cumulative_fill_qty) = trade_builder_cumulative_fill_qty(order, fallback_qty) {
+            return Some((cumulative_fill_qty, "cumulative_fill_qty"));
+        }
         if let Some(submitted_dynamic_qty) = trade_builder_submitted_dynamic_qty(order) {
             return Some((submitted_dynamic_qty, "submitted_dynamic_qty"));
         }
@@ -122,7 +163,7 @@ fn trade_builder_visible_inventory_expectation(
     );
     let expected_net_qty = (gross_qty - expected_fee_qty).max(0.0);
     let expected_visible_qty = floor_trade_builder_share_qty(
-        (expected_net_qty - TRADE_BUILDER_LOCAL_EXIT_QTY_BUFFER).max(0.0),
+        (expected_net_qty - trade_builder_exit_qty_buffer(gross_qty)).max(0.0),
     );
 
     Some(TradeBuilderVisibleInventoryExpectation {
@@ -300,14 +341,22 @@ async fn maybe_record_trade_builder_buy_submit_observation(
         return;
     }
 
-    let submitted_dynamic_qty =
-        normalize_trade_builder_terminal_fill_qty_candidate(Some(submitted_dynamic_qty));
-    let Some(submitted_dynamic_qty) = submitted_dynamic_qty else {
+    let Some((submitted_dynamic_qty, qty_source)) =
+        trade_builder_observed_submit_qty(order, Some(submitted_dynamic_qty))
+    else {
         return;
     };
     let expectation = trade_builder_visible_inventory_expectation(
-        None,
-        Some(submitted_dynamic_qty),
+        if qty_source == "cumulative_fill_qty" {
+            Some(submitted_dynamic_qty)
+        } else {
+            None
+        },
+        if qty_source == "cumulative_fill_qty" {
+            None
+        } else {
+            Some(submitted_dynamic_qty)
+        },
         None,
         Some(reference_price),
         fee_rate_bps as i64,
@@ -322,7 +371,7 @@ async fn maybe_record_trade_builder_buy_submit_observation(
         outcome_label: order.outcome_label.clone(),
         exchange_order_id: Some(exchange_order_id.to_string()),
         observation_kind: TRADE_BUILDER_OBSERVATION_KIND_SUBMIT.to_string(),
-        qty_source: Some("submitted_dynamic_qty".to_string()),
+        qty_source: Some(qty_source.to_string()),
         baseline_visible_qty: None,
         submitted_dynamic_qty: Some(submitted_dynamic_qty),
         resolved_fill_qty: None,
@@ -372,10 +421,18 @@ async fn maybe_record_trade_builder_buy_fill_observation(
         return;
     }
 
-    let resolved_fill_qty = normalize_trade_builder_terminal_fill_qty_candidate(resolved_fill_qty);
+    let observed_fill_qty =
+        trade_builder_observed_fill_qty(order, resolved_fill_qty).map(|(qty, _)| qty);
+    let observed_submit_qty =
+        trade_builder_observed_submit_qty(order, trade_builder_submitted_dynamic_qty(order))
+            .map(|(qty, _)| qty);
     let expectation = trade_builder_visible_inventory_expectation(
-        resolved_fill_qty,
-        trade_builder_submitted_dynamic_qty(order),
+        observed_fill_qty,
+        if order.filled_qty > 0.0 {
+            None
+        } else {
+            observed_submit_qty
+        },
         Some(reference_price),
         trade_builder_submitted_dynamic_price(order),
         order.fee_rate_bps,
@@ -392,8 +449,8 @@ async fn maybe_record_trade_builder_buy_fill_observation(
         observation_kind: TRADE_BUILDER_OBSERVATION_KIND_FILL.to_string(),
         qty_source: qty_source.map(ToOwned::to_owned),
         baseline_visible_qty: None,
-        submitted_dynamic_qty: trade_builder_submitted_dynamic_qty(order),
-        resolved_fill_qty,
+        submitted_dynamic_qty: observed_submit_qty,
+        resolved_fill_qty: observed_fill_qty,
         expected_fee_qty: expectation.map(|value| value.expected_fee_qty),
         expected_net_qty: expectation.map(|value| value.expected_net_qty),
         expected_visible_qty: expectation.map(|value| value.expected_visible_qty),
@@ -409,8 +466,8 @@ async fn maybe_record_trade_builder_buy_fill_observation(
         fill_to_inventory_ms: None,
         payload_json: json!({
             "force_terminal": force_terminal,
-            "actual_fill_qty_unresolved": resolved_fill_qty.is_none(),
-            "submitted_dynamic_qty": trade_builder_submitted_dynamic_qty(order),
+            "actual_fill_qty_unresolved": observed_fill_qty.is_none(),
+            "submitted_dynamic_qty": observed_submit_qty,
             "submitted_dynamic_price": trade_builder_submitted_dynamic_price(order),
         }),
     };

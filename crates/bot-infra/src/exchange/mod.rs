@@ -1,5 +1,6 @@
 use crate::signer::{
-    sign_order_eip712, unix_now_secs, ApiCredentials, ClobHeaderSigner, HeaderSigner,
+    domain_separator_for_exchange, sign_order_eip712_with_domain_separator, unix_now_secs,
+    ApiCredentials, ClobHeaderSigner, HeaderSigner,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -29,6 +30,6 @@ pub use models::{
     PriceSnapshot,
 };
 pub(crate) use parse::{
-    data_api_position_matches_token, parse_f64_value, parse_gamma_market, parse_json_f64,
-    DataApiInventoryPosition,
+    data_api_position_matches_token, parse_f64_value, parse_gamma_market, parse_gamma_market_any,
+    parse_json_f64, DataApiInventoryPosition,
 };

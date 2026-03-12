@@ -65,6 +65,10 @@ pub(crate) fn default_exchange_ctf_exchange_address() -> String {
     "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E".to_string()
 }
 
+pub(crate) fn default_neg_risk_ctf_exchange_address() -> String {
+    "0xC5d563A36AE78145C45a50134d48A1215220f80a".to_string()
+}
+
 pub(crate) fn default_tp_pct() -> f64 {
     0.12
 }
@@ -131,6 +135,10 @@ pub(crate) fn default_claim_rpc_url() -> String {
 
 pub(crate) fn default_claim_data_api_base_url() -> String {
     "https://data-api.polymarket.com".to_string()
+}
+
+pub(crate) fn default_claim_execution_mode() -> String {
+    "direct".to_string()
 }
 
 pub(crate) fn default_claim_rpc_url_env() -> String {

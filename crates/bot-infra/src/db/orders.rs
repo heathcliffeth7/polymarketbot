@@ -253,6 +253,24 @@ impl PostgresRepository {
         Ok(filled_qty)
     }
 
+    pub async fn aggregate_fill_metrics_by_exchange_order_id(
+        &self,
+        exchange_order_id: &str,
+    ) -> Result<(f64, f64)> {
+        let (filled_qty, filled_notional_usdc) = sqlx::query_as::<_, (f64, f64)>(
+            "SELECT \
+               COALESCE(SUM(f.size), 0)::double precision, \
+               COALESCE(SUM(f.price * f.size), 0)::double precision \
+             FROM fills f \
+             JOIN orders o ON o.id = f.order_id \
+             WHERE o.exchange_order_id = $1",
+        )
+        .bind(exchange_order_id)
+        .fetch_one(self.pool())
+        .await?;
+        Ok((filled_qty, filled_notional_usdc))
+    }
+
     pub async fn order_size_by_exchange_order_id(
         &self,
         exchange_order_id: &str,

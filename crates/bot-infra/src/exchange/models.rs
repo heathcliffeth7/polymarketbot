@@ -9,6 +9,9 @@ pub struct GammaMarket {
     pub yes_token_id: Option<String>,
     pub no_token_id: Option<String>,
     pub maker_base_fee: u64,
+    pub neg_risk: bool,
+    pub order_price_min_tick_size: Option<f64>,
+    pub order_min_size: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +34,8 @@ pub struct PlaceOrderRequest {
     pub leg_side: Option<String>,
     #[serde(default)]
     pub fee_rate_bps: u64,
+    #[serde(default)]
+    pub neg_risk: bool,
 }
 
 fn default_order_type() -> String {

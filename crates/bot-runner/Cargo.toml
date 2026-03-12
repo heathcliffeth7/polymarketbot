@@ -7,14 +7,18 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 base64.workspace = true
 aes-gcm.workspace = true
 ethers.workspace = true
+futures-util.workspace = true
 reqwest.workspace = true
+parking_lot.workspace = true
 bot-core = { path = "../bot-core" }
 bot-infra = { path = "../bot-infra" }

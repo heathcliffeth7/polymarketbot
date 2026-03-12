@@ -67,6 +67,17 @@ pub(crate) fn data_api_position_matches_token(
 }
 
 pub(crate) fn parse_gamma_market(item: &serde_json::Value) -> Option<GammaMarket> {
+    parse_gamma_market_impl(item, true)
+}
+
+pub(crate) fn parse_gamma_market_any(item: &serde_json::Value) -> Option<GammaMarket> {
+    parse_gamma_market_impl(item, false)
+}
+
+fn parse_gamma_market_impl(
+    item: &serde_json::Value,
+    require_supported_updown_slug: bool,
+) -> Option<GammaMarket> {
     let slug = item
         .get("slug")
         .and_then(|v| v.as_str())
@@ -75,9 +86,10 @@ pub(crate) fn parse_gamma_market(item: &serde_json::Value) -> Option<GammaMarket
     if slug.is_empty() {
         return None;
     }
-    if !SUPPORTED_UPDOWN_SLUG_PREFIXES
-        .iter()
-        .any(|prefix| slug.starts_with(prefix))
+    if require_supported_updown_slug
+        && !SUPPORTED_UPDOWN_SLUG_PREFIXES
+            .iter()
+            .any(|prefix| slug.starts_with(prefix))
     {
         return None;
     }
@@ -87,6 +99,22 @@ pub(crate) fn parse_gamma_market(item: &serde_json::Value) -> Option<GammaMarket
         .get("makerBaseFee")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    let neg_risk = item
+        .get("negRisk")
+        .or_else(|| item.get("neg_risk"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let order_price_min_tick_size = parse_json_f64(
+        item.get("orderPriceMinTickSize")
+            .or_else(|| item.get("order_price_min_tick_size"))
+            .or_else(|| item.get("minimum_tick_size"))
+            .or_else(|| item.get("tick_size")),
+    );
+    let order_min_size = parse_json_f64(
+        item.get("orderMinSize")
+            .or_else(|| item.get("order_min_size"))
+            .or_else(|| item.get("min_order_size")),
+    );
     Some(GammaMarket {
         slug,
         end_date_iso: item
@@ -105,6 +133,9 @@ pub(crate) fn parse_gamma_market(item: &serde_json::Value) -> Option<GammaMarket
         yes_token_id,
         no_token_id,
         maker_base_fee,
+        neg_risk,
+        order_price_min_tick_size,
+        order_min_size,
     })
 }
 

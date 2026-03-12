@@ -282,7 +282,7 @@ fn auto_scope_specs_resolve_token_from_outcome_label() {
     assert_eq!(specs[0].token_id, "yes-token");
     assert!(specs[0].once_mode);
     assert!(specs[0].once_scope_market);
-    assert_eq!(specs[0].price_mode, WsPriceMode::Midpoint);
+    assert_eq!(specs[0].price_mode, WsPriceMode::Composite);
     assert_eq!(
         specs[0].market_slug.as_deref(),
         Some("btc-updown-5m-1772296200")
@@ -323,7 +323,7 @@ fn auto_scope_specs_prefer_context_market_slug_over_stale_config_slug() {
 }
 
 #[test]
-fn market_price_specs_parse_price_mode_and_default_to_midpoint() {
+fn market_price_specs_parse_price_mode_and_default_to_composite() {
     let context = json!({
         "flowContext": {
             "marketSlug": "epl-test",
@@ -391,7 +391,7 @@ fn market_price_specs_parse_price_mode_and_default_to_midpoint() {
     assert_eq!(raw_specs.len(), 1);
     assert_eq!(site_display_specs.len(), 1);
     assert_eq!(last_trade_specs.len(), 1);
-    assert_eq!(default_specs[0].price_mode, WsPriceMode::Midpoint);
+    assert_eq!(default_specs[0].price_mode, WsPriceMode::Composite);
     assert_eq!(raw_specs[0].price_mode, WsPriceMode::Raw);
     assert_eq!(site_display_specs[0].price_mode, WsPriceMode::SiteDisplay);
     assert_eq!(last_trade_specs[0].price_mode, WsPriceMode::LastTrade);

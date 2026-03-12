@@ -10,27 +10,28 @@ impl PostgresRepository {
     ) -> Result<bool> {
         let inserted = sqlx::query_scalar::<_, bool>(
             "INSERT INTO auto_claim_jobs \
-              (owner_address, market_slug, condition_id, status, attempts, max_attempts, next_attempt_at, tx_hash, last_error, claimed_at, last_seen_redeemable_at, created_at, updated_at) \
+              (owner_address, market_slug, condition_id, status, attempts, max_attempts, next_attempt_at, tx_hash, last_error, claimed_at, submitted_at, last_seen_redeemable_at, created_at, updated_at) \
              VALUES \
-              ($1, $2, $3, 'pending', 0, $4, NOW(), NULL, NULL, NULL, NOW(), NOW(), NOW()) \
+              ($1, $2, $3, 'pending', 0, $4, NOW(), NULL, NULL, NULL, NULL, NOW(), NOW(), NOW()) \
              ON CONFLICT (owner_address, condition_id) DO UPDATE SET \
                market_slug = COALESCE(EXCLUDED.market_slug, auto_claim_jobs.market_slug), \
                max_attempts = GREATEST(auto_claim_jobs.max_attempts, EXCLUDED.max_attempts), \
                last_seen_redeemable_at = NOW(), \
                updated_at = NOW(), \
                status = CASE \
-                 WHEN auto_claim_jobs.status IN ('claimed', 'processing') THEN auto_claim_jobs.status \
-                 WHEN auto_claim_jobs.status = 'failed' AND auto_claim_jobs.attempts >= auto_claim_jobs.max_attempts THEN auto_claim_jobs.status \
+                 WHEN auto_claim_jobs.status IN ('claimed', 'processing', 'submitted') THEN auto_claim_jobs.status \
                  ELSE 'pending' \
                END, \
+               attempts = CASE \
+                 WHEN auto_claim_jobs.status IN ('claimed', 'processing', 'submitted') THEN auto_claim_jobs.attempts \
+                 ELSE 0 \
+               END, \
                next_attempt_at = CASE \
-                 WHEN auto_claim_jobs.status IN ('claimed', 'processing') THEN auto_claim_jobs.next_attempt_at \
-                 WHEN auto_claim_jobs.status = 'failed' AND auto_claim_jobs.attempts >= auto_claim_jobs.max_attempts THEN auto_claim_jobs.next_attempt_at \
+                 WHEN auto_claim_jobs.status IN ('claimed', 'processing', 'submitted') THEN auto_claim_jobs.next_attempt_at \
                  ELSE NOW() \
                END, \
                last_error = CASE \
-                 WHEN auto_claim_jobs.status IN ('claimed', 'processing') THEN auto_claim_jobs.last_error \
-                 WHEN auto_claim_jobs.status = 'failed' AND auto_claim_jobs.attempts >= auto_claim_jobs.max_attempts THEN auto_claim_jobs.last_error \
+                 WHEN auto_claim_jobs.status IN ('claimed', 'processing', 'submitted') THEN auto_claim_jobs.last_error \
                  ELSE NULL \
                END \
              RETURNING (xmax = 0)",
@@ -50,7 +51,7 @@ impl PostgresRepository {
         limit: i64,
     ) -> Result<Vec<AutoClaimJob>> {
         let rows = sqlx::query(
-            "SELECT id, owner_address, market_slug, condition_id, status, attempts, max_attempts, next_attempt_at, tx_hash, last_error, claimed_at, last_seen_redeemable_at, created_at, updated_at \
+            "SELECT id, owner_address, market_slug, condition_id, status, attempts, max_attempts, next_attempt_at, tx_hash, last_error, claimed_at, submitted_at, last_seen_redeemable_at, created_at, updated_at \
              FROM auto_claim_jobs \
              WHERE status IN ('pending', 'retry') AND next_attempt_at <= NOW() \
              ORDER BY next_attempt_at ASC, id ASC \
@@ -74,6 +75,44 @@ impl PostgresRepository {
                 tx_hash: row.get("tx_hash"),
                 last_error: row.get("last_error"),
                 claimed_at: row.get("claimed_at"),
+                submitted_at: row.get("submitted_at"),
+                last_seen_redeemable_at: row.get("last_seen_redeemable_at"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_auto_claim_jobs_for_receipt_check(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<AutoClaimJob>> {
+        let rows = sqlx::query(
+            "SELECT id, owner_address, market_slug, condition_id, status, attempts, max_attempts, next_attempt_at, tx_hash, last_error, claimed_at, submitted_at, last_seen_redeemable_at, created_at, updated_at \
+             FROM auto_claim_jobs \
+             WHERE status = 'submitted' \
+             ORDER BY submitted_at ASC NULLS FIRST, id ASC \
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| AutoClaimJob {
+                id: row.get("id"),
+                owner_address: row.get("owner_address"),
+                market_slug: row.get("market_slug"),
+                condition_id: row.get("condition_id"),
+                status: row.get("status"),
+                attempts: row.get("attempts"),
+                max_attempts: row.get("max_attempts"),
+                next_attempt_at: row.get("next_attempt_at"),
+                tx_hash: row.get("tx_hash"),
+                last_error: row.get("last_error"),
+                claimed_at: row.get("claimed_at"),
+                submitted_at: row.get("submitted_at"),
                 last_seen_redeemable_at: row.get("last_seen_redeemable_at"),
                 created_at: row.get("created_at"),
                 updated_at: row.get("updated_at"),
@@ -93,14 +132,26 @@ impl PostgresRepository {
         Ok(())
     }
 
-    pub async fn mark_auto_claim_job_claimed(&self, job_id: i64, tx_hash: &str) -> Result<()> {
+    pub async fn mark_auto_claim_job_submitted(&self, job_id: i64, tx_hash: &str) -> Result<()> {
         sqlx::query(
             "UPDATE auto_claim_jobs \
-             SET status = 'claimed', tx_hash = $2, claimed_at = NOW(), last_error = NULL, updated_at = NOW() \
+             SET status = 'submitted', tx_hash = $2, submitted_at = NOW(), last_error = NULL, updated_at = NOW() \
              WHERE id = $1",
         )
         .bind(job_id)
         .bind(tx_hash)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_auto_claim_job_receipt_confirmed(&self, job_id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE auto_claim_jobs \
+             SET status = 'claimed', claimed_at = NOW(), last_error = NULL, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(job_id)
         .execute(self.pool())
         .await?;
         Ok(())
@@ -121,6 +172,7 @@ impl PostgresRepository {
                    ELSE NOW() + ($3 * INTERVAL '1 millisecond') \
                  END, \
                  last_error = $2, \
+                 submitted_at = NULL, \
                  updated_at = NOW() \
              WHERE id = $1 \
              RETURNING status",
@@ -131,6 +183,51 @@ impl PostgresRepository {
         .fetch_one(self.pool())
         .await?;
         Ok(status)
+    }
+
+    pub async fn mark_auto_claim_job_failed(&self, job_id: i64, last_error: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE auto_claim_jobs \
+             SET attempts = attempts + 1, \
+                 status = 'failed', \
+                 next_attempt_at = NOW(), \
+                 tx_hash = NULL, \
+                 last_error = $2, \
+                 submitted_at = NULL, \
+                 updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(last_error)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn count_auto_claim_jobs_submitted(&self) -> Result<i64> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM auto_claim_jobs WHERE status = 'submitted'",
+        )
+        .fetch_one(self.pool())
+        .await?;
+        Ok(count)
+    }
+
+    pub async fn recover_stale_processing_auto_claim_jobs(
+        &self,
+        stale_minutes: i64,
+    ) -> Result<i64> {
+        let rows = sqlx::query_scalar::<_, i64>(
+            "UPDATE auto_claim_jobs \
+             SET status = 'retry', next_attempt_at = NOW(), updated_at = NOW() \
+             WHERE status = 'processing' \
+               AND updated_at < NOW() - ($1 * INTERVAL '1 minute') \
+             RETURNING id",
+        )
+        .bind(stale_minutes)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows.len() as i64)
     }
 
     pub async fn append_auto_claim_event(

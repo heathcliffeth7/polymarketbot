@@ -23,6 +23,7 @@ import {
 import { normalizeDateTimeInput } from '../flow-canvas-utils';
 import { Settings2, Trash2, Plus, Zap } from 'lucide-react';
 import { EMPTY_SELECT_SENTINEL } from './shared';
+import { MaxPriceProtectionSection } from './max-price-protection-section';
 import {
   DrawdownRulesSection,
   ExpressionSection,
@@ -45,6 +46,8 @@ export function NodeInspectorPanel({
   marketOutcomes,
   marketOutcomesLoading,
   upstreamAutoScope,
+  upstreamHasTriggerPrice,
+  upstreamMaxPriceResolution,
   userTelegramBotTokenMasked,
   userTelegramDefaultChatId,
   actions,
@@ -99,6 +102,51 @@ export function NodeInspectorPanel({
     nodeTypeDraft === 'action.place_order'
       ? (form.fields.side ?? '').toString().trim().toLowerCase()
       : '';
+  const placeOrderMaxPriceCentValue =
+    nodeTypeDraft === 'action.place_order' ? (form.fields.maxPriceCent ?? '').toString().trim() : '';
+  const placeOrderMaxPriceUi = form.placeOrderMaxPriceUi;
+  const placeOrderHasInheritedMaxPrice = placeOrderMaxPriceUi?.isInheritedValue === true;
+  const placeOrderHasAmbiguousUpstreamMaxPrice =
+    nodeTypeDraft === 'action.place_order' && upstreamMaxPriceResolution.kind === 'multiple';
+  const placeOrderHasStaleLocalMaxPrice =
+    nodeTypeDraft === 'action.place_order' &&
+    !placeOrderHasInheritedMaxPrice &&
+    placeOrderMaxPriceCentValue.length > 0 &&
+    upstreamMaxPriceResolution.kind === 'single' &&
+    upstreamMaxPriceResolution.maxPriceCent != null &&
+    upstreamMaxPriceResolution.maxPriceCent !== placeOrderMaxPriceCentValue;
+  const placeOrderTriggerGuardChecked =
+    (form.fields.triggerPriceGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
+  const triggerGuardRetryChecked =
+    (form.fields.retryOnTriggerPriceGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
+  const executionFloorGuardChecked =
+    (form.fields.executionFloorGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
+  const executionFloorRetryChecked =
+    (form.fields.retryOnExecutionFloorGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
+  const maxPriceProtectionActive =
+    nodeTypeDraft === 'action.place_order' &&
+    placeOrderSide === 'buy' &&
+    (placeOrderMaxPriceCentValue.length > 0 ||
+      (placeOrderMaxPriceUi?.upstreamKind === 'single' &&
+        placeOrderMaxPriceUi.upstreamMaxPriceCent != null));
+  const maxPriceNotifyChecked =
+    (form.fields.notifyOnMaxPriceBlocked ?? '').toString().trim().toLowerCase() === 'true';
+  const maxPriceRetryChecked =
+    (form.fields.retryOnMaxPriceBlock ?? '').toString().trim().toLowerCase() === 'true';
+  const priceToBeatGuardChecked =
+    (form.fields.priceToBeatGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
+  const priceToBeatRetryChecked =
+    (form.fields.retryOnPriceToBeatGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
+  const priceToBeatGuardUnit =
+    (form.fields.priceToBeatMaxDiffUnit ?? '').toString().trim().toLowerCase() === 'cent'
+      ? 'cent'
+      : 'usd';
+  const showDedicatedTriggerGuard =
+    nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy';
+  const triggerGuardDisabled =
+    !upstreamHasTriggerPrice && !placeOrderTriggerGuardChecked;
+  const executionFloorGuardDisabled =
+    !upstreamHasTriggerPrice && !executionFloorGuardChecked;
   const hideAutoScopePlaceOrderOutcomeFields =
     isPresetPlaceOrder && upstreamAutoScope && placeOrderSide === 'buy';
   const supportsOpenPositionPicker =
@@ -147,6 +195,40 @@ export function NodeInspectorPanel({
       if (field.key === 'slPriceCent') {
         const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
         return placeOrderSide === 'buy' && slEnabled === 'true';
+      }
+      if (field.key === 'slTriggerPriceMode') {
+        const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
+        return placeOrderSide === 'buy' && slEnabled === 'true';
+      }
+      if (field.key === 'notifyOnTriggerPriceBlocked') {
+        return placeOrderSide === 'buy' && placeOrderTriggerGuardChecked;
+      }
+      if (field.key === 'notifyOnExecutionFloorBlocked') {
+        return placeOrderSide === 'buy' && executionFloorGuardChecked;
+      }
+      if (field.key === 'notifyOnMaxPriceBlocked' || field.key === 'retryOnMaxPriceBlock') {
+        return false;
+      }
+      if (field.key === 'notifyOnTpHit') {
+        const tpEnabled = (form.fields.tpEnabled ?? '').toString().trim().toLowerCase();
+        return placeOrderSide === 'buy' && tpEnabled === 'true';
+      }
+      if (field.key === 'notifyOnSlHit') {
+        const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
+        return placeOrderSide === 'buy' && slEnabled === 'true';
+      }
+      if (
+        field.key === 'triggerPriceGuardEnabled' ||
+        field.key === 'retryOnTriggerPriceGuardBlock' ||
+        field.key === 'executionFloorGuardEnabled' ||
+        field.key === 'retryOnExecutionFloorGuardBlock' ||
+        field.key === 'priceToBeatGuardEnabled' ||
+        field.key === 'priceToBeatMaxDiff' ||
+        field.key === 'priceToBeatMaxDiffUnit' ||
+        field.key === 'notifyOnPriceToBeatGapBlocked' ||
+        field.key === 'retryOnPriceToBeatGuardBlock'
+      ) {
+        return false;
       }
     }
     if (nodeTypeDraft === 'action.dual_dca') {
@@ -333,6 +415,13 @@ export function NodeInspectorPanel({
                       ))}
                     </SelectContent>
                   </Select>
+                ) : field.input === 'checkbox' ? (
+                  <input
+                    type="checkbox"
+                    checked={(form.fields[field.key] ?? '').toString().trim().toLowerCase() === 'true'}
+                    onChange={(e) => actions.onUpdateField(field.key, e.target.checked ? 'true' : 'false')}
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
                 ) : field.input === 'select' ? (
                   <Select
                     value={selectValue || EMPTY_SELECT_SENTINEL}
@@ -446,6 +535,278 @@ export function NodeInspectorPanel({
                   )}
                 {field.help && (
                   <p className="text-[10px] leading-relaxed text-slate-400 italic">{field.help}</p>
+                )}
+                {field.key === 'maxPriceCent' && placeOrderHasInheritedMaxPrice && (
+                  <p className="text-[10px] leading-relaxed text-sky-600">
+                    Upstream `trigger.market_price` tavanindan otomatik dolduruldu. Config&apos;e
+                    yazmak icin `Node Guncelle` kullan.
+                  </p>
+                )}
+                {field.key === 'maxPriceCent' && placeOrderHasStaleLocalMaxPrice && (
+                  <p className="text-[10px] leading-relaxed text-amber-600">
+                    Bu node icindeki kayitli tavan `{placeOrderMaxPriceCentValue}`c. Upstream tetik
+                    artik `{upstreamMaxPriceResolution.maxPriceCent}`c tasiyor; otomatik
+                    guncellenmez.
+                  </p>
+                )}
+                {field.key === 'maxPriceCent' && placeOrderHasAmbiguousUpstreamMaxPrice && (
+                  <p className="text-[10px] leading-relaxed text-amber-600">
+                    Birden fazla veya belirsiz upstream tavan bulundu
+                    {upstreamMaxPriceResolution.distinctMaxPriceCents.length > 0
+                      ? ` (${upstreamMaxPriceResolution.distinctMaxPriceCents.join(', ')}c)`
+                      : ''}.
+                    Bu yuzden otomatik doldurma yapilmadi.
+                  </p>
+                )}
+                {field.key === 'maxPriceCent' && showDedicatedTriggerGuard && (
+                  <div className="space-y-1 rounded-md border border-slate-200/80 bg-slate-50/80 p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-[11px] font-medium text-slate-600">Tetik Fiyat Korumasi</Label>
+                      <input
+                        type="checkbox"
+                        checked={placeOrderTriggerGuardChecked}
+                        disabled={triggerGuardDisabled}
+                        onChange={(e) =>
+                          actions.onUpdateField(
+                            'triggerPriceGuardEnabled',
+                            e.target.checked ? 'true' : 'false'
+                          )
+                        }
+                        className="h-4 w-4 rounded border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
+                      />
+                    </div>
+                    <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                      Upstream tetik fiyatinin altina dusulurse buy emrini engelle.
+                    </p>
+                    {!upstreamHasTriggerPrice && !placeOrderTriggerGuardChecked && (
+                      <p className="text-[10px] leading-relaxed text-amber-600">
+                        Bu koruma yalnizca upstream tetikte `triggerPrice` veya `triggerPriceCent`
+                        varsa acilabilir.
+                      </p>
+                    )}
+                    {!upstreamHasTriggerPrice && placeOrderTriggerGuardChecked && (
+                      <p className="text-[10px] leading-relaxed text-amber-600">
+                        Mevcut ayar upstream tetik fiyatini artik bulamiyor. Istersen kapatabilirsin.
+                      </p>
+                    )}
+                    {placeOrderTriggerGuardChecked && (
+                      <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2">
+                        <Label className="text-[11px] font-medium text-slate-600">
+                          Iyilesince Tekrar Dene
+                        </Label>
+                        <input
+                          type="checkbox"
+                          checked={triggerGuardRetryChecked}
+                          onChange={(e) =>
+                            actions.onUpdateField(
+                              'retryOnTriggerPriceGuardBlock',
+                              e.target.checked ? 'true' : 'false'
+                            )
+                          }
+                          className="h-4 w-4 rounded border-slate-300"
+                        />
+                      </div>
+                    )}
+                    {placeOrderTriggerGuardChecked && (
+                      <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                        Guard bloklarsa order iptal olmaz; bekleme moduna alinip kosullar
+                        duzelince yeniden denenir.
+                      </p>
+                    )}
+                    <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2">
+                      <Label className="text-[11px] font-medium text-slate-600">
+                        Execution Floor Korumasi
+                      </Label>
+                      <input
+                        type="checkbox"
+                        checked={executionFloorGuardChecked}
+                        disabled={executionFloorGuardDisabled}
+                        onChange={(e) =>
+                          actions.onUpdateField(
+                            'executionFloorGuardEnabled',
+                            e.target.checked ? 'true' : 'false'
+                          )
+                        }
+                        className="h-4 w-4 rounded border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
+                      />
+                    </div>
+                    <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                      Best ask upstream tetik fiyatinin altindaysa buy emrini tamamen iptal et.
+                      Best ask bulunamazsa da bloklar.
+                    </p>
+                    {!upstreamHasTriggerPrice && !executionFloorGuardChecked && (
+                      <p className="text-[10px] leading-relaxed text-amber-600">
+                        Bu koruma yalnizca upstream tetikte `triggerPrice` veya `triggerPriceCent`
+                        varsa acilabilir.
+                      </p>
+                    )}
+                    {!upstreamHasTriggerPrice && executionFloorGuardChecked && (
+                      <p className="text-[10px] leading-relaxed text-amber-600">
+                        Mevcut ayar upstream tetik fiyatini artik bulamiyor. Istersen kapatabilirsin.
+                      </p>
+                    )}
+                    {executionFloorGuardChecked && (
+                      <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2">
+                        <Label className="text-[11px] font-medium text-slate-600">
+                          Iyilesince Tekrar Dene
+                        </Label>
+                        <input
+                          type="checkbox"
+                          checked={executionFloorRetryChecked}
+                          onChange={(e) =>
+                            actions.onUpdateField(
+                              'retryOnExecutionFloorGuardBlock',
+                              e.target.checked ? 'true' : 'false'
+                            )
+                          }
+                          className="h-4 w-4 rounded border-slate-300"
+                        />
+                      </div>
+                    )}
+                    {executionFloorGuardChecked && (
+                      <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                        Floor korumasi bloklarsa order beklemeye alinip market duzelince yeniden
+                        denenir.
+                      </p>
+                    )}
+                    <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2">
+                      <Label className="text-[11px] font-medium text-slate-600">
+                        Price to Beat Korumasi
+                      </Label>
+                      <input
+                        type="checkbox"
+                        checked={priceToBeatGuardChecked}
+                        onChange={(e) =>
+                          {
+                            actions.onUpdateField(
+                              'priceToBeatGuardEnabled',
+                              e.target.checked ? 'true' : 'false'
+                            );
+                            if (
+                              e.target.checked &&
+                              !['usd', 'cent'].includes(
+                                (form.fields.priceToBeatMaxDiffUnit ?? '')
+                                  .toString()
+                                  .trim()
+                                  .toLowerCase()
+                              )
+                            ) {
+                              actions.onUpdateField('priceToBeatMaxDiffUnit', 'usd');
+                            }
+                            if (
+                              e.target.checked &&
+                              !(form.fields.notifyOnPriceToBeatGapBlocked ?? '')
+                                .toString()
+                                .trim()
+                            ) {
+                              actions.onUpdateField('notifyOnPriceToBeatGapBlocked', 'true');
+                            }
+                          }
+                        }
+                        className="h-4 w-4 rounded border-slate-300"
+                      />
+                    </div>
+                    <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                      Price to Beat ile ayni Polymarket/Chainlink current price feedi kullanilir.
+                      Fark belirlenen minimum seviyenin altindaysa buy emrini engelle. 5m ve 15m
+                      updown marketlerde calisir.
+                    </p>
+                    {priceToBeatGuardChecked && (
+                      <div className="mt-2 space-y-2 border-t border-slate-200 pt-2">
+                        <div className="space-y-1">
+                          <Label className="text-[11px] font-medium text-slate-600">
+                            Minimum Fark
+                          </Label>
+                          <Input
+                            type="number"
+                            step="any"
+                            value={form.fields.priceToBeatMaxDiff ?? ''}
+                            onChange={(event) =>
+                              actions.onUpdateField('priceToBeatMaxDiff', event.target.value)
+                            }
+                            placeholder={priceToBeatGuardUnit === 'cent' ? '1' : '5'}
+                            className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-[11px] font-medium text-slate-600">
+                            Birim
+                          </Label>
+                          <Select
+                            value={priceToBeatGuardUnit}
+                            onValueChange={(value) =>
+                              actions.onUpdateField('priceToBeatMaxDiffUnit', value)
+                            }
+                          >
+                            <SelectTrigger
+                              className="h-8 w-full border-slate-200 bg-white text-xs text-slate-900"
+                              size="sm"
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="usd">USD</SelectItem>
+                              <SelectItem value="cent">Cent</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                          {priceToBeatGuardUnit === 'cent'
+                            ? 'Cent modu: 1 = $0.01. Fark bu minimum degerin altinda kalirsa bloklanir.'
+                            : 'USD modu: 5 = $5.00. Fark bu minimum degerin altinda kalirsa bloklanir.'}
+                        </p>
+                        <div className="flex items-center justify-between gap-2">
+                          <Label className="text-[11px] font-medium text-slate-600">
+                            Price to Beat Engel Bildirimi
+                          </Label>
+                          <input
+                            type="checkbox"
+                            checked={
+                              (form.fields.notifyOnPriceToBeatGapBlocked ?? '')
+                                .toString()
+                                .trim()
+                                .toLowerCase() === 'true'
+                            }
+                            onChange={(e) =>
+                              actions.onUpdateField(
+                                'notifyOnPriceToBeatGapBlocked',
+                                e.target.checked ? 'true' : 'false'
+                              )
+                            }
+                            className="h-4 w-4 rounded border-slate-300"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <Label className="text-[11px] font-medium text-slate-600">
+                            Iyilesince Tekrar Dene
+                          </Label>
+                          <input
+                            type="checkbox"
+                            checked={priceToBeatRetryChecked}
+                            onChange={(e) =>
+                              actions.onUpdateField(
+                                'retryOnPriceToBeatGuardBlock',
+                                e.target.checked ? 'true' : 'false'
+                              )
+                            }
+                            className="h-4 w-4 rounded border-slate-300"
+                          />
+                        </div>
+                        <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                          Guard fail olursa node hata verir ama bekleme modunda yeniden denenir;
+                          kosullar duzelince order akisina devam eder.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {field.key === 'maxPriceCent' && showDedicatedTriggerGuard && (
+                  <MaxPriceProtectionSection
+                    hasConfiguredMaxPrice={maxPriceProtectionActive}
+                    notifyChecked={maxPriceNotifyChecked}
+                    retryChecked={maxPriceRetryChecked}
+                    onUpdateField={actions.onUpdateField}
+                  />
                 )}
                 </div>
               );

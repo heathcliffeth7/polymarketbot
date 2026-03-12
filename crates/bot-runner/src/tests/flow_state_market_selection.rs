@@ -327,6 +327,9 @@ fn gamma_market_for_test(slug: &str) -> GammaMarket {
         yes_token_id: Some("yes-token".to_string()),
         no_token_id: Some("no-token".to_string()),
         maker_base_fee: 0,
+        neg_risk: false,
+        order_price_min_tick_size: None,
+        order_min_size: None,
     }
 }
 

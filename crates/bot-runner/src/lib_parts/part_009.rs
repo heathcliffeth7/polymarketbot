@@ -131,6 +131,7 @@ async fn place_live_leg_order(
         client_order_id: client_order_id.clone(),
         leg_side: Some(leg_side_label(leg.side).to_string()),
         fee_rate_bps,
+        neg_risk: false,
     };
 
     let ack = client.place(&req).await?;
@@ -550,4 +551,3 @@ fn price_dropped_below_threshold(
     }
     current_price <= reference_price * (1.0 - (drop_sell_pct / 100.0))
 }
-

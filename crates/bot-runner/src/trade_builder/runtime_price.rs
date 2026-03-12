@@ -7,7 +7,7 @@ fn evaluate_trade_builder_order_trigger(
         return TradeBuilderTriggerEvaluation {
             should_trigger: matches!(
                 order.status.as_str(),
-                "pending" | "armed" | "triggered" | "blocked"
+                "pending" | "armed" | "triggered" | "blocked" | "guard_blocked"
             ),
             first_tick_threshold_used: false,
         };
@@ -52,7 +52,7 @@ fn evaluate_trade_builder_order_trigger(
         "cross_above"
             if matches!(
                 order.status.as_str(),
-                "triggered" | "blocked" | "inventory_pending"
+                "triggered" | "blocked" | "guard_blocked" | "inventory_pending"
             ) =>
         {
             current_price >= trigger_price
@@ -60,7 +60,7 @@ fn evaluate_trade_builder_order_trigger(
         "cross_below"
             if matches!(
                 order.status.as_str(),
-                "triggered" | "blocked" | "inventory_pending"
+                "triggered" | "blocked" | "guard_blocked" | "inventory_pending"
             ) =>
         {
             current_price <= trigger_price

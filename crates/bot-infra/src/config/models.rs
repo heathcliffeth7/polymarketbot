@@ -1,5 +1,30 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimExecutionMode {
+    Direct,
+    BuilderRelayer,
+}
+
+impl ClaimExecutionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::BuilderRelayer => "builder_relayer",
+        }
+    }
+
+    pub fn from_config_value(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "direct" => Ok(Self::Direct),
+            "builder_relayer" => Ok(Self::BuilderRelayer),
+            other => Err(anyhow::anyhow!(
+                "claim.execution_mode must be one of: direct, builder_relayer (got {other})"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct BotConfig {
     pub mode: ExecutionMode,
@@ -114,7 +139,15 @@ pub struct ExchangeConfig {
     pub api_secret_env: String,
     pub api_passphrase_env: String,
     #[serde(default)]
+    pub builder_api_key_env: String,
+    #[serde(default)]
+    pub builder_api_secret_env: String,
+    #[serde(default)]
+    pub builder_api_passphrase_env: String,
+    #[serde(default)]
     pub ctf_exchange_address: String,
+    #[serde(default = "default_neg_risk_ctf_exchange_address")]
+    pub neg_risk_ctf_exchange_address: String,
     #[serde(default)]
     pub signer_private_key: String,
     #[serde(default)]
@@ -123,6 +156,12 @@ pub struct ExchangeConfig {
     pub gnosis_safe_address: String,
     #[serde(default)]
     pub gnosis_safe_address_env: String,
+    #[serde(default)]
+    pub builder_api_key: String,
+    #[serde(default)]
+    pub builder_api_secret: String,
+    #[serde(default)]
+    pub builder_api_passphrase: String,
 }
 
 impl Default for ExchangeConfig {
@@ -140,11 +179,18 @@ impl Default for ExchangeConfig {
             api_key_env: String::new(),
             api_secret_env: String::new(),
             api_passphrase_env: String::new(),
+            builder_api_key_env: String::new(),
+            builder_api_secret_env: String::new(),
+            builder_api_passphrase_env: String::new(),
             ctf_exchange_address: default_exchange_ctf_exchange_address(),
+            neg_risk_ctf_exchange_address: default_neg_risk_ctf_exchange_address(),
             signer_private_key: String::new(),
             signer_private_key_env: String::new(),
             gnosis_safe_address: String::new(),
             gnosis_safe_address_env: String::new(),
+            builder_api_key: String::new(),
+            builder_api_secret: String::new(),
+            builder_api_passphrase: String::new(),
         }
     }
 }
@@ -185,6 +231,90 @@ impl ExchangeConfig {
         }
         None
     }
+
+    pub fn resolve_builder_api_key(&self) -> Result<String> {
+        if !self.builder_api_key.trim().is_empty() {
+            return decrypt_config_string_if_needed(
+                "exchange.builder_api_key",
+                &self.builder_api_key,
+            );
+        }
+        if !self.builder_api_key_env.is_empty() {
+            if let Ok(val) = env::var(&self.builder_api_key_env) {
+                if !val.is_empty() {
+                    return Ok(val);
+                }
+            }
+        }
+        if !self.api_key.trim().is_empty() {
+            return decrypt_config_string_if_needed("exchange.api_key", &self.api_key);
+        }
+        if !self.api_key_env.is_empty() {
+            if let Ok(val) = env::var(&self.api_key_env) {
+                if !val.is_empty() {
+                    return Ok(val);
+                }
+            }
+        }
+        Err(anyhow::anyhow!("builder_api_key not configured"))
+    }
+
+    pub fn resolve_builder_api_secret(&self) -> Result<String> {
+        if !self.builder_api_secret.trim().is_empty() {
+            return decrypt_config_string_if_needed(
+                "exchange.builder_api_secret",
+                &self.builder_api_secret,
+            );
+        }
+        if !self.builder_api_secret_env.is_empty() {
+            if let Ok(val) = env::var(&self.builder_api_secret_env) {
+                if !val.is_empty() {
+                    return Ok(val);
+                }
+            }
+        }
+        if !self.api_secret.trim().is_empty() {
+            return decrypt_config_string_if_needed("exchange.api_secret", &self.api_secret);
+        }
+        if !self.api_secret_env.is_empty() {
+            if let Ok(val) = env::var(&self.api_secret_env) {
+                if !val.is_empty() {
+                    return Ok(val);
+                }
+            }
+        }
+        Err(anyhow::anyhow!("builder_api_secret not configured"))
+    }
+
+    pub fn resolve_builder_api_passphrase(&self) -> Result<String> {
+        if !self.builder_api_passphrase.trim().is_empty() {
+            return decrypt_config_string_if_needed(
+                "exchange.builder_api_passphrase",
+                &self.builder_api_passphrase,
+            );
+        }
+        if !self.builder_api_passphrase_env.is_empty() {
+            if let Ok(val) = env::var(&self.builder_api_passphrase_env) {
+                if !val.is_empty() {
+                    return Ok(val);
+                }
+            }
+        }
+        if !self.api_passphrase.trim().is_empty() {
+            return decrypt_config_string_if_needed(
+                "exchange.api_passphrase",
+                &self.api_passphrase,
+            );
+        }
+        if !self.api_passphrase_env.is_empty() {
+            if let Ok(val) = env::var(&self.api_passphrase_env) {
+                if !val.is_empty() {
+                    return Ok(val);
+                }
+            }
+        }
+        Err(anyhow::anyhow!("builder_api_passphrase not configured"))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -205,6 +335,8 @@ pub struct ClaimConfig {
     pub private_key: String,
     #[serde(default = "default_claim_private_key_env")]
     pub private_key_env: String,
+    #[serde(default = "default_claim_execution_mode")]
+    pub execution_mode: String,
     #[serde(default = "default_claim_chain_id")]
     pub chain_id: u64,
     #[serde(default = "default_claim_ctf_contract_address")]
@@ -236,6 +368,7 @@ impl Default for ClaimConfig {
             user_address_env: default_claim_user_address_env(),
             private_key: String::new(),
             private_key_env: default_claim_private_key_env(),
+            execution_mode: default_claim_execution_mode(),
             chain_id: default_claim_chain_id(),
             ctf_contract_address: default_claim_ctf_contract_address(),
             collateral_token_address: default_claim_collateral_token_address(),
@@ -250,6 +383,10 @@ impl Default for ClaimConfig {
 }
 
 impl ClaimConfig {
+    pub fn execution_mode(&self) -> Result<ClaimExecutionMode> {
+        ClaimExecutionMode::from_config_value(&self.execution_mode)
+    }
+
     pub fn resolve_user_address(&self) -> Result<String> {
         if !self.user_address.trim().is_empty() {
             return decrypt_config_string_if_needed("claim.user_address", &self.user_address);
@@ -354,7 +491,8 @@ impl AppConfig {
         let execution: ExecutionConfig =
             load_json_or_toml(settings.get("execution"), &dir.join("execution.toml"))?;
         let exchange: ExchangeConfig = load_json_or_default(settings.get("exchange"))?;
-        let claim: ClaimConfig = load_json_or_default(settings.get("claim"))?;
+        let claim: ClaimConfig =
+            load_json_or_toml_or_default(settings.get("claim"), &dir.join("claim.toml"))?;
         let telegram: TelegramConfig = load_json_or_default(settings.get("telegram"))?;
 
         validate(

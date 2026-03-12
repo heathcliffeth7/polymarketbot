@@ -2,6 +2,15 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as TOML from '@iarna/toml';
 import { pool } from '@/lib/db';
+import type {
+  ClaimRelayerConfigForServer,
+  ClaimRuntimeValidationState,
+} from '@/lib/claim-relayer-config';
+import {
+  normalizeClaimExecutionMode,
+  resolvePlaintextConfigValueForServer,
+  resolveSensitiveConfigValueForServer,
+} from '@/lib/claim-relayer-config';
 import {
   decryptConfigValue,
   encryptConfigValue,
@@ -12,33 +21,14 @@ const CONFIG_DIR = process.env.BOT_CONFIG_DIR || '/home/heathcliff/polymarketbot
 const MASKED_SECRET = '********';
 
 const EXCHANGE_SENSITIVE_FIELDS = [
-  'api_key',
-  'api_secret',
-  'api_passphrase',
+  'api_key', 'api_secret', 'api_passphrase',
+  'builder_api_key', 'builder_api_secret', 'builder_api_passphrase',
   'signer_private_key',
 ] as const;
 const CLAIM_SENSITIVE_FIELDS = ['private_key'] as const;
 const TELEGRAM_SENSITIVE_FIELDS = ['bot_token'] as const;
-const SUPPORTED_MARKET_SCOPES = [
-  'btc_5m_updown',
-  'btc_15m_updown',
-  'eth_5m_updown',
-  'eth_15m_updown',
-  'sol_5m_updown',
-  'sol_15m_updown',
-  'xrp_5m_updown',
-  'xrp_15m_updown',
-] as const;
-const SUPPORTED_MARKET_SLUG_PREFIXES = [
-  'btc-updown-5m-',
-  'btc-updown-15m-',
-  'eth-updown-5m-',
-  'eth-updown-15m-',
-  'sol-updown-5m-',
-  'sol-updown-15m-',
-  'xrp-updown-5m-',
-  'xrp-updown-15m-',
-] as const;
+const SUPPORTED_MARKET_SCOPES = ['btc_5m_updown', 'btc_15m_updown', 'eth_5m_updown', 'eth_15m_updown', 'sol_5m_updown', 'sol_15m_updown', 'xrp_5m_updown', 'xrp_15m_updown'] as const;
+const SUPPORTED_MARKET_SLUG_PREFIXES = ['btc-updown-5m-', 'btc-updown-15m-', 'eth-updown-5m-', 'eth-updown-15m-', 'sol-updown-5m-', 'sol-updown-15m-', 'xrp-updown-5m-', 'xrp-updown-15m-'] as const;
 
 const ALLOWED_FILES: Record<string, { writable: boolean }> = {
   bot: { writable: true },
@@ -199,21 +189,46 @@ export async function readPositionWalletAddress(
   context: UserConfigContext
 ): Promise<string> {
   const raw = normalizeExchangeShape(await readRawConfig('exchange', context));
-
-  const safeEnvName = String(raw.gnosis_safe_address_env ?? '').trim();
-  const safeFromEnv = safeEnvName ? String(process.env[safeEnvName] ?? '').trim() : '';
-  if (safeFromEnv) return safeFromEnv;
-
-  const safeInline = String(raw.gnosis_safe_address ?? '').trim();
-  if (safeInline) {
-    if (!isEncryptedConfigValue(safeInline)) return safeInline;
-    try {
-      const decrypted = decryptConfigValue(safeInline).trim();
-      if (decrypted) return decrypted;
-    } catch {}
-  }
-
+  const safeValue = resolvePlaintextConfigValueForServer(
+    raw.gnosis_safe_address,
+    raw.gnosis_safe_address_env
+  );
+  if (safeValue) return safeValue;
   return readExchangeApiAddressForServer(context);
+}
+
+export async function readClaimRelayerConfigForServer(
+  context: UserConfigContext
+): Promise<ClaimRelayerConfigForServer> {
+  const storedClaim = await readStoredUserConfig(context.userId, 'claim');
+  const claimSource = storedClaim ?? (await readFallbackFileConfig('claim').catch(() => ({})));
+  const claim = normalizeClaimShape(claimSource);
+  const exchange = normalizeExchangeShape(await readRawConfig('exchange', context));
+
+  return {
+    executionMode: normalizeClaimExecutionMode(claim.execution_mode),
+    chainId: Number(claim.chain_id ?? 137),
+    ctfContractAddress: String(claim.ctf_contract_address ?? '').trim(),
+    collateralTokenAddress: String(claim.collateral_token_address ?? '').trim(),
+    userAddress: resolvePlaintextConfigValueForServer(claim.user_address, claim.user_address_env),
+    privateKey: resolveSensitiveConfigValueForServer(claim.private_key, claim.private_key_env),
+    safeAddress: resolvePlaintextConfigValueForServer(
+      exchange.gnosis_safe_address,
+      exchange.gnosis_safe_address_env
+    ),
+    builderApiKey: resolveSensitiveConfigValueForServer(
+      exchange.builder_api_key || exchange.api_key,
+      exchange.builder_api_key_env || exchange.api_key_env
+    ),
+    builderApiSecret: resolveSensitiveConfigValueForServer(
+      exchange.builder_api_secret || exchange.api_secret,
+      exchange.builder_api_secret_env || exchange.api_secret_env
+    ),
+    builderApiPassphrase: resolveSensitiveConfigValueForServer(
+      exchange.builder_api_passphrase || exchange.api_passphrase,
+      exchange.builder_api_passphrase_env || exchange.api_passphrase_env
+    ),
+  };
 }
 
 export async function readTelegramBotTokenForServer(
@@ -231,6 +246,47 @@ export async function readTelegramChatIdForServer(
 ): Promise<string> {
   const raw = normalizeTelegramShape(await readRawConfig('telegram', context));
   return String(raw.chat_id ?? '').trim();
+}
+
+export async function readEffectiveClaimConfigForServer(
+  context: UserConfigContext
+): Promise<ClaimRuntimeValidationState> {
+  // Runtime loads stored claim JSON when present, otherwise falls back to claim.toml.
+  // Do not use buildDefaultUserConfig here because it intentionally forces enabled=false.
+  const stored = await readStoredUserConfig(context.userId, 'claim');
+  const source = stored ?? (await readFallbackFileConfig('claim').catch(() => ({})));
+  const raw = normalizeClaimShape(source);
+  const exchange = normalizeExchangeShape(await readRawConfig('exchange', context));
+
+  return {
+    enabled: raw.enabled === true,
+    executionMode: normalizeClaimExecutionMode(raw.execution_mode),
+    hasRpcSource:
+      String(raw.rpc_url ?? '').trim().length > 0 ||
+      String(raw.rpc_url_env ?? '').trim().length > 0,
+    hasUserAddressSource:
+      String(raw.user_address ?? '').trim().length > 0 ||
+      String(raw.user_address_env ?? '').trim().length > 0,
+    hasPrivateKeySource:
+      String(raw.private_key ?? '').trim().length > 0 ||
+      String(raw.private_key_env ?? '').trim().length > 0,
+    hasSafeAddressSource:
+      String(exchange.gnosis_safe_address ?? '').trim().length > 0 ||
+      String(exchange.gnosis_safe_address_env ?? '').trim().length > 0,
+    hasBuilderCredsSource:
+      (String(exchange.builder_api_key ?? '').trim().length > 0 ||
+        String(exchange.builder_api_key_env ?? '').trim().length > 0 ||
+        String(exchange.api_key ?? '').trim().length > 0 ||
+        String(exchange.api_key_env ?? '').trim().length > 0) &&
+      (String(exchange.builder_api_secret ?? '').trim().length > 0 ||
+        String(exchange.builder_api_secret_env ?? '').trim().length > 0 ||
+        String(exchange.api_secret ?? '').trim().length > 0 ||
+        String(exchange.api_secret_env ?? '').trim().length > 0) &&
+      (String(exchange.builder_api_passphrase ?? '').trim().length > 0 ||
+        String(exchange.builder_api_passphrase_env ?? '').trim().length > 0 ||
+        String(exchange.api_passphrase ?? '').trim().length > 0 ||
+        String(exchange.api_passphrase_env ?? '').trim().length > 0),
+  };
 }
 
 export function isValidTelegramChatTarget(rawValue: string): boolean {
@@ -405,6 +461,15 @@ function normalizeExchangeConfigForWrite(
     merged.api_secret_env = '';
     merged.api_passphrase_env = '';
   }
+  if (
+    String(merged.builder_api_key ?? '').trim() &&
+    String(merged.builder_api_secret ?? '').trim() &&
+    String(merged.builder_api_passphrase ?? '').trim()
+  ) {
+    merged.builder_api_key_env = '';
+    merged.builder_api_secret_env = '';
+    merged.builder_api_passphrase_env = '';
+  }
   if (String(merged.signer_private_key ?? '').trim()) {
     merged.signer_private_key_env = '';
   }
@@ -429,6 +494,9 @@ function normalizeClaimConfigForWrite(
   }
   if (incoming.data_api_base_url !== undefined) {
     merged.data_api_base_url = String(incoming.data_api_base_url ?? '').trim();
+  }
+  if (incoming.execution_mode !== undefined) {
+    merged.execution_mode = String(incoming.execution_mode ?? '').trim();
   }
   merged.user_address = resolvePlaintextFieldForWrite('user_address', incoming, existing);
   merged.private_key = resolveSensitiveFieldForWrite('private_key', incoming, existing);
@@ -553,7 +621,7 @@ function normalizeSensitiveValueForWrite(field: string, value: string): string {
   if (!trimmed) {
     return '';
   }
-  if (field !== 'api_secret') {
+  if (field !== 'api_secret' && field !== 'builder_api_secret') {
     return trimmed;
   }
   return normalizeBase64UrlSecretForStorage(trimmed);
@@ -598,6 +666,9 @@ function normalizeExchangeShape(source: Record<string, unknown>): Record<string,
     api_key: String(source.api_key ?? ''),
     api_secret: String(source.api_secret ?? ''),
     api_passphrase: String(source.api_passphrase ?? ''),
+    builder_api_key: String(source.builder_api_key ?? ''),
+    builder_api_secret: String(source.builder_api_secret ?? ''),
+    builder_api_passphrase: String(source.builder_api_passphrase ?? ''),
     ctf_exchange_address: String(source.ctf_exchange_address ?? ''),
     signer_private_key: String(source.signer_private_key ?? ''),
     signer_private_key_env: String(source.signer_private_key_env ?? ''),
@@ -605,6 +676,9 @@ function normalizeExchangeShape(source: Record<string, unknown>): Record<string,
     api_key_env: String(source.api_key_env ?? ''),
     api_secret_env: String(source.api_secret_env ?? ''),
     api_passphrase_env: String(source.api_passphrase_env ?? ''),
+    builder_api_key_env: String(source.builder_api_key_env ?? ''),
+    builder_api_secret_env: String(source.builder_api_secret_env ?? ''),
+    builder_api_passphrase_env: String(source.builder_api_passphrase_env ?? ''),
     gnosis_safe_address: String(source.gnosis_safe_address ?? ''),
     gnosis_safe_address_env: String(source.gnosis_safe_address_env ?? ''),
   };
@@ -620,6 +694,7 @@ function normalizeClaimShape(source: Record<string, unknown>): Record<string, un
   const retryBackoffMs = Number(source.retry_backoff_ms);
   return {
     enabled: Boolean(source.enabled),
+    execution_mode: String(source.execution_mode ?? 'direct'),
     rpc_url: String(source.rpc_url ?? ''),
     rpc_url_env: String(source.rpc_url_env ?? ''),
     data_api_base_url: String(source.data_api_base_url ?? ''),
@@ -772,6 +847,7 @@ function validateConfig(name: string, data: Record<string, unknown>): void {
     const rpcUrl = String(data.rpc_url ?? '').trim();
     const rpcUrlEnv = String(data.rpc_url_env ?? '').trim();
     const dataApiBaseUrl = String(data.data_api_base_url ?? '').trim();
+    const executionMode = normalizeClaimExecutionMode(data.execution_mode);
     const userAddress = String(data.user_address ?? '').trim();
     const userAddressEnv = String(data.user_address_env ?? '').trim();
     const privateKey = String(data.private_key ?? '').trim();
@@ -779,6 +855,9 @@ function validateConfig(name: string, data: Record<string, unknown>): void {
 
     if (rpcUrl && !rpcUrl.startsWith('http')) {
       errors.push('rpc_url must start with http');
+    }
+    if (!['direct', 'builder_relayer'].includes(executionMode)) {
+      errors.push('execution_mode must be direct or builder_relayer');
     }
     if (!dataApiBaseUrl.startsWith('http')) {
       errors.push('data_api_base_url must start with http');
@@ -880,12 +959,18 @@ async function buildDefaultUserConfig(name: string): Promise<Record<string, unkn
       api_key: '',
       api_secret: '',
       api_passphrase: '',
+      builder_api_key: '',
+      builder_api_secret: '',
+      builder_api_passphrase: '',
       signer_private_key: '',
       gnosis_safe_address: '',
       api_address_env: '',
       api_key_env: '',
       api_secret_env: '',
       api_passphrase_env: '',
+      builder_api_key_env: '',
+      builder_api_secret_env: '',
+      builder_api_passphrase_env: '',
       signer_private_key_env: '',
       gnosis_safe_address_env: '',
     };
@@ -895,6 +980,7 @@ async function buildDefaultUserConfig(name: string): Promise<Record<string, unkn
     return {
       ...normalized,
       enabled: false,
+      execution_mode: 'direct',
       user_address: '',
       user_address_env: '',
       private_key: '',

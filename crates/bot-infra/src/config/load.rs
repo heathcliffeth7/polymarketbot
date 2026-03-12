@@ -33,3 +33,17 @@ pub(crate) fn load_json_or_default<T: for<'de> Deserialize<'de> + Default>(
     }
     Ok(T::default())
 }
+
+pub(crate) fn load_json_or_toml_or_default<T: for<'de> Deserialize<'de> + Default>(
+    payload: Option<&Value>,
+    path: &Path,
+) -> Result<T> {
+    if let Some(value) = payload {
+        return serde_json::from_value(value.clone())
+            .with_context(|| format!("parsing stored config payload for {}", path.display()));
+    }
+    if path.exists() {
+        return load_toml(path);
+    }
+    Ok(T::default())
+}

@@ -50,7 +50,6 @@ import {
   createGraphFingerprint,
   createNodeKey,
   hasRequiredPlaceOrderSeed,
-  hasUpstreamAutoScopeTrigger,
   isRecord,
   nodePaletteCategoryOf,
   toCanvasEdge,
@@ -70,7 +69,6 @@ import {
   removeExpressionRowState,
   removeOutcomeConditionState,
   removeStatePatchRowState,
-  syncPlaceOrderTriggerRowsState,
   updateDrawdownRuleState,
   updateExpressionRowState,
   updateNodeFieldState,
@@ -80,9 +78,11 @@ import {
 } from './form-state';
 import { useCanvasKeyboard } from '../flow-canvas-keyboard';
 import { exportGraphAsJson, importGraphFromFile } from '../flow-import-export';
-import { normalizePresetPlaceOrderConfig } from './helpers';
+import { applyInheritedPlaceOrderMaxPriceConfig, normalizePresetPlaceOrderConfig } from './helpers';
 import { FlowCanvasEditorLayout } from './layout';
 import { useMarketOutcomes } from './use-market-outcomes';
+import { useSelectedNodeUpstream } from './use-selected-node-upstream';
+import { useSyncPlaceOrderFormState } from './use-sync-place-order-form-state';
 
 export function FlowCanvasEditorBody({
   graph,
@@ -99,10 +99,7 @@ export function FlowCanvasEditorBody({
   userTelegramBotTokenMasked,
   userTelegramDefaultChatId,
 }: FlowCanvasEditorProps) {
-  const graphFingerprint = useMemo(
-    () => createGraphFingerprint(graph.nodes, graph.edges),
-    [graph.nodes, graph.edges]
-  );
+  const graphFingerprint = useMemo(() => createGraphFingerprint(graph.nodes, graph.edges), [graph.nodes, graph.edges]);
   const [canvasNodes, setCanvasNodes] = useState<FlowNode[]>(() => graph.nodes.map(toCanvasNode));
   const [canvasEdges, setCanvasEdges] = useState<FlowEdge[]>(() => graph.edges.map(toCanvasEdge));
   const canvasNodesRef = useRef<FlowNode[]>(canvasNodes);
@@ -119,10 +116,8 @@ export function FlowCanvasEditorBody({
   const history = useCanvasHistory();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const selectedNodeUpstreamAutoScope = useMemo(() => {
-    if (!selectedNodeId) return false;
-    return hasUpstreamAutoScopeTrigger(selectedNodeId, canvasNodes, canvasEdges);
-  }, [selectedNodeId, canvasNodes, canvasEdges]);
+  const { upstreamAutoScope: selectedNodeUpstreamAutoScope, upstreamTriggerPrice: selectedNodeUpstreamTriggerPrice, upstreamMaxPriceResolution: selectedNodeUpstreamMaxPriceResolution } =
+    useSelectedNodeUpstream({ selectedNodeId, canvasNodes, canvasEdges });
   const [nodeInspectorTab, setNodeInspectorTab] = useState<'basic' | 'advanced'>('basic');
   const [edgeInspectorTab, setEdgeInspectorTab] = useState<'basic' | 'advanced'>('basic');
   const [openPositionApplyingKey, setOpenPositionApplyingKey] = useState<string | null>(null);
@@ -468,10 +463,7 @@ export function FlowCanvasEditorBody({
     setHasPendingNodeDraft(true);
     setNodeForm((prev) => updateTriggerSizeRowState(prev, index, value));
   };
-  useEffect(() => {
-    if (nodeTypeDraft !== 'action.place_order') return;
-    setNodeForm(syncPlaceOrderTriggerRowsState);
-  }, [nodeTypeDraft, nodeForm?.fields.maxTriggers]);
+  useSyncPlaceOrderFormState({ nodeTypeDraft, selectedNodeId, placeOrderMaxTriggers: nodeForm?.fields.maxTriggers, upstreamMaxPriceResolution: selectedNodeUpstreamMaxPriceResolution, setNodeForm });
   const canApplyOpenPosition = (p: TradeFlowOpenPositionOption) =>
     p.matchedTradeId != null ? true : Boolean(p.marketSlug.trim() && p.tokenId.trim());
   const applyOpenPositionSelection = async (position: TradeFlowOpenPositionOption) => {
@@ -623,6 +615,11 @@ export function FlowCanvasEditorBody({
       if (!nodeForm) return;
       parsedConfig = buildNodeConfigFromForm(nextType, nodeForm);
     }
+    applyInheritedPlaceOrderMaxPriceConfig(
+      nextType,
+      parsedConfig,
+      selectedNodeUpstreamMaxPriceResolution
+    );
     if (nextType === 'action.place_order' && isPresetPlaceOrderMarker(parsedConfig.presetKind, parsedConfig.refKey)) {
       normalizePresetPlaceOrderConfig(parsedConfig);
       const placeOrderSide = toTrimmedStringValue(parsedConfig.side).toLowerCase();
@@ -987,6 +984,8 @@ export function FlowCanvasEditorBody({
       marketOutcomes={marketOutcomes}
       outcomesLoading={outcomesLoading}
       selectedNodeUpstreamAutoScope={selectedNodeUpstreamAutoScope}
+      selectedNodeUpstreamTriggerPrice={selectedNodeUpstreamTriggerPrice}
+      selectedNodeUpstreamMaxPriceResolution={selectedNodeUpstreamMaxPriceResolution}
       userTelegramBotTokenMasked={userTelegramBotTokenMasked ?? null}
       userTelegramDefaultChatId={userTelegramDefaultChatId ?? null}
       nodeInspectorActions={nodeInspectorActions}

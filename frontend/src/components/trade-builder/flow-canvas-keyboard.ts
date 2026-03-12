@@ -22,9 +22,14 @@ export function useCanvasKeyboard(
   });
 
   const onKeyDown = useCallback((e: KeyboardEvent) => {
-    const target = e.target as HTMLElement;
-    const tagName = target.tagName.toLowerCase();
-    const isInput = tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+    const target = e.target instanceof HTMLElement ? e.target : null;
+    const tagName = target?.tagName.toLowerCase() ?? '';
+    const isInput =
+      !!target &&
+      (target.isContentEditable ||
+        tagName === 'input' ||
+        tagName === 'textarea' ||
+        tagName === 'select');
     const ctrl = e.ctrlKey || e.metaKey;
 
     if (ctrl && e.key === 'k') {

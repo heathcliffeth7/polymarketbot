@@ -386,6 +386,183 @@ export function hasUpstreamAutoScopeTrigger(
   return false;
 }
 
+function hasValidTriggerPriceConfig(config: Record<string, unknown>): boolean {
+  const triggerPriceCent = Number(config.triggerPriceCent);
+  if (Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100) {
+    return true;
+  }
+
+  const triggerPrice = Number(config.triggerPrice);
+  return Number.isFinite(triggerPrice) && triggerPrice > 0 && triggerPrice <= 1;
+}
+
+function hasValidOutcomeTriggerPrice(config: Record<string, unknown>): boolean {
+  if (!Array.isArray(config.outcomeConditions)) return false;
+
+  return config.outcomeConditions.some((row) => {
+    if (!isRecord(row)) return false;
+    const triggerCondition = toTrimmedStringValue(row.triggerCondition).toLowerCase();
+    if (triggerCondition !== 'cross_above' && triggerCondition !== 'cross_below') {
+      return false;
+    }
+    return hasValidTriggerPriceConfig(row);
+  });
+}
+
+function formatCentValue(value: number): string {
+  if (Number.isInteger(value)) return String(value);
+  return value.toFixed(4).replace(/\.?0+$/, '');
+}
+
+function resolveConfiguredMaxPriceCent(
+  maxPriceCentValue: unknown,
+  legacyMaxPriceValue: unknown,
+): string | null {
+  const maxPriceCent = Number(maxPriceCentValue);
+  if (Number.isFinite(maxPriceCent) && maxPriceCent > 0 && maxPriceCent <= 100) {
+    return formatCentValue(maxPriceCent);
+  }
+
+  const maxPrice = Number(legacyMaxPriceValue);
+  if (Number.isFinite(maxPrice) && maxPrice > 0 && maxPrice <= 1) {
+    return formatCentValue(maxPrice * 100);
+  }
+
+  return null;
+}
+
+function collectTriggerMarketPriceMaxPriceCandidates(
+  config: Record<string, unknown>,
+): { values: string[]; hasUnpricedPath: boolean } {
+  const outcomeConditions = Array.isArray(config.outcomeConditions) ? config.outcomeConditions : [];
+  if (outcomeConditions.length > 0) {
+    const values = new Set<string>();
+    let hasUnpricedPath = false;
+    for (const row of outcomeConditions) {
+      if (!isRecord(row)) {
+        hasUnpricedPath = true;
+        continue;
+      }
+      const resolved = resolveConfiguredMaxPriceCent(row.maxPriceCent, row.maxPrice);
+      if (resolved) {
+        values.add(resolved);
+      } else {
+        hasUnpricedPath = true;
+      }
+    }
+    return { values: Array.from(values), hasUnpricedPath };
+  }
+
+  const resolved = resolveConfiguredMaxPriceCent(config.maxPriceCent, config.maxPrice);
+  return resolved
+    ? { values: [resolved], hasUnpricedPath: false }
+    : { values: [], hasUnpricedPath: true };
+}
+
+export function hasUpstreamTriggerWithConfiguredPrice(
+  nodeId: string,
+  nodes: FlowNode[],
+  edges: FlowEdge[],
+): boolean {
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of edges) {
+    const list = incomingByTarget.get(edge.target) ?? [];
+    list.push(edge.source);
+    incomingByTarget.set(edge.target, list);
+  }
+
+  const visited = new Set<string>();
+  const queue = [nodeId];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const sourceId of incomingByTarget.get(current) ?? []) {
+      const sourceNode = nodeMap.get(sourceId);
+      if (!sourceNode) continue;
+      if (
+        (sourceNode.data.nodeType === 'trigger.market_price' ||
+          sourceNode.data.nodeType === 'trigger.open_positions') &&
+        (hasValidTriggerPriceConfig(sourceNode.data.config) ||
+          hasValidOutcomeTriggerPrice(sourceNode.data.config))
+      ) {
+        return true;
+      }
+      queue.push(sourceId);
+    }
+  }
+
+  return false;
+}
+
+export interface UpstreamMaxPriceResolution {
+  kind: 'none' | 'single' | 'multiple';
+  maxPriceCent: string | null;
+  distinctMaxPriceCents: string[];
+}
+
+export function resolveUpstreamTriggerMaxPrice(
+  nodeId: string,
+  nodes: FlowNode[],
+  edges: FlowEdge[],
+): UpstreamMaxPriceResolution {
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of edges) {
+    const list = incomingByTarget.get(edge.target) ?? [];
+    list.push(edge.source);
+    incomingByTarget.set(edge.target, list);
+  }
+
+  const visited = new Set<string>();
+  const distinctValues = new Set<string>();
+  let hasUnpricedPath = false;
+  const queue = [nodeId];
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const sourceId of incomingByTarget.get(current) ?? []) {
+      const sourceNode = nodeMap.get(sourceId);
+      if (!sourceNode) continue;
+      if (sourceNode.data.nodeType === 'trigger.market_price') {
+        const candidate = collectTriggerMarketPriceMaxPriceCandidates(sourceNode.data.config);
+        for (const value of candidate.values) {
+          distinctValues.add(value);
+        }
+        hasUnpricedPath = hasUnpricedPath || candidate.hasUnpricedPath;
+      }
+      queue.push(sourceId);
+    }
+  }
+
+  const distinctMaxPriceCents = Array.from(distinctValues).sort(
+    (left, right) => Number(left) - Number(right)
+  );
+  if (distinctMaxPriceCents.length === 0) {
+    return {
+      kind: 'none',
+      maxPriceCent: null,
+      distinctMaxPriceCents,
+    };
+  }
+
+  if (distinctMaxPriceCents.length === 1 && !hasUnpricedPath) {
+    return {
+      kind: 'single',
+      maxPriceCent: distinctMaxPriceCents[0],
+      distinctMaxPriceCents,
+    };
+  }
+
+  return {
+    kind: 'multiple',
+    maxPriceCent: null,
+    distinctMaxPriceCents,
+  };
+}
+
 export function autoLayoutNodes(
   nodes: FlowNode[],
   edges: FlowEdge[]

@@ -61,6 +61,7 @@ export const NUMERIC_KEYS = new Set([
   'entryPriceCent',
   'tpPriceCent',
   'slPriceCent',
+  'priceToBeatMaxDiff',
 ]);
 
 export const BOOLEAN_KEYS = new Set([
@@ -69,6 +70,20 @@ export const BOOLEAN_KEYS = new Set([
   'requireTokenId',
   'tpEnabled',
   'slEnabled',
+  'triggerPriceGuardEnabled',
+  'executionFloorGuardEnabled',
+  'priceToBeatGuardEnabled',
+  'retryOnTriggerPriceGuardBlock',
+  'retryOnExecutionFloorGuardBlock',
+  'retryOnPriceToBeatGuardBlock',
+  'notifyOnOrderPlaced',
+  'notifyOnTriggerPriceBlocked',
+  'notifyOnExecutionFloorBlocked',
+  'notifyOnPriceToBeatGapBlocked',
+  'notifyOnMaxPriceBlocked',
+  'retryOnMaxPriceBlock',
+  'notifyOnTpHit',
+  'notifyOnSlHit',
 ]);
 
 export const CONTEXT_BASE_KEYS = new Set([

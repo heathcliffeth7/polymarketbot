@@ -297,12 +297,16 @@ async fn process_trade_builder_workflow(
                     None,
                     None,
                     None,
+                    None,
+                    None,
                     TRADE_BUILDER_SIZE_BASIS_NOTIONAL_USDC,
                     delta_notional,
                     None,
                     None,
                     buy_leg.min_price_distance_cent,
                     workflow.expires_at,
+                    None,
+                    None,
                     1,
                     None,
                     false,
@@ -313,6 +317,16 @@ async fn process_trade_builder_workflow(
                     None,
                     None,
                     None,
+                    None,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
                 )
                 .await?;
             repo.set_trade_builder_workflow_leg_builder_order(
@@ -427,12 +441,16 @@ async fn ensure_sell_leg_order(
             sell_leg.trigger_condition.as_deref(),
             sell_leg.trigger_price,
             None,
+            None,
+            None,
             TRADE_BUILDER_SIZE_BASIS_NOTIONAL_USDC,
             sell_leg.target_notional_usdc,
             None,
             None,
             sell_leg.min_price_distance_cent,
             workflow.expires_at,
+            None,
+            None,
             1,
             None,
             false,
@@ -443,6 +461,16 @@ async fn ensure_sell_leg_order(
             None,
             None,
             None,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
         )
         .await?;
     repo.set_trade_builder_workflow_leg_builder_order(sell_leg.id, Some(sell_order_id), "open")
@@ -601,6 +629,7 @@ fn is_trade_builder_order_processable_status(status: &str) -> bool {
             | "open"
             | "partially_filled"
             | "canceled_requested"
+            | "guard_blocked"
             | "inventory_pending"
     )
 }

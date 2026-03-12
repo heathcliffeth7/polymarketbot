@@ -1,4 +1,5 @@
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
+import { validateActionPlaceOrderConfig } from './validation-action-place-order';
 import {
   countValidOutcomeConditions,
   hasProvidedValue,
@@ -7,12 +8,10 @@ import {
   RESOLVE_MARKET_ALLOWED_ASSETS,
   RESOLVE_MARKET_ALLOWED_TIMEFRAMES,
   RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME,
-  resolveConfiguredBinaryPrice,
   toBooleanish,
   toFiniteNumber,
   toTrimmedString,
 } from './shared';
-import { hasUpstreamAutoScopeMarketTrigger } from './graph';
 import { pushNodeError, pushNodeWarning, validateAuxiliaryNodeConfig } from './validation-core';
 
 export function validateNodeConfig(
@@ -25,9 +24,6 @@ export function validateNodeConfig(
   const graphMarketSlug = String(graph.context.marketSlug ?? '').trim();
   const graphTokenId = String(graph.context.tokenId ?? '').trim();
   const graphOutcomeLabel = String(graph.context.outcomeLabel ?? '').trim();
-  const hasResolveMarketNode = graph.nodes.some((candidate) => candidate.type === 'action.resolve_market');
-  const hasUpstreamMarketPriceAutoScope = hasUpstreamAutoScopeMarketTrigger(node.key, graph);
-
   validateAuxiliaryNodeConfig(issues, node, config);
   if (node.type === 'trigger.market_price') {
     const marketMode = toTrimmedString(config.marketMode).toLowerCase();
@@ -125,9 +121,9 @@ export function validateNodeConfig(
     }
 
     const priceMode = toTrimmedString(config.priceMode).toLowerCase();
-    const validPriceModes = ['midpoint', 'raw', 'last_trade', 'site_display', 'best_bid', 'best_ask'];
+    const validPriceModes = ['composite', 'midpoint', 'raw', 'last_trade', 'site_display', 'best_bid', 'best_ask'];
     if (priceMode && !validPriceModes.includes(priceMode)) {
-      pushNodeError(issues, node, 'invalid_price_mode', 'trigger.market_price priceMode must be midpoint, raw, last_trade, site_display, best_bid, or best_ask.');
+      pushNodeError(issues, node, 'invalid_price_mode', 'trigger.market_price priceMode must be composite, midpoint, raw, last_trade, site_display, best_bid, or best_ask.');
     }
 
     if (countValidOutcomeConditions(config) <= 0) {
@@ -489,273 +485,7 @@ export function validateNodeConfig(
   }
 
   if (node.type === 'action.place_order') {
-    const sourceTradeId = toFiniteNumber(config.sourceTradeId);
-    const side = String(config.side ?? '').trim().toLowerCase();
-    const effectiveSourceTradeId = sourceTradeId ?? graphSourceTradeId ?? 0;
-    const allowBuyAutoScopeSourceTrade =
-      side === 'buy' && hasUpstreamMarketPriceAutoScope;
-    if (effectiveSourceTradeId <= 0 && !allowBuyAutoScopeSourceTrade) {
-      pushNodeError(
-        issues,
-        node,
-        'missing_source_trade_id',
-        'action.place_order requires sourceTradeId in node config or graph context.'
-      );
-    }
-    if (
-      !String(config.marketSlug ?? graphMarketSlug).trim() &&
-      !hasResolveMarketNode &&
-      !(side === 'buy' && hasUpstreamMarketPriceAutoScope)
-    ) {
-      pushNodeError(
-        issues,
-        node,
-        'missing_market_slug',
-        'action.place_order requires marketSlug in node config/graph context. Buy auto_scope zincirinde runtime tetikten de cozulebilir.'
-      );
-    }
-    if (
-      !String(config.tokenId ?? graphTokenId).trim() &&
-      !hasResolveMarketNode &&
-      !(side === 'buy' && hasUpstreamMarketPriceAutoScope)
-    ) {
-      pushNodeError(
-        issues,
-        node,
-        'missing_token_id',
-        'action.place_order requires tokenId in node config/graph context. Buy auto_scope zincirinde runtime tetikten de cozulebilir.'
-      );
-    }
-    if (!side) {
-      pushNodeError(issues, node, 'missing_side', 'action.place_order side is required (buy or sell).');
-    } else if (side !== 'buy' && side !== 'sell') {
-      pushNodeError(issues, node, 'invalid_side', 'action.place_order side must be buy or sell.');
-    }
-
-    const executionMode = String(config.executionMode ?? '').trim().toLowerCase();
-    if (!executionMode) {
-      pushNodeError(
-        issues,
-        node,
-        'missing_execution_mode',
-        'action.place_order executionMode is required (market or limit).'
-      );
-    } else if (executionMode !== 'market' && executionMode !== 'limit') {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_execution_mode',
-        'action.place_order executionMode must be market or limit.'
-      );
-    }
-    const maxTriggers = toFiniteNumber(config.maxTriggers);
-    if (maxTriggers != null && (maxTriggers < 1 || maxTriggers > 20)) {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_max_triggers',
-        'action.place_order maxTriggers must be in [1, 20].'
-      );
-    }
-    const sizeModeRaw = String(config.sizeMode ?? '').trim().toLowerCase();
-    if (sizeModeRaw && sizeModeRaw !== 'usdc' && sizeModeRaw !== 'pct') {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_size_mode',
-        'action.place_order sizeMode must be usdc or pct.'
-      );
-    }
-    const triggerSizesRaw = config.triggerSizes;
-    const triggerSizes: number[] = [];
-    let triggerSizesInvalid = false;
-    if (triggerSizesRaw != null) {
-      if (!Array.isArray(triggerSizesRaw)) {
-        pushNodeError(
-          issues,
-          node,
-          'invalid_trigger_sizes',
-          'action.place_order triggerSizes must be an array.'
-        );
-      } else {
-        for (const item of triggerSizesRaw) {
-          const value = toFiniteNumber(item);
-          if (value == null || value <= 0) {
-            triggerSizesInvalid = true;
-            continue;
-          }
-          triggerSizes.push(value);
-        }
-        if (triggerSizesRaw.length > 0 && triggerSizes.length === 0) {
-          triggerSizesInvalid = true;
-        }
-        if (triggerSizesInvalid) {
-          pushNodeError(
-            issues,
-            node,
-            'invalid_trigger_sizes',
-            'action.place_order triggerSizes entries must be finite numbers > 0.'
-          );
-        }
-        if (
-          maxTriggers != null &&
-          maxTriggers >= 1 &&
-          triggerSizes.length > 0 &&
-          triggerSizes.length > Math.floor(maxTriggers)
-        ) {
-          pushNodeError(
-            issues,
-            node,
-            'invalid_trigger_sizes_length',
-            'action.place_order triggerSizes length cannot exceed maxTriggers.'
-          );
-        }
-        if (sizeModeRaw === 'pct' && triggerSizes.length > 0) {
-          const triggerSizesSum = triggerSizes.reduce((sum, value) => sum + value, 0);
-          if (triggerSizesSum > 100.000001) {
-            pushNodeError(
-              issues,
-              node,
-              'invalid_trigger_sizes_sum_pct',
-              'action.place_order pct triggerSizes total must be <= 100.'
-            );
-          }
-        }
-      }
-    }
-    const sizeUsdc = toFiniteNumber(config.sizeUsdc ?? config.targetNotionalUsdc);
-    const sizePct = toFiniteNumber(config.sizePct ?? config.sizePercent);
-    const hasTriggerSizes = triggerSizes.length > 0;
-    const usesPctSizing =
-      sizeModeRaw === 'pct' || (!hasTriggerSizes && sizeUsdc == null && sizePct != null);
-    if (!hasTriggerSizes) {
-      const usePct = usesPctSizing;
-      if (usePct) {
-        if (sizePct == null || sizePct <= 0 || sizePct > 100) {
-          pushNodeError(
-            issues,
-            node,
-            'invalid_size_pct',
-            'action.place_order sizePct must be in (0, 100].'
-          );
-        }
-      } else if (sizeUsdc == null || sizeUsdc <= 0) {
-        pushNodeError(
-          issues,
-          node,
-          'invalid_size',
-          'action.place_order requires sizeUsdc/targetNotionalUsdc > 0 (or sizePct in pct mode).'
-        );
-      }
-    }
-    if (side === 'buy' && usesPctSizing && effectiveSourceTradeId <= 0 && hasUpstreamMarketPriceAutoScope) {
-      pushNodeError(
-        issues,
-        node,
-        'pct_buy_requires_source_trade',
-        'action.place_order buy + auto_scope zincirinde pct sizing icin sourceTradeId gerekir. Buy auto source trade yalnizca usdc sizing ile desteklenir.'
-      );
-    }
-    const minDistance = toFiniteNumber(config.minPriceDistanceCent);
-    if (minDistance != null && minDistance <= 0) {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_min_price_distance',
-        'action.place_order minPriceDistanceCent must be > 0.'
-      );
-    }
-    const triggerCondition = config.triggerCondition;
-    if (triggerCondition != null && !isSupportedTriggerCondition(triggerCondition)) {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_trigger_condition',
-        'action.place_order triggerCondition must be cross_above or cross_below.'
-      );
-    }
-
-    const tpEnabled = toBooleanish(config.tpEnabled);
-    const slEnabled = toBooleanish(config.slEnabled);
-    const tpPrice = resolveConfiguredBinaryPrice(config.tpPriceCent, config.tpPrice);
-    const slPrice = resolveConfiguredBinaryPrice(config.slPriceCent, config.slPrice);
-
-    if (config.tpEnabled != null && tpEnabled == null) {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_tp_enabled',
-        'action.place_order tpEnabled must be boolean (true/false).'
-      );
-    }
-    if (config.slEnabled != null && slEnabled == null) {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_sl_enabled',
-        'action.place_order slEnabled must be boolean (true/false).'
-      );
-    }
-    if (tpEnabled === true && side !== 'buy') {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_tp_side',
-        'action.place_order tpEnabled is only valid for side=buy.'
-      );
-    }
-    if (slEnabled === true && side !== 'buy') {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_sl_side',
-        'action.place_order slEnabled is only valid for side=buy.'
-      );
-    }
-    if (tpEnabled === true && !tpPrice.provided) {
-      pushNodeError(
-        issues,
-        node,
-        'missing_tp_price',
-        'action.place_order tpEnabled requires tpPriceCent (or legacy tpPrice).'
-      );
-    } else if (tpPrice.provided && tpPrice.value == null) {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_tp_price',
-        'action.place_order tpPriceCent must be in (0, 100] or legacy tpPrice must be in (0, 1].'
-      );
-    }
-    if (slEnabled === true && !slPrice.provided) {
-      pushNodeError(
-        issues,
-        node,
-        'missing_sl_price',
-        'action.place_order slEnabled requires slPriceCent (or legacy slPrice).'
-      );
-    } else if (slPrice.provided && slPrice.value == null) {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_sl_price',
-        'action.place_order slPriceCent must be in (0, 100] or legacy slPrice must be in (0, 1].'
-      );
-    }
-    if (
-      tpEnabled === true &&
-      slEnabled === true &&
-      tpPrice.value != null &&
-      slPrice.value != null &&
-      slPrice.value >= tpPrice.value
-    ) {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_sl_tp_band',
-        'action.place_order requires slPrice < tpPrice when both stop loss and take profit are enabled.'
-      );
-    }
+    validateActionPlaceOrderConfig(issues, node, graph);
   }
 
   if (node.type === 'action.dual_dca') {

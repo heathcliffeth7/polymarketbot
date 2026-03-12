@@ -63,6 +63,10 @@ fn trade_builder_current_exit_submit_stage(
         .unwrap_or(TradeBuilderExitSubmitStage::DynamicGross)
 }
 
+fn trade_builder_exit_qty_buffer(gross_qty: f64) -> f64 {
+    (gross_qty * TRADE_BUILDER_LOCAL_EXIT_QTY_BUFFER_RATE).max(TRADE_BUILDER_LOCAL_EXIT_QTY_BUFFER)
+}
+
 fn trade_builder_estimated_visible_exit_qty(
     order: &TradeBuilderOrder,
     requested_qty: f64,
@@ -83,7 +87,7 @@ fn trade_builder_estimated_visible_exit_qty(
     let estimated_fee_qty =
         estimate_trade_builder_buy_fee_shares(execution_price, gross_qty, fee_rate_bps);
     let estimated_visible_qty = round_trade_builder_share_qty(
-        (gross_qty - estimated_fee_qty - TRADE_BUILDER_LOCAL_EXIT_QTY_BUFFER).max(0.0),
+        (gross_qty - estimated_fee_qty - trade_builder_exit_qty_buffer(gross_qty)).max(0.0),
     );
     let submit_qty = round_trade_builder_share_qty(estimated_visible_qty.min(requested_qty));
     (submit_qty > 0.0).then_some(TradeBuilderLocalInventoryFallback {
@@ -137,21 +141,14 @@ fn resolve_trade_builder_exit_inventory(
     })
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TradeBuilderExitRetryQtySource {
     EstimatedVisibleQty,
     ForcedTickQty,
 }
 
-impl TradeBuilderExitRetryQtySource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::EstimatedVisibleQty => "estimated_visible_qty",
-            Self::ForcedTickQty => "forced_tick_qty",
-        }
-    }
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TradeBuilderExitRetryResolution {
     next_qty: f64,
@@ -177,6 +174,7 @@ fn trade_builder_forced_retry_tick_qty(requested_qty: f64) -> Option<f64> {
     trade_builder_retry_qty_is_lower(requested_qty, shaved).then_some(shaved)
 }
 
+#[cfg(test)]
 fn resolve_trade_builder_exit_retry_qty(
     order: &TradeBuilderOrder,
     attempted_qty: f64,
@@ -211,6 +209,12 @@ fn resolve_trade_builder_exit_retry_qty(
 
 fn trade_builder_next_retry_share_qty(requested_qty: f64) -> Option<f64> {
     trade_builder_forced_retry_tick_qty(requested_qty)
+}
+
+fn trade_builder_next_optimistic_exit_stage_after_balance_reject(
+    _current_attempt_stage: TradeBuilderExitSubmitStage,
+) -> TradeBuilderExitSubmitStage {
+    TradeBuilderExitSubmitStage::VisibleInventory
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -249,6 +253,19 @@ fn trade_builder_error_indicates_midpoint_not_found(error_text: &str) -> bool {
     normalized.contains("/midpoint") && normalized.contains("404")
 }
 
+fn trade_builder_error_is_fatal_exchange_rejection(error_text: &str) -> bool {
+    let normalized = error_text.to_ascii_lowercase();
+    normalized.contains("invalid signature")
+        || normalized.contains("signature verification failed")
+        || normalized.contains("invalid api key")
+        || normalized.contains("api key not found")
+        || normalized.contains("unauthorized")
+        || normalized.contains("forbidden")
+        || normalized.contains("market not found")
+        || normalized.contains("market closed")
+        || normalized.contains("market resolved")
+}
+
 fn trade_builder_is_terminal_status(status: &str) -> bool {
     matches!(
         status,
@@ -274,16 +291,32 @@ fn trade_builder_is_take_profit_child(order: &TradeBuilderOrder) -> bool {
 }
 
 fn trade_builder_should_use_optimistic_exit_submit(order: &TradeBuilderOrder) -> bool {
-    trade_builder_is_child_exit_sell(order)
-        && normalize_trade_builder_size_basis(&order.size_basis) == TRADE_BUILDER_SIZE_BASIS_SHARES
+    if normalize_trade_builder_size_basis(&order.size_basis) != TRADE_BUILDER_SIZE_BASIS_SHARES {
+        return false;
+    }
+    if trade_builder_is_child_exit_sell(order) {
+        return true;
+    }
+    order.side == "sell" && order.kind == "immediate" && order.origin_flow_run_id.is_some()
 }
 
 fn trade_builder_should_retry_exit_sell(order: &TradeBuilderOrder) -> bool {
     order.side == "sell"
         && normalize_trade_builder_size_basis(&order.size_basis) == TRADE_BUILDER_SIZE_BASIS_SHARES
+        && !order
+            .last_error
+            .as_deref()
+            .is_some_and(trade_builder_error_is_fatal_exchange_rejection)
 }
 
 fn trade_builder_should_retry_after_processing_error(order: &TradeBuilderOrder) -> bool {
+    if order
+        .last_error
+        .as_deref()
+        .is_some_and(trade_builder_error_is_fatal_exchange_rejection)
+    {
+        return false;
+    }
     trade_builder_should_retry_exit_sell(order)
         && (trade_builder_stop_loss_latched(order)
             || order
@@ -347,6 +380,44 @@ fn trade_builder_price_exceeds_max_price(order: &TradeBuilderOrder, desired_pric
         .max_price
         .map(|max_price| desired_price.is_finite() && desired_price > max_price)
         .unwrap_or(false)
+}
+
+fn trade_builder_price_below_guard_trigger(order: &TradeBuilderOrder, current_price: f64) -> bool {
+    if order.side != "buy" {
+        return false;
+    }
+    order
+        .guard_trigger_price
+        .map(|guard| current_price.is_finite() && current_price < guard)
+        .unwrap_or(false)
+}
+
+fn trade_builder_execution_floor_block_reason(
+    order: &TradeBuilderOrder,
+    best_ask: Option<f64>,
+) -> Option<&'static str> {
+    if order.side != "buy" {
+        return None;
+    }
+    let floor_price = order.best_ask_floor_price?;
+    let best_ask = best_ask.filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)?;
+    if best_ask < floor_price {
+        Some("below_best_ask_floor")
+    } else {
+        None
+    }
+}
+
+fn trade_builder_execution_floor_missing_best_ask(
+    order: &TradeBuilderOrder,
+    best_ask: Option<f64>,
+) -> bool {
+    if order.side != "buy" || order.best_ask_floor_price.is_none() {
+        return false;
+    }
+    best_ask
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+        .is_none()
 }
 
 fn normalize_trade_builder_size_basis(raw: &str) -> &'static str {
@@ -417,6 +488,17 @@ fn fast_trigger_eval_price(
     }
 }
 
+fn sl_trigger_eval_price_for_mode(
+    mode: &str,
+    runtime_price: &TradeBuilderRuntimePrice,
+) -> Option<f64> {
+    match mode {
+        "best_bid" => runtime_price.best_bid.map(clamp_probability),
+        "last_trade" => runtime_price.last_trade_price.map(clamp_probability),
+        _ => Some(fast_trigger_eval_price(runtime_price, Some("cross_below"))),
+    }
+}
+
 fn fast_execution_price_for_sell(runtime_price: &TradeBuilderRuntimePrice) -> f64 {
     runtime_price
         .best_bid
@@ -442,6 +524,14 @@ fn trade_builder_trigger_eval_price_for_order(
 ) -> f64 {
     if !trade_builder_uses_fast_runtime_pricing(order) {
         return runtime_price.price;
+    }
+    if trade_builder_is_stop_loss_child(order) {
+        if let Some(mode) = order.sl_trigger_price_mode.as_deref() {
+            if let Some(price) = sl_trigger_eval_price_for_mode(mode, runtime_price) {
+                return price;
+            }
+            return runtime_price.price;
+        }
     }
     fast_trigger_eval_price(runtime_price, order.trigger_condition.as_deref())
 }

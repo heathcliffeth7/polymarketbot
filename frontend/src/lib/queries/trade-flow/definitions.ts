@@ -65,6 +65,7 @@ const STOPPABLE_TRADE_BUILDER_ORDER_STATUSES = [
   'open',
   'partially_filled',
   'blocked',
+  'guard_blocked',
   'inventory_pending',
   'canceled_requested',
 ] as const;

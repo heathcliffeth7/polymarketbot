@@ -99,7 +99,7 @@ async fn schedule_trade_builder_exit_sell_retry(
                     &json!({
                         "previous_qty": previous_qty,
                         "next_qty": shaved_qty,
-                        "buffer_qty": TRADE_BUILDER_LOCAL_EXIT_QTY_BUFFER,
+                        "buffer_qty": trade_builder_exit_qty_buffer(previous_qty),
                         "reason": error_text,
                     }),
                 )
@@ -207,6 +207,62 @@ async fn resolve_trade_builder_order_fee_rate_bps(
                 .await?;
             }
             Ok(default_fee_rate_bps)
+        }
+    }
+}
+
+async fn maybe_send_trade_builder_system_alert(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    alert_type: &str,
+    error_text: &str,
+) {
+    let Ok(telegram) = load_user_telegram_config(repo, order.user_id).await else {
+        return;
+    };
+    let bot_token = telegram.bot_token.trim();
+    let chat_id = telegram.chat_id.trim();
+    if bot_token.is_empty() || chat_id.is_empty() {
+        return;
+    }
+    let Ok(bot_token) = decrypt_config_string_if_needed("telegram.bot_token", bot_token) else {
+        return;
+    };
+    if bot_token.is_empty() {
+        return;
+    }
+
+    let truncated_error: String = error_text.chars().take(500).collect();
+    let message = format!(
+        "ALERT: Order #{} ({}) fatal error\nType: {}\nMarket: {}\nSide: {}\nError: {}",
+        order.id,
+        order.outcome_label,
+        alert_type,
+        order.market_slug,
+        order.side,
+        truncated_error
+    );
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+    let result = TELEGRAM_HTTP_CLIENT
+        .post(&url)
+        .json(&serde_json::json!({ "chat_id": chat_id, "text": message }))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+    match result {
+        Ok(resp) if resp.status().is_success() => {
+            info!(
+                builder_order_id = order.id,
+                alert_type,
+                "TRADE_BUILDER_SYSTEM_ALERT_SENT"
+            );
+        }
+        _ => {
+            warn!(
+                builder_order_id = order.id,
+                alert_type,
+                "TRADE_BUILDER_SYSTEM_ALERT_FAILED"
+            );
         }
     }
 }

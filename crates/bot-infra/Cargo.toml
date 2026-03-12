@@ -24,6 +24,7 @@ aes-gcm.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 ethers.workspace = true
+thiserror.workspace = true
 bot-core = { path = "../bot-core" }
 
 [dev-dependencies]

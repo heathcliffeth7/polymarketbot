@@ -1,4 +1,5 @@
 mod dca;
+mod trade_flow;
 
 include!("lib_parts/part_000.rs");
 include!("lib_parts/part_001.rs");
@@ -30,13 +31,18 @@ include!("trade_builder/exit_math.rs");
 include!("trade_builder/runtime_price.rs");
 include!("trade_builder/fill_resolution.rs");
 include!("trade_builder/exit_retry.rs");
+include!("trade_builder/notification.rs");
+include!("trade_builder/guard_waiting.rs");
 include!("trade_builder/exit_sibling_priority.rs");
 include!("trade_builder/order_expiry.rs");
 include!("trade_builder/trigger_sizes.rs");
 include!("trade_builder/order_submit.rs");
+include!("trade_builder/cancel_reconcile.rs");
+include!("trade_builder/open_order_reconcile.rs");
+include!("trade_builder/fill_finalize.rs");
+include!("trade_builder/price_resolution.rs");
+include!("trade_builder/armed_ws_eval.rs");
 include!("trade_builder/order_processing.rs");
-include!("lib_parts/part_025.rs");
-include!("lib_parts/part_026.rs");
 include!("lib_parts/part_027.rs");
 include!("lib_parts/part_028.rs");
 

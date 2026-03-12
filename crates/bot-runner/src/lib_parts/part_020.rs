@@ -532,14 +532,13 @@ async fn process_trade_builder_orders(
     let orders = repo
         .list_trade_builder_orders_for_processing(MANUAL_ORDER_PROCESS_LIMIT)
         .await?;
+    let orders_empty = orders.is_empty();
     let pending_inventory_observations = repo
         .list_pending_trade_builder_first_visible_inventory_observations(
             TRADE_BUILDER_INVENTORY_OBSERVATION_LIMIT,
         )
         .await?;
-    if orders.is_empty() && pending_inventory_observations.is_empty() {
-        return Ok(());
-    }
+    let pending_inventory_observations_empty = pending_inventory_observations.is_empty();
 
     let policy = DefaultRiskPolicy;
     let mut user_cfg_cache: HashMap<i64, AppConfig> = HashMap::new();
@@ -548,7 +547,7 @@ async fn process_trade_builder_orders(
     let mut synced_user_ids: HashSet<i64> = HashSet::new();
 
     for order in orders {
-        let result = async {
+        let result: Result<()> = async {
             let user_cfg =
                 load_user_app_config_cached(repo, order.user_id, &mut user_cfg_cache).await?;
             let gamma = user_gamma_cache
@@ -566,7 +565,7 @@ async fn process_trade_builder_orders(
                 sync_recent_trade_builder_fills(repo, client.as_ref()).await?;
             }
             let limits = to_risk_limits(&user_cfg);
-            process_trade_builder_order(
+            let _ = try_process_trade_builder_order(
                 repo,
                 run_id,
                 &user_cfg,
@@ -577,7 +576,8 @@ async fn process_trade_builder_orders(
                 ws,
                 &order,
             )
-            .await
+            .await?;
+            Ok(())
         }
         .await;
         if let Err(err) = result {
@@ -664,6 +664,16 @@ async fn process_trade_builder_orders(
                 "TRADE_BUILDER_FILL_SYNC_ERROR"
             );
         }
+    }
+
+    let armed_orders = repo.list_armed_tp_sl_child_builder_orders().await?;
+    refresh_armed_builder_order_cache(armed_orders).await;
+    if let Err(err) = ensure_fast_path_market_stream_union(ws).await {
+        warn!(run_id, error = %err, "ARMED_ORDER_WS_STREAM_UNION_REFRESH_FAILED");
+    }
+
+    if orders_empty && pending_inventory_observations_empty {
+        return Ok(());
     }
 
     Ok(())

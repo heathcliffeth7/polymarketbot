@@ -1,0 +1,40 @@
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  filename TEXT PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO schema_migrations (filename) VALUES
+  ('001_init.sql'),
+  ('002_live_hardening.sql'),
+  ('003_reconcile_events.sql'),
+  ('004_dual_side_dca.sql'),
+  ('005_position_exit_and_pressure.sql'),
+  ('006_trade_builder_orders.sql'),
+  ('007_trade_builder_order_events.sql'),
+  ('008_trade_builder_workflows.sql'),
+  ('009_trade_builder_workflow_leg_fills.sql'),
+  ('010_trade_flow_engine.sql'),
+  ('011_trade_flow_runtime.sql'),
+  ('012_auto_claim_jobs.sql'),
+  ('013_trade_flow_dual_dca.sql'),
+  ('014_dual_dca_direct_orders.sql'),
+  ('015_trade_flow_steps_claim_index.sql'),
+  ('016_trade_flow_confirmation_ms.sql'),
+  ('017_trade_builder_order_execution_mode.sql'),
+  ('018_take_profit_on_builder_orders.sql'),
+  ('019_stop_loss_on_builder_orders.sql'),
+  ('020_trade_builder_order_size_basis.sql'),
+  ('021_trade_builder_order_inventory_pending_status.sql'),
+  ('021b_trade_builder_order_max_price.sql'),
+  ('022_multi_user_tenant.sql'),
+  ('023_claim_user_settings.sql'),
+  ('024_trade_builder_stop_loss_priority.sql'),
+  ('025_trade_builder_inventory_observations.sql'),
+  ('026_trade_builder_order_submitted_dynamic_qty.sql'),
+  ('027_trade_flow_stop_origin_tracking.sql'),
+  ('028_trade_flow_market_price_composite_mode.sql'),
+  ('029_backfill_claim_user_settings.sql'),
+  ('030_auto_claim_submitted_state.sql'),
+  ('031_trade_builder_order_guard_trigger_price.sql'),
+  ('032_schema_migrations.sql')
+ON CONFLICT (filename) DO NOTHING;

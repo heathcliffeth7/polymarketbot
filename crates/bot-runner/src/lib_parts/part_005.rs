@@ -107,11 +107,7 @@ fn build_order_executor_from_app_config(cfg: &AppConfig) -> Result<ClobHttpClien
         .parse::<LocalWallet>()
         .context("parse signer private key")?
         .with_chain_id(cfg.exchange.chain_id);
-    let exchange_address: Address = cfg
-        .exchange
-        .ctf_exchange_address
-        .parse()
-        .context("parse ctf_exchange_address")?;
+    let (exchange_address, neg_risk_exchange_address) = resolve_clob_exchange_addresses(cfg)?;
     let gnosis_safe: Option<Address> = cfg
         .exchange
         .resolve_gnosis_safe_address()
@@ -125,9 +121,32 @@ fn build_order_executor_from_app_config(cfg: &AppConfig) -> Result<ClobHttpClien
         creds,
         wallet,
         exchange_address,
+        neg_risk_exchange_address,
         cfg.exchange.chain_id,
         gnosis_safe,
     ))
+}
+
+fn resolve_clob_exchange_addresses(cfg: &AppConfig) -> Result<(Address, Option<Address>)> {
+    let exchange_address: Address = cfg
+        .exchange
+        .ctf_exchange_address
+        .trim()
+        .parse()
+        .context("parse ctf_exchange_address")?;
+    let neg_risk_exchange_address = if cfg.exchange.neg_risk_ctf_exchange_address.trim().is_empty()
+    {
+        None
+    } else {
+        Some(
+            cfg.exchange
+                .neg_risk_ctf_exchange_address
+                .trim()
+                .parse()
+                .context("parse neg_risk_ctf_exchange_address")?,
+        )
+    };
+    Ok((exchange_address, neg_risk_exchange_address))
 }
 
 pub(crate) async fn load_user_order_executor_cached(

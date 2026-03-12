@@ -16,11 +16,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         .parse::<LocalWallet>()
         .context("parse signer private key")?
         .with_chain_id(cfg.exchange.chain_id);
-    let exchange_address: Address = cfg
-        .exchange
-        .ctf_exchange_address
-        .parse()
-        .context("parse ctf_exchange_address")?;
+    let (exchange_address, neg_risk_exchange_address) = resolve_clob_exchange_addresses(cfg)?;
     let gnosis_safe: Option<Address> = cfg
         .exchange
         .resolve_gnosis_safe_address()
@@ -34,6 +30,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         creds.clone(),
         wallet,
         exchange_address,
+        neg_risk_exchange_address,
         cfg.exchange.chain_id,
         gnosis_safe,
     );
@@ -42,6 +39,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
     run_balance_preflight(run_id, repo, &client, cfg.risk.min_balance_usdc).await;
     let ws = ClobWsClient::new(cfg.exchange.clob_ws_url.clone());
     let mut auto_claim_runtimes: HashMap<i64, FlowAutoClaimRuntime> = HashMap::new();
+    let mut flow_runtime_caches = FlowRuntimeCaches::default();
     let override_slug = configured_market_override_slug(cfg)?;
 
     let mut waiting_event_emitted = false;
@@ -62,6 +60,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
             cfg,
             Some(&client),
             &ws,
+            &mut flow_runtime_caches,
             &mut auto_claim_runtimes,
         )
         .await
@@ -377,6 +376,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         .await?;
     }
     let mut last_yes_price: Option<f64> = None;
+    let mut flow_runtime_caches = FlowRuntimeCaches::default();
 
     for iter in 0..120u32 {
         if let Err(e) = process_trade_builder_orders(repo, run_id, cfg, &client, &ws).await {
@@ -395,6 +395,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
             cfg,
             Some(&client),
             &ws,
+            &mut flow_runtime_caches,
             &mut auto_claim_runtimes,
         )
         .await
@@ -726,4 +727,3 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
 
     Ok(())
 }
-

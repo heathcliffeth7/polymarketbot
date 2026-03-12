@@ -19,7 +19,7 @@ async fn execute_trigger_market_price(
     let auto_scope_mode = node_market_mode(node) == "auto_scope";
     let price_mode = WsPriceMode::parse(
         node.config.get("priceMode").and_then(|v| v.as_str()),
-        WsPriceMode::Midpoint,
+        WsPriceMode::Composite,
     );
     // --- Early WS-sourced detection for auto_scope guard ---
     let ws_sourced = step
@@ -298,6 +298,7 @@ async fn execute_trigger_market_price(
     let mut triggered_token_id = String::new();
     let mut triggered_outcome_label = String::new();
     let mut triggered_condition = String::new();
+    let mut triggered_trigger_price: Option<f64> = None;
     let mut triggered_price: Option<f64> = None;
     let mut triggered_max_price: Option<f64> = None;
     let mut current_price: Option<f64> = None;
@@ -340,7 +341,7 @@ async fn execute_trigger_market_price(
         let conf_price = ws_price_from_step;
         let conf_prev = ws_previous_price_from_step;
 
-        let (conf_condition, _conf_trigger_price, conf_outcome_label) =
+        let (conf_condition, conf_trigger_price, conf_outcome_label) =
             if let Some(ref conditions) = outcome_conditions {
                 conditions
                     .iter()
@@ -387,6 +388,7 @@ async fn execute_trigger_market_price(
         triggered_token_id = conf_token_id;
         triggered_outcome_label = conf_outcome_label;
         triggered_condition = conf_condition;
+        triggered_trigger_price = conf_trigger_price;
         triggered_price = conf_price;
         current_price = conf_price;
         triggered_previous_price = conf_prev;
@@ -508,6 +510,7 @@ async fn execute_trigger_market_price(
                     &market_slug,
                     Some(cond_token_id.as_str()),
                     price_mode,
+                    Some(cond_trigger_condition.as_str()),
                 )
                 .await
             };
@@ -569,6 +572,7 @@ async fn execute_trigger_market_price(
                 triggered_token_id = cond_token_id;
                 triggered_outcome_label = cond_outcome_label;
                 triggered_condition = cond_trigger_condition;
+                triggered_trigger_price = Some(tp);
                 triggered_price = Some(cur);
                 triggered_max_price = cond_max_price;
                 current_price = Some(cur);
@@ -595,6 +599,7 @@ async fn execute_trigger_market_price(
         let legacy_outcome_label = node_config_string(node, "outcomeLabel")
             .or_else(|| flow_context_string(context, "outcomeLabel"))
             .unwrap_or_default();
+        let trigger_condition = node_config_string(node, "triggerCondition");
         let cur_result = if let Some(sp) = ws_price_from_step {
             Ok(Some(sp))
         } else if ws_sourced {
@@ -603,7 +608,14 @@ async fn execute_trigger_market_price(
             }
             Ok(None)
         } else {
-            fetch_trade_flow_market_price(ws, client, &market_slug, token_id.as_deref(), price_mode)
+            fetch_trade_flow_market_price(
+                ws,
+                client,
+                &market_slug,
+                token_id.as_deref(),
+                price_mode,
+                trigger_condition.as_deref(),
+            )
                 .await
                 .map(Some)
         };
@@ -647,7 +659,6 @@ async fn execute_trigger_market_price(
             set_flow_node_state(context, &node.key, "last_price", json!(cur_price));
         }
 
-        let trigger_condition = node_config_string(node, "triggerCondition");
         let trigger_price = node_config_f64(node, "triggerPrice")
             .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
         // PRCE-01: Use per-token key to avoid cross-token price contamination.
@@ -749,6 +760,7 @@ async fn execute_trigger_market_price(
         triggered_token_id = token_id.unwrap_or_default();
         triggered_outcome_label = legacy_outcome_label;
         triggered_condition = trigger_condition.unwrap_or_default();
+        triggered_trigger_price = trigger_price;
         triggered_price = current_price;
         triggered_previous_price = previous_price;
         if pass {
@@ -814,6 +826,23 @@ async fn execute_trigger_market_price(
         )
         .await;
     }
+    let cycle_window_mode = node
+        .config
+        .get("cycleWindowMode")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| value == "first" || value == "last");
+    let cycle_window_secs = node_config_i64(node, "cycleWindowSecs").filter(|value| *value > 0);
+    let (cycle_window_open_at, cycle_window_end_at) =
+        match (cycle_window_mode.as_deref(), cycle_window_secs) {
+            (Some(mode), Some(window_secs)) => resolve_cycle_window_absolute_bounds(
+                &market_slug,
+                mode,
+                window_secs,
+            )
+            .map_or((None, None), |(open_at, end_at)| (Some(open_at), Some(end_at))),
+            _ => (None, None),
+        };
 
     apply_trigger_market_price_context_updates(
         context,
@@ -823,8 +852,13 @@ async fn execute_trigger_market_price(
         &triggered_token_id,
         &triggered_outcome_label,
         &triggered_condition,
+        triggered_trigger_price,
         triggered_price,
         triggered_max_price,
+        cycle_window_mode.as_deref(),
+        cycle_window_secs,
+        cycle_window_open_at.clone(),
+        cycle_window_end_at.clone(),
         pass,
     );
     let mut protection_output = Value::Null;
@@ -951,40 +985,16 @@ async fn execute_trigger_market_price(
     }
 
     Ok(finish_trigger_market_price_execution(
-        run,
-        node,
-        context,
-        &market_slug,
-        price_mode,
-        &triggered_token_id,
-        &triggered_outcome_label,
-        &triggered_condition,
-        triggered_price,
-        triggered_max_price,
-        &protection_output,
-        triggered_previous_price,
-        ws_previous_price_from_step,
-        effective_previous_price,
-        trigger_evaluation_mode,
-        ws_evaluation_mode_from_step,
-        ws_price_mode_from_step,
-        ws_price_source_from_step,
-        ws_price_source_detail_from_step,
-        ws_best_bid_from_step,
-        ws_best_ask_from_step,
-        ws_last_trade_price_from_step,
-        ws_snapshot_age_ms_from_step,
-        ws_site_display_mode_decision_from_step,
-        ws_cross_confirmed_short_circuit_applied,
-        current_price,
-        pass,
-        &var_key,
-        &outcome_conditions,
-        ws_sourced,
-        ws_ignore_reason.clone(),
-        once_mode,
-        once_scope_market,
-        queued_at_from_step,
-        interval_ms,
+        run, node, context, &market_slug, price_mode, &triggered_token_id,
+        &triggered_outcome_label, &triggered_condition, triggered_trigger_price,
+        triggered_price, triggered_max_price, &protection_output, triggered_previous_price,
+        ws_previous_price_from_step, effective_previous_price, trigger_evaluation_mode,
+        ws_evaluation_mode_from_step, ws_price_mode_from_step, ws_price_source_from_step,
+        ws_price_source_detail_from_step, ws_best_bid_from_step, ws_best_ask_from_step,
+        ws_last_trade_price_from_step, ws_snapshot_age_ms_from_step,
+        ws_site_display_mode_decision_from_step, ws_cross_confirmed_short_circuit_applied,
+        current_price, pass, &var_key, &outcome_conditions, ws_sourced, ws_ignore_reason.clone(),
+        once_mode, once_scope_market, queued_at_from_step, cycle_window_mode.as_deref(),
+        cycle_window_secs, cycle_window_open_at, cycle_window_end_at, interval_ms,
     ))
 }

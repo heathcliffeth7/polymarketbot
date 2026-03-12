@@ -9,6 +9,7 @@ import {
   type OutcomeConditionRow,
   type PrimitiveValueType,
 } from '@/lib/trade-flow-config-mappers';
+import type { UpstreamMaxPriceResolution } from '../flow-canvas-utils';
 
 function getTriggerMarketSource(fields: Record<string, string>): string | null {
   const marketMode = (fields.marketMode ?? '').trim().toLowerCase();
@@ -48,6 +49,15 @@ export function updateNodeFieldState(
 
   const nextFields = { ...prev.fields, [key]: value };
   let next: NodeConfigFormState = { ...prev, fields: nextFields };
+  if (nodeType === 'action.place_order' && key === 'maxPriceCent' && prev.placeOrderMaxPriceUi) {
+    next = {
+      ...next,
+      placeOrderMaxPriceUi: {
+        ...prev.placeOrderMaxPriceUi,
+        isInheritedValue: false,
+      },
+    };
+  }
 
   if (!shouldResetDependentSelections(nodeType, key)) {
     return next;
@@ -114,6 +124,59 @@ export function syncPlaceOrderTriggerRowsState(
     nextRows.length === currentRows.length && nextRows.every((v, i) => v === currentRows[i]);
   if (unchanged) return prev;
   return { ...prev, triggerSizeRows: nextRows };
+}
+
+function sameDistinctValues(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+export function syncPlaceOrderInheritedMaxPriceState(
+  prev: NodeConfigFormState | null,
+  resolution: UpstreamMaxPriceResolution
+): NodeConfigFormState | null {
+  if (!prev) return prev;
+
+  const currentMaxPriceCent = (prev.fields.maxPriceCent ?? '').trim();
+  const wasInherited = prev.placeOrderMaxPriceUi?.isInheritedValue === true;
+  let nextFields = prev.fields;
+  let isInheritedValue = false;
+
+  if (resolution.kind === 'single' && resolution.maxPriceCent) {
+    if (wasInherited || currentMaxPriceCent.length === 0) {
+      if (currentMaxPriceCent !== resolution.maxPriceCent) {
+        nextFields = { ...prev.fields, maxPriceCent: resolution.maxPriceCent };
+      }
+      isInheritedValue = true;
+    }
+  } else if (wasInherited && currentMaxPriceCent.length > 0) {
+    nextFields = { ...prev.fields, maxPriceCent: '' };
+  }
+
+  const nextUi = {
+    isInheritedValue,
+    upstreamKind: resolution.kind,
+    upstreamMaxPriceCent: resolution.maxPriceCent,
+    distinctUpstreamMaxPriceCents: resolution.distinctMaxPriceCents,
+  } as const;
+
+  const prevUi = prev.placeOrderMaxPriceUi;
+  const fieldsUnchanged = nextFields === prev.fields;
+  const uiUnchanged =
+    prevUi != null &&
+    prevUi.isInheritedValue === nextUi.isInheritedValue &&
+    prevUi.upstreamKind === nextUi.upstreamKind &&
+    prevUi.upstreamMaxPriceCent === nextUi.upstreamMaxPriceCent &&
+    sameDistinctValues(prevUi.distinctUpstreamMaxPriceCents, nextUi.distinctUpstreamMaxPriceCents);
+
+  if (fieldsUnchanged && uiUnchanged) {
+    return prev;
+  }
+
+  return {
+    ...prev,
+    fields: nextFields,
+    placeOrderMaxPriceUi: nextUi,
+  };
 }
 
 export function updateExpressionRowState(

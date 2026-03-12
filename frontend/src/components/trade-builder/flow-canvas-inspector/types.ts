@@ -12,6 +12,7 @@ import type {
   TradeFlowOpenPositionsMeta,
 } from '@/lib/types';
 import type { FlowEdge } from '../flow-canvas-constants';
+import type { UpstreamMaxPriceResolution } from '../flow-canvas-utils';
 
 export interface NodeInspectorActions {
   onNodeKeyChange: (key: string) => void;
@@ -66,6 +67,8 @@ export interface NodeInspectorPanelProps {
   marketOutcomes: TradeBuilderOutcome[];
   marketOutcomesLoading: boolean;
   upstreamAutoScope: boolean;
+  upstreamHasTriggerPrice: boolean;
+  upstreamMaxPriceResolution: UpstreamMaxPriceResolution;
   userTelegramBotTokenMasked: string | null;
   userTelegramDefaultChatId: string | null;
   actions: NodeInspectorActions;

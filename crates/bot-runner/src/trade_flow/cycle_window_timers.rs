@@ -277,12 +277,25 @@ async fn resolve_ws_fast_path_trigger_price(
 ) -> Option<ResolvedTriggerPrice> {
     let resolved = market_snapshots
         .get(&node_spec.token_id)
-        .and_then(|snapshot| resolve_trigger_price_from_market_snapshot(snapshot, node_spec.price_mode));
+        .and_then(|snapshot| {
+            resolve_trigger_price_from_market_snapshot(
+                snapshot,
+                node_spec.price_mode,
+                Some(node_spec.trigger_condition.as_str()),
+            )
+        });
     if let Some(resolved) = resolved {
         return Some(resolved);
     }
     if let Some(cl) = client {
-        match resolve_trigger_price_from_rest(cl, &node_spec.token_id, node_spec.price_mode).await {
+        match resolve_trigger_price_from_rest(
+            cl,
+            &node_spec.token_id,
+            node_spec.price_mode,
+            Some(node_spec.trigger_condition.as_str()),
+        )
+        .await
+        {
             Ok(resolved) => return Some(resolved),
             Err(_) => {
                 debug!(

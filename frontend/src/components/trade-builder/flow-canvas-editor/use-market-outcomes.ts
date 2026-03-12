@@ -11,14 +11,24 @@ export function useMarketOutcomes({
   nodeTypeDraft,
   nodeForm,
 }: UseMarketOutcomesArgs) {
-  const outcomeMarketSlug =
-    nodeTypeDraft === 'trigger.open_positions' ||
-    nodeTypeDraft === 'trigger.market_price' ||
-    nodeTypeDraft === 'trigger.position_drawdown'
-      ? (nodeForm?.fields.marketSlug ?? '').trim() ||
-        (nodeForm?.fields.marketScope ?? '').trim() ||
-        null
-      : null;
+  const outcomeMarketSlug = useMemo(() => {
+    const marketSlug = (nodeForm?.fields.marketSlug ?? '').trim();
+    if (!marketSlug) return null;
+
+    if (
+      nodeTypeDraft === 'trigger.open_positions' ||
+      nodeTypeDraft === 'trigger.position_drawdown'
+    ) {
+      return marketSlug;
+    }
+
+    if (nodeTypeDraft !== 'trigger.market_price') {
+      return null;
+    }
+
+    const marketMode = (nodeForm?.fields.marketMode ?? '').trim().toLowerCase();
+    return marketMode === 'auto_scope' ? null : marketSlug;
+  }, [nodeForm?.fields.marketMode, nodeForm?.fields.marketSlug, nodeTypeDraft]);
 
   const { data: outcomeData, isLoading: outcomesLoading } =
     useTradeBuilderOutcomes(outcomeMarketSlug);

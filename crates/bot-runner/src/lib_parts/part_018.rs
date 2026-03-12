@@ -220,6 +220,22 @@ async fn execute_action_place_order(
             }
         }
     }
+    if let Some(blocked_execution) =
+        trade_flow::guards::maybe_block_action_place_order_price_to_beat_guard(
+            repo,
+            run,
+            node,
+            context,
+            &market_slug,
+            &token_id,
+            &outcome_label,
+            &side,
+            &execution_mode,
+        )
+        .await?
+    {
+        return Ok(blocked_execution);
+    }
     let mut source_trade_id = resolve_flow_source_trade_id(node, context).or_else(|| {
         step_input_i64(step, &["sourceTradeId", "source_trade_id"]).filter(|value| *value > 0)
     });
@@ -410,6 +426,7 @@ async fn execute_action_place_order(
                         "size_usdc": existing_order_snapshot.size_usdc,
                         "target_qty": existing_order_snapshot.target_qty,
                         "remaining_qty": existing_order_snapshot.remaining_qty,
+                        "should_inline_submit": false,
                         "reused_existing_order": true
                     }),
                     routes: Vec::new(),
@@ -461,7 +478,65 @@ async fn execute_action_place_order(
         min_price_distance_cent > 0.0,
         "action.place_order minPriceDistanceCent must be > 0"
     );
-    let max_price = resolve_action_place_order_max_price(context, step);
+    let should_inline_submit = kind == "immediate";
+    let max_price = resolve_action_place_order_max_price(node, step, context);
+    let trigger_price_guard_enabled =
+        node_config_bool(node, "triggerPriceGuardEnabled").unwrap_or(false);
+    let guard_trigger_price = if trigger_price_guard_enabled && side == "buy" {
+        Some(resolve_action_place_order_guard_trigger_price(step).ok_or_else(|| {
+            anyhow::anyhow!(
+                "action.place_order triggerPriceGuardEnabled=true but no trigger_price found in step inputs"
+            )
+        })?)
+    } else {
+        None
+    };
+    let execution_floor_guard_enabled =
+        node_config_bool(node, "executionFloorGuardEnabled").unwrap_or(false);
+    let best_ask_floor_price = if execution_floor_guard_enabled && side == "buy" {
+        Some(resolve_action_place_order_guard_trigger_price(step).ok_or_else(|| {
+            anyhow::anyhow!(
+                "action.place_order executionFloorGuardEnabled=true but no trigger_price found in step inputs"
+            )
+        })?)
+    } else {
+        None
+    };
+    let cycle_window_open_at = resolve_action_place_order_datetime(
+        step,
+        context,
+        &["cycleWindowOpenAt", "cycle_window_open_at"],
+        "cycleWindowOpenAt",
+    );
+    let cycle_window_end_at = resolve_action_place_order_datetime(
+        step,
+        context,
+        &["cycleWindowEndAt", "cycle_window_end_at"],
+        "cycleWindowEndAt",
+    );
+    let (eligible_after_at, eligible_before_at) = if side == "buy" {
+        match (cycle_window_open_at, cycle_window_end_at) {
+            (Some(open_at), Some(end_at)) if open_at < end_at => (Some(open_at), Some(end_at)),
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    let notify_on_fill = node_config_bool(node, "notifyOnOrderPlaced").unwrap_or(false);
+    let notify_on_trigger_guard_blocked =
+        node_config_bool(node, "notifyOnTriggerPriceBlocked").unwrap_or(false);
+    let notify_on_execution_floor_blocked =
+        node_config_bool(node, "notifyOnExecutionFloorBlocked").unwrap_or(false);
+    let retry_on_trigger_guard_block =
+        node_config_bool(node, "retryOnTriggerPriceGuardBlock").unwrap_or(false);
+    let retry_on_execution_floor_guard_block =
+        node_config_bool(node, "retryOnExecutionFloorGuardBlock").unwrap_or(false);
+    let retry_on_max_price_block =
+        node_config_bool(node, "retryOnMaxPriceBlock").unwrap_or(false);
+    let notify_on_tp_hit = node_config_bool(node, "notifyOnTpHit").unwrap_or(false);
+    let notify_on_sl_hit = node_config_bool(node, "notifyOnSlHit").unwrap_or(false);
+    let notify_on_max_price_blocked =
+        node_config_bool(node, "notifyOnMaxPriceBlocked").unwrap_or(false);
 
     let tp_enabled = node_config_bool(node, "tpEnabled").unwrap_or(false);
     let tp_price = resolve_action_place_order_exit_price(
@@ -481,6 +556,23 @@ async fn execute_action_place_order(
         "slPrice",
         "sl",
     )?;
+    let sl_trigger_price_mode: Option<&str> = if sl_enabled {
+        let raw = node_config_string(node, "slTriggerPriceMode");
+        let mode = match raw.as_deref() {
+            Some("best_bid") => "best_bid",
+            Some("composite") => "composite",
+            Some("last_trade") => "last_trade",
+            Some(other) => {
+                anyhow::bail!(
+                    "action.place_order slTriggerPriceMode must be best_bid|composite|last_trade, got: {other}"
+                )
+            }
+            None => "best_bid",
+        };
+        Some(mode)
+    } else {
+        None
+    };
     if let (Some(tp_price), Some(sl_price)) = (tp_price, sl_price) {
         anyhow::ensure!(
             sl_price < tp_price,
@@ -592,9 +684,35 @@ async fn execute_action_place_order(
             sizing.remaining_qty,
             "triggered",
             None,
+            eligible_after_at.clone(),
+            eligible_before_at.clone(),
             Some(run.definition_id),
             Some(run.id),
             Some(&node.key),
+        )
+        .await?;
+        repo.set_trade_builder_order_notification_flags(
+            existing_order.id,
+            notify_on_fill,
+            notify_on_trigger_guard_blocked,
+            notify_on_execution_floor_blocked,
+            notify_on_tp_hit,
+            notify_on_sl_hit,
+            notify_on_max_price_blocked,
+        )
+        .await?;
+        repo.set_trade_builder_order_guard_retry_flags(
+            existing_order.id,
+            retry_on_trigger_guard_block,
+            retry_on_execution_floor_guard_block,
+            retry_on_max_price_block,
+        )
+        .await?;
+        repo.set_trade_builder_order_guard_retry_flags(
+            existing_order.id,
+            retry_on_trigger_guard_block,
+            retry_on_execution_floor_guard_block,
+            retry_on_max_price_block,
         )
         .await?;
         repo.append_trade_builder_order_event(
@@ -611,7 +729,17 @@ async fn execute_action_place_order(
                 "size_pct": sizing.resolved_size_pct,
                 "size_usdc": sizing.size_usdc,
                 "target_qty": sizing.target_qty,
-                "remaining_qty": sizing.remaining_qty
+                "remaining_qty": sizing.remaining_qty,
+                "eligible_after_at": eligible_after_at.as_ref().map(|value| value.to_rfc3339()),
+                "eligible_before_at": eligible_before_at.as_ref().map(|value| value.to_rfc3339()),
+                "notify_on_fill": notify_on_fill,
+                "notify_on_trigger_guard_blocked": notify_on_trigger_guard_blocked,
+                "notify_on_execution_floor_blocked": notify_on_execution_floor_blocked,
+                "retry_on_trigger_guard_block": retry_on_trigger_guard_block,
+                "retry_on_execution_floor_guard_block": retry_on_execution_floor_guard_block,
+                "retry_on_max_price_block": retry_on_max_price_block,
+                "notify_on_tp_hit": notify_on_tp_hit,
+                "notify_on_sl_hit": notify_on_sl_hit
             }),
         )
         .await?;
@@ -635,6 +763,15 @@ async fn execute_action_place_order(
                 "size_usdc": sizing.size_usdc,
                 "target_qty": sizing.target_qty,
                 "remaining_qty": sizing.remaining_qty,
+                "notify_on_fill": notify_on_fill,
+                "notify_on_trigger_guard_blocked": notify_on_trigger_guard_blocked,
+                "notify_on_execution_floor_blocked": notify_on_execution_floor_blocked,
+                "retry_on_trigger_guard_block": retry_on_trigger_guard_block,
+                "retry_on_execution_floor_guard_block": retry_on_execution_floor_guard_block,
+                "retry_on_max_price_block": retry_on_max_price_block,
+                "notify_on_tp_hit": notify_on_tp_hit,
+                "notify_on_sl_hit": notify_on_sl_hit,
+                "should_inline_submit": should_inline_submit,
                 "rearmed_existing_order": true
             }),
             routes: Vec::new(),
@@ -660,12 +797,16 @@ async fn execute_action_place_order(
             trigger_condition.as_deref(),
             trigger_price,
             max_price,
+            guard_trigger_price,
+            best_ask_floor_price,
             sizing.size_basis,
             sizing.size_usdc,
             sizing.target_qty,
             sizing.remaining_qty,
             min_price_distance_cent,
             expires_at,
+            eligible_after_at.clone(),
+            eligible_before_at.clone(),
             max_triggers,
             None,
             tp_enabled,
@@ -676,6 +817,16 @@ async fn execute_action_place_order(
             Some(run.definition_id),
             Some(run.id),
             Some(&node.key),
+            sl_trigger_price_mode,
+            notify_on_fill,
+            notify_on_trigger_guard_blocked,
+            notify_on_execution_floor_blocked,
+            notify_on_tp_hit,
+            notify_on_sl_hit,
+            notify_on_max_price_blocked,
+            retry_on_trigger_guard_block,
+            retry_on_execution_floor_guard_block,
+            retry_on_max_price_block,
         )
         .await?;
     repo.append_trade_builder_order_event(
@@ -694,8 +845,14 @@ async fn execute_action_place_order(
             "size_usdc": sizing.size_usdc,
             "target_qty": sizing.target_qty,
             "remaining_qty": sizing.remaining_qty,
+            "eligible_after_at": eligible_after_at.as_ref().map(|value| value.to_rfc3339()),
+            "eligible_before_at": eligible_before_at.as_ref().map(|value| value.to_rfc3339()),
             "trigger_sizes": trigger_sizes,
             "max_price": max_price,
+            "guard_trigger_price": guard_trigger_price,
+            "trigger_price_guard_enabled": trigger_price_guard_enabled,
+            "best_ask_floor_price": best_ask_floor_price,
+            "execution_floor_guard_enabled": execution_floor_guard_enabled,
             "ignored_stale_existing_order": ignored_existing_order.is_some(),
             "ignored_existing_order_id": ignored_existing_order.as_ref().and_then(|(id, _)| *id),
             "ignored_existing_order_reason": ignored_existing_order.as_ref().map(|(_, reason)| *reason),
@@ -703,7 +860,18 @@ async fn execute_action_place_order(
             "tp_enabled": tp_enabled,
             "tp_price": tp_price,
             "sl_enabled": sl_enabled,
-            "sl_price": sl_price
+            "sl_price": sl_price,
+            "sl_trigger_price_mode": sl_trigger_price_mode,
+            "notify_on_fill": notify_on_fill,
+            "notify_on_trigger_guard_blocked": notify_on_trigger_guard_blocked,
+            "notify_on_execution_floor_blocked": notify_on_execution_floor_blocked,
+            "retry_on_trigger_guard_block": retry_on_trigger_guard_block,
+            "retry_on_execution_floor_guard_block": retry_on_execution_floor_guard_block,
+            "retry_on_max_price_block": retry_on_max_price_block,
+            "notify_on_tp_hit": notify_on_tp_hit,
+            "notify_on_sl_hit": notify_on_sl_hit,
+            "notify_on_max_price_blocked": notify_on_max_price_blocked,
+            "should_inline_submit": should_inline_submit,
         }),
     )
     .await?;
@@ -724,6 +892,8 @@ async fn execute_action_place_order(
             "market_slug": market_slug,
             "token_id": token_id,
             "max_price": max_price,
+            "guard_trigger_price": guard_trigger_price,
+            "best_ask_floor_price": best_ask_floor_price,
             "protection": protection_output,
             "size_basis": sizing.size_basis,
             "size_mode": sizing.resolved_size_mode,
@@ -734,7 +904,18 @@ async fn execute_action_place_order(
             "tp_enabled": tp_enabled,
             "tp_price": tp_price,
             "sl_enabled": sl_enabled,
-            "sl_price": sl_price
+            "sl_price": sl_price,
+            "execution_floor_guard_enabled": execution_floor_guard_enabled,
+            "sl_trigger_price_mode": sl_trigger_price_mode,
+            "notify_on_fill": notify_on_fill,
+            "notify_on_trigger_guard_blocked": notify_on_trigger_guard_blocked,
+            "notify_on_execution_floor_blocked": notify_on_execution_floor_blocked,
+            "retry_on_trigger_guard_block": retry_on_trigger_guard_block,
+            "retry_on_execution_floor_guard_block": retry_on_execution_floor_guard_block,
+            "retry_on_max_price_block": retry_on_max_price_block,
+            "notify_on_tp_hit": notify_on_tp_hit,
+            "notify_on_sl_hit": notify_on_sl_hit,
+            "should_inline_submit": should_inline_submit,
         }),
         routes: vec![TradeFlowRouteDecision {
             edge_type: "on_success".to_string(),

@@ -10,8 +10,8 @@ async fn refresh_trade_flow_ws_fast_path_cache(
             let mut cache = TRADE_FLOW_WS_FAST_PATH_CACHE.write().await;
             *cache = TradeFlowWsFastPathCache::default();
         }
-        if let Err(err) = ws.ensure_market_stream(&[]).await {
-            warn!(run_id, error = %err, "TRADE_FLOW_WS_STREAM_CLEAR_FAILED");
+        if let Err(err) = ensure_fast_path_market_stream_union(ws).await {
+            warn!(run_id, error = %err, "TRADE_FLOW_WS_STREAM_UNION_CLEAR_FAILED");
         }
         return Ok(());
     }
@@ -20,21 +20,19 @@ async fn refresh_trade_flow_ws_fast_path_cache(
         build_trade_flow_ws_fast_path_cache(repo, run_id, definitions, user_cfg_cache).await?;
     persist_trade_flow_ws_run_specs_contexts(repo, &mut fast_path_cache.run_specs).await?;
 
-    let all_token_ids: Vec<String> = fast_path_cache.token_targets.keys().cloned().collect();
-    if let Err(err) = ws.ensure_market_stream(&all_token_ids).await {
-        warn!(
-            run_id,
-            token_count = all_token_ids.len(),
-            error = %err,
-            "TRADE_FLOW_WS_STREAM_ENSURE_FAILED"
-        );
-    }
-
     let run_count = fast_path_cache.run_specs.len();
     let token_count = fast_path_cache.token_targets.len();
     {
         let mut cache = TRADE_FLOW_WS_FAST_PATH_CACHE.write().await;
         *cache = fast_path_cache;
+    }
+    if let Err(err) = ensure_fast_path_market_stream_union(ws).await {
+        warn!(
+            run_id,
+            token_count,
+            error = %err,
+            "TRADE_FLOW_WS_STREAM_UNION_ENSURE_FAILED"
+        );
     }
     info!(
         run_id,
@@ -211,12 +209,23 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
             };
 
             let resolved = market_snapshots.get(&token_id).and_then(|snapshot| {
-                resolve_trigger_price_from_market_snapshot(snapshot, node_spec.price_mode)
+                resolve_trigger_price_from_market_snapshot(
+                    snapshot,
+                    node_spec.price_mode,
+                    Some(node_spec.trigger_condition.as_str()),
+                )
             });
             let resolved_price = if let Some(resolved) = resolved {
                 resolved
             } else if let Some(cl) = client {
-                match resolve_trigger_price_from_rest(cl, &token_id, node_spec.price_mode).await {
+                match resolve_trigger_price_from_rest(
+                    cl,
+                    &token_id,
+                    node_spec.price_mode,
+                    Some(node_spec.trigger_condition.as_str()),
+                )
+                .await
+                {
                     Ok(resolved) => resolved,
                     Err(_) => {
                         debug!(
@@ -297,25 +306,22 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
                     }
                 }
             }
-            if node_spec.auto_scope {
-                if let (Some(ref slug), Some(ref cw_mode), Some(cw_secs)) = (
-                    &node_spec.market_slug,
-                    &node_spec.cycle_window_mode,
-                    node_spec.cycle_window_secs,
-                ) {
-                    if is_outside_cycle_window_focus(slug, cw_mode, cw_secs) {
-                        debug!(
-                            run_id,
-                            flow_run_id = run_spec.run_id,
-                            node_key = %node_spec.node_key,
-                            market_slug = %slug,
-                            cycle_window_mode = %cw_mode,
-                            cycle_window_secs = cw_secs,
-                            "TRIGGER_SKIP_CYCLE_WINDOW_FOCUS"
-                        );
-                        continue;
-                    }
-                }
+            if should_skip_for_cycle_window(
+                node_spec.market_slug.as_deref(),
+                node_spec.cycle_window_mode.as_deref(),
+                node_spec.cycle_window_secs,
+            ) {
+                debug!(
+                    run_id,
+                    flow_run_id = run_spec.run_id,
+                    node_key = %node_spec.node_key,
+                    market_slug = ?node_spec.market_slug,
+                    cycle_window_mode = ?node_spec.cycle_window_mode,
+                    cycle_window_secs = ?node_spec.cycle_window_secs,
+                    auto_scope = node_spec.auto_scope,
+                    "TRIGGER_SKIP_CYCLE_WINDOW_FOCUS"
+                );
+                continue;
             }
             if node_spec.protection_mode == TRIGGER_PROTECTION_MODE_UNDERLYING_CONFIRM {
                 if let Some(asset) = node_spec.protection_asset.as_deref() {
