@@ -33,7 +33,14 @@ fn resolve_composite_price(
             Some((bid.max(last_trade_price), "composite_max_bid_last_trade"))
         }
         (Some("cross_below"), Some(bid), Some(last_trade_price)) => {
-            Some((bid.min(last_trade_price), "composite_min_bid_last_trade"))
+            let filtered = if bid > 0.0
+                && last_trade_price < bid * SL_COMPOSITE_DIVERGENCE_KEEP_RATIO
+            {
+                bid
+            } else {
+                bid.min(last_trade_price)
+            };
+            Some((filtered, "composite_min_bid_last_trade"))
         }
         (_, Some(bid), None) => Some((bid, "composite_best_bid_only")),
         (_, None, Some(last_trade_price)) => {

@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use super::defaults::{CONFIG_ENC_NONCE_LEN, CONFIG_ENC_PREFIX};
+use super::defaults::{default_claim_min_claim_usdc, CONFIG_ENC_NONCE_LEN, CONFIG_ENC_PREFIX};
 use super::models::{AppConfig, ClaimConfig};
 use super::validate::validate_claim_private_key;
 use aes_gcm::aead::{Aead, KeyInit};
@@ -131,7 +131,7 @@ force_flatten_sec_before_close = 45
 max_daily_loss_usdc = 10.0
 max_consecutive_losses = 2
 max_notional_per_market_usdc = 20.0
-max_open_orders = 20
+max_open_orders = 40
 max_stale_data_ms = 2000
 kill_switch_mode = "disabled"
 manual_kill_switch_active = false
@@ -226,6 +226,12 @@ fn claim_private_key_validation_rejects_invalid_decrypted_value() {
 }
 
 #[test]
+fn claim_config_default_sets_min_claim_usdc() {
+    let claim = ClaimConfig::default();
+    assert_eq!(claim.min_claim_usdc, default_claim_min_claim_usdc());
+}
+
+#[test]
 fn app_config_load_from_user_settings_uses_claim_toml_fallback_when_payload_missing() {
     let dir = TempConfigDir::new().unwrap();
     write_base_app_config(dir.path()).unwrap();
@@ -251,6 +257,7 @@ positions_max_pages = 5
 process_batch_size = 10
 max_attempts = 5
 retry_backoff_ms = 10000
+min_claim_usdc = 2.5
 "#,
     )
     .unwrap();
@@ -265,6 +272,7 @@ retry_backoff_ms = 10000
         "0x2222222222222222222222222222222222222222"
     );
     assert_eq!(cfg.claim.execution_mode.as_str(), "direct");
+    assert_eq!(cfg.claim.min_claim_usdc, 2.5);
 }
 
 #[test]
@@ -293,6 +301,7 @@ positions_max_pages = 5
 process_batch_size = 10
 max_attempts = 5
 retry_backoff_ms = 10000
+min_claim_usdc = 2.5
 "#,
     )
     .unwrap();
@@ -326,6 +335,70 @@ retry_backoff_ms = 10000
 
     assert!(!cfg.claim.enabled);
     assert_eq!(cfg.claim.rpc_url, "https://db-rpc.example");
+    assert_eq!(cfg.claim.min_claim_usdc, default_claim_min_claim_usdc());
+}
+
+#[test]
+fn app_config_load_from_user_settings_claim_payload_overrides_min_claim_usdc() {
+    let dir = TempConfigDir::new().unwrap();
+    write_base_app_config(dir.path()).unwrap();
+    write_config(
+        dir.path(),
+        "claim.toml",
+        r#"
+enabled = true
+execution_mode = "direct"
+rpc_url = "https://polygon-rpc.com"
+rpc_url_env = ""
+data_api_base_url = "https://data-api.polymarket.com"
+user_address = "0x2222222222222222222222222222222222222222"
+user_address_env = ""
+private_key = "0x2222222222222222222222222222222222222222222222222222222222222222"
+private_key_env = ""
+chain_id = 137
+ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+collateral_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+discovery_interval_sec = 30
+positions_page_size = 200
+positions_max_pages = 5
+process_batch_size = 10
+max_attempts = 5
+retry_backoff_ms = 10000
+min_claim_usdc = 2.5
+"#,
+    )
+    .unwrap();
+
+    let settings = HashMap::from([
+        ("exchange".to_string(), base_exchange_payload()),
+        (
+            "claim".to_string(),
+            json!({
+                "enabled": true,
+                "execution_mode": "direct",
+                "rpc_url": "https://db-rpc.example",
+                "rpc_url_env": "",
+                "data_api_base_url": "https://data-api.polymarket.com",
+                "user_address": "0x2222222222222222222222222222222222222222",
+                "user_address_env": "",
+                "private_key": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "private_key_env": "",
+                "chain_id": 137,
+                "ctf_contract_address": "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+                "collateral_token_address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                "discovery_interval_sec": 30,
+                "positions_page_size": 200,
+                "positions_max_pages": 5,
+                "process_batch_size": 10,
+                "max_attempts": 5,
+                "retry_backoff_ms": 10000,
+                "min_claim_usdc": 3.5
+            }),
+        ),
+    ]);
+    let cfg = AppConfig::load_from_user_settings(dir.path(), &settings).unwrap();
+
+    assert_eq!(cfg.claim.min_claim_usdc, 3.5);
 }
 
 #[test]

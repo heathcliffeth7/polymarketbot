@@ -44,6 +44,8 @@ pub(crate) struct PriceToBeatGuardEvaluation {
     pub(crate) timeframe: Option<String>,
     pub(crate) asset: Option<String>,
     pub(crate) price_to_beat: Option<f64>,
+    pub(crate) price_to_beat_source: Option<String>,
+    pub(crate) price_to_beat_source_latency_ms: Option<i64>,
     pub(crate) current_price: Option<f64>,
     pub(crate) current_price_source: &'static str,
     pub(crate) gap_abs: Option<f64>,
@@ -63,6 +65,8 @@ impl PriceToBeatGuardEvaluation {
             "timeframe": self.timeframe,
             "asset": self.asset,
             "price_to_beat": self.price_to_beat,
+            "price_to_beat_source": self.price_to_beat_source,
+            "price_to_beat_source_latency_ms": self.price_to_beat_source_latency_ms,
             "current_price": self.current_price,
             "current_price_source": self.current_price_source,
             "gap_abs": self.gap_abs,
@@ -241,6 +245,8 @@ async fn evaluate_price_to_beat_guard(
             None,
             None,
             None,
+            None,
+            None,
         );
     };
     if !matches!(scope.timeframe, "5m" | "15m") {
@@ -254,6 +260,8 @@ async fn evaluate_price_to_beat_guard(
             Some(format!("unsupported timeframe: {}", scope.timeframe)),
             Some(scope.timeframe.to_string()),
             Some(scope.asset.to_string()),
+            None,
+            None,
             None,
             None,
         );
@@ -274,6 +282,8 @@ async fn evaluate_price_to_beat_guard(
                 Some(scope.asset.to_string()),
                 None,
                 None,
+                None,
+                None,
             )
         }
     };
@@ -292,6 +302,8 @@ async fn evaluate_price_to_beat_guard(
                 Some(scope.timeframe.to_string()),
                 Some(scope.asset.to_string()),
                 Some(snapshot.price_to_beat),
+                Some(snapshot.source.as_str().to_string()),
+                snapshot.source_latency_ms,
                 None,
             );
         }
@@ -320,6 +332,8 @@ async fn evaluate_price_to_beat_guard(
         timeframe: Some(snapshot.timeframe),
         asset: Some(snapshot.asset),
         price_to_beat: Some(snapshot.price_to_beat),
+        price_to_beat_source: Some(snapshot.source.as_str().to_string()),
+        price_to_beat_source_latency_ms: snapshot.source_latency_ms,
         current_price: Some(current_price),
         current_price_source: CURRENT_PRICE_SOURCE,
         gap_abs: Some(gap_abs),
@@ -388,6 +402,8 @@ fn blocked_price_to_beat_guard_evaluation(
     timeframe: Option<String>,
     asset: Option<String>,
     price_to_beat: Option<f64>,
+    price_to_beat_source: Option<String>,
+    price_to_beat_source_latency_ms: Option<i64>,
     current_price: Option<f64>,
 ) -> PriceToBeatGuardEvaluation {
     PriceToBeatGuardEvaluation {
@@ -399,6 +415,8 @@ fn blocked_price_to_beat_guard_evaluation(
         timeframe,
         asset,
         price_to_beat,
+        price_to_beat_source,
+        price_to_beat_source_latency_ms,
         current_price,
         current_price_source: CURRENT_PRICE_SOURCE,
         gap_abs: None,
@@ -493,6 +511,8 @@ mod tests {
             timeframe: Some("5m".to_string()),
             asset: Some("btc".to_string()),
             price_to_beat: Some(69_279.93484689),
+            price_to_beat_source: Some("polymarket".to_string()),
+            price_to_beat_source_latency_ms: None,
             current_price: Some(69_300.12),
             current_price_source: CURRENT_PRICE_SOURCE,
             gap_abs: Some(20.18515311),
@@ -520,6 +540,8 @@ mod tests {
             timeframe: Some("5m".to_string()),
             asset: Some("btc".to_string()),
             price_to_beat: None,
+            price_to_beat_source: None,
+            price_to_beat_source_latency_ms: None,
             current_price: Some(70_404.25964978),
             current_price_source: CURRENT_PRICE_SOURCE,
             gap_abs: None,
@@ -545,6 +567,8 @@ mod tests {
             timeframe: Some("5m".to_string()),
             asset: Some("btc".to_string()),
             price_to_beat: Some(69_279.93484689),
+            price_to_beat_source: Some("polymarket".to_string()),
+            price_to_beat_source_latency_ms: None,
             current_price: Some(69_300.12),
             current_price_source: CURRENT_PRICE_SOURCE,
             gap_abs: Some(20.18515311),
@@ -617,6 +641,8 @@ mod tests {
             timeframe: Some("5m".to_string()),
             asset: Some("btc".to_string()),
             price_to_beat: Some(70_714.62472011),
+            price_to_beat_source: Some("chainlink_snapshot".to_string()),
+            price_to_beat_source_latency_ms: Some(125),
             current_price: None,
             current_price_source: CURRENT_PRICE_SOURCE,
             gap_abs: None,

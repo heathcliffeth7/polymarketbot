@@ -3,13 +3,17 @@ import {
   createEmptyDrawdownRuleRow,
   createEmptyKeyValueDraft,
   createEmptyOutcomeConditionRow,
+  isPresetPlaceOrderMarker,
   type ConditionDraft,
   type DrawdownRuleRow,
   type NodeConfigFormState,
   type OutcomeConditionRow,
   type PrimitiveValueType,
 } from '@/lib/trade-flow-config-mappers';
-import type { UpstreamMaxPriceResolution } from '../flow-canvas-utils';
+import type {
+  UpstreamFixedMarketResolution,
+  UpstreamMaxPriceResolution,
+} from '../flow-canvas-utils';
 
 function getTriggerMarketSource(fields: Record<string, string>): string | null {
   const marketMode = (fields.marketMode ?? '').trim().toLowerCase();
@@ -47,7 +51,7 @@ export function updateNodeFieldState(
 ): NodeConfigFormState | null {
   if (!prev) return prev;
 
-  const nextFields = { ...prev.fields, [key]: value };
+  let nextFields = { ...prev.fields, [key]: value };
   let next: NodeConfigFormState = { ...prev, fields: nextFields };
   if (nodeType === 'action.place_order' && key === 'maxPriceCent' && prev.placeOrderMaxPriceUi) {
     next = {
@@ -57,6 +61,25 @@ export function updateNodeFieldState(
         isInheritedValue: false,
       },
     };
+  }
+  if (nodeType === 'action.place_order' && prev.placeOrderMarketSeedUi) {
+    const nextUi = { ...prev.placeOrderMarketSeedUi };
+    if (key === 'marketSlug') {
+      nextUi.isInheritedMarketSlug = false;
+      if (prev.placeOrderMarketSeedUi.isInheritedTokenId || prev.placeOrderMarketSeedUi.isInheritedOutcomeLabel) {
+        nextFields = { ...nextFields, tokenId: '', outcomeLabel: '' };
+        next = { ...next, fields: nextFields };
+      }
+      nextUi.isInheritedTokenId = false;
+      nextUi.isInheritedOutcomeLabel = false;
+      next = { ...next, placeOrderMarketSeedUi: nextUi };
+    } else if (key === 'tokenId') {
+      nextUi.isInheritedTokenId = false;
+      next = { ...next, placeOrderMarketSeedUi: nextUi };
+    } else if (key === 'outcomeLabel') {
+      nextUi.isInheritedOutcomeLabel = false;
+      next = { ...next, placeOrderMarketSeedUi: nextUi };
+    }
   }
 
   if (!shouldResetDependentSelections(nodeType, key)) {
@@ -176,6 +199,109 @@ export function syncPlaceOrderInheritedMaxPriceState(
     ...prev,
     fields: nextFields,
     placeOrderMaxPriceUi: nextUi,
+  };
+}
+
+export function syncPlaceOrderInheritedMarketState(
+  prev: NodeConfigFormState | null,
+  resolution: UpstreamFixedMarketResolution
+): NodeConfigFormState | null {
+  if (!prev) return prev;
+  if (!isPresetPlaceOrderMarker(prev.fields.presetKind, prev.fields.refKey)) {
+    return prev;
+  }
+
+  const currentMarketSlug = (prev.fields.marketSlug ?? '').trim();
+  const currentTokenId = (prev.fields.tokenId ?? '').trim();
+  const currentOutcomeLabel = (prev.fields.outcomeLabel ?? '').trim();
+  const hasMarketSeedUi = prev.placeOrderMarketSeedUi != null;
+  const wasInheritedMarketSlug = prev.placeOrderMarketSeedUi?.isInheritedMarketSlug === true;
+  const wasInheritedTokenId = prev.placeOrderMarketSeedUi?.isInheritedTokenId === true;
+  const wasInheritedOutcomeLabel = prev.placeOrderMarketSeedUi?.isInheritedOutcomeLabel === true;
+  let nextFields = prev.fields;
+  let isInheritedMarketSlug = false;
+  let isInheritedTokenId = false;
+  let isInheritedOutcomeLabel = false;
+
+  if (resolution.kind === 'single' && resolution.marketSlug) {
+    if (!hasMarketSeedUi || wasInheritedMarketSlug || currentMarketSlug.length === 0) {
+      if (currentMarketSlug !== resolution.marketSlug) {
+        nextFields = { ...nextFields, marketSlug: resolution.marketSlug };
+      }
+      isInheritedMarketSlug = true;
+    }
+  } else if (wasInheritedMarketSlug && currentMarketSlug.length > 0) {
+    nextFields = { ...nextFields, marketSlug: '' };
+  }
+
+  if (
+    resolution.kind === 'single' &&
+    resolution.outcomeKind === 'single' &&
+    resolution.tokenId &&
+    resolution.outcomeLabel
+  ) {
+    if (!hasMarketSeedUi || wasInheritedTokenId || currentTokenId.length === 0) {
+      if ((nextFields.tokenId ?? '').trim() !== resolution.tokenId) {
+        nextFields = { ...nextFields, tokenId: resolution.tokenId };
+      }
+      isInheritedTokenId = true;
+    }
+    if (!hasMarketSeedUi || wasInheritedOutcomeLabel || currentOutcomeLabel.length === 0) {
+      if ((nextFields.outcomeLabel ?? '').trim() !== resolution.outcomeLabel) {
+        nextFields = { ...nextFields, outcomeLabel: resolution.outcomeLabel };
+      }
+      isInheritedOutcomeLabel = true;
+    }
+  } else {
+    if (!hasMarketSeedUi && resolution.kind === 'single') {
+      if (currentTokenId.length > 0 || currentOutcomeLabel.length > 0) {
+        nextFields = { ...nextFields, tokenId: '', outcomeLabel: '' };
+      }
+    }
+    if (wasInheritedTokenId && currentTokenId.length > 0) {
+      nextFields = { ...nextFields, tokenId: '' };
+    }
+    if (wasInheritedOutcomeLabel && currentOutcomeLabel.length > 0) {
+      nextFields = { ...nextFields, outcomeLabel: '' };
+    }
+  }
+
+  const nextUi = {
+    isInheritedMarketSlug,
+    isInheritedTokenId,
+    isInheritedOutcomeLabel,
+    upstreamKind: resolution.kind,
+    upstreamOutcomeKind: resolution.outcomeKind,
+    upstreamMarketSlug: resolution.marketSlug,
+    upstreamTokenId: resolution.tokenId,
+    upstreamOutcomeLabel: resolution.outcomeLabel,
+    distinctUpstreamMarketSlugs: resolution.distinctMarketSlugs,
+    distinctUpstreamOutcomeLabels: resolution.distinctOutcomeLabels,
+  } as const;
+
+  const prevUi = prev.placeOrderMarketSeedUi;
+  const fieldsUnchanged = nextFields === prev.fields;
+  const uiUnchanged =
+    prevUi != null &&
+    prevUi.isInheritedMarketSlug === nextUi.isInheritedMarketSlug &&
+    prevUi.isInheritedTokenId === nextUi.isInheritedTokenId &&
+    prevUi.isInheritedOutcomeLabel === nextUi.isInheritedOutcomeLabel &&
+    prevUi.upstreamKind === nextUi.upstreamKind &&
+    prevUi.upstreamOutcomeKind === nextUi.upstreamOutcomeKind &&
+    prevUi.upstreamMarketSlug === nextUi.upstreamMarketSlug &&
+    prevUi.upstreamTokenId === nextUi.upstreamTokenId &&
+    prevUi.upstreamOutcomeLabel === nextUi.upstreamOutcomeLabel &&
+    sameDistinctValues(prevUi.distinctUpstreamMarketSlugs, nextUi.distinctUpstreamMarketSlugs) &&
+    sameDistinctValues(prevUi.distinctUpstreamOutcomeLabels, nextUi.distinctUpstreamOutcomeLabels);
+
+  if (fieldsUnchanged && uiUnchanged) {
+    return prev;
+  }
+
+  return {
+    ...prev,
+    fields: nextFields,
+    placeOrderMarketSeedUi: nextUi,
   };
 }
 

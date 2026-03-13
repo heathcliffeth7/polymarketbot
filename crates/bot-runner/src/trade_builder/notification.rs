@@ -1,9 +1,54 @@
+async fn build_trade_builder_flow_identity(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+) -> Option<(String, Value)> {
+    let definition_id = order.origin_flow_definition_id?;
+    let definition_name = repo
+        .get_trade_flow_definition(definition_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|definition| definition.name)
+        .unwrap_or_else(|| "?".to_string());
+    let node_key = order
+        .origin_flow_node_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let run_id = order.origin_flow_run_id;
+    let mut block = format!("\nFlow: {} (#{definition_id})", definition_name);
+    if let Some(run_id) = run_id {
+        block.push_str(&format!("\nRun: #{run_id}"));
+    }
+    if let Some(node_key) = node_key {
+        block.push_str(&format!("\nNode: {node_key}"));
+    }
+    block.push_str(&format!("\nSource Trade: #{}", order.trade_id));
+
+    Some((
+        block,
+        json!({
+            "origin_flow_definition_id": definition_id,
+            "origin_flow_name": definition_name,
+            "origin_flow_run_id": run_id,
+            "origin_flow_node_key": node_key,
+            "source_trade_id": order.trade_id,
+        }),
+    ))
+}
+
 async fn send_trade_builder_notification(
     repo: &PostgresRepository,
     order: &TradeBuilderOrder,
     notification_type: &str,
     message: &str,
 ) {
+    let flow_identity = build_trade_builder_flow_identity(repo, order).await;
+    let message = if let Some((block, _)) = flow_identity.as_ref() {
+        format!("{message}{block}")
+    } else {
+        message.to_string()
+    };
     let Ok(telegram) = load_user_telegram_config(repo, order.user_id).await else {
         return;
     };
@@ -25,7 +70,7 @@ async fn send_trade_builder_notification(
         .post(&url)
         .json(&serde_json::json!({
             "chat_id": chat_id,
-            "text": message,
+            "text": message.as_str(),
         }))
         .timeout(std::time::Duration::from_secs(10))
         .send()
@@ -39,8 +84,9 @@ async fn send_trade_builder_notification(
                     "notification_sent",
                     &json!({
                         "notification_type": notification_type,
-                        "message": message,
+                        "message": message.as_str(),
                         "chat_id": chat_id,
+                        "flow_identity": flow_identity.as_ref().map(|(_, payload)| payload.clone()),
                     }),
                 )
                 .await

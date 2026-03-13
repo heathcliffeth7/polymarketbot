@@ -15,6 +15,7 @@ mod risk;
 mod runs;
 mod trade_builder;
 mod trade_flow;
+mod trade_flow_overlap;
 mod trades;
 
 pub use core::{PostgresRepository, RunnerSingletonDbLock};

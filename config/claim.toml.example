@@ -21,3 +21,4 @@ positions_max_pages = 5
 process_batch_size = 10
 max_attempts = 5
 retry_backoff_ms = 10000
+min_claim_usdc = 1.0

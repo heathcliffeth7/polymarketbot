@@ -571,6 +571,19 @@ async fn process_trade_builder_order(
         order_status = %order.status,
         "TRADE_BUILDER_TRIGGER_CONDITION_MET"
     );
+    if should_skip_trade_builder_composite_sl_bid_confirmation(&order, &runtime_price) {
+        info!(
+            run_id,
+            builder_order_id = order.id,
+            market = %order.market_slug,
+            best_bid = ?runtime_price.best_bid,
+            trigger_price = ?order.trigger_price,
+            trigger_eval_price,
+            last_trade_price = ?runtime_price.last_trade_price,
+            "SL_BID_CONFIRMATION_GUARD_SKIP"
+        );
+        return Ok(());
+    }
     maybe_latch_trade_builder_stop_loss(repo, &mut order, trigger_eval_price).await?;
     let fee_rate_bps = resolve_trade_builder_order_fee_rate_bps(repo, client, &mut order).await?;
 
@@ -628,6 +641,24 @@ async fn process_trade_builder_order(
     .await
 }
 
+fn should_skip_trade_builder_composite_sl_bid_confirmation(
+    order: &TradeBuilderOrder,
+    runtime_price: &TradeBuilderRuntimePrice,
+) -> bool {
+    if !trade_builder_is_stop_loss_child(order)
+        || order.sl_trigger_price_mode.as_deref() != Some("composite")
+    {
+        return false;
+    }
+    let Some(trigger_price) = order.trigger_price else {
+        return false;
+    };
+    match runtime_price.best_bid {
+        Some(best_bid) => best_bid > trigger_price,
+        None => true,
+    }
+}
+
 #[cfg(test)]
 mod eligibility_window_tests {
     use super::*;
@@ -665,7 +696,9 @@ mod eligibility_window_tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             parent_order_id: None,
+            origin_flow_definition_id: None,
             origin_flow_run_id: None,
+            origin_flow_node_key: None,
             tp_enabled: false,
             tp_price: None,
             sl_enabled: false,
@@ -674,6 +707,7 @@ mod eligibility_window_tests {
             fee_rate_bps: 0,
             trigger_latched: false,
             trigger_latched_reason: None,
+            trigger_latched_at: None,
             submitted_dynamic_qty: None,
             submitted_dynamic_price: None,
             guard_trigger_price: None,

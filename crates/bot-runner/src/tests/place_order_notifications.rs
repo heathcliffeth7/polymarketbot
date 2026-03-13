@@ -111,6 +111,17 @@ fn execution_floor_waiting_notification_mentions_recovery_retry() {
 }
 
 #[test]
+fn execution_floor_waiting_notification_describes_missing_best_ask() {
+    let mut order = test_builder_order("buy", None);
+    order.best_ask_floor_price = Some(0.77);
+
+    let message = build_execution_floor_waiting_notification_message(&order, None);
+
+    assert!(message.contains("Best ask verisi alinamadi"));
+    assert!(message.contains("Best Ask: N/A"));
+}
+
+#[test]
 fn max_price_blocked_notification_respects_toggle() {
     let mut order = test_builder_order("buy", None);
     order.max_price = Some(0.9);

@@ -25,4 +25,5 @@ export {
   getTradeFlowRunEvents,
   getRecentTradeFlowEvents,
 } from './definitions';
+export { getTradeFlowOverlapSummary } from './overlap';
 export { migrateLegacyWorkflowsToFlows, createFlowFromLegacyWorkflow } from './legacy';

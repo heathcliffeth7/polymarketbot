@@ -9,6 +9,7 @@ import type {
   TradeFlowVersion,
 } from '@/lib/types';
 import { DEFAULT_GRAPH, type Queryable, type TradeFlowListFilters, type TradeFlowRunFilters, type CreateTradeFlowDefinitionInput, type UpdateTradeFlowDefinitionInput } from './shared';
+import { cancelFlowResources, recordCancellationEvents } from './cancel-resources';
 import { normalizeTradeFlowGraph } from './graph';
 import { migrateLegacyWorkflowsToFlows } from './legacy';
 import { rotatePublishedFlowRunOnPublish } from './publish-runtime';
@@ -58,17 +59,7 @@ function mapEventRow(row: Record<string, unknown>): TradeFlowEvent {
 }
 
 const FLOW_STOP_REASON = 'flow_stopped_by_user';
-const STOPPABLE_TRADE_BUILDER_ORDER_STATUSES = [
-  'pending',
-  'armed',
-  'triggered',
-  'open',
-  'partially_filled',
-  'blocked',
-  'guard_blocked',
-  'inventory_pending',
-  'canceled_requested',
-] as const;
+const FLOW_ARCHIVE_REASON = 'definition_archived';
 
 async function fetchVersionById(queryable: Queryable, versionId: number | null): Promise<TradeFlowVersion | null> {
   if (!versionId) return null;
@@ -434,17 +425,9 @@ export async function archiveTradeFlowDefinition(
       return (await getTradeFlowDefinitionById(userId, definitionId)) as TradeFlowDefinitionDetail;
     }
 
-    await client.query(
-      `UPDATE trade_flow_runs
-       SET status = 'canceled',
-           ended_at = NOW(),
-           updated_at = NOW(),
-           last_error = COALESCE(last_error, 'definition_archived')
-       WHERE definition_id = $1
-         AND user_id = $2
-         AND status = 'running'`,
-      [definitionId, userId]
-    );
+    const eventTimestamp = new Date().toISOString();
+    const cancelResult = await cancelFlowResources(client, userId, definitionId, FLOW_ARCHIVE_REASON);
+    await recordCancellationEvents(client, definitionId, cancelResult, FLOW_ARCHIVE_REASON, eventTimestamp);
 
     await client.query(
       `UPDATE trade_flow_definitions
@@ -462,7 +445,13 @@ export async function archiveTradeFlowDefinition(
       [
         definitionId,
         current.published_version_id == null ? null : Number(current.published_version_id),
-        JSON.stringify({ definitionId, archivedAt: new Date().toISOString() }),
+        JSON.stringify({
+          definitionId,
+          archivedAt: eventTimestamp,
+          canceledRunCount: cancelResult.affectedRuns.length,
+          canceledDualDcaJobCount: cancelResult.canceledDualDcaJobIds.length,
+          canceledBuilderOrderCount: cancelResult.canceledOrderRows.length,
+        }),
       ]
     );
 
@@ -507,142 +496,8 @@ export async function stopTradeFlowDefinition(
     const publishedVersionId =
       definition.published_version_id == null ? null : Number(definition.published_version_id);
 
-    const runRes = await client.query(
-      `UPDATE trade_flow_runs
-       SET status = 'canceled',
-           ended_at = COALESCE(ended_at, NOW()),
-           updated_at = NOW(),
-           last_error = COALESCE(last_error, $3)
-       WHERE definition_id = $1
-         AND user_id = $2
-         AND status = 'running'
-       RETURNING id, version_id`,
-      [definitionId, userId, FLOW_STOP_REASON]
-    );
-    const affectedRuns = runRes.rows.map((row) => ({
-      id: Number(row.id),
-      versionId: row.version_id == null ? null : Number(row.version_id),
-    }));
-    const affectedRunIds = affectedRuns.map((run) => run.id);
-
-    if (affectedRunIds.length > 0) {
-      await client.query(
-        `UPDATE trade_flow_run_steps
-         SET status = 'canceled',
-             error_text = COALESCE(error_text, $2),
-             ended_at = NOW()
-         WHERE run_id = ANY($1::bigint[])
-           AND status IN ('queued', 'running')`,
-        [affectedRunIds, FLOW_STOP_REASON]
-      );
-
-      for (const run of affectedRuns) {
-        await client.query(
-          `INSERT INTO trade_flow_events
-            (run_id, definition_id, version_id, event_type, payload_json, created_at)
-           VALUES
-            ($1, $2, $3, 'run_canceled_by_user', $4::jsonb, NOW())`,
-          [
-            run.id,
-            definitionId,
-            run.versionId,
-            JSON.stringify({
-              reason: FLOW_STOP_REASON,
-              stoppedAt: eventTimestamp,
-            }),
-          ]
-        );
-      }
-    }
-
-    const dualDcaRes = await client.query(
-      `UPDATE trade_flow_dual_dca_jobs
-       SET status = 'canceled',
-           last_error = COALESCE(last_error, $2),
-           updated_at = NOW()
-       WHERE flow_definition_id = $1
-         AND status IN ('active', 'paused')
-       RETURNING id`,
-      [definitionId, FLOW_STOP_REASON]
-    );
-    const dualDcaJobIds = dualDcaRes.rows.map((row) => Number(row.id));
-    for (const jobId of dualDcaJobIds) {
-      await client.query(
-        `INSERT INTO trade_flow_dual_dca_events
-          (job_id, leg_id, event_type, payload_json, created_at)
-         VALUES
-          ($1, NULL, 'job_canceled', $2::jsonb, NOW())`,
-        [
-          jobId,
-          JSON.stringify({
-            reason: FLOW_STOP_REASON,
-            stoppedAt: eventTimestamp,
-          }),
-        ]
-      );
-    }
-
-    const orderRes = await client.query(
-      `WITH flow_owned_orders AS (
-         SELECT DISTINCT o.id
-         FROM trade_builder_orders o
-         WHERE o.origin_flow_definition_id = $3
-         UNION
-         SELECT DISTINCT child.id
-         FROM trade_builder_orders child
-         JOIN trade_builder_orders parent ON parent.id = child.parent_order_id
-         WHERE parent.origin_flow_definition_id = $3
-         UNION
-         SELECT DISTINCT l.builder_order_id
-         FROM trade_flow_dual_dca_legs l
-         JOIN trade_flow_dual_dca_jobs j ON j.id = l.job_id
-         WHERE j.flow_definition_id = $3
-           AND l.builder_order_id IS NOT NULL
-       )
-       UPDATE trade_builder_orders o
-       SET status = CASE
-             WHEN o.status = 'canceled_requested' THEN 'canceled_requested'
-             WHEN o.active_exchange_order_id IS NULL THEN 'canceled'
-             ELSE 'canceled_requested'
-           END,
-           last_error = COALESCE(o.last_error, $4),
-           updated_at = NOW()
-       WHERE o.user_id = $1
-         AND o.status = ANY($2::text[])
-         AND o.id IN (SELECT id FROM flow_owned_orders)
-       RETURNING o.id, o.status, o.active_exchange_order_id, o.origin_flow_run_id, o.origin_flow_node_key`,
-      [userId, STOPPABLE_TRADE_BUILDER_ORDER_STATUSES, definitionId, FLOW_STOP_REASON]
-    );
-    const affectedOrderRows = orderRes.rows.map((row) => ({
-      id: Number(row.id),
-      status: String(row.status || ''),
-      activeExchangeOrderId:
-        row.active_exchange_order_id == null ? null : String(row.active_exchange_order_id),
-      originFlowRunId: row.origin_flow_run_id == null ? null : Number(row.origin_flow_run_id),
-      originFlowNodeKey:
-        row.origin_flow_node_key == null ? null : String(row.origin_flow_node_key),
-    }));
-
-    for (const order of affectedOrderRows) {
-      await client.query(
-        `INSERT INTO trade_builder_order_events
-          (builder_order_id, event_type, payload_json, created_at)
-         VALUES
-          ($1, 'flow_stopped_by_user', $2::jsonb, NOW())`,
-        [
-          order.id,
-          JSON.stringify({
-            reason: FLOW_STOP_REASON,
-            stoppedAt: eventTimestamp,
-            nextStatus: order.status,
-            cancelRequested: order.status === 'canceled_requested',
-            activeExchangeOrderId: order.activeExchangeOrderId,
-            originFlowRunId: order.originFlowRunId,
-            originFlowNodeKey: order.originFlowNodeKey,
-          }),
-        ]
-      );
-    }
+    const cancelResult = await cancelFlowResources(client, userId, definitionId, FLOW_STOP_REASON);
+    await recordCancellationEvents(client, definitionId, cancelResult, FLOW_STOP_REASON, eventTimestamp);
 
     await client.query(
       `UPDATE trade_flow_definitions
@@ -664,9 +519,9 @@ export async function stopTradeFlowDefinition(
         JSON.stringify({
           reason: FLOW_STOP_REASON,
           stoppedAt: eventTimestamp,
-          canceledRunCount: affectedRuns.length,
-          canceledDualDcaJobCount: dualDcaJobIds.length,
-          canceledBuilderOrderCount: affectedOrderRows.length,
+          canceledRunCount: cancelResult.affectedRuns.length,
+          canceledDualDcaJobCount: cancelResult.canceledDualDcaJobIds.length,
+          canceledBuilderOrderCount: cancelResult.canceledOrderRows.length,
         }),
       ]
     );

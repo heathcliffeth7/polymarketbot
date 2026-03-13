@@ -49,6 +49,7 @@ import {
   createEdgeKey,
   createGraphFingerprint,
   createNodeKey,
+  extractPositionSeedFromNode,
   hasRequiredPlaceOrderSeed,
   isRecord,
   nodePaletteCategoryOf,
@@ -116,8 +117,7 @@ export function FlowCanvasEditorBody({
   const history = useCanvasHistory();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const { upstreamAutoScope: selectedNodeUpstreamAutoScope, upstreamTriggerPrice: selectedNodeUpstreamTriggerPrice, upstreamMaxPriceResolution: selectedNodeUpstreamMaxPriceResolution } =
-    useSelectedNodeUpstream({ selectedNodeId, canvasNodes, canvasEdges });
+  const { upstreamAutoScope: selectedNodeUpstreamAutoScope, upstreamTriggerPrice: selectedNodeUpstreamTriggerPrice, upstreamMaxPriceResolution: selectedNodeUpstreamMaxPriceResolution, upstreamFixedMarketResolution: selectedNodeUpstreamFixedMarketResolution } = useSelectedNodeUpstream({ selectedNodeId, canvasNodes, canvasEdges });
   const [nodeInspectorTab, setNodeInspectorTab] = useState<'basic' | 'advanced'>('basic');
   const [edgeInspectorTab, setEdgeInspectorTab] = useState<'basic' | 'advanced'>('basic');
   const [openPositionApplyingKey, setOpenPositionApplyingKey] = useState<string | null>(null);
@@ -402,17 +402,7 @@ export function FlowCanvasEditorBody({
     onError(null);
   };
   const addPresetPlaceOrderNode = (kind: PlaceOrderPresetKind) => {
-    const fromSel: PlaceOrderPresetSeed | null =
-      selectedNode &&
-      (selectedNode.data.nodeType === 'trigger.open_positions' ||
-        selectedNode.data.nodeType === 'trigger.position_drawdown')
-        ? {
-            sourceTradeId: toFiniteNumberValue(selectedNode.data.config.sourceTradeId),
-            marketSlug: toTrimmedStringValue(selectedNode.data.config.marketSlug),
-            tokenId: toTrimmedStringValue(selectedNode.data.config.tokenId),
-            outcomeLabel: toTrimmedStringValue(selectedNode.data.config.outcomeLabel),
-          }
-        : null;
+    const fromSel = selectedNode ? extractPositionSeedFromNode(selectedNode) : null;
     const fromCtx: PlaceOrderPresetSeed = {
       sourceTradeId: toFiniteNumberValue(graph.context.sourceTradeId),
       marketSlug: toTrimmedStringValue(graph.context.marketSlug),
@@ -463,7 +453,14 @@ export function FlowCanvasEditorBody({
     setHasPendingNodeDraft(true);
     setNodeForm((prev) => updateTriggerSizeRowState(prev, index, value));
   };
-  useSyncPlaceOrderFormState({ nodeTypeDraft, selectedNodeId, placeOrderMaxTriggers: nodeForm?.fields.maxTriggers, upstreamMaxPriceResolution: selectedNodeUpstreamMaxPriceResolution, setNodeForm });
+  useSyncPlaceOrderFormState({
+    nodeTypeDraft,
+    selectedNodeId,
+    placeOrderMaxTriggers: nodeForm?.fields.maxTriggers,
+    upstreamFixedMarketResolution: selectedNodeUpstreamFixedMarketResolution,
+    upstreamMaxPriceResolution: selectedNodeUpstreamMaxPriceResolution,
+    setNodeForm,
+  });
   const canApplyOpenPosition = (p: TradeFlowOpenPositionOption) =>
     p.matchedTradeId != null ? true : Boolean(p.marketSlug.trim() && p.tokenId.trim());
   const applyOpenPositionSelection = async (position: TradeFlowOpenPositionOption) => {

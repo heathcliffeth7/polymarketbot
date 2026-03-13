@@ -19,8 +19,8 @@ impl RunnerSingletonDbLock {
 impl PostgresRepository {
     pub async fn new(database_url: &str) -> Result<Self> {
         let pool = PgPoolOptions::new()
-            .max_connections(15)
-            .min_connections(3)
+            .max_connections(25)
+            .min_connections(5)
             .connect(database_url)
             .await?;
         Ok(Self { pool })

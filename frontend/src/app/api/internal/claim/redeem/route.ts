@@ -4,6 +4,7 @@ import {
   ClaimRelayerRouteError,
   type ClaimRedeemRequestBody,
   submitClaimViaBuilderRelayer,
+  submitClaimViaRelayerApiKey,
 } from '@/lib/claim-relayer';
 
 export const runtime = 'nodejs';
@@ -49,7 +50,9 @@ export async function POST(req: NextRequest) {
     }
     const context = { userId: Number(body.userId), username: `internal-${body.userId}` };
     const config = await readClaimRelayerConfigForServer(context);
-    const result = await submitClaimViaBuilderRelayer(config, body);
+    const result = config.executionMode === 'relayer_api_key'
+      ? await submitClaimViaRelayerApiKey(config, body)
+      : await submitClaimViaBuilderRelayer(config, body);
 
     return NextResponse.json(result);
   } catch (err) {

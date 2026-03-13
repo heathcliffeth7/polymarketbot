@@ -10,14 +10,23 @@ use ethers::contract::abigen;
 use ethers::middleware::{NonceManagerMiddleware, SignerMiddleware};
 use ethers::providers::{Http, Middleware, Provider};
 use ethers::signers::{LocalWallet, Signer};
-use ethers::types::{Address, BlockNumber, Bytes, H256, U256};
+use ethers::types::{Address, BlockNumber, H256, U256};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 use tracing::{info, warn};
 
-const AUTO_CLAIM_INDEX_SETS: [u64; 2] = [1, 2];
+mod batch;
+mod support;
+use support::{
+    apply_gas_price_floor_and_buffer, build_safe_prevalidated_signature, compact_error,
+    compact_submit_failure, elapsed_seconds_since, gas_price_gwei, has_receipt_timed_out,
+    max_inflight_claim_jobs, meets_min_claim_value, normalize_position_owner_address,
+    parse_json_f64, relayer_rate_limit_cooldown_until, submit_failure_indicates_rate_limit,
+};
+
+pub(self) const AUTO_CLAIM_INDEX_SETS: [u64; 2] = [1, 2];
 const AUTO_CLAIM_MAX_ERROR_LEN: usize = 400;
 const RECEIPT_TIMEOUT_SEC: u64 = 120;
 const MIN_GAS_PRICE_GWEI: u64 = 30;
@@ -70,8 +79,10 @@ pub struct AutoClaimService {
     process_batch_size: i64,
     max_attempts: i32,
     retry_backoff_ms: u64,
+    min_claim_usdc: f64,
     discovery_interval_sec: u64,
     next_discovery_at: DateTime<Utc>,
+    next_submission_at: DateTime<Utc>,
     http: Client,
     middleware: Arc<ClaimSigner>,
     ctf_contract: ConditionalTokens<ClaimSigner>,
@@ -114,10 +125,13 @@ impl AutoClaimService {
             .map(|raw| parse_address(&raw, "exchange.gnosis_safe_address"))
             .transpose()?;
         let execution_mode = cfg.claim.execution_mode()?;
-        let relayer_adapter = if matches!(execution_mode, ClaimExecutionMode::BuilderRelayer) {
+        let relayer_adapter = if matches!(
+            execution_mode,
+            ClaimExecutionMode::BuilderRelayer | ClaimExecutionMode::RelayerApiKey
+        ) {
             anyhow::ensure!(
                 safe_address.is_some(),
-                "exchange.gnosis_safe_address is required when claim.execution_mode=builder_relayer"
+                "exchange.gnosis_safe_address is required when claim.execution_mode=builder_relayer or relayer_api_key"
             );
             Some(ClaimRelayerAdapter::from_env()?)
         } else {
@@ -145,8 +159,10 @@ impl AutoClaimService {
             process_batch_size: cfg.claim.process_batch_size.max(1),
             max_attempts: cfg.claim.max_attempts.max(1),
             retry_backoff_ms: cfg.claim.retry_backoff_ms.max(1000),
+            min_claim_usdc: cfg.claim.min_claim_usdc.max(0.0),
             discovery_interval_sec: cfg.claim.discovery_interval_sec.max(5),
             next_discovery_at: Utc::now(),
+            next_submission_at: Utc::now(),
             http: Client::new(),
             middleware: middleware.clone(),
             ctf_contract,
@@ -190,9 +206,11 @@ impl AutoClaimService {
             );
         }
 
+        let max_inflight = max_inflight_claim_jobs(self.execution_mode, self.process_batch_size);
         let inflight_count = repo.count_auto_claim_jobs_submitted().await?;
-        if inflight_count < self.process_batch_size {
-            let processed = self.process_pending_jobs(repo).await?;
+        let available_slots = max_inflight.saturating_sub(inflight_count);
+        if available_slots > 0 && now >= self.next_submission_at {
+            let processed = self.process_pending_jobs(repo, available_slots).await?;
             if processed > 0 {
                 info!(
                     processed,
@@ -230,7 +248,7 @@ impl AutoClaimService {
                     {
                         continue;
                     }
-                    if !has_positive_claim_value(&position) {
+                    if !meets_min_claim_value(&position, self.min_claim_usdc) {
                         continue;
                     }
                     let Some(raw_condition_id) = position.condition_id.as_deref() else {
@@ -324,98 +342,7 @@ impl AutoClaimService {
             .context("failed to parse auto-claim positions response")
     }
 
-    async fn process_pending_jobs(&self, repo: &PostgresRepository) -> Result<usize> {
-        let jobs = repo
-            .list_auto_claim_jobs_for_processing(self.process_batch_size)
-            .await?;
-        for job in &jobs {
-            self.process_single_job(repo, job).await?;
-        }
-        Ok(jobs.len())
-    }
-
-    async fn process_single_job(
-        &self,
-        repo: &PostgresRepository,
-        job: &AutoClaimJob,
-    ) -> Result<()> {
-        repo.mark_auto_claim_job_processing(job.id).await?;
-        repo.append_auto_claim_event(
-            job.id,
-            "processing_started",
-            &json!({
-                "job_id": job.id,
-                "owner_address": job.owner_address,
-                "condition_id": job.condition_id,
-                "market_slug": job.market_slug,
-                "attempt": job.attempts + 1
-            }),
-        )
-        .await?;
-
-        match self
-            .submit_redeem_tx(&job.owner_address, &job.condition_id)
-            .await
-        {
-            Ok(submission) => {
-                let SubmittedRedeemTx {
-                    tx_hash,
-                    gas_price,
-                    submission_mode,
-                } = submission;
-                repo.mark_auto_claim_job_submitted(job.id, &tx_hash).await?;
-                let mut payload = json!({
-                    "job_id": job.id,
-                    "condition_id": job.condition_id,
-                    "tx_hash": tx_hash,
-                    "submission_mode": submission_mode,
-                });
-                if let Some(gas_price) = gas_price {
-                    payload["gas_price_gwei"] = json!(gas_price_gwei(gas_price));
-                }
-                repo.append_auto_claim_event(job.id, "submitted", &payload)
-                    .await?;
-            }
-            Err(err) => {
-                let compact_error = compact_submit_failure(&err);
-                let (status, event_type) = if err.retryable {
-                    let status = repo
-                        .mark_auto_claim_job_retry_or_fail(
-                            job.id,
-                            &compact_error,
-                            self.retry_backoff_ms as i64,
-                        )
-                        .await?;
-                    let event_type = if status == "failed" {
-                        "claim_failed"
-                    } else {
-                        "retry_scheduled"
-                    };
-                    (status, event_type)
-                } else {
-                    repo.mark_auto_claim_job_failed(job.id, &compact_error)
-                        .await?;
-                    ("failed".to_string(), "claim_failed")
-                };
-                repo.append_auto_claim_event(
-                    job.id,
-                    event_type,
-                    &json!({
-                        "job_id": job.id,
-                        "condition_id": job.condition_id,
-                        "status": status,
-                        "retryable": err.retryable,
-                        "error": compact_error,
-                        "error_chain": compact_error,
-                        "retry_backoff_ms": self.retry_backoff_ms
-                    }),
-                )
-                .await?;
-            }
-        }
-
-        Ok(())
-    }
+    // process_pending_jobs and process_single_job are in batch.rs
 
     async fn check_submitted_receipts(&self, repo: &PostgresRepository) -> Result<usize> {
         let jobs = repo
@@ -608,7 +535,10 @@ impl AutoClaimService {
         owner_address: &str,
         condition_id: &str,
     ) -> std::result::Result<SubmittedRedeemTx, ClaimSubmitFailure> {
-        if matches!(self.execution_mode, ClaimExecutionMode::BuilderRelayer) {
+        if matches!(
+            self.execution_mode,
+            ClaimExecutionMode::BuilderRelayer | ClaimExecutionMode::RelayerApiKey
+        ) {
             return self
                 .submit_redeem_tx_via_relayer(owner_address, condition_id)
                 .await;
@@ -842,7 +772,11 @@ impl AutoClaimService {
         Ok(SubmittedRedeemTx {
             tx_hash,
             gas_price: None,
-            submission_mode: "builder_relayer",
+            submission_mode: if matches!(self.execution_mode, ClaimExecutionMode::RelayerApiKey) {
+                "relayer_api_key"
+            } else {
+                "builder_relayer"
+            },
         })
     }
 
@@ -901,86 +835,6 @@ fn parse_tx_hash(raw: &str) -> Result<H256> {
 
 fn normalize_tx_hash(raw: &str) -> Result<String> {
     Ok(format!("{:#x}", parse_tx_hash(raw)?))
-}
-
-fn parse_json_f64(value: Option<&Value>) -> Option<f64> {
-    match value {
-        Some(Value::Number(v)) => v.as_f64(),
-        Some(Value::String(v)) => v.parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
-fn normalize_position_owner_address(
-    proxy_wallet: Option<&str>,
-    fallback_address: &str,
-) -> Result<String> {
-    if let Some(proxy_wallet) = proxy_wallet {
-        let trimmed = proxy_wallet.trim();
-        if !trimmed.is_empty() {
-            return normalize_address(trimmed);
-        }
-    }
-    normalize_address(fallback_address)
-}
-
-fn has_positive_claim_value(position: &DataApiPosition) -> bool {
-    if let Some(current_value) = parse_json_f64(position.current_value.as_ref()) {
-        return current_value > 0.0;
-    }
-    if let Some(cur_price) = parse_json_f64(position.cur_price.as_ref()) {
-        return cur_price > 0.0;
-    }
-    true
-}
-
-fn build_safe_prevalidated_signature(owner: Address) -> Bytes {
-    let mut signature = Vec::with_capacity(65);
-    signature.extend_from_slice(&[0u8; 12]);
-    signature.extend_from_slice(owner.as_bytes());
-    signature.extend_from_slice(&[0u8; 32]);
-    signature.push(1u8);
-    signature.into()
-}
-
-fn compact_error(err: anyhow::Error) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for cause in err.chain() {
-        let message = cause.to_string();
-        if !parts.iter().any(|part| part.contains(&message)) {
-            parts.push(message);
-        }
-    }
-    compact_error_text(&parts.join(" -> ").replace('\n', " "))
-}
-
-fn compact_submit_failure(err: &ClaimSubmitFailure) -> String {
-    compact_error_text(&err.message)
-}
-
-fn compact_error_text(raw: &str) -> String {
-    let mut out = raw.trim().replace('\n', " ");
-    if out.len() > AUTO_CLAIM_MAX_ERROR_LEN {
-        out.truncate(AUTO_CLAIM_MAX_ERROR_LEN);
-    }
-    out
-}
-
-fn apply_gas_price_floor_and_buffer(gas_price: U256) -> U256 {
-    let floor = U256::from(MIN_GAS_PRICE_GWEI) * U256::from(1_000_000_000u64);
-    gas_price.max(floor) * U256::from(120u64) / U256::from(100u64)
-}
-
-fn gas_price_gwei(gas_price: U256) -> u64 {
-    (gas_price / U256::from(1_000_000_000u64)).as_u64()
-}
-
-fn elapsed_seconds_since(start: DateTime<Utc>, end: DateTime<Utc>) -> i64 {
-    end.signed_duration_since(start).num_seconds().max(0)
-}
-
-fn has_receipt_timed_out(submitted_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    elapsed_seconds_since(submitted_at, now) >= RECEIPT_TIMEOUT_SEC as i64
 }
 
 #[cfg(test)]

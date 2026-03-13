@@ -245,7 +245,7 @@ export function OutcomeConditionsSection({ rows, marketOutcomes, marketOutcomesL
       {marketOutcomesLoading ? (
         <p className="text-[10px] text-slate-500">Outcome&apos;lar yukleniyor...</p>
       ) : marketOutcomes.length === 0 ? (
-        <p className="text-[10px] text-slate-500">Market slug girilince outcome&apos;lar otomatik yuklenecek.</p>
+        <p className="text-[10px] text-slate-500">Market slug veya market scope secilince outcome&apos;lar otomatik yuklenecek.</p>
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {marketOutcomes.map((outcome) => {

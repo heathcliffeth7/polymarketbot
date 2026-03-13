@@ -40,6 +40,19 @@ export interface PlaceOrderMaxPriceUiState {
   distinctUpstreamMaxPriceCents: string[];
 }
 
+export interface PlaceOrderMarketSeedUiState {
+  isInheritedMarketSlug: boolean;
+  isInheritedTokenId: boolean;
+  isInheritedOutcomeLabel: boolean;
+  upstreamKind: 'none' | 'single' | 'multiple';
+  upstreamOutcomeKind: 'none' | 'single' | 'multiple';
+  upstreamMarketSlug: string | null;
+  upstreamTokenId: string | null;
+  upstreamOutcomeLabel: string | null;
+  distinctUpstreamMarketSlugs: string[];
+  distinctUpstreamOutcomeLabels: string[];
+}
+
 export interface NodeConfigFormState {
   fields: Record<string, string>;
   triggerSizeRows: string[];
@@ -52,6 +65,7 @@ export interface NodeConfigFormState {
   nestedExprGroup: import('@/lib/types').ExpressionGroup | null;
   statePatchRows: KeyValueDraft[];
   placeOrderMaxPriceUi?: PlaceOrderMaxPriceUiState;
+  placeOrderMarketSeedUi?: PlaceOrderMarketSeedUiState;
   advancedJson: string;
 }
 

@@ -11,14 +11,15 @@ export function useMarketOutcomes({
   nodeTypeDraft,
   nodeForm,
 }: UseMarketOutcomesArgs) {
-  const outcomeMarketSlug = useMemo(() => {
+  const outcomeSource = useMemo(() => {
     const marketSlug = (nodeForm?.fields.marketSlug ?? '').trim();
-    if (!marketSlug) return null;
+    const marketScope = (nodeForm?.fields.marketScope ?? '').trim();
 
     if (
       nodeTypeDraft === 'trigger.open_positions' ||
       nodeTypeDraft === 'trigger.position_drawdown'
     ) {
+      if (!marketSlug) return null;
       return marketSlug;
     }
 
@@ -27,11 +28,20 @@ export function useMarketOutcomes({
     }
 
     const marketMode = (nodeForm?.fields.marketMode ?? '').trim().toLowerCase();
-    return marketMode === 'auto_scope' ? null : marketSlug;
-  }, [nodeForm?.fields.marketMode, nodeForm?.fields.marketSlug, nodeTypeDraft]);
+    if (marketMode === 'auto_scope') {
+      return marketScope || null;
+    }
+
+    return marketSlug || null;
+  }, [
+    nodeForm?.fields.marketMode,
+    nodeForm?.fields.marketScope,
+    nodeForm?.fields.marketSlug,
+    nodeTypeDraft,
+  ]);
 
   const { data: outcomeData, isLoading: outcomesLoading } =
-    useTradeBuilderOutcomes(outcomeMarketSlug);
+    useTradeBuilderOutcomes(outcomeSource);
   const marketOutcomes = useMemo(() => outcomeData?.data ?? [], [outcomeData?.data]);
   const marketOutcomeTokenIdSet = useMemo(
     () => new Set(marketOutcomes.map((outcome) => outcome.token_id)),

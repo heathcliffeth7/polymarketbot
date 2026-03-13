@@ -229,7 +229,7 @@ fn exit_sell_price_floor_uses_trigger_buffer() {
     sl_order.trigger_price = Some(0.60);
 
     assert_eq!(trade_builder_exit_sell_price_floor(&tp_order), Some(0.93));
-    assert_eq!(trade_builder_exit_sell_price_floor(&sl_order), Some(0.55));
+    assert_eq!(trade_builder_exit_sell_price_floor(&sl_order), None);
 }
 
 #[test]
@@ -246,7 +246,7 @@ fn exit_sell_price_cap_never_chases_beyond_trigger_buffer() {
     sl_order.trigger_price = Some(0.60);
 
     assert_eq!(trade_builder_cap_exit_sell_price(&tp_order, 0.27), 0.93);
-    assert_eq!(trade_builder_cap_exit_sell_price(&sl_order, 0.27), 0.55);
+    assert_eq!(trade_builder_cap_exit_sell_price(&sl_order, 0.27), 0.27);
     assert_eq!(trade_builder_cap_exit_sell_price(&tp_order, 0.97), 0.97);
 }
 

@@ -1,6 +1,6 @@
 import { decryptConfigValue, isEncryptedConfigValue } from '@/lib/crypto-config';
 
-export type ClaimExecutionMode = 'direct' | 'builder_relayer';
+export type ClaimExecutionMode = 'direct' | 'builder_relayer' | 'relayer_api_key';
 
 export interface ClaimRuntimeValidationState {
   enabled: boolean;
@@ -10,6 +10,7 @@ export interface ClaimRuntimeValidationState {
   hasPrivateKeySource: boolean;
   hasSafeAddressSource: boolean;
   hasBuilderCredsSource: boolean;
+  hasRelayerApiKeySource: boolean;
 }
 
 export interface ClaimRelayerConfigForServer {
@@ -23,12 +24,15 @@ export interface ClaimRelayerConfigForServer {
   builderApiKey: string;
   builderApiSecret: string;
   builderApiPassphrase: string;
+  relayerApiKey: string;
+  relayerApiKeyAddress: string;
 }
 
 export function normalizeClaimExecutionMode(rawValue: unknown): ClaimExecutionMode {
-  return String(rawValue ?? 'direct').trim().toLowerCase() === 'builder_relayer'
-    ? 'builder_relayer'
-    : 'direct';
+  const normalized = String(rawValue ?? 'direct').trim().toLowerCase();
+  if (normalized === 'builder_relayer') return 'builder_relayer';
+  if (normalized === 'relayer_api_key') return 'relayer_api_key';
+  return 'direct';
 }
 
 export function resolvePlaintextConfigValueForServer(

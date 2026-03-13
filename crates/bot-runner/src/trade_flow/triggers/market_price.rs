@@ -983,7 +983,6 @@ async fn execute_trigger_market_price(
             }
         }
     }
-
     Ok(finish_trigger_market_price_execution(
         run, node, context, &market_slug, price_mode, &triggered_token_id,
         &triggered_outcome_label, &triggered_condition, triggered_trigger_price,

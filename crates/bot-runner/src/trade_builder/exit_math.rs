@@ -1,3 +1,5 @@
+const SL_COMPOSITE_DIVERGENCE_KEEP_RATIO: f64 = 0.70;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TradeBuilderLocalInventoryFallback {
     submit_qty: f64,
@@ -360,6 +362,10 @@ fn trade_builder_exit_sell_price_floor(order: &TradeBuilderOrder) -> Option<f64>
     if !trade_builder_is_child_exit_sell(order) {
         return None;
     }
+    // SL icin floor uygulama - piyasa fiyatindan sat
+    if matches!(order.trigger_condition.as_deref(), Some("cross_below")) {
+        return None;
+    }
     let trigger_price = order.trigger_price?;
     let floored =
         ((trigger_price - TRADE_BUILDER_EXIT_TRIGGER_BUFFER).max(0.0) * 100.0).round() / 100.0;
@@ -418,6 +424,10 @@ fn trade_builder_execution_floor_missing_best_ask(
     best_ask
         .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
         .is_none()
+}
+
+fn trade_builder_execution_floor_should_wait(order: &TradeBuilderOrder, reason_code: &str) -> bool {
+    reason_code == "best_ask_unavailable" || order.retry_on_execution_floor_guard_block
 }
 
 fn normalize_trade_builder_size_basis(raw: &str) -> &'static str {
@@ -480,7 +490,14 @@ fn fast_trigger_eval_price(
             clamp_probability(best_bid.max(last_trade_price))
         }
         (Some(best_bid), Some(last_trade_price), Some("cross_below")) => {
-            clamp_probability(best_bid.min(last_trade_price))
+            let filtered = if best_bid > 0.0
+                && last_trade_price < best_bid * SL_COMPOSITE_DIVERGENCE_KEEP_RATIO
+            {
+                best_bid
+            } else {
+                best_bid.min(last_trade_price)
+            };
+            clamp_probability(filtered)
         }
         (Some(best_bid), None, _) => clamp_probability(best_bid),
         (None, Some(last_trade_price), _) => clamp_probability(last_trade_price),

@@ -105,16 +105,10 @@ export function NodeInspectorPanel({
   const placeOrderMaxPriceCentValue =
     nodeTypeDraft === 'action.place_order' ? (form.fields.maxPriceCent ?? '').toString().trim() : '';
   const placeOrderMaxPriceUi = form.placeOrderMaxPriceUi;
+  const placeOrderMarketSeedUi = form.placeOrderMarketSeedUi;
   const placeOrderHasInheritedMaxPrice = placeOrderMaxPriceUi?.isInheritedValue === true;
-  const placeOrderHasAmbiguousUpstreamMaxPrice =
-    nodeTypeDraft === 'action.place_order' && upstreamMaxPriceResolution.kind === 'multiple';
-  const placeOrderHasStaleLocalMaxPrice =
-    nodeTypeDraft === 'action.place_order' &&
-    !placeOrderHasInheritedMaxPrice &&
-    placeOrderMaxPriceCentValue.length > 0 &&
-    upstreamMaxPriceResolution.kind === 'single' &&
-    upstreamMaxPriceResolution.maxPriceCent != null &&
-    upstreamMaxPriceResolution.maxPriceCent !== placeOrderMaxPriceCentValue;
+  const placeOrderHasAmbiguousUpstreamMaxPrice = nodeTypeDraft === 'action.place_order' && upstreamMaxPriceResolution.kind === 'multiple';
+  const placeOrderHasStaleLocalMaxPrice = nodeTypeDraft === 'action.place_order' && !placeOrderHasInheritedMaxPrice && placeOrderMaxPriceCentValue.length > 0 && upstreamMaxPriceResolution.kind === 'single' && upstreamMaxPriceResolution.maxPriceCent != null && upstreamMaxPriceResolution.maxPriceCent !== placeOrderMaxPriceCentValue;
   const placeOrderTriggerGuardChecked =
     (form.fields.triggerPriceGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
   const triggerGuardRetryChecked =
@@ -123,12 +117,7 @@ export function NodeInspectorPanel({
     (form.fields.executionFloorGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
   const executionFloorRetryChecked =
     (form.fields.retryOnExecutionFloorGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
-  const maxPriceProtectionActive =
-    nodeTypeDraft === 'action.place_order' &&
-    placeOrderSide === 'buy' &&
-    (placeOrderMaxPriceCentValue.length > 0 ||
-      (placeOrderMaxPriceUi?.upstreamKind === 'single' &&
-        placeOrderMaxPriceUi.upstreamMaxPriceCent != null));
+  const maxPriceProtectionActive = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && (placeOrderMaxPriceCentValue.length > 0 || (placeOrderMaxPriceUi?.upstreamKind === 'single' && placeOrderMaxPriceUi.upstreamMaxPriceCent != null));
   const maxPriceNotifyChecked =
     (form.fields.notifyOnMaxPriceBlocked ?? '').toString().trim().toLowerCase() === 'true';
   const maxPriceRetryChecked =
@@ -536,6 +525,10 @@ export function NodeInspectorPanel({
                 {field.help && (
                   <p className="text-[10px] leading-relaxed text-slate-400 italic">{field.help}</p>
                 )}
+                {field.key === 'marketSlug' && placeOrderMarketSeedUi?.isInheritedMarketSlug && <p className="text-[10px] leading-relaxed text-sky-600">Bagli upstream `trigger.market_price` bilgisinden otomatik dolduruldu. Config&apos;e yazmak icin `Node Guncelle` kullan.</p>}
+                {field.key === 'marketSlug' && placeOrderMarketSeedUi?.upstreamKind === 'multiple' && <p className="text-[10px] leading-relaxed text-amber-600">Birden fazla bagli upstream fixed market bulundu{placeOrderMarketSeedUi.distinctUpstreamMarketSlugs.length > 0 ? ` (${placeOrderMarketSeedUi.distinctUpstreamMarketSlugs.join(', ')})` : ''}. Bu yuzden otomatik doldurma yapilmadi.</p>}
+                {field.key === 'tokenId' && placeOrderMarketSeedUi?.upstreamKind === 'single' && placeOrderMarketSeedUi.upstreamOutcomeKind === 'multiple' && <p className="text-[10px] leading-relaxed text-amber-600">Bagli upstream market bulundu ama outcome belirsiz{placeOrderMarketSeedUi.distinctUpstreamOutcomeLabels.length > 0 ? ` (${placeOrderMarketSeedUi.distinctUpstreamOutcomeLabels.join(', ')})` : ''}. Bu yuzden sadece market slug dolduruldu.</p>}
+                {field.key === 'tokenId' && (placeOrderMarketSeedUi?.isInheritedTokenId || placeOrderMarketSeedUi?.isInheritedOutcomeLabel) && <p className="text-[10px] leading-relaxed text-sky-600">Bagli upstream `trigger.market_price` outcome bilgisinden otomatik dolduruldu. Config&apos;e yazmak icin `Node Guncelle` kullan.</p>}
                 {field.key === 'maxPriceCent' && placeOrderHasInheritedMaxPrice && (
                   <p className="text-[10px] leading-relaxed text-sky-600">
                     Upstream `trigger.market_price` tavanindan otomatik dolduruldu. Config&apos;e

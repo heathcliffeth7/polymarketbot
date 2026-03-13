@@ -2,7 +2,9 @@ import { useMemo } from 'react';
 import type { FlowEdge, FlowNode } from '../flow-canvas-constants';
 import {
   hasUpstreamAutoScopeTrigger,
+  resolveUpstreamFixedTriggerMarket,
   resolveUpstreamTriggerMaxPrice,
+  type UpstreamFixedMarketResolution,
   type UpstreamMaxPriceResolution,
   hasUpstreamTriggerWithConfiguredPrice,
 } from '../flow-canvas-utils';
@@ -11,6 +13,16 @@ const EMPTY_UPSTREAM_MAX_PRICE_RESOLUTION: UpstreamMaxPriceResolution = {
   kind: 'none',
   maxPriceCent: null,
   distinctMaxPriceCents: [],
+};
+
+const EMPTY_UPSTREAM_FIXED_MARKET_RESOLUTION: UpstreamFixedMarketResolution = {
+  kind: 'none',
+  marketSlug: null,
+  outcomeKind: 'none',
+  tokenId: null,
+  outcomeLabel: null,
+  distinctMarketSlugs: [],
+  distinctOutcomeLabels: [],
 };
 
 interface UseSelectedNodeUpstreamArgs {
@@ -39,5 +51,15 @@ export function useSelectedNodeUpstream({
     return resolveUpstreamTriggerMaxPrice(selectedNodeId, canvasNodes, canvasEdges);
   }, [selectedNodeId, canvasNodes, canvasEdges]);
 
-  return { upstreamAutoScope, upstreamTriggerPrice, upstreamMaxPriceResolution };
+  const upstreamFixedMarketResolution = useMemo(() => {
+    if (!selectedNodeId) return EMPTY_UPSTREAM_FIXED_MARKET_RESOLUTION;
+    return resolveUpstreamFixedTriggerMarket(selectedNodeId, canvasNodes, canvasEdges);
+  }, [selectedNodeId, canvasNodes, canvasEdges]);
+
+  return {
+    upstreamAutoScope,
+    upstreamTriggerPrice,
+    upstreamMaxPriceResolution,
+    upstreamFixedMarketResolution,
+  };
 }

@@ -603,6 +603,26 @@ fn missing_best_ask_blocks_when_execution_floor_is_enabled() {
 }
 
 #[test]
+fn missing_best_ask_forces_execution_floor_waiting() {
+    let mut buy_order = test_builder_order("buy", None);
+    buy_order.best_ask_floor_price = Some(0.77);
+    assert!(trade_builder_execution_floor_should_wait(
+        &buy_order,
+        "best_ask_unavailable"
+    ));
+    assert!(!trade_builder_execution_floor_should_wait(
+        &buy_order,
+        "below_best_ask_floor"
+    ));
+
+    buy_order.retry_on_execution_floor_guard_block = true;
+    assert!(trade_builder_execution_floor_should_wait(
+        &buy_order,
+        "below_best_ask_floor"
+    ));
+}
+
+#[test]
 fn trigger_market_price_rejects_cross_when_above_max_price() {
     let (matched, reason) = evaluate_trigger_market_price_condition(
         Some(0.76),

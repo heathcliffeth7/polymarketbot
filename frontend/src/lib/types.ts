@@ -127,6 +127,43 @@ export interface BotRun {
   reason: string | null;
 }
 
+export interface ClaimSweepQueueStatus {
+  pending: number;
+  retry: number;
+  processing: number;
+  submitted: number;
+  failed: number;
+  claimed: number;
+}
+
+export interface ClaimSweepStatus {
+  thresholdUsdc: number;
+  walletAddress: string | null;
+  executionMode: 'direct' | 'builder_relayer' | 'relayer_api_key';
+  claimEnabled: boolean;
+  publishedAutoClaimFlow: boolean;
+  canSweep: boolean;
+  disabledReasonCode: string | null;
+  disabledReason: string | null;
+  eligibleCount: number;
+  eligibleTotalUsdc: number;
+  queue: ClaimSweepQueueStatus;
+  lastError: string | null;
+  refreshedAt: string | null;
+}
+
+export interface ClaimSweepRunResult {
+  thresholdUsdc: number;
+  walletAddress: string | null;
+  eligibleCount: number;
+  eligibleTotalUsdc: number;
+  queuedNewCount: number;
+  rearmedCount: number;
+  alreadyTrackedCount: number;
+  queue: ClaimSweepQueueStatus;
+  refreshedAt: string;
+}
+
 export interface DashboardData {
   botStatus: {
     serviceActive: boolean;
@@ -182,6 +219,7 @@ export interface DashboardData {
     enabled: boolean;
     updatedAt: string | null;
   }>;
+  claimSweep: ClaimSweepStatus;
 }
 
 export interface PaginatedResponse<T> {
@@ -269,6 +307,9 @@ export interface TradeBuilderOrder {
   created_at: string;
   updated_at: string;
   parent_order_id: number | null;
+  origin_flow_definition_id: number | null;
+  origin_flow_run_id: number | null;
+  origin_flow_node_key: string | null;
   tp_enabled: boolean;
   tp_price: number | null;
   sl_enabled: boolean;
@@ -509,6 +550,26 @@ export interface TradeFlowEvent {
   event_type: string;
   payload_json: Record<string, unknown>;
   created_at: string;
+}
+
+export interface TradeFlowOverlapPeer {
+  market_slug: string;
+  token_id: string;
+  side: 'buy' | 'sell';
+  definition_id: number;
+  definition_name: string | null;
+  run_id: number | null;
+  node_key: string | null;
+  source_trade_id: number;
+  active_order_count: number;
+}
+
+export interface TradeFlowOverlapGroup {
+  market_slug: string;
+  overlap_type: 'cross_flow' | 'intra_flow' | 'both';
+  cross_flow: boolean;
+  intra_flow: boolean;
+  peers: TradeFlowOverlapPeer[];
 }
 
 export interface TradeFlowRealtimePriceTick {

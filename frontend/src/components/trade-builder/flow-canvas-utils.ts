@@ -202,6 +202,47 @@ export function toFiniteNumberValue(value: unknown): number | null {
   return null;
 }
 
+export function extractPositionSeedFromNode(node: FlowNode): PlaceOrderPresetSeed | null {
+  if (
+    node.data.nodeType !== 'trigger.open_positions' &&
+    node.data.nodeType !== 'trigger.position_drawdown'
+  ) {
+    return null;
+  }
+
+  return {
+    sourceTradeId: toFiniteNumberValue(node.data.config.sourceTradeId),
+    marketSlug: toTrimmedStringValue(node.data.config.marketSlug),
+    tokenId: toTrimmedStringValue(node.data.config.tokenId),
+    outcomeLabel: toTrimmedStringValue(node.data.config.outcomeLabel),
+  };
+}
+
+export function extractMarketPriceSeedFromNode(node: FlowNode): PlaceOrderPresetSeed | null {
+  if (node.data.nodeType !== 'trigger.market_price') return null;
+
+  const marketMode = toTrimmedStringValue(node.data.config.marketMode).toLowerCase();
+  const marketSlug = toTrimmedStringValue(node.data.config.marketSlug);
+  if (marketMode !== 'fixed' || !marketSlug) return null;
+
+  let tokenId = '';
+  let outcomeLabel = '';
+  const outcomeConditions = Array.isArray(node.data.config.outcomeConditions)
+    ? node.data.config.outcomeConditions
+    : [];
+  if (outcomeConditions.length === 1 && isRecord(outcomeConditions[0])) {
+    tokenId = toTrimmedStringValue(outcomeConditions[0].tokenId);
+    outcomeLabel = toTrimmedStringValue(outcomeConditions[0].outcomeLabel);
+  }
+
+  return {
+    sourceTradeId: null,
+    marketSlug,
+    tokenId,
+    outcomeLabel,
+  };
+}
+
 export function buildPlaceOrderPresetConfig(
   kind: PlaceOrderPresetKind,
   seed: PlaceOrderPresetSeed
@@ -494,6 +535,120 @@ export function hasUpstreamTriggerWithConfiguredPrice(
   }
 
   return false;
+}
+
+function formatOutcomePairKey(tokenId: string, outcomeLabel: string): string {
+  return `${tokenId}::${outcomeLabel}`;
+}
+
+function parseOutcomePairKey(key: string): { tokenId: string; outcomeLabel: string } {
+  const [tokenId = '', outcomeLabel = ''] = key.split('::');
+  return { tokenId, outcomeLabel };
+}
+
+export interface UpstreamFixedMarketResolution {
+  kind: 'none' | 'single' | 'multiple';
+  marketSlug: string | null;
+  outcomeKind: 'none' | 'single' | 'multiple';
+  tokenId: string | null;
+  outcomeLabel: string | null;
+  distinctMarketSlugs: string[];
+  distinctOutcomeLabels: string[];
+}
+
+export function resolveUpstreamFixedTriggerMarket(
+  nodeId: string,
+  nodes: FlowNode[],
+  edges: FlowEdge[],
+): UpstreamFixedMarketResolution {
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of edges) {
+    const list = incomingByTarget.get(edge.target) ?? [];
+    list.push(edge.source);
+    incomingByTarget.set(edge.target, list);
+  }
+
+  const visited = new Set<string>();
+  const distinctMarketSlugs = new Set<string>();
+  const distinctOutcomePairs = new Set<string>();
+  let hasUnresolvedOutcome = false;
+  const queue = [nodeId];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const sourceId of incomingByTarget.get(current) ?? []) {
+      const sourceNode = nodeMap.get(sourceId);
+      if (!sourceNode) continue;
+      const candidate = extractMarketPriceSeedFromNode(sourceNode);
+      if (candidate) {
+        distinctMarketSlugs.add(candidate.marketSlug);
+        if (candidate.tokenId && candidate.outcomeLabel) {
+          distinctOutcomePairs.add(
+            formatOutcomePairKey(candidate.tokenId, candidate.outcomeLabel)
+          );
+        } else {
+          hasUnresolvedOutcome = true;
+        }
+      }
+      queue.push(sourceId);
+    }
+  }
+
+  const resolvedMarketSlugs = Array.from(distinctMarketSlugs).sort();
+  const distinctOutcomeLabels = Array.from(distinctOutcomePairs)
+    .map((pair) => parseOutcomePairKey(pair).outcomeLabel)
+    .sort();
+
+  if (resolvedMarketSlugs.length === 0) {
+    return {
+      kind: 'none',
+      marketSlug: null,
+      outcomeKind: 'none',
+      tokenId: null,
+      outcomeLabel: null,
+      distinctMarketSlugs: resolvedMarketSlugs,
+      distinctOutcomeLabels,
+    };
+  }
+
+  if (resolvedMarketSlugs.length > 1) {
+    return {
+      kind: 'multiple',
+      marketSlug: null,
+      outcomeKind: 'multiple',
+      tokenId: null,
+      outcomeLabel: null,
+      distinctMarketSlugs: resolvedMarketSlugs,
+      distinctOutcomeLabels,
+    };
+  }
+
+  if (!hasUnresolvedOutcome && distinctOutcomePairs.size === 1) {
+    const resolvedOutcome = parseOutcomePairKey(Array.from(distinctOutcomePairs)[0]);
+    return {
+      kind: 'single',
+      marketSlug: resolvedMarketSlugs[0],
+      outcomeKind: 'single',
+      tokenId: resolvedOutcome.tokenId,
+      outcomeLabel: resolvedOutcome.outcomeLabel,
+      distinctMarketSlugs: resolvedMarketSlugs,
+      distinctOutcomeLabels,
+    };
+  }
+
+  return {
+    kind: 'single',
+    marketSlug: resolvedMarketSlugs[0],
+    outcomeKind:
+      hasUnresolvedOutcome || distinctOutcomePairs.size > 0 ? 'multiple' : 'none',
+    tokenId: null,
+    outcomeLabel: null,
+    distinctMarketSlugs: resolvedMarketSlugs,
+    distinctOutcomeLabels,
+  };
 }
 
 export interface UpstreamMaxPriceResolution {

@@ -24,7 +24,9 @@ use bot_infra::exchange::{
 use bot_infra::market_data::{MarketDataProvider, MockMarketDataProvider};
 use bot_infra::reconcile::reconcile_tick_and_snapshot;
 use bot_infra::signer::ApiCredentials;
-use bot_infra::ws::{ClobWsClient, MarketDataSnapshot, WsChannel, WsEvent, WsEventType};
+use bot_infra::ws::{
+    ClobWsClient, MarketDataSnapshot, MarketTickCallback, WsChannel, WsEvent, WsEventType,
+};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ethers::{
     signers::{LocalWallet, Signer as _},

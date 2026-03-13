@@ -780,6 +780,29 @@ async fn execute_action_place_order(
         });
     }
 
+    if let Err(err) = append_parallel_flow_overlap_observed(
+        repo,
+        run,
+        &node.key,
+        &market_slug,
+        &token_id,
+        &outcome_label,
+        &side,
+        source_trade_id,
+    )
+    .await
+    {
+        warn!(
+            flow_run_id = run.id,
+            node_key = %node.key,
+            market_slug = %market_slug,
+            token_id = %token_id,
+            side = %side,
+            error = %err,
+            "PARALLEL_FLOW_OVERLAP_CHECK_FAILED"
+        );
+    }
+
     let builder_order_id = repo
         .create_trade_builder_order(
             source_trade_id,

@@ -600,6 +600,10 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
     run_daily_pnl_startup_check(run_id, repo, cfg.risk.max_daily_loss_usdc).await?;
     run_balance_preflight(run_id, repo, &client, cfg.risk.min_balance_usdc).await;
     let ws = ClobWsClient::new(cfg.exchange.clob_ws_url.clone());
+    let (tick_trigger_tx, mut tick_trigger_rx) =
+        tokio::sync::mpsc::unbounded_channel::<TickTrigger>();
+    ws.set_tick_callback(build_tick_trigger_callback(tick_trigger_tx))
+        .await;
     let mut auto_claim_runtimes: HashMap<i64, FlowAutoClaimRuntime> = HashMap::new();
     let mut flow_runtime_caches = FlowRuntimeCaches::default();
 
@@ -677,6 +681,9 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
 
         if let Some(delay) = timer_delay {
             tokio::select! {
+                Some(trigger) = tick_trigger_rx.recv() => {
+                    handle_tick_trigger(repo, run_id, &ws, trigger).await;
+                }
                 _ = tokio::time::sleep(remaining) => {}
                 _ = tokio::time::sleep(delay) => {
                     if let Err(e) = process_trade_flow_trigger_market_price_timers(
@@ -740,6 +747,9 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
             }
         } else {
             tokio::select! {
+                Some(trigger) = tick_trigger_rx.recv() => {
+                    handle_tick_trigger(repo, run_id, &ws, trigger).await;
+                }
                 _ = tokio::time::sleep(remaining) => {}
                 _ = ws.wait_for_market_update() => {
                     tokio::time::sleep(fast_path_debounce).await;
@@ -784,4 +794,29 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
             }
         }
     }
+}
+
+async fn handle_tick_trigger(
+    repo: &PostgresRepository,
+    run_id: i64,
+    ws: &ClobWsClient,
+    trigger: TickTrigger,
+) {
+    let Some(order) = take_armed_builder_order_from_cache(&trigger.token_id, trigger.order_id).await
+    else {
+        return;
+    };
+
+    info!(
+        run_id,
+        builder_order_id = order.id,
+        user_id = order.user_id,
+        token_id = order.token_id,
+        trigger_kind = trigger.trigger_kind,
+        trigger_price = trigger.trigger_price,
+        tick_price = trigger.tick_price,
+        "TICK_TRIGGER_FIRED"
+    );
+
+    spawn_armed_order_immediate_processing(repo, run_id, ws, order.id, order.user_id);
 }

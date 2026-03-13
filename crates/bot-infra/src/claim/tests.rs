@@ -2,26 +2,91 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn positive_claim_value_requires_positive_current_value_or_price() {
+fn meets_min_claim_value_uses_current_value_threshold() {
     let winner = DataApiPosition {
         proxy_wallet: None,
         condition_id: None,
         market_slug: None,
         slug: None,
-        current_value: Some(json!(5.32)),
+        current_value: Some(json!(1.0)),
         cur_price: Some(json!(1)),
         redeemable: Some(true),
         size: Some(json!(5.32)),
         balance: None,
     };
-    assert!(has_positive_claim_value(&winner));
+    assert!(meets_min_claim_value(&winner, 1.0));
 
     let loser = DataApiPosition {
-        current_value: Some(json!(0)),
-        cur_price: Some(json!(0)),
+        current_value: Some(json!(0.99)),
         ..winner.clone()
     };
-    assert!(!has_positive_claim_value(&loser));
+    assert!(!meets_min_claim_value(&loser, 1.0));
+}
+
+#[test]
+fn meets_min_claim_value_falls_back_to_cur_price_times_size() {
+    let winner = DataApiPosition {
+        proxy_wallet: None,
+        condition_id: None,
+        market_slug: None,
+        slug: None,
+        current_value: None,
+        cur_price: Some(json!(0.25)),
+        redeemable: Some(true),
+        size: Some(json!(4.0)),
+        balance: None,
+    };
+    assert!(meets_min_claim_value(&winner, 1.0));
+
+    let loser = DataApiPosition {
+        cur_price: Some(json!(0.24)),
+        ..winner.clone()
+    };
+    assert!(!meets_min_claim_value(&loser, 1.0));
+}
+
+#[test]
+fn meets_min_claim_value_is_fail_closed_without_enough_notional_data() {
+    let missing_size = DataApiPosition {
+        proxy_wallet: None,
+        condition_id: None,
+        market_slug: None,
+        slug: None,
+        current_value: None,
+        cur_price: Some(json!(1.0)),
+        redeemable: Some(true),
+        size: None,
+        balance: None,
+    };
+    assert!(!meets_min_claim_value(&missing_size, 1.0));
+
+    let missing_value_and_price = DataApiPosition {
+        cur_price: None,
+        ..missing_size
+    };
+    assert!(!meets_min_claim_value(&missing_value_and_price, 1.0));
+}
+
+#[test]
+fn meets_min_claim_value_requires_positive_value_when_threshold_is_non_positive() {
+    let zero_value = DataApiPosition {
+        proxy_wallet: None,
+        condition_id: None,
+        market_slug: None,
+        slug: None,
+        current_value: Some(json!(0.0)),
+        cur_price: Some(json!(1.0)),
+        redeemable: Some(true),
+        size: Some(json!(1.0)),
+        balance: None,
+    };
+    assert!(!meets_min_claim_value(&zero_value, 0.0));
+
+    let positive_value = DataApiPosition {
+        current_value: Some(json!(0.01)),
+        ..zero_value
+    };
+    assert!(meets_min_claim_value(&positive_value, -5.0));
 }
 
 #[test]
@@ -59,4 +124,35 @@ fn gas_price_floor_and_buffer_preserves_higher_node_quote() {
     let gas_price = U256::from(40_000_000_000u64);
     let effective = apply_gas_price_floor_and_buffer(gas_price);
     assert_eq!(gas_price_gwei(effective), 48);
+}
+
+#[test]
+fn max_inflight_claim_jobs_limits_builder_relayer_to_one() {
+    assert_eq!(
+        max_inflight_claim_jobs(ClaimExecutionMode::BuilderRelayer, 10),
+        1
+    );
+    assert_eq!(max_inflight_claim_jobs(ClaimExecutionMode::Direct, 10), 10);
+}
+
+#[test]
+fn submit_failure_indicates_rate_limit_matches_relayer_signals() {
+    assert!(submit_failure_indicates_rate_limit(
+        &ClaimSubmitFailure::retryable(
+            r#"relayer_rate_limited: {"status":429,"statusText":"Too Many Requests"}"#
+        )
+    ));
+    assert!(!submit_failure_indicates_rate_limit(
+        &ClaimSubmitFailure::retryable("claim relayer adapter returned HTTP 500")
+    ));
+}
+
+#[test]
+fn relayer_rate_limit_cooldown_uses_minimum_and_backoff() {
+    let now = Utc::now();
+    let min_cooldown = relayer_rate_limit_cooldown_until(now, 10_000);
+    let long_cooldown = relayer_rate_limit_cooldown_until(now, 45_000);
+
+    assert_eq!(elapsed_seconds_since(now, min_cooldown), 30);
+    assert_eq!(elapsed_seconds_since(now, long_cooldown), 45);
 }

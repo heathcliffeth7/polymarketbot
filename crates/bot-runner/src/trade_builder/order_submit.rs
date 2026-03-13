@@ -20,15 +20,15 @@ fn trade_builder_market_spec_slug_candidates(market_slug: &str) -> Vec<String> {
     if normalized.is_empty() {
         return Vec::new();
     }
-
     let mut candidates = vec![normalized.clone()];
-    if let Some((parent, _)) = normalized.rsplit_once('-') {
-        if !parent.is_empty() {
-            let parent = parent.to_string();
-            if !candidates.contains(&parent) {
-                candidates.push(parent);
-            }
+    let mut current = normalized.as_str();
+    for _ in 0..4 {
+        let Some((parent, _)) = current.rsplit_once('-') else { break };
+        if parent.len() < 3 { break }
+        if !candidates.iter().any(|c| c == parent) {
+            candidates.push(parent.to_string());
         }
+        current = parent;
     }
     candidates
 }
@@ -81,6 +81,11 @@ async fn resolve_trade_builder_market_spec(
         return Some(spec);
     }
 
+    warn!(
+        market_slug,
+        candidates = ?candidates,
+        "TRADE_BUILDER_MARKET_SPEC_UNRESOLVED"
+    );
     None
 }
 
@@ -137,9 +142,9 @@ async fn submit_trade_builder_trigger_order(
 
     if trade_builder_price_below_guard_trigger(order, current_price) {
         if order.retry_on_trigger_guard_block {
-            let notification_message = order.notify_on_trigger_guard_blocked.then(|| {
-                build_trigger_guard_waiting_notification_message(order, current_price)
-            });
+            let notification_message = order
+                .notify_on_trigger_guard_blocked
+                .then(|| build_trigger_guard_waiting_notification_message(order, current_price));
             transition_trade_builder_order_to_guard_waiting(
                 repo,
                 order,
@@ -167,8 +172,12 @@ async fn submit_trade_builder_trigger_order(
             )
             .await?;
         } else {
-            repo.set_trade_builder_order_status(order.id, "canceled", Some("below_trigger_price_guard"))
-                .await?;
+            repo.set_trade_builder_order_status(
+                order.id,
+                "canceled",
+                Some("below_trigger_price_guard"),
+            )
+            .await?;
             repo.append_trade_builder_order_event(
                 order.id,
                 "trigger_price_blocked",
@@ -188,7 +197,8 @@ async fn submit_trade_builder_trigger_order(
             )
             .await?;
             if order.notify_on_trigger_guard_blocked {
-                let message = build_trigger_guard_blocked_notification_message(order, current_price);
+                let message =
+                    build_trigger_guard_blocked_notification_message(order, current_price);
                 send_trade_builder_notification(repo, order, "trigger_price_blocked", &message)
                     .await;
             }
@@ -208,25 +218,25 @@ async fn submit_trade_builder_trigger_order(
         return Ok(());
     }
 
-    let execution_floor_reason = if trade_builder_execution_floor_missing_best_ask(order, best_ask) {
+    let execution_floor_reason = if trade_builder_execution_floor_missing_best_ask(order, best_ask)
+    {
         Some("best_ask_unavailable")
     } else {
         trade_builder_execution_floor_block_reason(order, best_ask)
     };
     if let Some(reason_code) = execution_floor_reason {
+        let should_wait = trade_builder_execution_floor_should_wait(order, reason_code);
         let reason_message = match reason_code {
             "best_ask_unavailable" => {
                 "Best ask is unavailable, so the execution floor guard blocked the buy order."
             }
-            "below_best_ask_floor" => {
-                "Best ask is below the configured execution floor."
-            }
+            "below_best_ask_floor" => "Best ask is below the configured execution floor.",
             _ => "Execution floor guard blocked the buy order.",
         };
-        if order.retry_on_execution_floor_guard_block {
-            let notification_message = order.notify_on_execution_floor_blocked.then(|| {
-                build_execution_floor_waiting_notification_message(order, best_ask)
-            });
+        if should_wait {
+            let notification_message = order
+                .notify_on_execution_floor_blocked
+                .then(|| build_execution_floor_waiting_notification_message(order, best_ask));
             transition_trade_builder_order_to_guard_waiting(
                 repo,
                 order,
@@ -291,7 +301,7 @@ async fn submit_trade_builder_trigger_order(
             best_ask,
             desired_price,
             best_ask_floor_price = ?order.best_ask_floor_price,
-            waiting = order.retry_on_execution_floor_guard_block,
+            waiting = should_wait,
             reason_code,
             "TRADE_BUILDER_ORDER_EXECUTION_FLOOR_BLOCKED"
         );
@@ -323,7 +333,9 @@ async fn submit_trade_builder_trigger_order(
                 }),
                 remaining_usdc,
                 remaining_qty,
-                order.notify_on_max_price_blocked.then_some("max_price_waiting"),
+                order
+                    .notify_on_max_price_blocked
+                    .then_some("max_price_waiting"),
                 notification_message,
             )
             .await?;

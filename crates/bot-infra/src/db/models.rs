@@ -62,7 +62,9 @@ pub struct TradeBuilderOrder {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub parent_order_id: Option<i64>,
+    pub origin_flow_definition_id: Option<i64>,
     pub origin_flow_run_id: Option<i64>,
+    pub origin_flow_node_key: Option<String>,
     pub tp_enabled: bool,
     pub tp_price: Option<f64>,
     pub sl_enabled: bool,
@@ -71,6 +73,7 @@ pub struct TradeBuilderOrder {
     pub fee_rate_bps: i64,
     pub trigger_latched: bool,
     pub trigger_latched_reason: Option<String>,
+    pub trigger_latched_at: Option<DateTime<Utc>>,
     pub submitted_dynamic_qty: Option<f64>,
     pub submitted_dynamic_price: Option<f64>,
     pub guard_trigger_price: Option<f64>,
@@ -85,6 +88,21 @@ pub struct TradeBuilderOrder {
     pub notify_on_tp_hit: bool,
     pub notify_on_sl_hit: bool,
     pub notify_on_max_price_blocked: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunningTradeFlowMarketPeer {
+    pub run_id: i64,
+    pub definition_id: i64,
+    pub definition_name: String,
+    pub source_trade_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveTradeFlowRunOrderPeer {
+    pub builder_order_id: i64,
+    pub source_trade_id: i64,
+    pub origin_flow_node_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]

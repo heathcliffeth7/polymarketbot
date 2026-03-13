@@ -39,6 +39,28 @@ export async function getDashboardData(
     activePosition,
     pressure,
     positionExitRules,
+    claimSweep: {
+      thresholdUsdc: 0.01,
+      walletAddress: null,
+      executionMode: 'direct',
+      claimEnabled: false,
+      publishedAutoClaimFlow: false,
+      canSweep: false,
+      disabledReasonCode: null,
+      disabledReason: null,
+      eligibleCount: 0,
+      eligibleTotalUsdc: 0,
+      queue: {
+        pending: 0,
+        retry: 0,
+        processing: 0,
+        submitted: 0,
+        failed: 0,
+        claimed: 0,
+      },
+      lastError: null,
+      refreshedAt: null,
+    },
   };
 }
 

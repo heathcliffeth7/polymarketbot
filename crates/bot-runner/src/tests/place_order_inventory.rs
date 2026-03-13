@@ -519,6 +519,110 @@ fn strict_stop_loss_trigger_modes_require_selected_source() {
 }
 
 #[test]
+fn composite_sl_bid_confirmation_guard_blocks_when_bid_above_trigger() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.60,
+        source: "ws_fast_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.88),
+        best_ask: Some(0.90),
+        last_trade_price: Some(0.45),
+    };
+
+    let mut order = test_builder_order("sell", Some(9));
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.60);
+    order.sl_trigger_price_mode = Some("composite".to_string());
+
+    assert!(should_skip_trade_builder_composite_sl_bid_confirmation(
+        &order,
+        &runtime_price));
+}
+
+#[test]
+fn composite_sl_bid_confirmation_guard_allows_equal_or_lower_bid() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.60);
+    order.sl_trigger_price_mode = Some("composite".to_string());
+
+    let equal_bid = TradeBuilderRuntimePrice {
+        price: 0.60,
+        source: "ws_fast_book_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.60),
+        best_ask: Some(0.62),
+        last_trade_price: Some(0.45),
+    };
+    assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
+        &order, &equal_bid));
+
+    let lower_bid = TradeBuilderRuntimePrice {
+        best_bid: Some(0.20),
+        ..equal_bid
+    };
+    assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
+        &order, &lower_bid));
+}
+
+#[test]
+fn composite_sl_bid_confirmation_guard_blocks_without_bid() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.45,
+        source: "ws_fast_last_trade",
+        runtime_warning: None,
+        best_bid: None,
+        best_ask: Some(0.47),
+        last_trade_price: Some(0.45),
+    };
+
+    let mut order = test_builder_order("sell", Some(9));
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.60);
+    order.sl_trigger_price_mode = Some("composite".to_string());
+
+    assert!(should_skip_trade_builder_composite_sl_bid_confirmation(
+        &order,
+        &runtime_price));
+}
+
+#[test]
+fn composite_sl_bid_confirmation_guard_ignores_other_orders() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.45,
+        source: "ws_fast_book_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.88),
+        best_ask: Some(0.90),
+        last_trade_price: Some(0.45),
+    };
+
+    let mut best_bid_sl = test_builder_order("sell", Some(9));
+    best_bid_sl.trigger_condition = Some("cross_below".to_string());
+    best_bid_sl.trigger_price = Some(0.60);
+    best_bid_sl.sl_trigger_price_mode = Some("best_bid".to_string());
+    assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
+        &best_bid_sl,
+        &runtime_price));
+
+    let mut last_trade_sl = test_builder_order("sell", Some(9));
+    last_trade_sl.trigger_condition = Some("cross_below".to_string());
+    last_trade_sl.trigger_price = Some(0.60);
+    last_trade_sl.sl_trigger_price_mode = Some("last_trade".to_string());
+    assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
+        &last_trade_sl,
+        &runtime_price));
+
+    let mut buy_order = test_builder_order("buy", None);
+    buy_order.trigger_condition = Some("cross_above".to_string());
+    buy_order.trigger_price = Some(0.60);
+    buy_order.sl_trigger_price_mode = Some("composite".to_string());
+    assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
+        &buy_order,
+        &runtime_price));
+}
+
+#[test]
 fn sl_trigger_mode_is_ignored_for_non_stop_loss_orders() {
     let runtime_price = TradeBuilderRuntimePrice {
         price: 0.77,

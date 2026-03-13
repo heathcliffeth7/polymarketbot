@@ -54,7 +54,8 @@ pub struct MarketDataSnapshot {
     pub last_source: String,
 }
 
-#[derive(Debug)]
+pub type MarketTickCallback = Arc<dyn Fn(&str, &MarketDataSnapshot) + Send + Sync>;
+
 struct ClobWsClientInner {
     ws_url: String,
     max_retries: u8,
@@ -62,13 +63,24 @@ struct ClobWsClientInner {
     cache: RwLock<HashMap<String, MarketDataSnapshot>>,
     dirty_tokens: Mutex<BTreeSet<String>>,
     desired_tokens: RwLock<BTreeSet<String>>,
+    tick_callback: RwLock<Option<MarketTickCallback>>,
     market_update_notify: Notify,
     market_task: Mutex<Option<JoinHandle<()>>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClobWsClient {
     inner: Arc<ClobWsClientInner>,
+}
+
+impl std::fmt::Debug for ClobWsClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClobWsClient")
+            .field("ws_url", &self.inner.ws_url)
+            .field("max_retries", &self.inner.max_retries)
+            .field("retry_backoff_ms", &self.inner.retry_backoff_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ClobWsClient {
@@ -81,6 +93,7 @@ impl ClobWsClient {
                 cache: RwLock::new(HashMap::new()),
                 dirty_tokens: Mutex::new(BTreeSet::new()),
                 desired_tokens: RwLock::new(BTreeSet::new()),
+                tick_callback: RwLock::new(None),
                 market_update_notify: Notify::new(),
                 market_task: Mutex::new(None),
             }),
@@ -169,6 +182,10 @@ impl ClobWsClient {
 
     pub async fn wait_for_market_update(&self) {
         self.inner.market_update_notify.notified().await;
+    }
+
+    pub async fn set_tick_callback(&self, cb: MarketTickCallback) {
+        *self.inner.tick_callback.write().await = Some(cb);
     }
 
     pub async fn take_dirty_market_tokens(&self) -> Vec<String> {
@@ -336,11 +353,14 @@ impl ClobWsClient {
             return;
         }
 
+        let tick_cb = self.inner.tick_callback.read().await.clone();
         let mut updated_tokens = BTreeSet::new();
+        let mut tick_snapshots = Vec::new();
         let mut cache = self.inner.cache.write().await;
         for update in updates {
-            updated_tokens.insert(update.token_id.clone());
-            let entry = cache.entry(update.token_id).or_default();
+            let token_id = update.token_id.clone();
+            updated_tokens.insert(token_id.clone());
+            let entry = cache.entry(token_id.clone()).or_default();
             if update.best_bid.is_some() {
                 entry.best_bid = update.best_bid;
             }
@@ -352,8 +372,17 @@ impl ClobWsClient {
             }
             entry.updated_at_ms = update.updated_at_ms;
             entry.last_source = update.source.to_string();
+            if tick_cb.is_some() {
+                tick_snapshots.push((token_id, entry.clone()));
+            }
         }
         drop(cache);
+
+        if let Some(ref cb) = tick_cb {
+            for (token_id, snapshot) in tick_snapshots {
+                cb(&token_id, &snapshot);
+            }
+        }
 
         if updated_tokens.is_empty() {
             return;
@@ -543,6 +572,7 @@ fn parse_number(value: Option<&Value>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     #[tokio::test]
     async fn market_cache_updates_book_and_last_trade_fields() {
@@ -607,5 +637,48 @@ mod tests {
         ws.clear_dirty_market_tokens(&["tok-yes".to_string()]).await;
         let dirty_after_clear = ws.take_dirty_market_tokens().await;
         assert_eq!(dirty_after_clear, vec!["tok-no".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn tick_callback_receives_intermediate_snapshots_after_cache_updates() {
+        let ws = ClobWsClient::new("wss://example.com/ws".to_string());
+        let seen = Arc::new(StdMutex::new(Vec::<(String, MarketDataSnapshot)>::new()));
+        let seen_cb = Arc::clone(&seen);
+        ws.set_tick_callback(Arc::new(move |token_id, snapshot| {
+            seen_cb
+                .lock()
+                .expect("tick callback mutex")
+                .push((token_id.to_string(), snapshot.clone()));
+        }))
+        .await;
+
+        ws.update_market_cache_from_payload(&json!({
+            "timestamp": 12345,
+            "price_changes": [
+                {
+                    "asset_id": "tok-yes",
+                    "best_bid": "0.70",
+                    "best_ask": "0.72",
+                    "timestamp": 12345
+                },
+                {
+                    "asset_id": "tok-yes",
+                    "event_type": "last_trade_price",
+                    "price": "0.68",
+                    "timestamp": 12346
+                }
+            ]
+        }))
+        .await;
+
+        let seen = seen.lock().expect("tick callback mutex");
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, "tok-yes");
+        assert_eq!(seen[0].1.best_bid, Some(0.70));
+        assert_eq!(seen[0].1.last_trade_price, None);
+        assert_eq!(seen[1].0, "tok-yes");
+        assert_eq!(seen[1].1.best_bid, Some(0.70));
+        assert_eq!(seen[1].1.last_trade_price, Some(0.68));
+        assert_eq!(seen[1].1.updated_at_ms, 12346);
     }
 }

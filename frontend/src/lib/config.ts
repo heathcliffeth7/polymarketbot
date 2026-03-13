@@ -25,7 +25,7 @@ const EXCHANGE_SENSITIVE_FIELDS = [
   'builder_api_key', 'builder_api_secret', 'builder_api_passphrase',
   'signer_private_key',
 ] as const;
-const CLAIM_SENSITIVE_FIELDS = ['private_key'] as const;
+const CLAIM_SENSITIVE_FIELDS = ['private_key', 'relayer_api_key'] as const;
 const TELEGRAM_SENSITIVE_FIELDS = ['bot_token'] as const;
 const SUPPORTED_MARKET_SCOPES = ['btc_5m_updown', 'btc_15m_updown', 'eth_5m_updown', 'eth_15m_updown', 'sol_5m_updown', 'sol_15m_updown', 'xrp_5m_updown', 'xrp_15m_updown'] as const;
 const SUPPORTED_MARKET_SLUG_PREFIXES = ['btc-updown-5m-', 'btc-updown-15m-', 'eth-updown-5m-', 'eth-updown-15m-', 'sol-updown-5m-', 'sol-updown-15m-', 'xrp-updown-5m-', 'xrp-updown-15m-'] as const;
@@ -228,6 +228,8 @@ export async function readClaimRelayerConfigForServer(
       exchange.builder_api_passphrase || exchange.api_passphrase,
       exchange.builder_api_passphrase_env || exchange.api_passphrase_env
     ),
+    relayerApiKey: resolveSensitiveConfigValueForServer(claim.relayer_api_key, claim.relayer_api_key_env),
+    relayerApiKeyAddress: resolvePlaintextConfigValueForServer(claim.relayer_api_key_address, claim.relayer_api_key_address_env),
   };
 }
 
@@ -286,6 +288,9 @@ export async function readEffectiveClaimConfigForServer(
         String(exchange.builder_api_passphrase_env ?? '').trim().length > 0 ||
         String(exchange.api_passphrase ?? '').trim().length > 0 ||
         String(exchange.api_passphrase_env ?? '').trim().length > 0),
+    hasRelayerApiKeySource:
+      (String(raw.relayer_api_key ?? '').trim().length > 0 || String(raw.relayer_api_key_env ?? '').trim().length > 0) &&
+      (String(raw.relayer_api_key_address ?? '').trim().length > 0 || String(raw.relayer_api_key_address_env ?? '').trim().length > 0),
   };
 }
 
@@ -536,16 +541,11 @@ function normalizeClaimConfigForWrite(
     merged.retry_backoff_ms = Number.isFinite(value) ? value : 0;
   }
 
-  if (String(merged.rpc_url ?? '').trim()) {
-    merged.rpc_url_env = '';
-  }
-  if (String(merged.user_address ?? '').trim()) {
-    merged.user_address_env = '';
-  }
-  if (String(merged.private_key ?? '').trim()) {
-    merged.private_key_env = '';
-  }
-
+  if (String(merged.rpc_url ?? '').trim()) merged.rpc_url_env = '';
+  if (String(merged.user_address ?? '').trim()) merged.user_address_env = '';
+  if (String(merged.private_key ?? '').trim()) merged.private_key_env = '';
+  merged.relayer_api_key = resolveSensitiveFieldForWrite('relayer_api_key', incoming, existing);
+  merged.relayer_api_key_address = resolvePlaintextFieldForWrite('relayer_api_key_address', incoming, existing);
   return merged;
 }
 
@@ -711,6 +711,10 @@ function normalizeClaimShape(source: Record<string, unknown>): Record<string, un
     process_batch_size: Number.isFinite(processBatchSize) ? processBatchSize : 10,
     max_attempts: Number.isFinite(maxAttempts) ? maxAttempts : 5,
     retry_backoff_ms: Number.isFinite(retryBackoffMs) ? retryBackoffMs : 10000,
+    relayer_api_key: String(source.relayer_api_key ?? ''),
+    relayer_api_key_env: String(source.relayer_api_key_env ?? ''),
+    relayer_api_key_address: String(source.relayer_api_key_address ?? ''),
+    relayer_api_key_address_env: String(source.relayer_api_key_address_env ?? ''),
   };
 }
 
@@ -853,15 +857,11 @@ function validateConfig(name: string, data: Record<string, unknown>): void {
     const privateKey = String(data.private_key ?? '').trim();
     const privateKeyEnv = String(data.private_key_env ?? '').trim();
 
-    if (rpcUrl && !rpcUrl.startsWith('http')) {
-      errors.push('rpc_url must start with http');
+    if (rpcUrl && !rpcUrl.startsWith('http')) errors.push('rpc_url must start with http');
+    if (!['direct', 'builder_relayer', 'relayer_api_key'].includes(executionMode)) {
+      errors.push('execution_mode must be direct, builder_relayer, or relayer_api_key');
     }
-    if (!['direct', 'builder_relayer'].includes(executionMode)) {
-      errors.push('execution_mode must be direct or builder_relayer');
-    }
-    if (!dataApiBaseUrl.startsWith('http')) {
-      errors.push('data_api_base_url must start with http');
-    }
+    if (!dataApiBaseUrl.startsWith('http')) errors.push('data_api_base_url must start with http');
     if (requiredNumber('chain_id') <= 0) {
       errors.push('chain_id must be > 0');
     }

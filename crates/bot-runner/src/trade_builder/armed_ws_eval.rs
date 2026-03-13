@@ -73,6 +73,18 @@ async fn insert_into_armed_builder_order_cache(order: TradeBuilderOrder) {
     }
 }
 
+async fn rearm_builder_order_to_cache(order: TradeBuilderOrder) {
+    if order.status == "armed" {
+        insert_into_armed_builder_order_cache(order).await;
+    }
+}
+
+async fn rearm_builder_order_to_cache_if_armed(repo: &PostgresRepository, order_id: i64) {
+    if let Ok(Some(order)) = repo.get_trade_builder_order(order_id).await {
+        rearm_builder_order_to_cache(order).await;
+    }
+}
+
 async fn armed_builder_order_cache_token_ids() -> Vec<String> {
     let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
     cache.by_token.keys().cloned().collect()
@@ -230,6 +242,7 @@ fn spawn_armed_order_immediate_processing(
                         error = %err,
                         "ARMED_ORDER_WS_USER_CONFIG_LOAD_FAILED"
                     );
+                    rearm_builder_order_to_cache_if_armed(&repo, order_id).await;
                     return;
                 }
             };
@@ -250,11 +263,12 @@ fn spawn_armed_order_immediate_processing(
                     error = %err,
                     "ARMED_ORDER_WS_EXECUTOR_LOAD_FAILED"
                 );
+                rearm_builder_order_to_cache_if_armed(&repo, order_id).await;
                 return;
             }
         };
 
-        if let Err(err) = try_immediate_submit_single_builder_order(
+        let result = try_immediate_submit_single_builder_order(
             &repo,
             run_id,
             &user_cfg,
@@ -263,8 +277,8 @@ fn spawn_armed_order_immediate_processing(
             order_id,
             "ws_armed",
         )
-        .await
-        {
+        .await;
+        if let Err(err) = result {
             warn!(
                 run_id,
                 builder_order_id = order_id,
@@ -273,6 +287,7 @@ fn spawn_armed_order_immediate_processing(
                 "ARMED_ORDER_WS_IMMEDIATE_SUBMIT_FAILED"
             );
         }
+        rearm_builder_order_to_cache_if_armed(&repo, order_id).await;
     });
 }
 
@@ -313,7 +328,9 @@ mod armed_ws_eval_tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             parent_order_id: Some(42),
+            origin_flow_definition_id: None,
             origin_flow_run_id: None,
+            origin_flow_node_key: None,
             tp_enabled: false,
             tp_price: None,
             sl_enabled: false,
@@ -322,6 +339,7 @@ mod armed_ws_eval_tests {
             fee_rate_bps: 0,
             trigger_latched: false,
             trigger_latched_reason: None,
+            trigger_latched_at: None,
             submitted_dynamic_qty: None,
             submitted_dynamic_price: None,
             guard_trigger_price: None,
@@ -339,15 +357,14 @@ mod armed_ws_eval_tests {
         }
     }
 
-    fn reset_armed_builder_order_cache() {
-        if let Ok(mut cache) = ARMED_BUILDER_ORDER_CACHE.try_write() {
-            cache.by_token.clear();
-        }
+    async fn reset_armed_builder_order_cache() {
+        let mut cache = ARMED_BUILDER_ORDER_CACHE.write().await;
+        cache.by_token.clear();
     }
 
     #[tokio::test]
     async fn insert_cache_upserts_existing_order() {
-        reset_armed_builder_order_cache();
+        reset_armed_builder_order_cache().await;
         let mut order = test_tp_sl_child_order();
         insert_into_armed_builder_order_cache(order.clone()).await;
 
@@ -358,6 +375,33 @@ mod armed_ws_eval_tests {
         let bucket = cache.by_token.get(&order.token_id).expect("bucket");
         assert_eq!(bucket.len(), 1);
         assert_eq!(bucket[0].last_seen_price, Some(0.77));
+    }
+
+    #[tokio::test]
+    async fn rearm_cache_helper_reinserts_armed_orders() {
+        reset_armed_builder_order_cache().await;
+        let mut order = test_tp_sl_child_order();
+        order.token_id = "tok-up-rearm-armed".to_string();
+
+        rearm_builder_order_to_cache(order.clone()).await;
+
+        let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
+        let bucket = cache.by_token.get(&order.token_id).expect("bucket");
+        assert_eq!(bucket.len(), 1);
+        assert_eq!(bucket[0].id, order.id);
+    }
+
+    #[tokio::test]
+    async fn rearm_cache_helper_skips_non_armed_orders() {
+        reset_armed_builder_order_cache().await;
+        let mut order = test_tp_sl_child_order();
+        order.token_id = "tok-up-rearm-skip".to_string();
+        order.status = "triggered".to_string();
+
+        rearm_builder_order_to_cache(order.clone()).await;
+
+        let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
+        assert!(cache.by_token.get(&order.token_id).is_none());
     }
 
     #[tokio::test]

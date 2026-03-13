@@ -221,11 +221,16 @@ pub(crate) fn validate(
         );
         validate_claim_user_address(claim)?;
         validate_claim_private_key(claim)?;
-        if matches!(claim_execution_mode, ClaimExecutionMode::BuilderRelayer) {
+        if matches!(
+            claim_execution_mode,
+            ClaimExecutionMode::BuilderRelayer | ClaimExecutionMode::RelayerApiKey
+        ) {
             anyhow::ensure!(
                 exchange.resolve_gnosis_safe_address().is_some(),
-                "exchange.gnosis_safe_address is required when claim.execution_mode=builder_relayer"
+                "exchange.gnosis_safe_address is required when claim.execution_mode=builder_relayer or relayer_api_key"
             );
+        }
+        if matches!(claim_execution_mode, ClaimExecutionMode::BuilderRelayer) {
             exchange.resolve_builder_api_key().with_context(|| {
                 "exchange.builder_api_key is required when claim.execution_mode=builder_relayer"
             })?;

@@ -1,15 +1,37 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use parking_lot::Mutex;
-use reqwest::header::USER_AGENT;
+use reqwest::{
+    header::{ACCEPT, CACHE_CONTROL, PRAGMA, USER_AGENT},
+    Proxy,
+};
 use serde_json::Value;
 use std::{collections::HashMap, sync::LazyLock};
 
+use super::chainlink_price::{fetch_chainlink_cycle_open, ChainlinkCycleOpenSnapshot};
+
 const POLYMARKET_EVENT_BASE_URL: &str = "https://polymarket.com/event";
 const POLYMARKET_PRICE_TO_BEAT_TIMEOUT_SECS: u64 = 10;
-const QUERY_NOT_FOUND_RETRY_ATTEMPTS: usize = 5;
-const QUERY_NOT_FOUND_RETRY_DELAY_MS: u64 = 4_000;
+const POLYMARKET_PRICE_TO_BEAT_CONNECT_TIMEOUT_SECS: u64 = 3;
+const QUERY_NOT_FOUND_RETRY_ATTEMPTS: usize = 3;
+const QUERY_NOT_FOUND_RETRY_DELAY_MS: u64 = 2_000;
 const QUERY_NOT_FOUND_ERROR_PREFIX: &str = "price to beat query not found in polymarket page for ";
+const PRICE_TO_BEAT_USER_AGENT: &str = "polymarketbot/price-to-beat-guard";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PriceToBeatSource {
+    Polymarket,
+    ChainlinkSnapshot,
+}
+
+impl PriceToBeatSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Polymarket => "polymarket",
+            Self::ChainlinkSnapshot => "chainlink_snapshot",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct PriceToBeatQuerySpec {
@@ -28,6 +50,8 @@ pub(crate) struct PolymarketPriceToBeatSnapshot {
     pub(crate) asset: String,
     pub(crate) timeframe: String,
     pub(crate) price_to_beat: f64,
+    pub(crate) source: PriceToBeatSource,
+    pub(crate) source_latency_ms: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -42,14 +66,7 @@ static POLYMARKET_PRICE_TO_BEAT_SERVICE: LazyLock<PolymarketPriceToBeatService> 
 impl PolymarketPriceToBeatService {
     fn new() -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .pool_max_idle_per_host(4)
-                .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
-                .timeout(std::time::Duration::from_secs(
-                    POLYMARKET_PRICE_TO_BEAT_TIMEOUT_SECS,
-                ))
-                .build()
-                .expect("polymarket price to beat http client"),
+            client: build_price_to_beat_http_client(),
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -60,12 +77,22 @@ impl PolymarketPriceToBeatService {
         }
 
         let spec = build_price_to_beat_query_spec(market_slug)?;
+        let mut last_error = None;
 
         for attempt in 0..=QUERY_NOT_FOUND_RETRY_ATTEMPTS {
+            // Cache-bust after the first miss because Polymarket sometimes serves a stale
+            // dehydrated payload around cycle rollover that is missing the crypto-prices query.
+            let request_url = build_event_request_url(
+                &spec.event_url,
+                (attempt > 0).then(|| Utc::now().timestamp_millis()),
+            );
             let html = self
                 .client
-                .get(&spec.event_url)
-                .header(USER_AGENT, "polymarketbot/price-to-beat-guard")
+                .get(&request_url)
+                .header(USER_AGENT, PRICE_TO_BEAT_USER_AGENT)
+                .header(ACCEPT, "text/html,application/xhtml+xml")
+                .header(CACHE_CONTROL, "no-cache")
+                .header(PRAGMA, "no-cache")
                 .send()
                 .await
                 .context("requesting polymarket event page")?
@@ -85,6 +112,8 @@ impl PolymarketPriceToBeatService {
                         asset: spec.asset.to_ascii_lowercase(),
                         timeframe: spec.timeframe,
                         price_to_beat,
+                        source: PriceToBeatSource::Polymarket,
+                        source_latency_ms: None,
                     };
                     self.cache
                         .lock()
@@ -106,15 +135,39 @@ impl PolymarketPriceToBeatService {
                     ))
                     .await;
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    last_error = Some(err);
+                    break;
+                }
             }
         }
 
-        Err(anyhow!(
-            "price to beat query not found after {} retries for {}",
-            QUERY_NOT_FOUND_RETRY_ATTEMPTS,
-            market_slug
-        ))
+        match build_chainlink_fallback_snapshot(&spec).await {
+            Ok(snapshot) => {
+                tracing::info!(
+                    market_slug,
+                    asset = %snapshot.asset,
+                    latency_ms = snapshot.source_latency_ms,
+                    "PRICE_TO_BEAT_CHAINLINK_FALLBACK_USED"
+                );
+                self.cache
+                    .lock()
+                    .insert(market_slug.to_string(), snapshot.clone());
+                Ok(snapshot)
+            }
+            Err(fallback_err) => {
+                let base_err = last_error.unwrap_or_else(|| {
+                    anyhow!(
+                        "price to beat query not found after {} retries for {}",
+                        QUERY_NOT_FOUND_RETRY_ATTEMPTS,
+                        market_slug
+                    )
+                });
+                Err(anyhow!(
+                    "{base_err}; chainlink fallback failed: {fallback_err}"
+                ))
+            }
+        }
     }
 }
 
@@ -124,6 +177,67 @@ pub(crate) async fn fetch_polymarket_price_to_beat(
     POLYMARKET_PRICE_TO_BEAT_SERVICE
         .fetch_snapshot(market_slug)
         .await
+}
+
+fn build_price_to_beat_http_client() -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .pool_max_idle_per_host(4)
+        .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+        .connect_timeout(std::time::Duration::from_secs(
+            POLYMARKET_PRICE_TO_BEAT_CONNECT_TIMEOUT_SECS,
+        ))
+        .timeout(std::time::Duration::from_secs(
+            POLYMARKET_PRICE_TO_BEAT_TIMEOUT_SECS,
+        ));
+    if let Ok(proxy_url) = std::env::var("SOCKS5_PROXY_URL") {
+        match Proxy::all(&proxy_url) {
+            Ok(proxy) => {
+                builder = builder.proxy(proxy);
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "PRICE_TO_BEAT_PROXY_CONFIG_INVALID");
+            }
+        }
+    }
+    builder
+        .build()
+        .expect("polymarket price to beat http client")
+}
+
+fn build_event_request_url(event_url: &str, cache_buster_ms: Option<i64>) -> String {
+    match cache_buster_ms {
+        Some(cache_buster_ms) => {
+            let separator = if event_url.contains('?') { '&' } else { '?' };
+            format!("{event_url}{separator}ptb_ts={cache_buster_ms}")
+        }
+        None => event_url.to_string(),
+    }
+}
+
+async fn build_chainlink_fallback_snapshot(
+    spec: &PriceToBeatQuerySpec,
+) -> Result<PolymarketPriceToBeatSnapshot> {
+    let cycle_open = fetch_chainlink_cycle_open(&spec.asset, spec.start_at)
+        .await
+        .context("fetching chainlink cycle-open fallback")?;
+    Ok(chainlink_snapshot_to_price_to_beat_snapshot(
+        spec,
+        &cycle_open,
+    ))
+}
+
+fn chainlink_snapshot_to_price_to_beat_snapshot(
+    spec: &PriceToBeatQuerySpec,
+    cycle_open: &ChainlinkCycleOpenSnapshot,
+) -> PolymarketPriceToBeatSnapshot {
+    PolymarketPriceToBeatSnapshot {
+        event_url: spec.event_url.clone(),
+        asset: spec.asset.to_ascii_lowercase(),
+        timeframe: spec.timeframe.clone(),
+        price_to_beat: cycle_open.price,
+        source: PriceToBeatSource::ChainlinkSnapshot,
+        source_latency_ms: Some(cycle_open.latency_ms),
+    }
 }
 
 pub(crate) fn build_price_to_beat_query_spec(market_slug: &str) -> Result<PriceToBeatQuerySpec> {
@@ -194,6 +308,18 @@ pub(crate) fn parse_open_price_from_html(html: &str, spec: &PriceToBeatQuerySpec
             .ok_or_else(|| anyhow!("openPrice missing from matched crypto-prices query"))?;
         return Ok(open_price);
     }
+
+    let available_keys: Vec<&Value> = queries.iter().filter_map(|q| q.get("queryKey")).collect();
+    tracing::warn!(
+        market_slug = %spec.market_slug,
+        expected_asset = %spec.asset,
+        expected_start = %expected_start,
+        expected_end = %expected_end,
+        expected_timeframe = spec.query_timeframe,
+        available_query_count = queries.len(),
+        available_keys = %serde_json::to_string(&available_keys).unwrap_or_default(),
+        "PRICE_TO_BEAT_QUERY_NOT_FOUND_DEBUG"
+    );
 
     Err(anyhow!(
         "price to beat query not found in polymarket page for {}",
@@ -291,5 +417,46 @@ mod tests {
             err.to_string().starts_with(QUERY_NOT_FOUND_ERROR_PREFIX),
             "error message does not start with expected prefix: {err}",
         );
+    }
+
+    #[test]
+    fn build_event_request_url_leaves_base_url_unchanged_without_cache_buster() {
+        assert_eq!(
+            build_event_request_url("https://polymarket.com/event/foo", None),
+            "https://polymarket.com/event/foo"
+        );
+    }
+
+    #[test]
+    fn build_event_request_url_appends_cache_buster_query() {
+        assert_eq!(
+            build_event_request_url("https://polymarket.com/event/foo", Some(123)),
+            "https://polymarket.com/event/foo?ptb_ts=123"
+        );
+    }
+
+    #[test]
+    fn build_event_request_url_respects_existing_query_string() {
+        assert_eq!(
+            build_event_request_url("https://polymarket.com/event/foo?lang=en", Some(123)),
+            "https://polymarket.com/event/foo?lang=en&ptb_ts=123"
+        );
+    }
+
+    #[test]
+    fn chainlink_snapshot_conversion_marks_source_and_latency() {
+        let spec = build_price_to_beat_query_spec("sol-updown-5m-1773324600").expect("spec");
+        let snapshot = ChainlinkCycleOpenSnapshot {
+            price: 87.13950000781921,
+            timestamp_ms: spec.start_at.timestamp_millis() + 125,
+            latency_ms: 125,
+        };
+
+        let converted = chainlink_snapshot_to_price_to_beat_snapshot(&spec, &snapshot);
+        assert_eq!(converted.asset, "sol");
+        assert_eq!(converted.timeframe, "5m");
+        assert_eq!(converted.price_to_beat, 87.13950000781921);
+        assert_eq!(converted.source, PriceToBeatSource::ChainlinkSnapshot);
+        assert_eq!(converted.source_latency_ms, Some(125));
     }
 }

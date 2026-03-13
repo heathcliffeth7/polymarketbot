@@ -4,6 +4,7 @@ use super::*;
 pub enum ClaimExecutionMode {
     Direct,
     BuilderRelayer,
+    RelayerApiKey,
 }
 
 impl ClaimExecutionMode {
@@ -11,6 +12,7 @@ impl ClaimExecutionMode {
         match self {
             Self::Direct => "direct",
             Self::BuilderRelayer => "builder_relayer",
+            Self::RelayerApiKey => "relayer_api_key",
         }
     }
 
@@ -18,8 +20,9 @@ impl ClaimExecutionMode {
         match raw.trim().to_ascii_lowercase().as_str() {
             "" | "direct" => Ok(Self::Direct),
             "builder_relayer" => Ok(Self::BuilderRelayer),
+            "relayer_api_key" => Ok(Self::RelayerApiKey),
             other => Err(anyhow::anyhow!(
-                "claim.execution_mode must be one of: direct, builder_relayer (got {other})"
+                "claim.execution_mode must be one of: direct, builder_relayer, relayer_api_key (got {other})"
             )),
         }
     }
@@ -92,6 +95,8 @@ pub struct StrategyConfig {
     pub basket_sl_usdc: f64,
     #[serde(default = "default_force_flatten_sec_before_close")]
     pub force_flatten_sec_before_close: u64,
+    #[serde(default = "default_sl_bid_confirm_timeout_ms")]
+    pub sl_bid_confirm_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -355,6 +360,8 @@ pub struct ClaimConfig {
     pub max_attempts: i32,
     #[serde(default = "default_claim_retry_backoff_ms")]
     pub retry_backoff_ms: u64,
+    #[serde(default = "default_claim_min_claim_usdc")]
+    pub min_claim_usdc: f64,
 }
 
 impl Default for ClaimConfig {
@@ -378,6 +385,7 @@ impl Default for ClaimConfig {
             process_batch_size: default_claim_process_batch_size(),
             max_attempts: default_claim_max_attempts(),
             retry_backoff_ms: default_claim_retry_backoff_ms(),
+            min_claim_usdc: default_claim_min_claim_usdc(),
         }
     }
 }

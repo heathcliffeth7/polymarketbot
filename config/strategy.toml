@@ -16,3 +16,4 @@ leg_tp_pct = 0.035
 basket_tp_usdc = 0.35
 basket_sl_usdc = -0.6
 force_flatten_sec_before_close = 45
+sl_bid_confirm_timeout_ms = 5000

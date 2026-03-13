@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth';
+import { getClaimSweepStatus } from '@/lib/claim-sweep';
 import { getDashboardData } from '@/lib/queries/dashboard';
 import { getServiceStatus } from '@/lib/systemctl';
 import { getMarketDiscoveryStatus } from '@/lib/queries/bot-runs';
@@ -16,7 +17,10 @@ export async function GET() {
       getDashboardData(user),
       getServiceStatus(),
     ]);
-    const marketDiscovery = await getMarketDiscoveryStatus(data.botStatus.lastRun?.started_at ?? null);
+    const [marketDiscovery, claimSweep] = await Promise.all([
+      getMarketDiscoveryStatus(data.botStatus.lastRun?.started_at ?? null),
+      getClaimSweepStatus(user, { serviceActive: serviceStatus.serviceActive }),
+    ]);
 
     data.botStatus.serviceActive = serviceStatus.serviceActive;
     data.botStatus.controlAvailable = serviceStatus.controlAvailable;
@@ -25,6 +29,7 @@ export async function GET() {
     data.botStatus.marketDiscoveryState = marketDiscovery.state;
     data.botStatus.selectedMarketSlug = marketDiscovery.selectedMarketSlug;
     data.botStatus.marketDiscoveryMessage = marketDiscovery.message;
+    data.claimSweep = claimSweep;
     return NextResponse.json(data);
   } catch (err) {
     console.error('Dashboard error:', err);

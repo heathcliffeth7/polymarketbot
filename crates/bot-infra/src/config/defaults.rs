@@ -129,6 +129,10 @@ pub(crate) fn default_force_flatten_sec_before_close() -> u64 {
     45
 }
 
+pub(crate) fn default_sl_bid_confirm_timeout_ms() -> u64 {
+    5000
+}
+
 pub(crate) fn default_claim_rpc_url() -> String {
     "https://polygon-rpc.com".to_string()
 }
@@ -187,6 +191,10 @@ pub(crate) fn default_claim_max_attempts() -> i32 {
 
 pub(crate) fn default_claim_retry_backoff_ms() -> u64 {
     10_000
+}
+
+pub(crate) fn default_claim_min_claim_usdc() -> f64 {
+    1.0
 }
 
 pub(crate) fn supported_market_scope_names_csv() -> String {
