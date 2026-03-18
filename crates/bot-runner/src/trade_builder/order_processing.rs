@@ -430,6 +430,26 @@ async fn process_trade_builder_order(
     let trigger_evaluation =
         evaluate_trade_builder_order_trigger(&order, previous_price, trigger_eval_price);
     if !trigger_evaluation.should_trigger {
+        if order.kind == "conditional"
+            && order.last_error.as_deref() == Some("composite_bid_confirmation_waiting")
+        {
+            repo.set_trade_builder_order_last_error(order.id, None)
+                .await?;
+            repo.append_trade_builder_order_event(
+                order.id,
+                "composite_bid_confirmation_released",
+                &json!({
+                    "reason_code": "trigger_no_longer_valid",
+                    "trigger_eval_price": trigger_eval_price,
+                    "trigger_price": order.trigger_price,
+                    "best_bid": runtime_price.best_bid,
+                    "last_trade_price": runtime_price.last_trade_price,
+                    "source": "housekeeping",
+                }),
+            )
+            .await?;
+            order.last_error = None;
+        }
         if order.kind == "conditional" {
             info!(
                 run_id,
@@ -572,6 +592,28 @@ async fn process_trade_builder_order(
         "TRADE_BUILDER_TRIGGER_CONDITION_MET"
     );
     if should_skip_trade_builder_composite_sl_bid_confirmation(&order, &runtime_price) {
+        let already_waiting = order.last_error.as_deref()
+            == Some("composite_bid_confirmation_waiting");
+        if !already_waiting {
+            repo.set_trade_builder_order_last_error(
+                order.id,
+                Some("composite_bid_confirmation_waiting"),
+            )
+            .await?;
+            repo.append_trade_builder_order_event(
+                order.id,
+                "composite_bid_confirmation_waiting",
+                &json!({
+                    "trigger_price": order.trigger_price,
+                    "trigger_eval_price": trigger_eval_price,
+                    "best_bid": runtime_price.best_bid,
+                    "last_trade_price": runtime_price.last_trade_price,
+                    "source": "housekeeping",
+                }),
+            )
+            .await?;
+            order.last_error = Some("composite_bid_confirmation_waiting".to_string());
+        }
         info!(
             run_id,
             builder_order_id = order.id,
@@ -580,9 +622,34 @@ async fn process_trade_builder_order(
             trigger_price = ?order.trigger_price,
             trigger_eval_price,
             last_trade_price = ?runtime_price.last_trade_price,
-            "SL_BID_CONFIRMATION_GUARD_SKIP"
+            already_waiting,
+            "SL_BID_CONFIRMATION_GUARD_WAITING"
         );
         return Ok(());
+    }
+    if order.last_error.as_deref() == Some("composite_bid_confirmation_waiting") {
+        repo.set_trade_builder_order_last_error(order.id, None)
+            .await?;
+        repo.append_trade_builder_order_event(
+            order.id,
+            "composite_bid_confirmation_confirmed",
+            &json!({
+                "trigger_price": order.trigger_price,
+                "best_bid": runtime_price.best_bid,
+                "last_trade_price": runtime_price.last_trade_price,
+                "source": "housekeeping",
+            }),
+        )
+        .await?;
+        order.last_error = None;
+        info!(
+            run_id,
+            builder_order_id = order.id,
+            market = %order.market_slug,
+            best_bid = ?runtime_price.best_bid,
+            trigger_price = ?order.trigger_price,
+            "SL_BID_CONFIRMATION_CONFIRMED"
+        );
     }
     maybe_latch_trade_builder_stop_loss(repo, &mut order, trigger_eval_price).await?;
     let fee_rate_bps = resolve_trade_builder_order_fee_rate_bps(repo, client, &mut order).await?;
@@ -716,6 +783,9 @@ mod eligibility_window_tests {
             retry_on_execution_floor_guard_block: false,
             retry_on_max_price_block: false,
             sl_trigger_price_mode: None,
+            reenter_on_sl_hit: false,
+            reentry_max_attempts: 0,
+            reentry_trigger_node_key: None,
             notify_on_fill: false,
             notify_on_trigger_guard_blocked: false,
             notify_on_execution_floor_blocked: false,

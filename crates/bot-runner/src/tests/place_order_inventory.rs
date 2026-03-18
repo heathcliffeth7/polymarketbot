@@ -315,6 +315,30 @@ fn guard_blocked_conditional_order_still_requires_trigger_to_hold() {
 }
 
 #[test]
+fn conditional_level_above_order_triggers_while_above_threshold() {
+    let mut order = test_builder_order("buy", None);
+    order.status = "armed".to_string();
+    order.trigger_condition = Some("level_above".to_string());
+    order.trigger_price = Some(0.80);
+    order.last_seen_price = Some(0.92);
+
+    assert!(should_trigger_builder_order(&order, 0.83));
+    assert!(!should_trigger_builder_order(&order, 0.79));
+}
+
+#[test]
+fn conditional_level_below_order_triggers_while_below_threshold() {
+    let mut order = test_builder_order("buy", None);
+    order.status = "armed".to_string();
+    order.trigger_condition = Some("level_below".to_string());
+    order.trigger_price = Some(0.20);
+    order.last_seen_price = Some(0.18);
+
+    assert!(should_trigger_builder_order(&order, 0.17));
+    assert!(!should_trigger_builder_order(&order, 0.21));
+}
+
+#[test]
 fn triggered_conditional_sell_orders_stay_latched_after_cross() {
     let mut tp_order = test_builder_order("sell", Some(9));
     tp_order.status = "triggered".to_string();

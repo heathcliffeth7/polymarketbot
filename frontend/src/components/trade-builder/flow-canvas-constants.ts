@@ -53,6 +53,9 @@ export interface FlowCanvasGraphChangeOptions {
 
 export interface FlowCanvasEditorProps {
   graph: import('@/lib/types').TradeFlowGraph;
+  instanceKey?: string | number | null;
+  readOnly?: boolean;
+  readOnlyReason?: string | null;
   onGraphChange: (
     nextGraph: import('@/lib/types').TradeFlowGraph,
     options?: FlowCanvasGraphChangeOptions

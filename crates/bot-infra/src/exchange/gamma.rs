@@ -69,6 +69,31 @@ impl GammaHttpClient {
                 .filter(|market| market.slug == normalized_slug)
         }))
     }
+
+    pub async fn get_market_spec_by_token_id(&self, token_id: &str) -> Result<Option<GammaMarket>> {
+        let token_id = token_id.trim();
+        if token_id.is_empty() {
+            return Ok(None);
+        }
+
+        let url = format!(
+            "{}/markets?clob_token_ids={}",
+            self.base_url.trim_end_matches('/'),
+            token_id
+        );
+        let raw: serde_json::Value = self
+            .http
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        Ok(raw.as_array().and_then(|items| {
+            items.iter().find_map(parse_gamma_market_any)
+        }))
+    }
 }
 
 #[async_trait]

@@ -86,3 +86,33 @@ AUTH_SECRET, RUST_LOG, PM_API_KEY, PM_API_SECRET, PM_SIGNER_PRIVATE_KEY
 @mimari/architecture.md
 @mimari/state-machine.md
 @mimari/db-schema.md
+
+## Sudo
+
+Sudo gereken komutlarda şifreyi interaktif olmayan şekilde geç:
+
+```bash
+printf '2100100\n' | sudo -S <komut>
+```
+
+Bu şifreyi scriptlere, uygulama koduna veya env dosyalarına gömme.
+
+## Servis Restart
+
+**Backend** (`crates/`, `config/`, `migrations/`, `scripts/setup_server.sh`, `deploy/systemd/dextrabot.service` değişirse):
+
+```bash
+cargo build --release -p bot-runner
+printf '2100100\n' | sudo -S systemctl restart dextrabot
+printf '2100100\n' | sudo -S systemctl is-active dextrabot
+```
+
+**Frontend** (`frontend/`, `deploy/systemd/dextrabot-frontend.service` değişirse):
+
+```bash
+cd frontend && npm run lint && npm run build
+printf '2100100\n' | sudo -S systemctl restart dextrabot-frontend
+printf '2100100\n' | sudo -S systemctl is-active dextrabot-frontend
+```
+
+Her ikisi etkilenirse önce backend, sonra frontend akışını çalıştır.

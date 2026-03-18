@@ -141,6 +141,22 @@ impl ClobHttpClient {
     }
 }
 
+fn parse_fee_rate_bps_value(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(v) => v.as_u64(),
+        Value::String(v) => v.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+pub(super) fn parse_fee_rate_bps_response(raw: &serde_json::Value) -> Option<u64> {
+    raw.get("fee_rate_bps")
+        .or_else(|| raw.get("feeRateBps"))
+        .or_else(|| raw.get("base_fee"))
+        .or_else(|| raw.get("baseFee"))
+        .and_then(parse_fee_rate_bps_value)
+}
+
 pub(super) fn extract_best_bid_ask_from_book(
     raw: &serde_json::Value,
 ) -> (Option<f64>, Option<f64>) {
@@ -240,15 +256,7 @@ impl ClobRestClient for ClobHttpClient {
             .json()
             .await?;
 
-        let fee_rate_bps = raw
-            .get("fee_rate_bps")
-            .or_else(|| raw.get("feeRateBps"))
-            .and_then(|value| match value {
-                Value::Number(v) => v.as_u64(),
-                Value::String(v) => v.parse::<u64>().ok(),
-                _ => None,
-            });
-        Ok(fee_rate_bps)
+        Ok(parse_fee_rate_bps_response(&raw))
     }
 
     async fn place_order(&self, req: &PlaceOrderRequest) -> Result<OrderAck> {

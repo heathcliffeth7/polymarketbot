@@ -14,7 +14,7 @@ export type BusyAction =
   | 'save'
   | 'validate'
   | 'publish'
-  | 'archive'
+  | 'delete'
   | null;
 
 export type TemplateKind =
@@ -24,6 +24,8 @@ export type TemplateKind =
   | 'sl_tp'
   | 'position_monitor'
   | 'multi_leg_hedge';
+
+export type DraftSaveStatus = 'idle' | 'pending' | 'error';
 
 export interface FlowEnginePanelProps {
   defaultMarketSlug: string | null;
@@ -39,24 +41,28 @@ export interface FlowEngineControllerState {
   createTemplateKind: TemplateKind;
   isWorkflowListOpen: boolean;
   workflowListQuery: string;
-  archivingDefinitionId: number | null;
+  deletingDefinitionId: number | null;
   selectedDefinitionIds: Set<number>;
-  bulkArchiving: boolean;
+  bulkDeleting: boolean;
   graph: TradeFlowGraph;
   contextForm: ContextFormState;
   contextTab: 'basic' | 'advanced';
   validation: TradeFlowValidationResult | null;
   busyAction: BusyAction;
+  saveStatus: DraftSaveStatus;
   message: string | null;
   error: string | null;
   autoSaveError: string | null;
   stoppingFlow: boolean;
   isActionBusy: boolean;
+  isEditorReadOnly: boolean;
+  readOnlyReason: string | null;
   publishDisabled: boolean;
 }
 
 export interface FlowEngineControllerData {
   definitionsLoading: boolean;
+  definitionsError: Error | null;
   visibleDefinitions: TradeFlowDefinition[];
   filteredDefinitions: TradeFlowDefinition[];
   detail: TradeFlowDefinitionDetail | null;
@@ -87,8 +93,8 @@ export interface FlowEngineControllerActions {
   validateGraph: () => Promise<void>;
   reloadDraftFromServer: () => Promise<void>;
   publishFlow: () => Promise<void>;
-  confirmAndArchiveCurrentFlow: () => Promise<void>;
-  archiveFlowFromList: (definitionId: number) => Promise<void>;
+  confirmAndDeleteCurrentFlow: () => Promise<void>;
+  deleteFlowFromList: (definitionId: number) => Promise<void>;
   handleStopFlow: () => Promise<void>;
   updateGraphFromCanvas: (
     nextGraph: TradeFlowGraph,
@@ -103,7 +109,7 @@ export interface FlowEngineControllerActions {
   toggleDefinitionSelection: (definitionId: number) => void;
   selectAllDefinitions: () => void;
   deselectAllDefinitions: () => void;
-  bulkArchiveDefinitions: () => Promise<void>;
+  bulkDeleteDefinitions: () => Promise<void>;
 }
 
 export interface FlowEngineController {

@@ -8,4 +8,4 @@
 - Raw fetch, doğrudan DB erişimi, config dosyası yazımı veya `systemctl` çağrısı burada bulunmamalı.
 - Ortak UI için `components/ui/`, özellik bazlı akış için feature klasörlerini kullan.
 - Veri alma/polling `hooks/` içinde, kalıcı yazma akışı API/lib katmanında kalmalı.
-- Bir dosya 900 satıra yaklaşırsa yeni özelliği aynı dosyaya yığmak yerine alt bileşene ayır.
+- Bir dosya 1400 satıra yaklaşırsa yeni özelliği aynı dosyaya yığmak yerine alt bileşene ayır.

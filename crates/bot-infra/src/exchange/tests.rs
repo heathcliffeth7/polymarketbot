@@ -1,4 +1,4 @@
-use super::clob::extract_best_bid_ask_from_book;
+use super::clob::{extract_best_bid_ask_from_book, parse_fee_rate_bps_response};
 use super::parse::{parse_gamma_market, parse_gamma_market_any, parse_yes_no_token_ids};
 use super::{ClobHttpClient, ClobRestClient, PlaceOrderRequest};
 use crate::signer::ApiCredentials;
@@ -230,4 +230,26 @@ fn book_parser_returns_none_when_both_sides_are_empty() {
     let (best_bid, best_ask) = extract_best_bid_ask_from_book(&raw);
     assert_eq!(best_bid, None);
     assert_eq!(best_ask, None);
+}
+
+#[test]
+fn fee_rate_parser_supports_base_fee_zero() {
+    let raw = json!({
+        "base_fee": 0
+    });
+
+    assert_eq!(parse_fee_rate_bps_response(&raw), Some(0));
+}
+
+#[test]
+fn fee_rate_parser_preserves_existing_fee_rate_fields() {
+    let snake = json!({
+        "fee_rate_bps": 12
+    });
+    let camel = json!({
+        "feeRateBps": "34"
+    });
+
+    assert_eq!(parse_fee_rate_bps_response(&snake), Some(12));
+    assert_eq!(parse_fee_rate_bps_response(&camel), Some(34));
 }

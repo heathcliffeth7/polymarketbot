@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::Duration as ChronoDuration;
 use serde_json::{json, Value};
 
-const CURRENT_PRICE_SOURCE: &str = "polymarket_live_data_ws";
+const CURRENT_PRICE_SOURCE: &str = "chainlink_live_data_ws";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PriceToBeatDiffUnit {
@@ -39,6 +39,8 @@ pub(crate) struct PriceToBeatGuardEvaluation {
     pub(crate) passed: bool,
     pub(crate) reason_code: String,
     pub(crate) reason_detail: Option<String>,
+    pub(crate) normalized_outcome_label: Option<String>,
+    pub(crate) direction: Option<String>,
     pub(crate) market_slug: String,
     pub(crate) event_url: String,
     pub(crate) timeframe: Option<String>,
@@ -48,6 +50,7 @@ pub(crate) struct PriceToBeatGuardEvaluation {
     pub(crate) price_to_beat_source_latency_ms: Option<i64>,
     pub(crate) current_price: Option<f64>,
     pub(crate) current_price_source: &'static str,
+    pub(crate) directional_gap: Option<f64>,
     pub(crate) gap_abs: Option<f64>,
     pub(crate) threshold_value: f64,
     pub(crate) threshold_unit: String,
@@ -60,6 +63,8 @@ impl PriceToBeatGuardEvaluation {
             "passed": self.passed,
             "reason_code": self.reason_code,
             "reason_detail": self.reason_detail,
+            "normalized_outcome_label": self.normalized_outcome_label,
+            "direction": self.direction,
             "market_slug": self.market_slug,
             "event_url": self.event_url,
             "timeframe": self.timeframe,
@@ -69,6 +74,7 @@ impl PriceToBeatGuardEvaluation {
             "price_to_beat_source_latency_ms": self.price_to_beat_source_latency_ms,
             "current_price": self.current_price,
             "current_price_source": self.current_price_source,
+            "directional_gap": self.directional_gap,
             "gap_abs": self.gap_abs,
             "threshold_value": self.threshold_value,
             "threshold_unit": self.threshold_unit,
@@ -85,6 +91,42 @@ fn price_to_beat_guard_waiting_reason(context: &Value) -> Option<String> {
     crate::flow_context_value(context, "priceToBeatGuardWaitingReason")
         .and_then(|value| value.as_str().map(str::to_string))
         .filter(|value| !value.trim().is_empty())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DirectionalGapEvaluation {
+    normalized_outcome_label: &'static str,
+    direction: &'static str,
+    directional_gap: f64,
+    passed: bool,
+}
+
+fn normalize_outcome_direction(label: &str) -> Option<(&'static str, &'static str)> {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "yes" | "up" | "long" | "bull" => Some(("yes", "up")),
+        "no" | "down" | "short" | "bear" => Some(("no", "down")),
+        _ => None,
+    }
+}
+
+fn evaluate_directional_gap(
+    current_price: f64,
+    price_to_beat: f64,
+    threshold_usd: f64,
+    outcome_label: &str,
+) -> Option<DirectionalGapEvaluation> {
+    let (normalized_outcome_label, direction) = normalize_outcome_direction(outcome_label)?;
+    let directional_gap = if direction == "up" {
+        current_price - price_to_beat
+    } else {
+        price_to_beat - current_price
+    };
+    Some(DirectionalGapEvaluation {
+        normalized_outcome_label,
+        direction,
+        directional_gap,
+        passed: directional_gap >= threshold_usd,
+    })
 }
 
 pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
@@ -126,7 +168,8 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
     })?;
 
     let evaluation =
-        evaluate_price_to_beat_guard(market_slug, threshold_value, threshold_unit).await;
+        evaluate_price_to_beat_guard(market_slug, threshold_value, threshold_unit, outcome_label)
+            .await;
     let evaluation_output = evaluation.to_value();
     crate::set_flow_context(context, "priceToBeatGuard", evaluation_output.clone());
     if evaluation.passed {
@@ -229,6 +272,7 @@ async fn evaluate_price_to_beat_guard(
     market_slug: &str,
     threshold_value: f64,
     threshold_unit: PriceToBeatDiffUnit,
+    outcome_label: &str,
 ) -> PriceToBeatGuardEvaluation {
     let threshold_usd = normalize_price_to_beat_threshold_usd(threshold_value, threshold_unit);
     let event_url = format!("https://polymarket.com/event/{market_slug}");
@@ -310,7 +354,34 @@ async fn evaluate_price_to_beat_guard(
     };
 
     let gap_abs = (current_price - snapshot.price_to_beat).abs();
-    let passed = gap_abs >= threshold_usd;
+    let directional = match evaluate_directional_gap(
+        current_price,
+        snapshot.price_to_beat,
+        threshold_usd,
+        outcome_label,
+    ) {
+        Some(directional) => directional,
+        None => {
+            return blocked_price_to_beat_guard_evaluation(
+                market_slug,
+                snapshot.event_url.clone(),
+                threshold_value,
+                threshold_unit,
+                threshold_usd,
+                "unsupported_outcome_label",
+                Some(format!(
+                    "outcome_label '{outcome_label}' is not a recognized direction"
+                )),
+                Some(scope.timeframe.to_string()),
+                Some(scope.asset.to_string()),
+                Some(snapshot.price_to_beat),
+                Some(snapshot.source.as_str().to_string()),
+                snapshot.source_latency_ms,
+                Some(current_price),
+            );
+        }
+    };
+    let passed = directional.passed;
     PriceToBeatGuardEvaluation {
         passed,
         reason_code: if passed {
@@ -320,13 +391,16 @@ async fn evaluate_price_to_beat_guard(
         },
         reason_detail: (!passed).then(|| {
             format!(
-                "gap {:.8} is below configured threshold {:.8} {} (~{:.8} usd)",
-                gap_abs,
+                "directional gap {:.8} (direction={}) is below threshold {:.8} {} (~{:.8} usd)",
+                directional.directional_gap,
+                directional.direction,
                 threshold_value,
                 threshold_unit.as_str(),
                 threshold_usd
             )
         }),
+        normalized_outcome_label: Some(directional.normalized_outcome_label.to_string()),
+        direction: Some(directional.direction.to_string()),
         market_slug: market_slug.to_string(),
         event_url: snapshot.event_url,
         timeframe: Some(snapshot.timeframe),
@@ -336,10 +410,20 @@ async fn evaluate_price_to_beat_guard(
         price_to_beat_source_latency_ms: snapshot.source_latency_ms,
         current_price: Some(current_price),
         current_price_source: CURRENT_PRICE_SOURCE,
+        directional_gap: Some(directional.directional_gap),
         gap_abs: Some(gap_abs),
         threshold_value,
         threshold_unit: threshold_unit.as_str().to_string(),
         threshold_usd,
+    }
+}
+
+fn format_optional_direction(value: Option<&str>) -> String {
+    match value {
+        Some("up") => "Up".to_string(),
+        Some("down") => "Down".to_string(),
+        Some(other) => other.to_string(),
+        None => "N/A".to_string(),
     }
 }
 
@@ -348,7 +432,7 @@ pub(crate) fn build_price_to_beat_guard_blocked_notification_message(
 ) -> String {
     let reason = match evaluation.reason_code.as_str() {
         "price_to_beat_gap_below_threshold" => {
-            "Current price (Chainlink) ile Price to Beat farki gereken minimum seviyenin altinda."
+            "Secilen yon icin Price to Beat farki gereken minimum seviyenin altinda."
         }
         "price_to_beat_unavailable" => {
             "Polymarket Price to Beat verisi alinamadigi icin emir engellendi."
@@ -357,6 +441,9 @@ pub(crate) fn build_price_to_beat_guard_blocked_notification_message(
             "Chainlink current price verisi alinamadigi icin emir engellendi."
         }
         "unsupported_market" => "Bu market Price to Beat guard tarafindan desteklenmiyor.",
+        "unsupported_outcome_label" => {
+            "Outcome label Up/Down veya Yes/No yonlerinden biri olarak taninamadi."
+        }
         _ => "Price to Beat guard emri engelledi.",
     };
 
@@ -367,14 +454,16 @@ pub(crate) fn build_price_to_beat_guard_blocked_notification_message(
         .unwrap_or_default();
 
     format!(
-        "Price to Beat Korumasi Engelledi\nSebep: {}{}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nCurrent (Chainlink): {}\nFark: {}\nLimit: {:.8} {} (~{:.8} USD)",
+        "Price to Beat Korumasi Engelledi\nSebep: {}{}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nCurrent (Chainlink): {}\nYonsel Fark: {}\nMutlak Fark: {}\nLimit: {:.8} {} (~{:.8} USD)",
         reason,
         detail_line,
+        format_optional_direction(evaluation.direction.as_deref()),
         evaluation.market_slug,
         evaluation.asset.as_deref().unwrap_or("N/A"),
         evaluation.timeframe.as_deref().unwrap_or("N/A"),
         format_optional_guard_number(evaluation.price_to_beat),
         format_optional_guard_number(evaluation.current_price),
+        format_optional_guard_number(evaluation.directional_gap),
         format_optional_guard_number(evaluation.gap_abs),
         evaluation.threshold_value,
         evaluation.threshold_unit,
@@ -410,6 +499,8 @@ fn blocked_price_to_beat_guard_evaluation(
         passed: false,
         reason_code: reason_code.to_string(),
         reason_detail,
+        normalized_outcome_label: None,
+        direction: None,
         market_slug: market_slug.to_string(),
         event_url,
         timeframe,
@@ -419,6 +510,7 @@ fn blocked_price_to_beat_guard_evaluation(
         price_to_beat_source_latency_ms,
         current_price,
         current_price_source: CURRENT_PRICE_SOURCE,
+        directional_gap: None,
         gap_abs: None,
         threshold_value,
         threshold_unit: threshold_unit.as_str().to_string(),
@@ -506,6 +598,8 @@ mod tests {
             passed: false,
             reason_code: "price_to_beat_gap_below_threshold".to_string(),
             reason_detail: None,
+            normalized_outcome_label: Some("yes".to_string()),
+            direction: Some("up".to_string()),
             market_slug: "btc-updown-5m-1773232500".to_string(),
             event_url: "https://polymarket.com/event/btc-updown-5m-1773232500".to_string(),
             timeframe: Some("5m".to_string()),
@@ -515,6 +609,7 @@ mod tests {
             price_to_beat_source_latency_ms: None,
             current_price: Some(69_300.12),
             current_price_source: CURRENT_PRICE_SOURCE,
+            directional_gap: Some(20.18515311),
             gap_abs: Some(20.18515311),
             threshold_value: 30.0,
             threshold_unit: "usd".to_string(),
@@ -523,9 +618,11 @@ mod tests {
 
         let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
         assert!(message.contains("Price to Beat Korumasi Engelledi"));
+        assert!(message.contains("Yon: Up"));
         assert!(message.contains("Market: btc-updown-5m-1773232500"));
         assert!(message.contains("Asset: btc"));
         assert!(message.contains("gereken minimum seviyenin altinda"));
+        assert!(message.contains("Yonsel Fark: 20.18515311"));
         assert!(message.contains("Limit: 30.00000000 usd (~30.00000000 USD)"));
     }
 
@@ -535,6 +632,8 @@ mod tests {
             passed: false,
             reason_code: "price_to_beat_unavailable".to_string(),
             reason_detail: Some("__NEXT_DATA__ script tag not found in html".to_string()),
+            normalized_outcome_label: None,
+            direction: None,
             market_slug: "btc-updown-5m-1773242700".to_string(),
             event_url: "https://polymarket.com/event/btc-updown-5m-1773242700".to_string(),
             timeframe: Some("5m".to_string()),
@@ -544,6 +643,7 @@ mod tests {
             price_to_beat_source_latency_ms: None,
             current_price: Some(70_404.25964978),
             current_price_source: CURRENT_PRICE_SOURCE,
+            directional_gap: None,
             gap_abs: None,
             threshold_value: 30.0,
             threshold_unit: "usd".to_string(),
@@ -562,6 +662,8 @@ mod tests {
             passed: false,
             reason_code: "price_to_beat_gap_below_threshold".to_string(),
             reason_detail: None,
+            normalized_outcome_label: Some("yes".to_string()),
+            direction: Some("up".to_string()),
             market_slug: "btc-updown-5m-1773232500".to_string(),
             event_url: "https://polymarket.com/event/btc-updown-5m-1773232500".to_string(),
             timeframe: Some("5m".to_string()),
@@ -571,6 +673,7 @@ mod tests {
             price_to_beat_source_latency_ms: None,
             current_price: Some(69_300.12),
             current_price_source: CURRENT_PRICE_SOURCE,
+            directional_gap: Some(20.18515311),
             gap_abs: Some(20.18515311),
             threshold_value: 30.0,
             threshold_unit: "usd".to_string(),
@@ -631,11 +734,62 @@ mod tests {
     }
 
     #[test]
+    fn up_direction_passes_when_current_above_threshold() {
+        let evaluation = evaluate_directional_gap(105.0, 100.0, 4.0, "Up").expect("direction");
+        assert_eq!(
+            evaluation,
+            DirectionalGapEvaluation {
+                normalized_outcome_label: "yes",
+                direction: "up",
+                directional_gap: 5.0,
+                passed: true,
+            }
+        );
+    }
+
+    #[test]
+    fn up_direction_blocks_when_price_below() {
+        let evaluation = evaluate_directional_gap(95.0, 100.0, 4.0, "Up").expect("direction");
+        assert_eq!(evaluation.direction, "up");
+        assert_eq!(evaluation.directional_gap, -5.0);
+        assert!(!evaluation.passed);
+    }
+
+    #[test]
+    fn down_direction_passes_when_current_below_threshold() {
+        let evaluation = evaluate_directional_gap(95.0, 100.0, 4.0, "Down").expect("direction");
+        assert_eq!(
+            evaluation,
+            DirectionalGapEvaluation {
+                normalized_outcome_label: "no",
+                direction: "down",
+                directional_gap: 5.0,
+                passed: true,
+            }
+        );
+    }
+
+    #[test]
+    fn down_direction_blocks_when_price_above() {
+        let evaluation = evaluate_directional_gap(105.0, 100.0, 4.0, "Down").expect("direction");
+        assert_eq!(evaluation.direction, "down");
+        assert_eq!(evaluation.directional_gap, -5.0);
+        assert!(!evaluation.passed);
+    }
+
+    #[test]
+    fn unsupported_outcome_label_blocks() {
+        assert!(evaluate_directional_gap(105.0, 100.0, 4.0, "Flat").is_none());
+    }
+
+    #[test]
     fn current_price_unavailable_reason_is_supported() {
         let evaluation = PriceToBeatGuardEvaluation {
             passed: false,
             reason_code: "current_price_unavailable".to_string(),
             reason_detail: Some("chainlink ws error: no cached price for btc/usd".to_string()),
+            normalized_outcome_label: None,
+            direction: None,
             market_slug: "btc-updown-5m-1773246900".to_string(),
             event_url: "https://polymarket.com/event/btc-updown-5m-1773246900".to_string(),
             timeframe: Some("5m".to_string()),
@@ -645,6 +799,7 @@ mod tests {
             price_to_beat_source_latency_ms: Some(125),
             current_price: None,
             current_price_source: CURRENT_PRICE_SOURCE,
+            directional_gap: None,
             gap_abs: None,
             threshold_value: 30.0,
             threshold_unit: "usd".to_string(),
@@ -654,5 +809,34 @@ mod tests {
         let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
         assert!(message.contains("Chainlink current price verisi alinamadigi"));
         assert!(message.contains("Current (Chainlink): N/A"));
+    }
+
+    #[test]
+    fn unsupported_outcome_label_reason_is_supported() {
+        let evaluation = PriceToBeatGuardEvaluation {
+            passed: false,
+            reason_code: "unsupported_outcome_label".to_string(),
+            reason_detail: Some("outcome_label 'Flat' is not a recognized direction".to_string()),
+            normalized_outcome_label: None,
+            direction: None,
+            market_slug: "eth-updown-5m-1773710400".to_string(),
+            event_url: "https://polymarket.com/event/eth-updown-5m-1773710400".to_string(),
+            timeframe: Some("5m".to_string()),
+            asset: Some("eth".to_string()),
+            price_to_beat: Some(2366.97),
+            price_to_beat_source: Some("polymarket".to_string()),
+            price_to_beat_source_latency_ms: None,
+            current_price: Some(2368.11),
+            current_price_source: CURRENT_PRICE_SOURCE,
+            directional_gap: None,
+            gap_abs: Some(1.14),
+            threshold_value: 4.0,
+            threshold_unit: "usd".to_string(),
+            threshold_usd: 4.0,
+        };
+
+        let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
+        assert!(message.contains("Outcome label Up/Down veya Yes/No"));
+        assert!(message.contains("Yon: N/A"));
     }
 }

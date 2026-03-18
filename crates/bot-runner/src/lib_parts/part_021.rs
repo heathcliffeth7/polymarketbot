@@ -78,6 +78,13 @@ async fn process_trade_builder_workflows(
                 "TRADE_BUILDER_WORKFLOW_ERROR"
             );
         }
+        if trade_flow_ws_fast_path_cache_requires_refresh_now().await {
+            if let Err(e) = refresh_trade_flow_ws_fast_path_for_boundary(
+                repo, run_id, ws, &mut user_cfg_cache,
+            ).await {
+                warn!(run_id, error = %e, "TRADE_FLOW_BOUNDARY_REFRESH_FAILED");
+            }
+        }
     }
 
     for user_id in synced_user_ids {
@@ -319,6 +326,9 @@ async fn process_trade_builder_workflow(
                     None,
                     None,
                     false,
+                    0,
+                    None,
+                    false,
                     false,
                     false,
                     false,
@@ -461,6 +471,9 @@ async fn ensure_sell_leg_order(
             None,
             None,
             None,
+            None,
+            false,
+            0,
             None,
             false,
             false,

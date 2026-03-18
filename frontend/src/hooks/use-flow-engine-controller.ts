@@ -3,25 +3,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mutate as swrMutate } from 'swr';
 import { toast } from 'sonner';
-import { formatClientRequestError } from '@/lib/http-client';
 import {
   buildContextFromForm,
   parseContextToForm,
   type ContextFormState,
 } from '@/lib/trade-flow-config-mappers';
-import {
-  createStarterTradeFlowGraph,
-  createDcaTradeFlowGraph,
-  createStopLossTakeProfitGraph,
-  createPositionMonitorNotifyGraph,
-  createMultiLegHedgeGraph,
-} from '@/lib/trade-flow-templates';
 import type { TradeFlowDefinition, TradeFlowDefinitionDetail, TradeFlowGraph } from '@/lib/types';
 import { useBotStatus } from './use-bot-status';
 import { useConfig } from './use-config';
 import {
-  archiveTradeFlowDefinition,
   createTradeFlowDefinition,
+  deleteTradeFlowDefinition,
   ensureDualDcaSourceTrade,
   patchTradeFlowDefinitionDraft,
   publishTradeFlowDefinition,
@@ -38,7 +30,6 @@ import {
 } from '@/components/trade-builder/flow-engine-helpers';
 import {
   buildDetailSnapshotKey,
-  createSellBuyIfElseTemplate,
   deepCloneGraph,
   isRecord,
 } from '@/components/trade-builder/flow-engine-utils';
@@ -46,7 +37,17 @@ import {
   compareFlowDetailSnapshotMeta,
   getFlowDetailSnapshotMeta,
 } from './flow-detail-snapshot';
+import { isEditorOwned, isGraphContentEqual, isStaleSnapshot } from './flow-engine-draft-sync';
+import {
+  buildFlowDraftPersistPayload,
+  createTemplateGraph,
+  formatFlowOperationError,
+  getTemplateCreatedMessage,
+  resolveFlowContextInput,
+} from './flow-engine-controller-helpers';
+import { useDraftSaveQueue } from './flow-engine-draft-save-queue';
 import type {
+  DraftSaveStatus,
   FlowEngineController,
   FlowEnginePanelProps,
   TemplateKind,
@@ -69,17 +70,19 @@ export function useFlowEngineController({
   const [createTemplateKind, setCreateTemplateKind] = useState<TemplateKind>('starter');
   const [isWorkflowListOpen, setIsWorkflowListOpen] = useState(false);
   const [workflowListQuery, setWorkflowListQuery] = useState('');
-  const [archivingDefinitionId, setArchivingDefinitionId] = useState<number | null>(null);
+  const [deletingDefinitionId, setDeletingDefinitionId] = useState<number | null>(null);
   const [selectedDefinitionIds, setSelectedDefinitionIds] = useState<Set<number>>(new Set());
-  const [bulkArchiving, setBulkArchiving] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [optimisticDefinitions, setOptimisticDefinitions] = useState<
     Array<TradeFlowDefinition & { _addedAt?: number }>
   >([]);
+  const [deletedDefinitionIds, setDeletedDefinitionIds] = useState<Set<number>>(new Set());
   const [graph, setGraph] = useState<TradeFlowGraph>({ context: {}, nodes: [], edges: [] });
   const [contextForm, setContextForm] = useState<ContextFormState>(parseContextToForm({}));
   const [contextTab, setContextTab] = useState<'basic' | 'advanced'>('basic');
   const [validation, setValidation] = useState<FlowEngineController['state']['validation']>(null);
   const [busyAction, setBusyAction] = useState<FlowEngineController['state']['busyAction']>(null);
+  const [saveStatus, setSaveStatus] = useState<DraftSaveStatus>('idle');
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [autoSaveError, setAutoSaveError] = useState<string | null>(null);
@@ -90,7 +93,7 @@ export function useFlowEngineController({
   const [stoppingFlow, setStoppingFlow] = useState(false);
 
   const { data: botStatus } = useBotStatus();
-  const { livePrices: realtimeLivePrices } = useTradeFlowRealtime();
+  const { livePrices: realtimeLivePrices, setSavePaused, closeStream } = useTradeFlowRealtime();
   const { data: telegramConfig } = useConfig('telegram');
 
   const userTelegramBotTokenMasked = useMemo(() => {
@@ -116,8 +119,16 @@ export function useFlowEngineController({
   const draftNameRef = useRef(draftName);
   const draftDescriptionRef = useRef(draftDescription);
   const isGraphDirtyRef = useRef(isGraphDirty);
+  const selectionPreferenceRef = useRef<number | 'blank' | null>(null);
+  const blankStateAppliedRef = useRef(false);
+  const graphOwnerDefinitionIdRef = useRef<number | null>(null);
+  const autosaveTimeoutRef = useRef<number | null>(null);
   const canvasAutoSaveRevisionRef = useRef(0);
   const latestDetailSnapshotRef = useRef<ReturnType<typeof getFlowDetailSnapshotMeta>>(null);
+  const acknowledgeSuccessRef = useRef<(detail: TradeFlowDefinitionDetail) => void>(
+    () => {}
+  );
+  const resolveContextInputRef = useRef<() => { context: Record<string, unknown> | null; errorMessage: string | null }>(() => ({ context: {}, errorMessage: null }));
   selectedDefinitionIdRef.current = selectedDefinitionId;
   draftNameRef.current = draftName;
   draftDescriptionRef.current = draftDescription;
@@ -134,18 +145,90 @@ export function useFlowEngineController({
     canvasAutoSaveRevisionRef.current += 1;
     return canvasAutoSaveRevisionRef.current;
   }, []);
+  const clearScheduledAutosave = useCallback(() => {
+    if (autosaveTimeoutRef.current != null) {
+      window.clearTimeout(autosaveTimeoutRef.current);
+      autosaveTimeoutRef.current = null;
+    }
+  }, []);
+  const resetEditorToBlankState = useCallback(() => {
+    const blankGraph: TradeFlowGraph = { context: {}, nodes: [], edges: [] };
+    clearScheduledAutosave();
+    graphOwnerDefinitionIdRef.current = null;
+    setGraphState(blankGraph);
+    setContextForm(parseContextToForm({}));
+    setDraftName('');
+    setDraftDescription('');
+    setValidation(null);
+    setGraphDirtyState(false);
+    setAutoSaveError(null);
+    setSaveStatus('idle');
+    setLastHydratedSnapshotKey(null);
+    canvasAutoSaveRevisionRef.current = 0;
+    latestDetailSnapshotRef.current = null;
+  }, [clearScheduledAutosave, setGraphDirtyState, setGraphState]);
+  useEffect(() => {
+    return () => {
+      clearScheduledAutosave();
+    };
+  }, [clearScheduledAutosave]);
+  const stablePatchDraft = useCallback(
+    async (definitionId: number, payload: Record<string, unknown>) =>
+      (
+        await patchTradeFlowDefinitionDraft(definitionId, payload, {
+          timeoutMs: 60_000,
+        })
+      ).data,
+    []
+  );
+  const { queueDraftSave, waitForQueuedDraftSave } = useDraftSaveQueue({
+    acknowledgeSuccessRef,
+    patchDraft: stablePatchDraft,
+    revisionRef: canvasAutoSaveRevisionRef,
+    saveStatus,
+    selectedDefinitionIdRef,
+    setAutoSaveError,
+    setError,
+    setSaveStatus,
+  });
 
-  const { data: definitionsData, mutate: mutateDefinitions, isLoading: definitionsLoading } =
-    useTradeFlowDefinitions(1, 50, undefined, true);
+  const {
+    data: definitionsData,
+    error: rawDefinitionsError,
+    mutate: mutateDefinitions,
+    isLoading: definitionsLoading,
+  } = useTradeFlowDefinitions(
+    1,
+    50,
+    undefined,
+    false,
+    isGraphDirty || saveStatus === 'pending' || isSwitchingDefinition
+  );
+  const definitionsError = useMemo(
+    () =>
+      rawDefinitionsError instanceof Error
+        ? rawDefinitionsError
+        : rawDefinitionsError
+          ? new Error('Flow listesi yuklenemedi.')
+          : null,
+    [rawDefinitionsError]
+  );
+  const hasResolvedDefinitions = definitionsData !== undefined && definitionsError == null;
   const definitions = useMemo(() => definitionsData?.data ?? [], [definitionsData?.data]);
   const mergedDefinitions = useMemo(() => {
-    const serverVisible = definitions.filter((definition) => definition.status !== 'archived');
+    const serverVisible = definitions.filter(
+      (definition) =>
+        definition.status !== 'archived' && !deletedDefinitionIds.has(definition.id)
+    );
     const existingIds = new Set(serverVisible.map((definition) => definition.id));
     const optimisticMissing = optimisticDefinitions.filter(
-      (definition) => definition.status !== 'archived' && !existingIds.has(definition.id)
+      (definition) =>
+        definition.status !== 'archived' &&
+        !deletedDefinitionIds.has(definition.id) &&
+        !existingIds.has(definition.id)
     );
     return [...optimisticMissing, ...serverVisible];
-  }, [definitions, optimisticDefinitions]);
+  }, [definitions, deletedDefinitionIds, optimisticDefinitions]);
 
   useEffect(() => {
     if (optimisticDefinitions.length === 0) return;
@@ -159,11 +242,28 @@ export function useFlowEngineController({
       return next.length === previous.length ? previous : next;
     });
   }, [definitions, optimisticDefinitions.length]);
+  useEffect(() => {
+    if (deletedDefinitionIds.size === 0) return;
+    const serverIds = new Set(definitions.map((definition) => definition.id));
+    setDeletedDefinitionIds((previous) => {
+      const next = new Set(Array.from(previous).filter((definitionId) => serverIds.has(definitionId)));
+      return next.size === previous.size ? previous : next;
+    });
+  }, [definitions, deletedDefinitionIds.size]);
 
   const visibleDefinitions = useMemo(
     () => mergedDefinitions.filter((definition) => definition.status !== 'archived'),
     [mergedDefinitions]
   );
+  useEffect(() => {
+    const visibleDefinitionIds = new Set(visibleDefinitions.map((definition) => definition.id));
+    setSelectedDefinitionIds((previous) => {
+      const next = new Set(
+        Array.from(previous).filter((definitionId) => visibleDefinitionIds.has(definitionId))
+      );
+      return next.size === previous.size ? previous : next;
+    });
+  }, [visibleDefinitions]);
   const filteredDefinitions = useMemo(() => {
     const query = workflowListQuery.trim().toLowerCase();
     if (!query) return visibleDefinitions;
@@ -189,72 +289,188 @@ export function useFlowEngineController({
     setSelectedDefinitionIds(new Set());
   }, []);
 
-  const bulkArchiveDefinitions = useCallback(async () => {
+  const markDefinitionDeleted = useCallback(
+    (definitionId: number) => {
+      setDeletedDefinitionIds((previous) => {
+        const next = new Set(previous);
+        next.add(definitionId);
+        return next;
+      });
+      setOptimisticDefinitions((previous) =>
+        previous.filter((definition) => definition.id !== definitionId)
+      );
+      setSelectedDefinitionIds((previous) => {
+        if (!previous.has(definitionId)) return previous;
+        const next = new Set(previous);
+        next.delete(definitionId);
+        return next;
+      });
+      if (selectedDefinitionIdRef.current === definitionId) {
+        selectionPreferenceRef.current = 'blank';
+        setSelectedDefinitionId(null);
+        resetEditorToBlankState();
+      }
+      setValidation(null);
+    },
+    [resetEditorToBlankState]
+  );
+
+  const revalidateDeletedFlowCaches = useCallback(async () => {
+    await Promise.all([
+      mutateDefinitions(),
+      swrMutate(
+        (key: string) =>
+          typeof key === 'string' &&
+          (key.includes('/api/trade-flow/definitions') ||
+            key.includes('/api/trade-flow/runs') ||
+            key.includes('/api/trade-flow/events/recent'))
+      ),
+    ]);
+  }, [mutateDefinitions]);
+
+  const resolveContextInput = useCallback(
+    () => resolveFlowContextInput(contextTab, contextForm),
+    [contextForm, contextTab]
+  );
+  resolveContextInputRef.current = resolveContextInput;
+
+  const bulkDeleteDefinitions = useCallback(async () => {
     if (selectedDefinitionIds.size === 0) return;
     if (
       !window.confirm(
-        `${selectedDefinitionIds.size} workflow'u silmek (arsivlemek) istediginize emin misiniz?`
+        `${selectedDefinitionIds.size} workflow'u kalici olarak silmek istediginize emin misiniz?\n\nBu islem arsivleme yapmaz ve geri alinamaz.`
       )
     ) {
       return;
     }
-    setBulkArchiving(true);
+    setBusyAction('delete');
+    setBulkDeleting(true);
+    setError(null);
+    setMessage(null);
+    let deletedCount = 0;
+    const failedIds: number[] = [];
     try {
-      for (const id of selectedDefinitionIds) {
+      for (const id of Array.from(selectedDefinitionIds)) {
         try {
-          await archiveTradeFlowDefinition(id);
+          await deleteTradeFlowDefinition(id);
+          markDefinitionDeleted(id);
+          deletedCount += 1;
         } catch (err) {
-          console.error(`Failed to archive definition ${id}:`, err);
+          failedIds.push(id);
+          console.error(`Failed to delete definition ${id}:`, err);
         }
       }
-      setSelectedDefinitionIds(new Set());
-      swrMutate((key: string) => typeof key === 'string' && key.includes('/api/trade-flow/definitions'));
+      await revalidateDeletedFlowCaches();
+      if (deletedCount > 0) {
+        setMessage(`${deletedCount} workflow kalici olarak silindi.`);
+      }
+      if (failedIds.length > 0) {
+        setError(
+          `Su workflow'ler silinemedi: ${failedIds.map((id) => `#${id}`).join(', ')}.`
+        );
+      }
     } finally {
-      setBulkArchiving(false);
+      setBulkDeleting(false);
+      setBusyAction(null);
     }
-  }, [selectedDefinitionIds]);
+  }, [markDefinitionDeleted, revalidateDeletedFlowCaches, selectedDefinitionIds]);
 
   const saveCurrentDraftBeforeSwitch = useCallback(
     async (definitionId: number) => {
-      if (!isGraphDirtyRef.current) return;
+      clearScheduledAutosave();
+      await waitForQueuedDraftSave();
+
+      const currentDefinition =
+        visibleDefinitions.find((definition) => definition.id === definitionId) ?? null;
       const graphSnapshot = graphRef.current;
-      const contextSnapshot = isRecord(graphSnapshot.context) ? graphSnapshot.context : {};
-      const name = draftNameRef.current.trim();
-      if (!name) {
-        throw new Error('Flow adi bos olamaz.');
+      const currentContext = isRecord(graphSnapshot.context) ? graphSnapshot.context : {};
+      const { context: resolvedContext, errorMessage } = resolveContextInput();
+      if (!resolvedContext) {
+        throw new Error(errorMessage ?? 'Context JSON hatali.');
       }
-      await patchTradeFlowDefinitionDraft(definitionId, {
-        name,
-        description: draftDescriptionRef.current.trim() || null,
-        graphJson: { ...graphSnapshot, context: contextSnapshot },
-      });
+      const nextName = draftNameRef.current.trim();
+      const nextDescription = draftDescriptionRef.current.trim();
+      const currentName = currentDefinition?.name.trim() ?? '';
+      const currentDescription = (currentDefinition?.description ?? '').trim();
+      const hasMetadataChanges =
+        nextName !== currentName || nextDescription !== currentDescription;
+      const hasContextChanges =
+        JSON.stringify(currentContext) !== JSON.stringify(resolvedContext);
+      if (!isGraphDirtyRef.current && !hasMetadataChanges && !hasContextChanges) return;
+
+      const payload = buildFlowDraftPersistPayload(
+        { ...graphSnapshot, context: resolvedContext },
+        draftNameRef.current,
+        draftDescriptionRef.current
+      );
+      setSaveStatus('pending');
+      setAutoSaveError(null);
+      try {
+        await patchTradeFlowDefinitionDraft(
+          definitionId,
+          {
+            ...payload,
+            syncNormalizedTables: false,
+          },
+          { timeoutMs: 60_000, retries: 0 }
+        );
+        if (selectedDefinitionIdRef.current === definitionId) {
+          setSaveStatus('idle');
+          setAutoSaveError(null);
+        }
+      } catch (err) {
+        const reason = formatFlowOperationError(err, 'Draft kaydedilemedi.');
+        if (selectedDefinitionIdRef.current === definitionId) {
+          setSaveStatus('error');
+          setAutoSaveError(reason);
+        }
+        throw new Error(reason);
+      }
       await Promise.all([
         mutateDefinitions(),
         swrMutate(`/api/trade-flow/definitions/${definitionId}`),
       ]);
     },
-    [mutateDefinitions]
+    [
+      mutateDefinitions,
+      setAutoSaveError,
+      setSaveStatus,
+      clearScheduledAutosave,
+      resolveContextInput,
+      visibleDefinitions,
+      waitForQueuedDraftSave,
+    ]
   );
 
   const requestDefinitionSwitch = useCallback(
     async (nextDefinitionId: number) => {
       if (!Number.isFinite(nextDefinitionId) || nextDefinitionId <= 0) return false;
       if (switchLockRef.current) return false;
+      if (hasPendingCanvasNodeDraft) {
+        const reason = "Node formunda uygulanmamis degisiklik var. Once 'Node Guncelle' kullanin.";
+        setError(reason);
+        toast.error(reason);
+        return false;
+      }
       const currentDefinitionId = selectedDefinitionIdRef.current;
       if (currentDefinitionId === nextDefinitionId) return true;
 
       switchLockRef.current = true;
+      selectionPreferenceRef.current = nextDefinitionId;
       setIsSwitchingDefinition(true);
+      invalidateCanvasAutoSaveRevision();
       setError(null);
       setMessage(null);
       try {
-        if (currentDefinitionId && isGraphDirtyRef.current) {
+        if (currentDefinitionId) {
           await saveCurrentDraftBeforeSwitch(currentDefinitionId);
           setAutoSaveError(null);
+          setSaveStatus('idle');
           setMessage(`Workflow #${currentDefinitionId} icin draft otomatik kaydedildi.`);
         }
+        resetEditorToBlankState();
+        setSelectedDefinitionIds(new Set());
         setSelectedDefinitionId(nextDefinitionId);
-        setGraphDirtyState(false);
         setAutoSaveError(null);
         setLastHydratedSnapshotKey(null);
         return true;
@@ -267,35 +483,85 @@ export function useFlowEngineController({
         setIsSwitchingDefinition(false);
       }
     },
-    [saveCurrentDraftBeforeSwitch, setGraphDirtyState]
+    [
+      hasPendingCanvasNodeDraft,
+      invalidateCanvasAutoSaveRevision,
+      resetEditorToBlankState,
+      saveCurrentDraftBeforeSwitch,
+    ]
   );
+
+  const { data: detailData, error: detailError, mutate: mutateDetail } = useTradeFlowDefinitionDetail(
+    selectedDefinitionId,
+    isGraphDirty || saveStatus === 'pending'
+  );
+  const detail = useMemo(() => detailData?.data ?? null, [detailData?.data]);
+  const detailFetchSettled = detailData !== undefined || detailError != null;
 
   useEffect(() => {
     if (visibleDefinitions.length === 0) {
-      if (definitionsLoading || busyAction) return;
-      setSelectedDefinitionId(null);
-      setGraphDirtyState(false);
-      setLastHydratedSnapshotKey(null);
+      if (
+        definitionsLoading ||
+        busyAction ||
+        definitionsError ||
+        !hasResolvedDefinitions ||
+        (detail?.definition?.id != null && detail.definition.id === selectedDefinitionId) ||
+        (selectedDefinitionId != null && !detailFetchSettled)
+      ) {
+        return;
+      }
+      if (!blankStateAppliedRef.current) {
+        blankStateAppliedRef.current = true;
+        selectionPreferenceRef.current = 'blank';
+        if (selectedDefinitionId !== null) {
+          setSelectedDefinitionId(null);
+        }
+        setSelectedDefinitionIds((previous) => (previous.size === 0 ? previous : new Set()));
+        resetEditorToBlankState();
+      }
       return;
     }
+    blankStateAppliedRef.current = false;
+
+    const selectionPreference = selectionPreferenceRef.current;
+    if (selectionPreference === 'blank' && !selectedDefinitionId) {
+      return;
+    }
+    if (typeof selectionPreference === 'number') {
+      const preferredVisible = visibleDefinitions.some(
+        (definition) => definition.id === selectionPreference
+      );
+      if (selectedDefinitionId === selectionPreference && preferredVisible) {
+        selectionPreferenceRef.current = null;
+      } else if (preferredVisible) {
+        void requestDefinitionSwitch(selectionPreference);
+        return;
+      } else if (busyAction === 'create') {
+        return;
+      } else {
+        selectionPreferenceRef.current = null;
+      }
+    }
+
     const stillExists = visibleDefinitions.some(
       (definition) => definition.id === selectedDefinitionId
     );
-    if (!selectedDefinitionId || !stillExists) {
+    if ((!selectedDefinitionId || !stillExists) && !definitionsError && hasResolvedDefinitions) {
       void requestDefinitionSwitch(visibleDefinitions[0].id);
     }
   }, [
     busyAction,
+    definitionsError,
+    detail?.definition?.id,
+    detailFetchSettled,
+    hasResolvedDefinitions,
     definitionsLoading,
     requestDefinitionSwitch,
+    resetEditorToBlankState,
     selectedDefinitionId,
-    setGraphDirtyState,
     visibleDefinitions,
   ]);
 
-  const { data: detailData, mutate: mutateDetail } =
-    useTradeFlowDefinitionDetail(selectedDefinitionId);
-  const detail = useMemo(() => detailData?.data ?? null, [detailData?.data]);
   const selectedDefinition = useMemo(() => {
     if (detail?.definition && detail.definition.id === selectedDefinitionId) {
       return detail.definition;
@@ -308,13 +574,20 @@ export function useFlowEngineController({
   useEffect(() => {
     setGraphDirtyState(false);
     setAutoSaveError(null);
+    setSaveStatus('idle');
     setLastHydratedSnapshotKey(null);
     canvasAutoSaveRevisionRef.current = 0;
     latestDetailSnapshotRef.current = null;
   }, [selectedDefinitionId, setGraphDirtyState]);
 
+  useEffect(() => {
+    setSavePaused(isGraphDirty || saveStatus === 'pending');
+  }, [isGraphDirty, saveStatus, setSavePaused]);
+
   const { data: openPositionsData, isLoading: openPositionsLoading } =
-    useTradeFlowOpenPositions();
+    useTradeFlowOpenPositions(
+      isGraphDirty || saveStatus === 'pending' || isSwitchingDefinition
+    );
   const openPositions = useMemo(() => openPositionsData?.data ?? [], [openPositionsData?.data]);
   const openPositionsMeta = useMemo(
     () => openPositionsData?.meta ?? null,
@@ -340,6 +613,7 @@ export function useFlowEngineController({
     }
     latestDetailSnapshotRef.current = nextSnapshot;
     const normalized = deepCloneGraph(nextDetail.draftVersion.graph_json);
+    graphOwnerDefinitionIdRef.current = nextDetail.definition.id;
     setGraphState(normalized);
     setContextForm(parseContextToForm(normalized.context || {}));
     setDraftName(nextDetail.definition.name);
@@ -352,33 +626,38 @@ export function useFlowEngineController({
     return true;
   }, [primeDetailCache, setGraphDirtyState, setGraphState]);
 
-  useEffect(() => {
-    if (!detail?.draftVersion || !incomingSnapshotKey) return;
-    if (isGraphDirtyRef.current) return;
-    if (incomingSnapshotKey === lastHydratedSnapshotKey) return;
-    hydrateEditorFromDetail(detail);
-  }, [detail, hydrateEditorFromDetail, incomingSnapshotKey, lastHydratedSnapshotKey]);
+  const acknowledgeSuccess = useCallback((updatedDetail: TradeFlowDefinitionDetail) => {
+    primeDetailCache(updatedDetail);
+    latestDetailSnapshotRef.current = getFlowDetailSnapshotMeta(updatedDetail);
+    setLastHydratedSnapshotKey(buildDetailSnapshotKey(updatedDetail));
 
-  const resolveContextInput = useCallback(() => {
-    if (contextTab === 'advanced') {
-      try {
-        const parsed = JSON.parse(contextForm.advancedJson) as unknown;
-        if (!isRecord(parsed)) throw new Error('Context JSON nesne olmali.');
-        return { context: parsed as Record<string, unknown>, errorMessage: null };
-      } catch (err) {
-        return {
-          context: null,
-          errorMessage:
-            err instanceof Error ? `Context JSON hatali: ${err.message}` : 'Context JSON hatali.',
-        };
-      }
+    if (!updatedDetail.draftVersion) {
+      setGraphDirtyState(false);
+      setAutoSaveError(null);
+      return;
     }
 
-    return {
-      context: buildContextFromForm(contextForm),
-      errorMessage: null,
-    };
-  }, [contextForm, contextTab]);
+    const serverGraph = deepCloneGraph(updatedDetail.draftVersion.graph_json);
+    if (!isGraphContentEqual(graphRef.current, serverGraph)) {
+      hydrateEditorFromDetail(updatedDetail);
+      return;
+    }
+
+    setGraphDirtyState(false);
+    setAutoSaveError(null);
+  }, [hydrateEditorFromDetail, primeDetailCache, setGraphDirtyState]);
+  acknowledgeSuccessRef.current = acknowledgeSuccess;
+
+  useEffect(() => {
+    if (!detail?.draftVersion || !incomingSnapshotKey) return;
+    if (detail.definition.id !== selectedDefinitionId) return;
+    if (isGraphDirtyRef.current) return;
+    if (saveStatus === 'pending') return;
+    if (incomingSnapshotKey === lastHydratedSnapshotKey) return;
+    const incoming = getFlowDetailSnapshotMeta(detail);
+    if (isStaleSnapshot(incoming, latestDetailSnapshotRef.current)) return;
+    hydrateEditorFromDetail(detail);
+  }, [detail, hydrateEditorFromDetail, incomingSnapshotKey, lastHydratedSnapshotKey, saveStatus, selectedDefinitionId]);
 
   const applyResolvedContext = useCallback(
     (parsed: Record<string, unknown>) => {
@@ -404,55 +683,30 @@ export function useFlowEngineController({
     return applyResolvedContext(context);
   };
 
-  const buildDraftPersistPayload = (graphJson: TradeFlowGraph) => {
-    const name = draftName.trim();
-    if (!name) {
-      throw new Error('Flow adi bos olamaz.');
-    }
-    return {
-      name,
-      description: draftDescription.trim() || null,
-      graphJson,
-    };
-  };
-
-  const formatOperationError = (err: unknown, fallback: string) =>
-    formatClientRequestError(err, fallback);
-
   const createFromTemplate = async (kind: TemplateKind) => {
     const name = createName.trim();
     if (!name) {
       setError('Yeni flow icin ad zorunlu.');
       return;
     }
+    const currentDefinitionId = selectedDefinitionIdRef.current;
     setBusyAction('create');
     setError(null);
     setMessage(null);
     try {
-      const templateMap: Record<TemplateKind, () => TradeFlowGraph> = {
-        starter: () => createStarterTradeFlowGraph(defaultMarketSlug, defaultOutcome),
-        sell_buy_if: () => createSellBuyIfElseTemplate(defaultMarketSlug, defaultOutcome),
-        dca: () => createDcaTradeFlowGraph(defaultMarketSlug, defaultOutcome),
-        sl_tp: () => createStopLossTakeProfitGraph(defaultMarketSlug, defaultOutcome),
-        position_monitor: () =>
-          createPositionMonitorNotifyGraph(defaultMarketSlug, defaultOutcome),
-        multi_leg_hedge: () => createMultiLegHedgeGraph(defaultMarketSlug, defaultOutcome),
-      };
-      const templateLabels: Record<TemplateKind, string> = {
-        starter: 'Starter flow olusturuldu.',
-        sell_buy_if: 'Satis + If/Else + Alis sablonu olusturuldu.',
-        dca: 'DCA sablonu olusturuldu.',
-        sl_tp: 'Stop Loss + Take Profit sablonu olusturuldu.',
-        position_monitor: 'Pozisyon Izleme + Bildirim sablonu olusturuldu.',
-        multi_leg_hedge: 'Multi-Leg Hedge sablonu olusturuldu.',
-      };
-      const template = templateMap[kind]();
+      if (currentDefinitionId) {
+        await saveCurrentDraftBeforeSwitch(currentDefinitionId);
+        setAutoSaveError(null);
+        setSaveStatus('idle');
+      }
+      const template = createTemplateGraph(kind, defaultMarketSlug, defaultOutcome);
       const created = await createTradeFlowDefinition({
         name,
         description: createDescription.trim() || null,
         graphJson: template,
       });
       const createdDetail = created.data;
+      selectionPreferenceRef.current = createdDetail.definition.id;
       setOptimisticDefinitions((previous) => {
         const next = [
           { ...createdDetail.definition, _addedAt: Date.now() },
@@ -468,10 +722,12 @@ export function useFlowEngineController({
       if (!switched) return;
       hydrateEditorFromDetail(createdDetail);
       setValidation(null);
-      setMessage(templateLabels[kind]);
+      setMessage(getTemplateCreatedMessage(kind));
       await mutateDefinitions();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Flow olusturulamadi.');
+      setError(
+        err instanceof Error ? err.message : 'Flow olusturulamadi.'
+      );
     } finally {
       setBusyAction(null);
     }
@@ -480,6 +736,10 @@ export function useFlowEngineController({
   const validateGraph = async () => {
     if (!selectedDefinitionId) {
       setError('Once bir flow secin.');
+      return;
+    }
+    if (!isEditorOwned(selectedDefinitionIdRef.current, graphOwnerDefinitionIdRef.current) || isSwitchingDefinition) {
+      setError('Flow yuklenmeden duzenleme yapilamaz.');
       return;
     }
     const { context: ctx, errorMessage } = resolveContextInput();
@@ -502,7 +762,7 @@ export function useFlowEngineController({
           : 'Flow dogrulamada sorunlar bulundu.'
       );
     } catch (err) {
-      setError(formatOperationError(err, 'Dogrulama yapilamadi.'));
+      setError(formatFlowOperationError(err, 'Dogrulama yapilamadi.'));
     } finally {
       setBusyAction(null);
     }
@@ -534,7 +794,7 @@ export function useFlowEngineController({
       setAutoSaveError(null);
       setMessage('Draft sunucudan yeniden yuklendi.');
     } catch (err) {
-      setError(formatOperationError(err, 'Draft sunucudan yuklenemedi.'));
+      setError(formatFlowOperationError(err, 'Draft sunucudan yuklenemedi.'));
     } finally {
       setBusyAction(null);
     }
@@ -553,6 +813,10 @@ export function useFlowEngineController({
       setError('Once bir flow secin.');
       return;
     }
+    if (!isEditorOwned(selectedDefinitionIdRef.current, graphOwnerDefinitionIdRef.current) || isSwitchingDefinition) {
+      setError('Flow yuklenmeden duzenleme yapilamaz.');
+      return;
+    }
     const { context: ctx, errorMessage } = resolveContextInput();
     if (!ctx) {
       setError(errorMessage ?? 'Context JSON hatali.');
@@ -563,17 +827,26 @@ export function useFlowEngineController({
     setError(null);
     setMessage(null);
     try {
-      invalidateCanvasAutoSaveRevision();
-      const payload = buildDraftPersistPayload({ ...graphRef.current, context: ctx });
+      clearScheduledAutosave();
+      const revision = invalidateCanvasAutoSaveRevision();
+      const payload = buildFlowDraftPersistPayload(
+        { ...graphRef.current, context: ctx },
+        draftName,
+        draftDescription
+      );
       setGraphState(payload.graphJson);
-      const updated = await patchTradeFlowDefinitionDraft(selectedDefinitionId, payload);
-      hydrateEditorFromDetail(updated.data);
-      setAutoSaveError(null);
+      await queueDraftSave(selectedDefinitionId, {
+        ...payload,
+        syncNormalizedTables: false,
+      }, {
+        errorMessage: 'Draft kaydedilemedi.',
+        revision,
+      });
       setMessage('Draft flow kaydedildi.');
       await mutateDefinitions();
       await mutateDetail();
     } catch (err) {
-      const reason = formatOperationError(err, 'Draft kaydedilemedi.');
+      const reason = formatFlowOperationError(err, 'Draft kaydedilemedi.');
       setAutoSaveError(reason);
       setError(reason);
     } finally {
@@ -586,7 +859,18 @@ export function useFlowEngineController({
       setError('Once bir flow secin.');
       return;
     }
-    if (autoSaveError) {
+    if (!isEditorOwned(selectedDefinitionIdRef.current, graphOwnerDefinitionIdRef.current) || isSwitchingDefinition) {
+      setError('Flow yuklenmeden duzenleme yapilamaz.');
+      return;
+    }
+    if (saveStatus === 'pending') {
+      try {
+        await waitForQueuedDraftSave();
+      } catch {
+        // Queue failure is handled by autoSaveError below.
+      }
+    }
+    if (saveStatus === 'error' || autoSaveError) {
       setError(
         'Autosave/PATCH hatasi duzelmeden publish edilemez. Draft Kaydet veya Taslagi Sunucudan Yukle kullan.'
       );
@@ -621,20 +905,29 @@ export function useFlowEngineController({
     let ensuredSourceTradeId: number | null = null;
     let ensuredSourceTradeCreated = false;
     try {
-      invalidateCanvasAutoSaveRevision();
+      clearScheduledAutosave();
+      const revision = invalidateCanvasAutoSaveRevision();
       const baseDraftGraph: TradeFlowGraph = { ...graphRef.current, context: ctx };
       const prepared = await prepareDualDcaGraphForPublish(
         baseDraftGraph,
         publishDefinitionId,
         ensureDualDcaSourceTrade
       );
-      const payload = buildDraftPersistPayload(prepared.graphJson);
+      const payload = buildFlowDraftPersistPayload(
+        prepared.graphJson,
+        draftName,
+        draftDescription
+      );
       ensuredSourceTradeId = prepared.sourceTradeId;
       ensuredSourceTradeCreated = prepared.created;
       setGraphState(payload.graphJson);
-      await patchTradeFlowDefinitionDraft(publishDefinitionId, payload);
-      setGraphDirtyState(false);
-      setAutoSaveError(null);
+      await queueDraftSave(publishDefinitionId, {
+        ...payload,
+        syncNormalizedTables: false,
+      }, {
+        errorMessage: 'Draft kaydedilemedi.',
+        revision,
+      });
       draftSaved = true;
       const published = await publishTradeFlowDefinition(publishDefinitionId);
       hydrateEditorFromDetail(published.data);
@@ -657,7 +950,7 @@ export function useFlowEngineController({
       await mutateDefinitions();
       await mutateDetail();
     } catch (err) {
-      const reason = formatOperationError(err, 'Flow publish edilemedi.');
+      const reason = formatFlowOperationError(err, 'Flow publish edilemedi.');
       const errMsg = draftSaved
         ? `Draft kaydedildi ama publish basarisiz (${publishLabel}). Neden: ${reason}`
         : `Publish basarisiz (${publishLabel}). Neden: ${reason}`;
@@ -671,70 +964,81 @@ export function useFlowEngineController({
     }
   };
 
-  const archiveFlow = async () => {
+  const deleteFlow = async () => {
     if (!selectedDefinitionId) {
       setError('Once bir flow secin.');
       return;
     }
     const targetId = selectedDefinitionId;
-    setBusyAction('archive');
+    const target =
+      selectedDefinition ??
+      visibleDefinitions.find((definition) => definition.id === targetId) ??
+      null;
+    const label = target ? `#${target.id} - ${target.name}` : `#${targetId}`;
+    setBusyAction('delete');
     setError(null);
     setMessage(null);
     try {
-      const archived = await archiveTradeFlowDefinition(targetId);
-      setOptimisticDefinitions((previous) =>
-        previous.filter((definition) => definition.id !== targetId)
-      );
-      hydrateEditorFromDetail(archived.data);
-      setValidation(null);
-      setMessage('Flow arsive alindi. Aktif run varsa iptal edildi.');
-      await mutateDefinitions();
-      await mutateDetail();
+      await deleteTradeFlowDefinition(targetId);
+      markDefinitionDeleted(targetId);
+      await revalidateDeletedFlowCaches();
+      setMessage(`${label} kalici olarak silindi. Aktif run/order/job akisi varsa durduruldu.`);
+      toast.success(`${label} kalici olarak silindi.`);
     } catch (err) {
-      setError(formatOperationError(err, 'Flow arsive alinamadi.'));
+      const reason = formatFlowOperationError(err, 'Flow kalici olarak silinemedi.');
+      setError(reason);
+      toast.error(reason);
     } finally {
       setBusyAction(null);
     }
   };
 
-  const archiveFlowFromList = async (definitionId: number) => {
+  const deleteFlowFromList = async (definitionId: number) => {
     const target = visibleDefinitions.find((definition) => definition.id === definitionId);
     const label = target ? `#${target.id} - ${target.name}` : `#${definitionId}`;
-    if (!window.confirm(`${label} workflow silinsin mi? Bu islem arsivleme yapar.`)) return;
+    if (
+      !window.confirm(
+        `${label} workflow kalici olarak silinsin mi?\n\nBu islem arsivleme yapmaz ve geri alinamaz.`
+      )
+    ) {
+      return;
+    }
 
-    setBusyAction('archive');
-    setArchivingDefinitionId(definitionId);
+    setBusyAction('delete');
+    setDeletingDefinitionId(definitionId);
     setError(null);
     setMessage(null);
     try {
-      await archiveTradeFlowDefinition(definitionId);
-      setOptimisticDefinitions((previous) =>
-        previous.filter((definition) => definition.id !== definitionId)
-      );
-      if (selectedDefinitionId === definitionId) {
-        setSelectedDefinitionId(null);
-      }
-      setValidation(null);
-      setMessage(`Workflow ${label} silindi (arsivlendi).`);
-      await mutateDefinitions();
-      await mutateDetail();
+      await deleteTradeFlowDefinition(definitionId);
+      markDefinitionDeleted(definitionId);
+      await revalidateDeletedFlowCaches();
+      setMessage(`Workflow ${label} kalici olarak silindi.`);
+      toast.success(`Workflow ${label} kalici olarak silindi.`);
     } catch (err) {
-      setError(formatOperationError(err, 'Workflow silinemedi.'));
+      const reason = formatFlowOperationError(err, 'Workflow kalici olarak silinemedi.');
+      setError(reason);
+      toast.error(reason);
     } finally {
-      setArchivingDefinitionId(null);
+      setDeletingDefinitionId(null);
       setBusyAction(null);
     }
   };
 
-  const confirmAndArchiveCurrentFlow = async () => {
+  const confirmAndDeleteCurrentFlow = async () => {
     if (!selectedDefinitionId) {
       setError('Once bir flow secin.');
       return;
     }
     const target = visibleDefinitions.find((definition) => definition.id === selectedDefinitionId);
     const label = target ? `#${target.id} - ${target.name}` : `#${selectedDefinitionId}`;
-    if (!window.confirm(`${label} workflow silinsin mi? Bu islem arsivleme yapar.`)) return;
-    await archiveFlow();
+    if (
+      !window.confirm(
+        `${label} workflow kalici olarak silinsin mi?\n\nBu islem arsivleme yapmaz, aktif run/order/job akisini durdurur ve geri alinamaz.`
+      )
+    ) {
+      return;
+    }
+    await deleteFlow();
   };
 
   const handleStopFlow = async () => {
@@ -782,7 +1086,7 @@ export function useFlowEngineController({
         ),
       ]);
     } catch (err) {
-      const reason = formatOperationError(err, 'Workflow durdurulamadi.');
+      const reason = formatFlowOperationError(err, 'Workflow durdurulamadi.');
       setError(reason);
       toast.error(reason);
     } finally {
@@ -790,68 +1094,105 @@ export function useFlowEngineController({
     }
   };
 
-  const updateGraphFromCanvas = (
-    nextGraph: TradeFlowGraph,
-    options?: { allowGraphShrink?: boolean }
-  ) => {
-    const currentGraph = graphRef.current;
-    const nextNodeKeys = new Set(nextGraph.nodes.map((node) => node.key));
-    const nextEdgeKeys = new Set(nextGraph.edges.map((edge) => edge.key));
-    const droppedExistingNodeWithoutPermission =
-      !options?.allowGraphShrink &&
-      currentGraph.nodes.some((node) => !nextNodeKeys.has(node.key));
-    const droppedExistingEdgeWithoutPermission =
-      !options?.allowGraphShrink &&
-      currentGraph.edges.some((edge) => !nextEdgeKeys.has(edge.key));
-    if (droppedExistingNodeWithoutPermission || droppedExistingEdgeWithoutPermission) {
-      return;
-    }
+  const updateGraphFromCanvas = useCallback(
+    (nextGraph: TradeFlowGraph, options?: { allowGraphShrink?: boolean }) => {
+      const definitionId = selectedDefinitionIdRef.current;
+      const graphOwnerDefinitionId = graphOwnerDefinitionIdRef.current;
+      if (!definitionId || graphOwnerDefinitionId !== definitionId || isSwitchingDefinition) {
+        setError('Flow yuklenmeden duzenleme yapilamaz.');
+        return;
+      }
+      const currentGraph = graphRef.current;
+      const nextNodeKeys = new Set(nextGraph.nodes.map((node) => node.key));
+      const nextEdgeKeys = new Set(nextGraph.edges.map((edge) => edge.key));
+      const droppedExistingNodeWithoutPermission =
+        !options?.allowGraphShrink &&
+        currentGraph.nodes.some((node) => !nextNodeKeys.has(node.key));
+      const droppedExistingEdgeWithoutPermission =
+        !options?.allowGraphShrink &&
+        currentGraph.edges.some((edge) => !nextEdgeKeys.has(edge.key));
+      if (droppedExistingNodeWithoutPermission || droppedExistingEdgeWithoutPermission) {
+        return;
+      }
 
-    const { context: ctx, errorMessage } = resolveContextInput();
-    if (!ctx) {
-      setError(errorMessage ?? 'Context JSON hatali.');
-      return;
-    }
+      const { context: ctx, errorMessage } = resolveContextInputRef.current();
+      if (!ctx) {
+        setError(errorMessage ?? 'Context JSON hatali.');
+        return;
+      }
 
-    const optimisticGraph = { ...nextGraph, context: ctx };
-    const definitionId = selectedDefinitionIdRef.current;
-    const revision = invalidateCanvasAutoSaveRevision();
-    setGraphState(optimisticGraph);
-    setGraphDirtyState(true);
-    setValidation(null);
-    setError(null);
-    if (!definitionId) return;
+      const optimisticGraph = { ...nextGraph, context: ctx };
+      const revision = invalidateCanvasAutoSaveRevision();
+      setGraphState(optimisticGraph);
+      setGraphDirtyState(true);
+      setValidation(null);
+      setError(null);
+      if (!definitionId) return;
 
-    const fallbackName = draftName.trim() || 'Untitled';
-    const payload = {
-      name: fallbackName,
-      description: draftDescription.trim() || null,
-      graphJson: optimisticGraph,
-    };
-    void patchTradeFlowDefinitionDraft(definitionId, payload)
-      .then((updated) => {
-        if (selectedDefinitionIdRef.current !== definitionId) return;
-        if (canvasAutoSaveRevisionRef.current !== revision) return;
-        hydrateEditorFromDetail(updated.data);
-        setAutoSaveError(null);
-      })
-      .catch((err) => {
-        if (selectedDefinitionIdRef.current !== definitionId) return;
-        if (canvasAutoSaveRevisionRef.current !== revision) return;
-        const reason = formatOperationError(err, 'Autosave basarisiz.');
-        setAutoSaveError(reason);
-        setError(reason);
-        console.warn('[auto-save] PATCH failed:', err);
-      });
-  };
+      clearScheduledAutosave();
+      autosaveTimeoutRef.current = window.setTimeout(() => {
+        autosaveTimeoutRef.current = null;
+        if (
+          selectedDefinitionIdRef.current !== definitionId ||
+          graphOwnerDefinitionIdRef.current !== definitionId ||
+          isSwitchingDefinition
+        ) {
+          return;
+        }
+        closeStream();
+        void (async () => {
+          await new Promise((r) => setTimeout(r, 50));
+          await queueDraftSave(
+            definitionId,
+            {
+              graphJson: optimisticGraph,
+              syncNormalizedTables: false,
+            },
+            {
+              errorMessage: 'Autosave basarisiz.',
+              revision,
+              surfaceError: true,
+            }
+          ).catch((err) => {
+            if (
+              selectedDefinitionIdRef.current !== definitionId ||
+              canvasAutoSaveRevisionRef.current !== revision
+            ) {
+              return;
+            }
+            console.warn('[auto-save] PATCH failed:', err);
+          });
+        })();
+      }, 200);
+    },
+    [
+      clearScheduledAutosave,
+      closeStream,
+      invalidateCanvasAutoSaveRevision,
+      isSwitchingDefinition,
+      queueDraftSave,
+      setGraphDirtyState,
+      setGraphState,
+    ]
+  );
 
   const isActionBusy = busyAction !== null || isSwitchingDefinition;
-  const publishDisabled = isActionBusy || Boolean(autoSaveError);
+  const publishDisabled =
+    isActionBusy || saveStatus === 'pending' || Boolean(autoSaveError);
+  const editorOwned = isEditorOwned(
+    selectedDefinitionId,
+    graphOwnerDefinitionIdRef.current
+  );
+  const isEditorReadOnly = isSwitchingDefinition || !editorOwned;
+  const readOnlyReason = !selectedDefinitionId
+    ? 'Once bir flow secin.'
+    : 'Flow yukleniyor. Yukleme bitmeden duzenleme yapilamaz.';
 
   const applyCanvasContextPatch = useCallback(
     async (patch: Record<string, unknown>, successMessage?: string) => {
       const definitionId = selectedDefinitionIdRef.current;
-      if (!definitionId) {
+      const graphOwnerDefinitionId = graphOwnerDefinitionIdRef.current;
+      if (!definitionId || graphOwnerDefinitionId !== definitionId || isSwitchingDefinition) {
         setError('Once bir flow secin.');
         return;
       }
@@ -862,16 +1203,7 @@ export function useFlowEngineController({
       const previousIsGraphDirty = isGraphDirtyRef.current;
       const mergedContext = mergeGraphContextPatch(previousGraph.context, patch);
       const nextGraph: TradeFlowGraph = { ...previousGraph, context: mergedContext };
-      const fallbackName =
-        visibleDefinitions.find((definition) => definition.id === definitionId)?.name ||
-        'Untitled';
-      const payload = {
-        name: draftNameRef.current.trim() || fallbackName,
-        description: draftDescriptionRef.current.trim() || null,
-        graphJson: nextGraph,
-      };
-
-      invalidateCanvasAutoSaveRevision();
+      const revision = invalidateCanvasAutoSaveRevision();
       setGraphState(nextGraph);
       setGraphDirtyState(true);
       setContextForm(parseContextToForm(mergedContext));
@@ -880,8 +1212,14 @@ export function useFlowEngineController({
       setMessage(null);
 
       try {
-        const updated = await patchTradeFlowDefinitionDraft(definitionId, payload);
-        hydrateEditorFromDetail(updated.data);
+        await queueDraftSave(
+          definitionId,
+          { graphJson: nextGraph },
+          {
+            errorMessage: 'Autoclaim degisikligi kaydedilemedi.',
+            revision,
+          }
+        );
         if (successMessage) {
           setMessage(successMessage);
         }
@@ -891,18 +1229,18 @@ export function useFlowEngineController({
         setContextForm(parseContextToForm(previousContext));
         setValidation(previousValidation);
         setGraphDirtyState(previousIsGraphDirty);
-        setError(formatOperationError(err, 'Autoclaim degisikligi kaydedilemedi.'));
+        setError(formatFlowOperationError(err, 'Autoclaim degisikligi kaydedilemedi.'));
       }
     },
     [
-      hydrateEditorFromDetail,
       invalidateCanvasAutoSaveRevision,
       mutateDefinitions,
       mutateDetail,
+      isSwitchingDefinition,
+      queueDraftSave,
       setGraphDirtyState,
       setGraphState,
       validation,
-      visibleDefinitions,
     ]
   );
 
@@ -920,23 +1258,27 @@ export function useFlowEngineController({
       createTemplateKind,
       isWorkflowListOpen,
       workflowListQuery,
-      archivingDefinitionId,
+      deletingDefinitionId,
       selectedDefinitionIds,
-      bulkArchiving,
+      bulkDeleting,
       graph,
       contextForm,
       contextTab,
       validation,
       busyAction,
+      saveStatus,
       message,
       error,
       autoSaveError,
       stoppingFlow,
       isActionBusy,
+      isEditorReadOnly,
+      readOnlyReason,
       publishDisabled,
     },
     data: {
       definitionsLoading,
+      definitionsError,
       visibleDefinitions,
       filteredDefinitions,
       detail,
@@ -966,8 +1308,8 @@ export function useFlowEngineController({
       validateGraph,
       reloadDraftFromServer,
       publishFlow,
-      confirmAndArchiveCurrentFlow,
-      archiveFlowFromList,
+      confirmAndDeleteCurrentFlow,
+      deleteFlowFromList,
       handleStopFlow,
       updateGraphFromCanvas,
       applyContextFromForm,
@@ -976,7 +1318,7 @@ export function useFlowEngineController({
       toggleDefinitionSelection,
       selectAllDefinitions,
       deselectAllDefinitions,
-      bulkArchiveDefinitions,
+      bulkDeleteDefinitions,
     },
   };
 }

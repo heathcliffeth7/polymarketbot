@@ -112,6 +112,24 @@ fn fatal_exchange_rejection_does_not_catch_balance() {
 }
 
 #[test]
+fn fee_rate_lookup_result_accepts_zero_fee_without_fallback() {
+    let (resolved_fee_rate_bps, used_fallback) =
+        resolve_trade_builder_fee_rate_lookup_result(0, Some(0));
+
+    assert_eq!(resolved_fee_rate_bps, 0);
+    assert!(!used_fallback);
+}
+
+#[test]
+fn fee_rate_lookup_result_falls_back_when_lookup_is_missing() {
+    let (resolved_fee_rate_bps, used_fallback) =
+        resolve_trade_builder_fee_rate_lookup_result(0, None);
+
+    assert_eq!(resolved_fee_rate_bps, DEFAULT_TRADE_BUILDER_FEE_RATE_BPS);
+    assert!(used_fallback);
+}
+
+#[test]
 fn should_retry_exit_sell_false_on_fatal_error() {
     let mut order = test_builder_order("sell", Some(9));
     order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();

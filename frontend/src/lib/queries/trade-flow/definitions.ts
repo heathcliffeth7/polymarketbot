@@ -1,4 +1,10 @@
-import { pool } from '@/lib/db';
+import type { PoolClient } from 'pg';
+import {
+  compactTelemetryError,
+  getPoolTelemetrySnapshot,
+  isFlowTelemetryEnabled,
+  pool,
+} from '@/lib/db';
 import type {
   PaginatedResponse,
   TradeFlowDefinition,
@@ -59,13 +65,74 @@ function mapEventRow(row: Record<string, unknown>): TradeFlowEvent {
 }
 
 const FLOW_STOP_REASON = 'flow_stopped_by_user';
-const FLOW_ARCHIVE_REASON = 'definition_archived';
+const FLOW_DELETE_REASON = 'definition_deleted';
+const FLOW_DUPLICATE_NAME_MESSAGE = 'Flow name is already in use';
+
+function formatTelemetryDuration(startedAt: number, endedAt: number): string {
+  if (startedAt <= 0 || endedAt <= 0 || endedAt < startedAt) return 'na';
+  return `${Math.round(endedAt - startedAt)}ms`;
+}
+
+async function ensureUniqueActiveDefinitionName(
+  queryable: Queryable,
+  userId: number,
+  name: string,
+  excludeDefinitionId?: number
+): Promise<void> {
+  const params: unknown[] = [userId, name.trim().toLowerCase()];
+  let query =
+    `SELECT id
+     FROM trade_flow_definitions
+     WHERE user_id = $1
+       AND LOWER(name) = $2
+       AND status <> 'archived'`;
+
+  if (excludeDefinitionId != null) {
+    params.push(excludeDefinitionId);
+    query += ` AND id <> $3`;
+  }
+
+  query += ' LIMIT 1';
+  const res = await queryable.query(query, params);
+  if ((res.rowCount ?? 0) > 0) {
+    throw new Error(FLOW_DUPLICATE_NAME_MESSAGE);
+  }
+}
 
 async function fetchVersionById(queryable: Queryable, versionId: number | null): Promise<TradeFlowVersion | null> {
   if (!versionId) return null;
   const res = await queryable.query('SELECT * FROM trade_flow_versions WHERE id = $1 LIMIT 1', [versionId]);
   if ((res.rowCount ?? 0) === 0) return null;
   return mapVersionRow(res.rows[0] as Record<string, unknown>);
+}
+
+async function fetchDefinitionDetailById(
+  queryable: Queryable,
+  userId: number,
+  definitionId: number
+): Promise<TradeFlowDefinitionDetail | null> {
+  const defRes = await queryable.query(
+    `SELECT d.*, m.legacy_workflow_id
+     FROM trade_flow_definitions d
+     LEFT JOIN trade_flow_legacy_mappings m ON m.definition_id = d.id
+     WHERE d.id = $1
+       AND d.user_id = $2
+     LIMIT 1`,
+    [definitionId, userId]
+  );
+  if ((defRes.rowCount ?? 0) === 0) return null;
+
+  const definition = mapDefinitionRow(defRes.rows[0] as Record<string, unknown>);
+  const [draftVersion, publishedVersion] = await Promise.all([
+    fetchVersionById(queryable, definition.draft_version_id),
+    fetchVersionById(queryable, definition.published_version_id),
+  ]);
+
+  return {
+    definition,
+    draftVersion,
+    publishedVersion,
+  };
 }
 
 async function replaceVersionGraph(queryable: Queryable, versionId: number, graph: TradeFlowGraph): Promise<void> {
@@ -104,6 +171,75 @@ async function replaceVersionGraph(queryable: Queryable, versionId: number, grap
   }
 }
 
+async function syncVersionGraph(queryable: Queryable, versionId: number, graph: TradeFlowGraph): Promise<void> {
+  const [existingNodesRes, existingEdgesRes] = await Promise.all([
+    queryable.query('SELECT node_key FROM trade_flow_nodes WHERE version_id = $1', [versionId]),
+    queryable.query('SELECT edge_key FROM trade_flow_edges WHERE version_id = $1', [versionId]),
+  ]);
+
+  const existingNodeKeys = new Set((existingNodesRes.rows as { node_key: string }[]).map((r) => r.node_key));
+  const existingEdgeKeys = new Set((existingEdgesRes.rows as { edge_key: string }[]).map((r) => r.edge_key));
+
+  const incomingNodeKeys = new Set(graph.nodes.map((n) => n.key));
+  const incomingEdgeKeys = new Set(graph.edges.map((e) => e.key));
+
+  const removedNodeKeys = [...existingNodeKeys].filter((k) => !incomingNodeKeys.has(k));
+  const removedEdgeKeys = [...existingEdgeKeys].filter((k) => !incomingEdgeKeys.has(k));
+
+  const deletePromises: Promise<unknown>[] = [];
+  if (removedNodeKeys.length > 0) {
+    deletePromises.push(
+      queryable.query('DELETE FROM trade_flow_nodes WHERE version_id = $1 AND node_key = ANY($2::text[])', [versionId, removedNodeKeys])
+    );
+  }
+  if (removedEdgeKeys.length > 0) {
+    deletePromises.push(
+      queryable.query('DELETE FROM trade_flow_edges WHERE version_id = $1 AND edge_key = ANY($2::text[])', [versionId, removedEdgeKeys])
+    );
+  }
+  if (deletePromises.length > 0) await Promise.all(deletePromises);
+
+  if (graph.nodes.length > 0) {
+    const nodeValues: unknown[] = [];
+    const nodeRows: string[] = [];
+    let idx = 1;
+    for (const node of graph.nodes) {
+      nodeRows.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::jsonb, NOW())`);
+      nodeValues.push(versionId, node.key, node.type, node.positionX, node.positionY, JSON.stringify(node.config || {}));
+    }
+    await queryable.query(
+      `INSERT INTO trade_flow_nodes (version_id, node_key, node_type, position_x, position_y, config_json, created_at)
+       VALUES ${nodeRows.join(', ')}
+       ON CONFLICT (version_id, node_key) DO UPDATE SET
+         node_type = EXCLUDED.node_type,
+         position_x = EXCLUDED.position_x,
+         position_y = EXCLUDED.position_y,
+         config_json = EXCLUDED.config_json`,
+      nodeValues
+    );
+  }
+
+  if (graph.edges.length > 0) {
+    const edgeValues: unknown[] = [];
+    const edgeRows: string[] = [];
+    let idx = 1;
+    for (const edge of graph.edges) {
+      edgeRows.push(`($${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}, $${idx++}::jsonb, NOW())`);
+      edgeValues.push(versionId, edge.key, edge.source, edge.target, edge.type, edge.condition ? JSON.stringify(edge.condition) : null);
+    }
+    await queryable.query(
+      `INSERT INTO trade_flow_edges (version_id, edge_key, source_node_key, target_node_key, edge_type, condition_json, created_at)
+       VALUES ${edgeRows.join(', ')}
+       ON CONFLICT (version_id, edge_key) DO UPDATE SET
+         source_node_key = EXCLUDED.source_node_key,
+         target_node_key = EXCLUDED.target_node_key,
+         edge_type = EXCLUDED.edge_type,
+         condition_json = EXCLUDED.condition_json`,
+      edgeValues
+    );
+  }
+}
+
 export async function createTradeFlowDefinition(
   input: CreateTradeFlowDefinitionInput
 ): Promise<TradeFlowDefinitionDetail> {
@@ -117,6 +253,7 @@ export async function createTradeFlowDefinition(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await ensureUniqueActiveDefinitionName(client, input.userId, name);
 
     if (input.legacyWorkflowId) {
       const legacyWorkflowRes = await client.query(
@@ -169,7 +306,7 @@ export async function createTradeFlowDefinition(
     }
 
     await client.query('COMMIT');
-    return (await getTradeFlowDefinitionById(input.userId, Number(definition.id))) as TradeFlowDefinitionDetail;
+    return (await fetchDefinitionDetailById(client, input.userId, Number(definition.id))) as TradeFlowDefinitionDetail;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -183,9 +320,25 @@ export async function updateTradeFlowDefinitionDraft(
   definitionId: number,
   updates: UpdateTradeFlowDefinitionInput
 ): Promise<TradeFlowDefinitionDetail> {
-  const client = await pool.connect();
+  const telemetryEnabled = isFlowTelemetryEnabled();
+  const t0 = telemetryEnabled ? performance.now() : 0;
+  let tConnect = 0;
+  let tLock = 0;
+  let tWrite = 0;
+  let tCommit = 0;
+  let tRead = 0;
+  let transactionStarted = false;
+  let client: PoolClient | null = null;
   try {
+    client = await pool.connect();
+    if (telemetryEnabled) {
+      tConnect = performance.now();
+    }
+
     await client.query('BEGIN');
+    transactionStarted = true;
+    await client.query("SET LOCAL statement_timeout = '15s'");
+    await client.query("SET LOCAL lock_timeout = '5s'");
 
     const defRes = await client.query(
       `SELECT *
@@ -199,8 +352,12 @@ export async function updateTradeFlowDefinitionDraft(
     if ((defRes.rowCount ?? 0) === 0) {
       throw new Error('Flow definition not found');
     }
+    if (telemetryEnabled) {
+      tLock = performance.now();
+    }
     const definition = defRes.rows[0] as Record<string, unknown>;
 
+    const shouldSyncNormalizedTables = updates.syncNormalizedTables === true;
     let draftVersionId = definition.draft_version_id == null ? null : Number(definition.draft_version_id);
     if (!draftVersionId) {
       const maxVersionRes = await client.query(
@@ -223,7 +380,9 @@ export async function updateTradeFlowDefinitionDraft(
         [definitionId, maxVersion + 1, JSON.stringify(fallbackGraph)]
       );
       draftVersionId = Number(insertDraftRes.rows[0].id);
-      await replaceVersionGraph(client, draftVersionId, fallbackGraph);
+      if (shouldSyncNormalizedTables) {
+        await replaceVersionGraph(client, draftVersionId, fallbackGraph);
+      }
     }
 
     if (updates.graphJson !== undefined) {
@@ -235,7 +394,9 @@ export async function updateTradeFlowDefinitionDraft(
          WHERE id = $1`,
         [draftVersionId, JSON.stringify(normalizedGraph)]
       );
-      await replaceVersionGraph(client, draftVersionId, normalizedGraph);
+      if (shouldSyncNormalizedTables) {
+        await syncVersionGraph(client, draftVersionId, normalizedGraph);
+      }
     }
 
     const fields: string[] = ['updated_at = NOW()'];
@@ -245,6 +406,7 @@ export async function updateTradeFlowDefinitionDraft(
     if (updates.name !== undefined) {
       const nextName = updates.name.trim();
       if (!nextName) throw new Error('Flow name cannot be empty');
+      await ensureUniqueActiveDefinitionName(client, userId, nextName, definitionId);
       fields.push(`name = $${idx++}`);
       params.push(nextName);
     }
@@ -265,14 +427,41 @@ export async function updateTradeFlowDefinitionDraft(
        WHERE id = $1 AND user_id = $2`,
       params
     );
+    if (telemetryEnabled) {
+      tWrite = performance.now();
+    }
 
     await client.query('COMMIT');
-    return (await getTradeFlowDefinitionById(userId, definitionId)) as TradeFlowDefinitionDetail;
+    transactionStarted = false;
+    if (telemetryEnabled) {
+      tCommit = performance.now();
+    }
+
+    const result = (await fetchDefinitionDetailById(client, userId, definitionId)) as TradeFlowDefinitionDetail;
+    if (telemetryEnabled) {
+      tRead = performance.now();
+      console.log(
+        `[draft-save] outcome=ok def=${definitionId} pool=${getPoolTelemetrySnapshot()} connect=${formatTelemetryDuration(t0, tConnect)} lock=${formatTelemetryDuration(tConnect, tLock)} write=${formatTelemetryDuration(tLock, tWrite)} commit=${formatTelemetryDuration(tWrite, tCommit)} read=${formatTelemetryDuration(tCommit, tRead)} total=${formatTelemetryDuration(t0, tRead)}`
+      );
+    }
+    return result;
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (transactionStarted && client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackErr) {
+        console.error('Trade flow draft rollback error:', rollbackErr);
+      }
+    }
+    if (telemetryEnabled) {
+      const tError = performance.now();
+      console.log(
+        `[draft-save] outcome=error def=${definitionId} pool=${getPoolTelemetrySnapshot()} connect=${formatTelemetryDuration(t0, tConnect)} lock=${formatTelemetryDuration(tConnect, tLock)} write=${formatTelemetryDuration(tLock, tWrite)} commit=${formatTelemetryDuration(tWrite, tCommit)} read=${formatTelemetryDuration(tCommit, tRead)} elapsed=${formatTelemetryDuration(t0, tError)} err=${compactTelemetryError(err)}`
+      );
+    }
     throw err;
   } finally {
-    client.release();
+    client?.release();
   }
 }
 
@@ -393,7 +582,7 @@ export async function publishTradeFlowDefinition(
     );
 
     await client.query('COMMIT');
-    return (await getTradeFlowDefinitionById(context.userId, definitionId)) as TradeFlowDefinitionDetail;
+    return (await fetchDefinitionDetailById(client, context.userId, definitionId)) as TradeFlowDefinitionDetail;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -402,13 +591,14 @@ export async function publishTradeFlowDefinition(
   }
 }
 
-export async function archiveTradeFlowDefinition(
+export async function hardDeleteTradeFlowDefinition(
   userId: number,
   definitionId: number
-): Promise<TradeFlowDefinitionDetail> {
+): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query("SET LOCAL statement_timeout = '45s'");
 
     const defRes = await client.query(
       `SELECT * FROM trade_flow_definitions WHERE id = $1 AND user_id = $2 LIMIT 1 FOR UPDATE`,
@@ -418,45 +608,31 @@ export async function archiveTradeFlowDefinition(
       throw new Error('Flow definition not found');
     }
 
-    const current = defRes.rows[0] as Record<string, unknown>;
-    const currentStatus = String(current.status || '');
-    if (currentStatus === 'archived') {
-      await client.query('COMMIT');
-      return (await getTradeFlowDefinitionById(userId, definitionId)) as TradeFlowDefinitionDetail;
-    }
-
     const eventTimestamp = new Date().toISOString();
-    const cancelResult = await cancelFlowResources(client, userId, definitionId, FLOW_ARCHIVE_REASON);
-    await recordCancellationEvents(client, definitionId, cancelResult, FLOW_ARCHIVE_REASON, eventTimestamp);
+    const cancelResult = await cancelFlowResources(client, userId, definitionId, FLOW_DELETE_REASON);
+    await recordCancellationEvents(client, definitionId, cancelResult, FLOW_DELETE_REASON, eventTimestamp);
 
+    // Clear self-referencing parent_step_id before cascade delete to avoid O(N²) FK checks
     await client.query(
-      `UPDATE trade_flow_definitions
-       SET status = 'archived',
-           updated_at = NOW()
-       WHERE id = $1 AND user_id = $2`,
+      `UPDATE trade_flow_run_steps SET parent_step_id = NULL
+       WHERE run_id IN (SELECT id FROM trade_flow_runs WHERE definition_id = $1 AND user_id = $2)
+         AND parent_step_id IS NOT NULL`,
       [definitionId, userId]
     );
 
     await client.query(
-      `INSERT INTO trade_flow_events
-        (run_id, definition_id, version_id, event_type, payload_json, created_at)
-       VALUES
-        (NULL, $1, $2, 'flow_archived', $3::jsonb, NOW())`,
-      [
-        definitionId,
-        current.published_version_id == null ? null : Number(current.published_version_id),
-        JSON.stringify({
-          definitionId,
-          archivedAt: eventTimestamp,
-          canceledRunCount: cancelResult.affectedRuns.length,
-          canceledDualDcaJobCount: cancelResult.canceledDualDcaJobIds.length,
-          canceledBuilderOrderCount: cancelResult.canceledOrderRows.length,
-        }),
-      ]
+      `DELETE FROM trade_flow_runs
+       WHERE definition_id = $1 AND user_id = $2`,
+      [definitionId, userId]
+    );
+
+    await client.query(
+      `DELETE FROM trade_flow_definitions
+       WHERE id = $1 AND user_id = $2`,
+      [definitionId, userId]
     );
 
     await client.query('COMMIT');
-    return (await getTradeFlowDefinitionById(userId, definitionId)) as TradeFlowDefinitionDetail;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -527,7 +703,7 @@ export async function stopTradeFlowDefinition(
     );
 
     await client.query('COMMIT');
-    return (await getTradeFlowDefinitionById(userId, definitionId)) as TradeFlowDefinitionDetail;
+    return (await fetchDefinitionDetailById(client, userId, definitionId)) as TradeFlowDefinitionDetail;
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -540,28 +716,12 @@ export async function getTradeFlowDefinitionById(
   userId: number,
   definitionId: number
 ): Promise<TradeFlowDefinitionDetail | null> {
-  const defRes = await pool.query(
-    `SELECT d.*, m.legacy_workflow_id
-     FROM trade_flow_definitions d
-     LEFT JOIN trade_flow_legacy_mappings m ON m.definition_id = d.id
-     WHERE d.id = $1
-       AND d.user_id = $2
-     LIMIT 1`,
-    [definitionId, userId]
-  );
-  if ((defRes.rowCount ?? 0) === 0) return null;
-
-  const definition = mapDefinitionRow(defRes.rows[0] as Record<string, unknown>);
-  const [draftVersion, publishedVersion] = await Promise.all([
-    fetchVersionById(pool, definition.draft_version_id),
-    fetchVersionById(pool, definition.published_version_id),
-  ]);
-
-  return {
-    definition,
-    draftVersion,
-    publishedVersion,
-  };
+  const client = await pool.connect();
+  try {
+    return await fetchDefinitionDetailById(client, userId, definitionId);
+  } finally {
+    client.release();
+  }
 }
 
 export async function getTradeFlowDefinitions(

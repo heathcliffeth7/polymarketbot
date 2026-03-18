@@ -5,8 +5,8 @@
 
 ## Genel
 - Agent yanıtlarını Türkçe yaz; komut, env, dosya adı ve kod kimliklerini aynen bırak.
-- Codex yeni veya dokunulan el yazımı kaynak dosyaları 1000 satırı aşacak halde bırakmamalı.
-- Bir değişiklik dosyayı 900+ satıra taşıyorsa yeni mantığı aynı dosyaya yığmadan önce sorumluluğa göre modüle böl.
+- Codex yeni veya dokunulan el yazımı kaynak dosyaları 1500 satırı aşacak halde bırakmamalı.
+- Bir değişiklik dosyayı 1400+ satıra taşıyorsa yeni mantığı aynı dosyaya yığmadan önce sorumluluğa göre modüle böl.
 - Sırf satır sayısını düşürmek için anlamsız `part_###` veya benzeri geçici dosya bölmeleri açma; isimli modül/dizin yapısı kur.
 - Bu sınır `target/`, `frontend/.next/`, `node_modules/`, lock dosyaları ve diğer generated/vendor çıktılar için geçerli değil.
 - Yeni talimat gerekiyorsa mevcut AGENTS ağacına ekle; tek dosyada yığılma yapma.

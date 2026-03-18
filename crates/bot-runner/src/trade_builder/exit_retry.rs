@@ -150,6 +150,16 @@ async fn schedule_trade_builder_exit_sell_retry(
     Ok(())
 }
 
+fn resolve_trade_builder_fee_rate_lookup_result(
+    stored_fee_rate_bps: i64,
+    lookup_fee_rate_bps: Option<u64>,
+) -> (u64, bool) {
+    match lookup_fee_rate_bps {
+        Some(fee_rate_bps) => (fee_rate_bps, false),
+        None => (trade_builder_fee_rate_bps_or_default(stored_fee_rate_bps), true),
+    }
+}
+
 async fn resolve_trade_builder_order_fee_rate_bps(
     repo: &PostgresRepository,
     client: &dyn OrderExecutor,
@@ -157,7 +167,7 @@ async fn resolve_trade_builder_order_fee_rate_bps(
 ) -> Result<u64> {
     let default_fee_rate_bps = trade_builder_fee_rate_bps_or_default(order.fee_rate_bps);
     match client.fee_rate_bps(&order.token_id).await {
-        Ok(Some(fee_rate_bps)) if fee_rate_bps > 0 => {
+        Ok(Some(fee_rate_bps)) => {
             if order.fee_rate_bps != fee_rate_bps as i64 {
                 repo.set_trade_builder_order_fee_rate_bps(order.id, fee_rate_bps as i64)
                     .await?;
@@ -165,23 +175,27 @@ async fn resolve_trade_builder_order_fee_rate_bps(
             }
             Ok(fee_rate_bps)
         }
-        Ok(_) => {
+        Ok(None) => {
+            let (resolved_fee_rate_bps, used_fallback) =
+                resolve_trade_builder_fee_rate_lookup_result(order.fee_rate_bps, None);
             if order.fee_rate_bps <= 0 {
-                repo.set_trade_builder_order_fee_rate_bps(order.id, default_fee_rate_bps as i64)
+                repo.set_trade_builder_order_fee_rate_bps(order.id, resolved_fee_rate_bps as i64)
                     .await?;
-                order.fee_rate_bps = default_fee_rate_bps as i64;
-                repo.append_trade_builder_order_event(
-                    order.id,
-                    "fee_rate_fallback",
-                    &json!({
-                        "reason": "fee_rate_lookup_empty",
-                        "token_id": order.token_id,
-                        "fallback_fee_rate_bps": default_fee_rate_bps
-                    }),
-                )
-                .await?;
+                order.fee_rate_bps = resolved_fee_rate_bps as i64;
+                if used_fallback {
+                    repo.append_trade_builder_order_event(
+                        order.id,
+                        "fee_rate_fallback",
+                        &json!({
+                            "reason": "fee_rate_lookup_empty",
+                            "token_id": order.token_id,
+                            "fallback_fee_rate_bps": default_fee_rate_bps
+                        }),
+                    )
+                    .await?;
+                }
             }
-            Ok(default_fee_rate_bps)
+            Ok(resolved_fee_rate_bps)
         }
         Err(err) => {
             warn!(

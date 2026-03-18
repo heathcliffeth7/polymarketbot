@@ -60,6 +60,7 @@ const FLOW_STEP_PROCESS_LIMIT: i64 = 250;
 const PRESSURE_DROP_PCT_THRESHOLD: f64 = 1.5;
 const AUTO_SCOPE_CACHE_TTL_SECS: u64 = 30;
 const FLOW_HOUSEKEEPING_INTERVAL_MS: u64 = 1_000;
+const FLOW_BOUNDARY_REFRESH_RETRY_MS: u64 = 1_000;
 const FLOW_WS_FAST_PATH_DEBOUNCE_MS: u64 = 1;
 const FLOW_RUNTIME_CACHE_TTL_SECS: u64 = 60;
 const TRADE_BUILDER_EXIT_QTY_TOLERANCE: f64 = 0.011;
@@ -110,6 +111,8 @@ const FLOW_NODE_STATE_ONCE_FIRED: &str = "once_fired";
 const FLOW_NODE_STATE_ONCE_FIRED_AT: &str = "once_fired_at";
 const FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG: &str = "once_fired_market_slug";
 const FLOW_NODE_STATE_ONCE_BLOCK_LOGGED: &str = "once_blocked_logged";
+const FLOW_NODE_STATE_REENTRY_GENERATION: &str = "reentry_generation";
+const FLOW_NODE_STATE_REENTRY_ATTEMPTS_USED: &str = "reentry_attempts_used";
 const FLOW_NODE_STATE_CYCLE_WINDOW_BOUNDARY_MARKER_PREFIX: &str = "cycle_window_boundary_marker_";
 const FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG: &str =
     "publish_auto_scope_locked_market_slug";

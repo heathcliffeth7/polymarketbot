@@ -34,8 +34,8 @@ fn evaluate_trade_builder_order_trigger(
 
     if trade_builder_is_child_exit_sell(order) {
         let should_trigger = match trigger_condition {
-            "cross_above" => current_price >= trigger_price,
-            "cross_below" => current_price <= trigger_price,
+            "cross_above" | "level_above" => current_price >= trigger_price,
+            "cross_below" | "level_below" => current_price <= trigger_price,
             _ => false,
         };
         return TradeBuilderTriggerEvaluation {
@@ -47,6 +47,8 @@ fn evaluate_trade_builder_order_trigger(
     let first_tick_threshold_used =
         previous_price.is_none() && trade_builder_is_child_exit_sell(order);
     let should_trigger = match trigger_condition {
+        "level_above" => current_price >= trigger_price,
+        "level_below" => current_price <= trigger_price,
         "cross_above" if first_tick_threshold_used => current_price >= trigger_price,
         "cross_below" if first_tick_threshold_used => current_price <= trigger_price,
         "cross_above"
@@ -72,7 +74,10 @@ fn evaluate_trade_builder_order_trigger(
 
     TradeBuilderTriggerEvaluation {
         should_trigger,
-        first_tick_threshold_used: should_trigger && first_tick_threshold_used,
+        first_tick_threshold_used: should_trigger
+            && (first_tick_threshold_used
+                || (previous_price.is_none()
+                    && matches!(trigger_condition, "level_above" | "level_below"))),
     }
 }
 

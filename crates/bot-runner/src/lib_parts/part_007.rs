@@ -60,8 +60,7 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
             .parse::<LocalWallet>()
             .context("parse signer private key")?
             .with_chain_id(cfg.exchange.chain_id);
-        let (exchange_address, neg_risk_exchange_address) =
-            resolve_clob_exchange_addresses(cfg)?;
+        let (exchange_address, neg_risk_exchange_address) = resolve_clob_exchange_addresses(cfg)?;
         let gnosis_safe: Option<Address> = cfg
             .exchange
             .resolve_gnosis_safe_address()
@@ -92,7 +91,7 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
             Err(e) => {
                 warn!(run_id, market = %cycle_slug, error = %e, "WS_USER_CONNECT_FAILED_USING_REST_RECONCILE")
             }
-    }
+        }
     }
     let mut auto_claim_runtimes: HashMap<i64, FlowAutoClaimRuntime> = HashMap::new();
     let mut flow_runtime_caches = FlowRuntimeCaches::default();
@@ -560,6 +559,63 @@ async fn run_paper_dual_loop(
     Ok(())
 }
 
+fn effective_boundary_refresh_delay(
+    raw_boundary_refresh_delay: Option<Duration>,
+    next_boundary_refresh_retry_at: Option<Instant>,
+    now: Instant,
+) -> Option<Duration> {
+    match raw_boundary_refresh_delay {
+        Some(delay) if delay.is_zero() => Some(
+            next_boundary_refresh_retry_at
+                .map(|retry_at| retry_at.saturating_duration_since(now))
+                .unwrap_or(Duration::ZERO),
+        ),
+        delay => delay,
+    }
+}
+
+fn boundary_refresh_retry_is_due(
+    next_boundary_refresh_retry_at: Option<Instant>,
+    now: Instant,
+) -> bool {
+    next_boundary_refresh_retry_at
+        .map(|retry_at| retry_at <= now)
+        .unwrap_or(true)
+}
+
+async fn attempt_flow_boundary_refresh(
+    repo: &PostgresRepository,
+    run_id: i64,
+    ws: &ClobWsClient,
+    user_cfg_cache: &mut HashMap<i64, AppConfig>,
+    reason: &'static str,
+    next_boundary_refresh_retry_at: &mut Option<Instant>,
+) -> bool {
+    info!(run_id, reason, "TRADE_FLOW_BOUNDARY_REFRESH_TRIGGERED");
+    match refresh_trade_flow_ws_fast_path_for_boundary(repo, run_id, ws, user_cfg_cache).await {
+        Ok(()) => {
+            *next_boundary_refresh_retry_at = None;
+            true
+        }
+        Err(err) => {
+            warn!(
+                run_id,
+                error = %err,
+                reason,
+                "TRADE_FLOW_BOUNDARY_REFRESH_FAILED"
+            );
+            let retry_after_ms = FLOW_BOUNDARY_REFRESH_RETRY_MS;
+            *next_boundary_refresh_retry_at =
+                Some(Instant::now() + Duration::from_millis(retry_after_ms));
+            info!(
+                run_id,
+                reason, retry_after_ms, "TRADE_FLOW_BOUNDARY_REFRESH_RETRY_SCHEDULED"
+            );
+            false
+        }
+    }
+}
+
 async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) -> Result<()> {
     let live_enabled = env::var("LIVE_TRADING_ENABLED").ok().as_deref() == Some("true");
     anyhow::ensure!(
@@ -616,23 +672,12 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
     let housekeeping_interval = Duration::from_millis(FLOW_HOUSEKEEPING_INTERVAL_MS);
     let fast_path_debounce = Duration::from_millis(FLOW_WS_FAST_PATH_DEBOUNCE_MS);
     let mut next_housekeeping_at = Instant::now();
+    let mut next_boundary_refresh_retry_at: Option<Instant> = None;
     loop {
         let now = Instant::now();
         if now >= next_housekeeping_at {
             loop_count += 1;
             flow_runtime_caches.prune_stale();
-            if let Err(e) = process_trade_builder_orders(repo, run_id, cfg, &client, &ws).await {
-                warn!(run_id, error = %e, "TRADE_BUILDER_PROCESS_FAILED");
-            }
-            if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await
-            {
-                warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
-            }
-            if let Err(e) =
-                dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await
-            {
-                warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
-            }
             if loop_count % 20 == 1 {
                 info!(run_id, loop_count, "FLOW_LOOP_TICK_PRE_FLOWS");
             }
@@ -652,19 +697,74 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
             if loop_count % 20 == 1 {
                 info!(run_id, loop_count, "FLOW_LOOP_TICK_POST_FLOWS");
             }
+            let boundary_delay = trade_flow_next_auto_scope_boundary_refresh_delay().await;
+            let mut boundary_cfg_cache: HashMap<i64, AppConfig> = HashMap::new();
+            tokio::join!(
+                async {
+                    if let Some(delay) = boundary_delay {
+                        tokio::time::sleep(delay).await;
+                        if trade_flow_ws_fast_path_cache_requires_refresh_now().await {
+                            if let Err(e) = refresh_trade_flow_ws_fast_path_for_boundary(
+                                repo, run_id, &ws, &mut boundary_cfg_cache,
+                            )
+                            .await
+                            {
+                                warn!(run_id, error = %e, "TRADE_FLOW_BOUNDARY_REFRESH_FAILED");
+                            }
+                        }
+                    }
+                },
+                async {
+                    if let Err(e) =
+                        process_trade_builder_orders(repo, run_id, cfg, &client, &ws).await
+                    {
+                        warn!(run_id, error = %e, "TRADE_BUILDER_PROCESS_FAILED");
+                    }
+                    if let Err(e) =
+                        process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await
+                    {
+                        warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
+                    }
+                    if let Err(e) =
+                        dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws)
+                            .await
+                    {
+                        warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
+                    }
+                }
+            );
             next_housekeeping_at = Instant::now() + housekeeping_interval;
             continue;
         }
 
         let remaining = next_housekeeping_at.saturating_duration_since(now);
         let timer_delay = trade_flow_next_trigger_market_price_timer_delay().await;
-        if matches!(timer_delay, Some(delay) if delay.is_zero()) {
-            if let Err(e) = process_trade_flow_trigger_market_price_timers(
+        let raw_boundary_refresh_delay = trade_flow_next_auto_scope_boundary_refresh_delay().await;
+        if !matches!(raw_boundary_refresh_delay, Some(delay) if delay.is_zero()) {
+            next_boundary_refresh_retry_at = None;
+        }
+        let boundary_refresh_delay = effective_boundary_refresh_delay(
+            raw_boundary_refresh_delay,
+            next_boundary_refresh_retry_at,
+            now,
+        );
+        if matches!(boundary_refresh_delay, Some(delay) if delay.is_zero()) {
+            let _ = attempt_flow_boundary_refresh(
                 repo,
                 run_id,
                 &ws,
-                Some(&client),
-            ).await {
+                &mut flow_runtime_caches.user_cfg,
+                "immediate_due",
+                &mut next_boundary_refresh_retry_at,
+            )
+            .await;
+            continue;
+        }
+        if matches!(timer_delay, Some(delay) if delay.is_zero()) {
+            if let Err(e) =
+                process_trade_flow_trigger_market_price_timers(repo, run_id, &ws, Some(&client))
+                    .await
+            {
                 warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_TIMER_WAKE");
             }
             if let Err(e) = process_trade_flow_ready_steps(
@@ -673,41 +773,219 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                 Some(&client),
                 &ws,
                 &mut flow_runtime_caches,
-            ).await {
+            )
+            .await
+            {
                 warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_TIMER_READY");
             }
             continue;
         }
 
         if let Some(delay) = timer_delay {
+            if let Some(boundary_delay) = boundary_refresh_delay {
+                tokio::select! {
+                    Some(trigger) = tick_trigger_rx.recv() => {
+                        handle_tick_trigger(repo, run_id, &ws, trigger).await;
+                    }
+                    _ = tokio::time::sleep(remaining) => {}
+                    _ = tokio::time::sleep(delay) => {
+                        if let Err(e) = process_trade_flow_trigger_market_price_timers(
+                            repo,
+                            run_id,
+                            &ws,
+                            Some(&client),
+                        ).await {
+                            warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_TIMER_WAKE");
+                        }
+                        if let Err(e) = process_trade_flow_ready_steps(
+                            repo,
+                            run_id,
+                            Some(&client),
+                            &ws,
+                            &mut flow_runtime_caches,
+                        ).await {
+                            warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_TIMER_READY");
+                        }
+                    }
+                    _ = tokio::time::sleep(boundary_delay) => {
+                        let _ = attempt_flow_boundary_refresh(
+                            repo,
+                            run_id,
+                            &ws,
+                            &mut flow_runtime_caches.user_cfg,
+                            "sleep_wake",
+                            &mut next_boundary_refresh_retry_at,
+                        )
+                        .await;
+                    }
+                    _ = ws.wait_for_market_update() => {
+                        tokio::time::sleep(fast_path_debounce).await;
+                        if trade_flow_ws_fast_path_cache_requires_refresh_now().await {
+                            if boundary_refresh_retry_is_due(
+                                next_boundary_refresh_retry_at,
+                                Instant::now(),
+                            ) {
+                                let _ = attempt_flow_boundary_refresh(
+                                    repo,
+                                    run_id,
+                                    &ws,
+                                    &mut flow_runtime_caches.user_cfg,
+                                    "ws_stale",
+                                    &mut next_boundary_refresh_retry_at,
+                                )
+                                .await;
+                            }
+                            continue;
+                        }
+                        let dirty_token_ids = ws.take_dirty_market_tokens().await;
+                        ws.clear_dirty_market_tokens(&dirty_token_ids).await;
+                        if let Err(e) = process_trade_flow_ws_fast_path(
+                            repo,
+                            run_id,
+                            Some(&client),
+                            &ws,
+                            &mut flow_runtime_caches,
+                            &dirty_token_ids,
+                        ).await {
+                            warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_FAST_WAKE");
+                        }
+                        if let Err(e) = evaluate_armed_builder_orders_for_dirty_tokens(
+                            repo,
+                            run_id,
+                            &ws,
+                            &dirty_token_ids,
+                        )
+                        .await
+                        {
+                            warn!(run_id, error = %e, "ARMED_ORDER_WS_EVAL_FAILED");
+                        }
+                    }
+                    _ = FLOW_PROCESS_NOTIFY.notified() => {
+                        if let Err(e) = process_trade_flow_ready_steps(
+                            repo,
+                            run_id,
+                            Some(&client),
+                            &ws,
+                            &mut flow_runtime_caches,
+                        ).await {
+                            warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_NOTIFY_WAKE");
+                        }
+                    }
+                }
+            } else {
+                tokio::select! {
+                    Some(trigger) = tick_trigger_rx.recv() => {
+                        handle_tick_trigger(repo, run_id, &ws, trigger).await;
+                    }
+                    _ = tokio::time::sleep(remaining) => {}
+                    _ = tokio::time::sleep(delay) => {
+                        if let Err(e) = process_trade_flow_trigger_market_price_timers(
+                            repo,
+                            run_id,
+                            &ws,
+                            Some(&client),
+                        ).await {
+                            warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_TIMER_WAKE");
+                        }
+                        if let Err(e) = process_trade_flow_ready_steps(
+                            repo,
+                            run_id,
+                            Some(&client),
+                            &ws,
+                            &mut flow_runtime_caches,
+                        ).await {
+                            warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_TIMER_READY");
+                        }
+                    }
+                    _ = ws.wait_for_market_update() => {
+                        tokio::time::sleep(fast_path_debounce).await;
+                        if trade_flow_ws_fast_path_cache_requires_refresh_now().await {
+                            if boundary_refresh_retry_is_due(
+                                next_boundary_refresh_retry_at,
+                                Instant::now(),
+                            ) {
+                                let _ = attempt_flow_boundary_refresh(
+                                    repo,
+                                    run_id,
+                                    &ws,
+                                    &mut flow_runtime_caches.user_cfg,
+                                    "ws_stale",
+                                    &mut next_boundary_refresh_retry_at,
+                                )
+                                .await;
+                            }
+                            continue;
+                        }
+                        let dirty_token_ids = ws.take_dirty_market_tokens().await;
+                        ws.clear_dirty_market_tokens(&dirty_token_ids).await;
+                        if let Err(e) = process_trade_flow_ws_fast_path(
+                            repo,
+                            run_id,
+                            Some(&client),
+                            &ws,
+                            &mut flow_runtime_caches,
+                            &dirty_token_ids,
+                        ).await {
+                            warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_FAST_WAKE");
+                        }
+                        if let Err(e) = evaluate_armed_builder_orders_for_dirty_tokens(
+                            repo,
+                            run_id,
+                            &ws,
+                            &dirty_token_ids,
+                        )
+                        .await
+                        {
+                            warn!(run_id, error = %e, "ARMED_ORDER_WS_EVAL_FAILED");
+                        }
+                    }
+                    _ = FLOW_PROCESS_NOTIFY.notified() => {
+                        if let Err(e) = process_trade_flow_ready_steps(
+                            repo,
+                            run_id,
+                            Some(&client),
+                            &ws,
+                            &mut flow_runtime_caches,
+                        ).await {
+                            warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_NOTIFY_WAKE");
+                        }
+                    }
+                }
+            }
+        } else if let Some(boundary_delay) = boundary_refresh_delay {
             tokio::select! {
                 Some(trigger) = tick_trigger_rx.recv() => {
                     handle_tick_trigger(repo, run_id, &ws, trigger).await;
                 }
                 _ = tokio::time::sleep(remaining) => {}
-                _ = tokio::time::sleep(delay) => {
-                    if let Err(e) = process_trade_flow_trigger_market_price_timers(
+                _ = tokio::time::sleep(boundary_delay) => {
+                    let _ = attempt_flow_boundary_refresh(
                         repo,
                         run_id,
                         &ws,
-                        Some(&client),
-                    ).await {
-                        warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_TIMER_WAKE");
-                    }
-                    if let Err(e) = process_trade_flow_ready_steps(
-                        repo,
-                        run_id,
-                        Some(&client),
-                        &ws,
-                        &mut flow_runtime_caches,
-                    ).await {
-                        warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED_TIMER_READY");
-                    }
+                        &mut flow_runtime_caches.user_cfg,
+                        "sleep_wake",
+                        &mut next_boundary_refresh_retry_at,
+                    )
+                    .await;
                 }
                 _ = ws.wait_for_market_update() => {
                     tokio::time::sleep(fast_path_debounce).await;
                     if trade_flow_ws_fast_path_cache_requires_refresh_now().await {
-                        next_housekeeping_at = Instant::now();
+                        if boundary_refresh_retry_is_due(
+                            next_boundary_refresh_retry_at,
+                            Instant::now(),
+                        ) {
+                            let _ = attempt_flow_boundary_refresh(
+                                repo,
+                                run_id,
+                                &ws,
+                                &mut flow_runtime_caches.user_cfg,
+                                "ws_stale",
+                                &mut next_boundary_refresh_retry_at,
+                            )
+                            .await;
+                        }
                         continue;
                     }
                     let dirty_token_ids = ws.take_dirty_market_tokens().await;
@@ -754,7 +1032,20 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                 _ = ws.wait_for_market_update() => {
                     tokio::time::sleep(fast_path_debounce).await;
                     if trade_flow_ws_fast_path_cache_requires_refresh_now().await {
-                        next_housekeeping_at = Instant::now();
+                        if boundary_refresh_retry_is_due(
+                            next_boundary_refresh_retry_at,
+                            Instant::now(),
+                        ) {
+                            let _ = attempt_flow_boundary_refresh(
+                                repo,
+                                run_id,
+                                &ws,
+                                &mut flow_runtime_caches.user_cfg,
+                                "ws_stale",
+                                &mut next_boundary_refresh_retry_at,
+                            )
+                            .await;
+                        }
                         continue;
                     }
                     let dirty_token_ids = ws.take_dirty_market_tokens().await;
@@ -802,7 +1093,8 @@ async fn handle_tick_trigger(
     ws: &ClobWsClient,
     trigger: TickTrigger,
 ) {
-    let Some(order) = take_armed_builder_order_from_cache(&trigger.token_id, trigger.order_id).await
+    let Some(order) =
+        take_armed_builder_order_from_cache(&trigger.token_id, trigger.order_id).await
     else {
         return;
     };

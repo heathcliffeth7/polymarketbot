@@ -52,6 +52,7 @@ pub(crate) struct PolymarketPriceToBeatSnapshot {
     pub(crate) price_to_beat: f64,
     pub(crate) source: PriceToBeatSource,
     pub(crate) source_latency_ms: Option<i64>,
+    pub(crate) fetched_at: DateTime<Utc>,
 }
 
 #[derive(Debug)]
@@ -69,6 +70,10 @@ impl PolymarketPriceToBeatService {
             client: build_price_to_beat_http_client(),
             cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn has_cached_snapshot(&self, market_slug: &str) -> bool {
+        self.cache.lock().contains_key(market_slug)
     }
 
     async fn fetch_snapshot(&self, market_slug: &str) -> Result<PolymarketPriceToBeatSnapshot> {
@@ -114,6 +119,7 @@ impl PolymarketPriceToBeatService {
                         price_to_beat,
                         source: PriceToBeatSource::Polymarket,
                         source_latency_ms: None,
+                        fetched_at: Utc::now(),
                     };
                     self.cache
                         .lock()
@@ -179,6 +185,32 @@ pub(crate) async fn fetch_polymarket_price_to_beat(
         .await
 }
 
+pub(crate) async fn warm_price_to_beat_cache(market_slug: &str) {
+    if POLYMARKET_PRICE_TO_BEAT_SERVICE.has_cached_snapshot(market_slug) {
+        return;
+    }
+    match POLYMARKET_PRICE_TO_BEAT_SERVICE
+        .fetch_snapshot(market_slug)
+        .await
+    {
+        Ok(snapshot) => {
+            tracing::info!(
+                market_slug,
+                source = snapshot.source.as_str(),
+                age_ms = (Utc::now() - snapshot.fetched_at).num_milliseconds(),
+                "PRICE_TO_BEAT_CACHE_WARMED"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                market_slug,
+                error = %err,
+                "PRICE_TO_BEAT_CACHE_WARM_FAILED"
+            );
+        }
+    }
+}
+
 fn build_price_to_beat_http_client() -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .pool_max_idle_per_host(4)
@@ -237,6 +269,7 @@ fn chainlink_snapshot_to_price_to_beat_snapshot(
         price_to_beat: cycle_open.price,
         source: PriceToBeatSource::ChainlinkSnapshot,
         source_latency_ms: Some(cycle_open.latency_ms),
+        fetched_at: Utc::now(),
     }
 }
 
@@ -458,5 +491,6 @@ mod tests {
         assert_eq!(converted.price_to_beat, 87.13950000781921);
         assert_eq!(converted.source, PriceToBeatSource::ChainlinkSnapshot);
         assert_eq!(converted.source_latency_ms, Some(125));
+        assert!(converted.fetched_at <= Utc::now());
     }
 }

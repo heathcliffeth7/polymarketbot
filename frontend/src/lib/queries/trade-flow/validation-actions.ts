@@ -1,6 +1,7 @@
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
 import { validateActionPlaceOrderConfig } from './validation-action-place-order';
 import {
+  countValidMarketPriceOutcomeConditions,
   countValidOutcomeConditions,
   hasProvidedValue,
   isRecord,
@@ -126,7 +127,27 @@ export function validateNodeConfig(
       pushNodeError(issues, node, 'invalid_price_mode', 'trigger.market_price priceMode must be composite, midpoint, raw, last_trade, site_display, best_bid, or best_ask.');
     }
 
-    if (countValidOutcomeConditions(config) <= 0) {
+    const repeatMode = toTrimmedString(config.repeatMode).toLowerCase();
+    if (Array.isArray(config.outcomeConditions)) {
+      for (const item of config.outcomeConditions) {
+        if (!isRecord(item)) continue;
+        const triggerCondition = toTrimmedString(item.triggerCondition).toLowerCase();
+        if (
+          (triggerCondition === 'level_above' || triggerCondition === 'level_below') &&
+          repeatMode !== 'once'
+        ) {
+          pushNodeError(
+            issues,
+            node,
+            'invalid_level_trigger_repeat_mode',
+            'trigger.market_price level_above/level_below only support repeatMode=once.'
+          );
+          break;
+        }
+      }
+    }
+
+    if (countValidMarketPriceOutcomeConditions(config) <= 0) {
       pushNodeError(
         issues,
         node,

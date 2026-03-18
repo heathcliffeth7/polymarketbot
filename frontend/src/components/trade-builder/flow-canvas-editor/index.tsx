@@ -57,11 +57,7 @@ class FlowCanvasErrorBoundary extends Component<
 
 export function FlowCanvasEditor(props: FlowCanvasEditorProps) {
   const [retrySeed, setRetrySeed] = useState(0);
-  const retryKey = [
-    props.graph.nodes.map((node) => node.key).join(','),
-    props.graph.edges.map((edge) => edge.key).join(','),
-    retrySeed,
-  ].join('|');
+  const retryKey = `${String(props.instanceKey ?? 'default')}|${retrySeed}`;
 
   return (
     <FlowCanvasErrorBoundary

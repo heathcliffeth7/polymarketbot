@@ -10,6 +10,7 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
+import { usePathname } from 'next/navigation';
 import { toast } from 'sonner';
 import { useTradeFlowRecentEvents } from '@/hooks/use-trade-flow';
 import { useTradeFlowRealtime } from '@/contexts/trade-flow-realtime-context';
@@ -219,8 +220,11 @@ function saveLastSeenId(id: number) {
 }
 
 export function NotificationProvider({ children }: { children: ReactNode }) {
-  const { flowEvents: streamEvents } = useTradeFlowRealtime();
-  const { data: eventsData } = useTradeFlowRecentEvents('running', 100, true);
+  const pathname = usePathname();
+  const { connectionState, flowEvents: streamEvents } = useTradeFlowRealtime();
+  const isTradeBuilderPage = pathname.startsWith('/trade-builder');
+  const recentEventsEnabled = !(isTradeBuilderPage && connectionState === 'open');
+  const { data: eventsData } = useTradeFlowRecentEvents('running', 100, recentEventsEnabled);
   const events = useMemo(() => {
     const merged = new Map<number, TradeFlowEvent>();
     for (const evt of eventsData?.data ?? []) {

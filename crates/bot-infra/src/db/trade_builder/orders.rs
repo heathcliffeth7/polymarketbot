@@ -35,6 +35,9 @@ impl PostgresRepository {
         origin_flow_run_id: Option<i64>,
         origin_flow_node_key: Option<&str>,
         sl_trigger_price_mode: Option<&str>,
+        reenter_on_sl_hit: bool,
+        reentry_max_attempts: i32,
+        reentry_trigger_node_key: Option<&str>,
         notify_on_fill: bool,
         notify_on_trigger_guard_blocked: bool,
         notify_on_execution_floor_blocked: bool,
@@ -47,13 +50,13 @@ impl PostgresRepository {
     ) -> Result<i64> {
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO trade_builder_orders \
-              (trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, remaining_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, parent_order_id, tp_enabled, tp_price, sl_enabled, sl_price, fee_rate_bps, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, sl_trigger_price_mode, notify_on_fill, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, created_at, updated_at) \
+              (trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, remaining_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, parent_order_id, tp_enabled, tp_price, sl_enabled, sl_price, fee_rate_bps, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_fill, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, created_at, updated_at) \
              VALUES \
               ($1, (SELECT user_id FROM trades WHERE id = $1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 0, $23, $24, $25, $26, $27, $28, \
                COALESCE($29, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_definition_id FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
                COALESCE($30, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_run_id FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
                COALESCE($31, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_node_key FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
-               $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, \
+               $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, \
                NOW(), NOW()) \
              RETURNING id",
         )
@@ -89,6 +92,9 @@ impl PostgresRepository {
         .bind(origin_flow_run_id)
         .bind(origin_flow_node_key)
         .bind(sl_trigger_price_mode)
+        .bind(reenter_on_sl_hit)
+        .bind(reentry_max_attempts)
+        .bind(reentry_trigger_node_key)
         .bind(notify_on_fill)
         .bind(notify_on_trigger_guard_blocked)
         .bind(notify_on_execution_floor_blocked)
@@ -127,7 +133,7 @@ impl PostgresRepository {
         limit: i64,
     ) -> Result<Vec<TradeBuilderOrder>> {
         let rows = sqlx::query(
-            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, trigger_latched_at, submitted_dynamic_qty, submitted_dynamic_price, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, sl_trigger_price_mode, notify_on_fill, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked \
+            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, trigger_latched_at, submitted_dynamic_qty, submitted_dynamic_price, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_fill, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked \
              FROM trade_builder_orders \
              WHERE status IN ('pending', 'armed', 'triggered', 'open', 'partially_filled', 'canceled_requested', 'inventory_pending', 'guard_blocked') \
                 OR (status = 'error' AND trigger_latched = TRUE AND trigger_latched_reason = 'stop_loss') \
@@ -200,6 +206,9 @@ impl PostgresRepository {
                     .get("retry_on_execution_floor_guard_block"),
                 retry_on_max_price_block: row.get("retry_on_max_price_block"),
                 sl_trigger_price_mode: row.get("sl_trigger_price_mode"),
+                reenter_on_sl_hit: row.get("reenter_on_sl_hit"),
+                reentry_max_attempts: row.get("reentry_max_attempts"),
+                reentry_trigger_node_key: row.get("reentry_trigger_node_key"),
                 notify_on_fill: row.get("notify_on_fill"),
                 notify_on_trigger_guard_blocked: row.get("notify_on_trigger_guard_blocked"),
                 notify_on_execution_floor_blocked: row.get("notify_on_execution_floor_blocked"),
@@ -212,7 +221,7 @@ impl PostgresRepository {
 
     pub async fn list_armed_tp_sl_child_builder_orders(&self) -> Result<Vec<TradeBuilderOrder>> {
         let rows = sqlx::query(
-            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, trigger_latched_at, submitted_dynamic_qty, submitted_dynamic_price, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, sl_trigger_price_mode, notify_on_fill, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked \
+            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, trigger_latched_at, submitted_dynamic_qty, submitted_dynamic_price, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_fill, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked \
              FROM trade_builder_orders \
              WHERE parent_order_id IS NOT NULL \
                AND side = 'sell' \
@@ -280,6 +289,9 @@ impl PostgresRepository {
                     .get("retry_on_execution_floor_guard_block"),
                 retry_on_max_price_block: row.get("retry_on_max_price_block"),
                 sl_trigger_price_mode: row.get("sl_trigger_price_mode"),
+                reenter_on_sl_hit: row.get("reenter_on_sl_hit"),
+                reentry_max_attempts: row.get("reentry_max_attempts"),
+                reentry_trigger_node_key: row.get("reentry_trigger_node_key"),
                 notify_on_fill: row.get("notify_on_fill"),
                 notify_on_trigger_guard_blocked: row.get("notify_on_trigger_guard_blocked"),
                 notify_on_execution_floor_blocked: row.get("notify_on_execution_floor_blocked"),
@@ -302,7 +314,7 @@ impl PostgresRepository {
                 o.max_triggers, o.triggers_fired, o.active_exchange_order_id, o.remaining_size, o.remaining_qty, o.working_price, \
                 o.last_seen_price, o.last_error, o.created_at, o.updated_at, \
                 o.parent_order_id, o.origin_flow_definition_id, o.origin_flow_run_id, o.origin_flow_node_key, o.tp_enabled, o.tp_price, o.sl_enabled, o.sl_price, \
-                o.filled_qty, o.fee_rate_bps, o.trigger_latched, o.trigger_latched_reason, o.submitted_dynamic_qty, o.submitted_dynamic_price, o.retry_on_trigger_guard_block, o.retry_on_execution_floor_guard_block, o.retry_on_max_price_block, o.sl_trigger_price_mode, \
+                o.filled_qty, o.fee_rate_bps, o.trigger_latched, o.trigger_latched_reason, o.trigger_latched_at, o.submitted_dynamic_qty, o.submitted_dynamic_price, o.retry_on_trigger_guard_block, o.retry_on_execution_floor_guard_block, o.retry_on_max_price_block, o.sl_trigger_price_mode, o.reenter_on_sl_hit, o.reentry_max_attempts, o.reentry_trigger_node_key, \
                 o.notify_on_fill, o.notify_on_trigger_guard_blocked, o.notify_on_execution_floor_blocked, o.notify_on_tp_hit, o.notify_on_sl_hit, o.notify_on_max_price_blocked \
              FROM trade_builder_orders o \
              JOIN trade_flow_dual_dca_legs l ON l.builder_order_id = o.id \
@@ -372,6 +384,9 @@ impl PostgresRepository {
                     .get("retry_on_execution_floor_guard_block"),
                 retry_on_max_price_block: row.get("retry_on_max_price_block"),
                 sl_trigger_price_mode: row.get("sl_trigger_price_mode"),
+                reenter_on_sl_hit: row.get("reenter_on_sl_hit"),
+                reentry_max_attempts: row.get("reentry_max_attempts"),
+                reentry_trigger_node_key: row.get("reentry_trigger_node_key"),
                 notify_on_fill: row.get("notify_on_fill"),
                 notify_on_trigger_guard_blocked: row.get("notify_on_trigger_guard_blocked"),
                 notify_on_execution_floor_blocked: row.get("notify_on_execution_floor_blocked"),
@@ -455,6 +470,21 @@ impl PostgresRepository {
         )
         .bind(builder_order_id)
         .bind(status)
+        .bind(last_error)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_trade_builder_order_last_error(
+        &self,
+        builder_order_id: i64,
+        last_error: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders SET last_error = $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(builder_order_id)
         .bind(last_error)
         .execute(self.pool())
         .await?;
@@ -770,7 +800,7 @@ impl PostgresRepository {
         builder_order_id: i64,
     ) -> Result<Option<TradeBuilderOrder>> {
         let row = sqlx::query(
-            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, trigger_latched_at, submitted_dynamic_qty, submitted_dynamic_price, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, sl_trigger_price_mode, notify_on_fill, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked \
+            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, trigger_latched_at, submitted_dynamic_qty, submitted_dynamic_price, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_fill, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked \
              FROM trade_builder_orders WHERE id = $1",
         )
         .bind(builder_order_id)
@@ -829,6 +859,9 @@ impl PostgresRepository {
             retry_on_execution_floor_guard_block: row.get("retry_on_execution_floor_guard_block"),
             retry_on_max_price_block: row.get("retry_on_max_price_block"),
             sl_trigger_price_mode: row.get("sl_trigger_price_mode"),
+            reenter_on_sl_hit: row.get("reenter_on_sl_hit"),
+            reentry_max_attempts: row.get("reentry_max_attempts"),
+            reentry_trigger_node_key: row.get("reentry_trigger_node_key"),
             notify_on_fill: row.get("notify_on_fill"),
             notify_on_trigger_guard_blocked: row.get("notify_on_trigger_guard_blocked"),
             notify_on_execution_floor_blocked: row.get("notify_on_execution_floor_blocked"),
@@ -844,7 +877,7 @@ impl PostgresRepository {
         exclude_order_id: Option<i64>,
     ) -> Result<Vec<TradeBuilderOrder>> {
         let rows = sqlx::query(
-            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, trigger_latched_at, submitted_dynamic_qty, submitted_dynamic_price, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, sl_trigger_price_mode, notify_on_fill, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked \
+            "SELECT id, trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, last_error, created_at, updated_at, parent_order_id, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, tp_enabled, tp_price, sl_enabled, sl_price, filled_qty, fee_rate_bps, trigger_latched, trigger_latched_reason, trigger_latched_at, submitted_dynamic_qty, submitted_dynamic_price, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_fill, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked \
              FROM trade_builder_orders \
              WHERE parent_order_id = $1
                AND ($2::bigint IS NULL OR id <> $2)
@@ -910,6 +943,9 @@ impl PostgresRepository {
                     .get("retry_on_execution_floor_guard_block"),
                 retry_on_max_price_block: row.get("retry_on_max_price_block"),
                 sl_trigger_price_mode: row.get("sl_trigger_price_mode"),
+                reenter_on_sl_hit: row.get("reenter_on_sl_hit"),
+                reentry_max_attempts: row.get("reentry_max_attempts"),
+                reentry_trigger_node_key: row.get("reentry_trigger_node_key"),
                 notify_on_fill: row.get("notify_on_fill"),
                 notify_on_trigger_guard_blocked: row.get("notify_on_trigger_guard_blocked"),
                 notify_on_execution_floor_blocked: row.get("notify_on_execution_floor_blocked"),

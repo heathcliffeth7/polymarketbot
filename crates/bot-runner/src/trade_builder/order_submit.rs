@@ -51,38 +51,59 @@ fn trade_builder_market_spec_cache_put(market_slug: &str, spec: TradeBuilderMark
 async fn resolve_trade_builder_market_spec(
     cfg: &AppConfig,
     market_slug: &str,
+    token_id: &str,
 ) -> Option<TradeBuilderMarketSpec> {
     let candidates = trade_builder_market_spec_slug_candidates(market_slug);
-    if candidates.is_empty() {
-        return None;
-    }
 
-    for candidate in &candidates {
-        if let Some(spec) = trade_builder_market_spec_cache_get(candidate) {
+    if !candidates.is_empty() {
+        for candidate in &candidates {
+            if let Some(spec) = trade_builder_market_spec_cache_get(candidate) {
+                if !candidates.is_empty() {
+                    trade_builder_market_spec_cache_put(&candidates[0], spec);
+                }
+                return Some(spec);
+            }
+        }
+
+        let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
+        for candidate in &candidates {
+            let Ok(Some(market)) = gamma.get_market_spec_by_slug(candidate).await else {
+                continue;
+            };
+            let spec = TradeBuilderMarketSpec {
+                neg_risk: market.neg_risk,
+                order_price_min_tick_size: normalize_trade_builder_market_spec_number(
+                    market.order_price_min_tick_size,
+                ),
+                order_min_size: normalize_trade_builder_market_spec_number(market.order_min_size),
+            };
+            trade_builder_market_spec_cache_put(candidate, spec);
             trade_builder_market_spec_cache_put(&candidates[0], spec);
             return Some(spec);
         }
     }
 
-    let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
-    for candidate in &candidates {
-        let Ok(Some(market)) = gamma.get_market_spec_by_slug(candidate).await else {
-            continue;
-        };
-        let spec = TradeBuilderMarketSpec {
-            neg_risk: market.neg_risk,
-            order_price_min_tick_size: normalize_trade_builder_market_spec_number(
-                market.order_price_min_tick_size,
-            ),
-            order_min_size: normalize_trade_builder_market_spec_number(market.order_min_size),
-        };
-        trade_builder_market_spec_cache_put(candidate, spec);
-        trade_builder_market_spec_cache_put(&candidates[0], spec);
-        return Some(spec);
+    // Slug lookup failed (e.g. negRisk market with parent slug) — fallback to token_id lookup
+    if !token_id.is_empty() {
+        let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
+        if let Ok(Some(market)) = gamma.get_market_spec_by_token_id(token_id).await {
+            let spec = TradeBuilderMarketSpec {
+                neg_risk: market.neg_risk,
+                order_price_min_tick_size: normalize_trade_builder_market_spec_number(
+                    market.order_price_min_tick_size,
+                ),
+                order_min_size: normalize_trade_builder_market_spec_number(market.order_min_size),
+            };
+            if !candidates.is_empty() {
+                trade_builder_market_spec_cache_put(&candidates[0], spec);
+            }
+            return Some(spec);
+        }
     }
 
     warn!(
         market_slug,
+        token_id,
         candidates = ?candidates,
         "TRADE_BUILDER_MARKET_SPEC_UNRESOLVED"
     );
@@ -589,7 +610,7 @@ async fn submit_trade_builder_trigger_order(
     let normalized_execution_mode = normalize_trade_builder_execution_mode(&order.execution_mode);
     let order_type = clob_order_type_for_execution_mode(normalized_execution_mode);
     let client_order_id = format!("tb-{}", Uuid::new_v4());
-    let market_spec = resolve_trade_builder_market_spec(cfg, &order.market_slug).await;
+    let market_spec = resolve_trade_builder_market_spec(cfg, &order.market_slug, &order.token_id).await;
     let req = PlaceOrderRequest {
         market: order.market_slug.clone(),
         token_id: Some(order.token_id.clone()),

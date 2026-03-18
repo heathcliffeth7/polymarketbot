@@ -62,6 +62,7 @@ export const NUMERIC_KEYS = new Set([
   'tpPriceCent',
   'slPriceCent',
   'priceToBeatMaxDiff',
+  'reentryMaxAttempts',
 ]);
 
 export const BOOLEAN_KEYS = new Set([
@@ -84,6 +85,7 @@ export const BOOLEAN_KEYS = new Set([
   'retryOnMaxPriceBlock',
   'notifyOnTpHit',
   'notifyOnSlHit',
+  'reenterOnSlHit',
 ]);
 
 export const CONTEXT_BASE_KEYS = new Set([

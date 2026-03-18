@@ -81,12 +81,15 @@ import { useCanvasKeyboard } from '../flow-canvas-keyboard';
 import { exportGraphAsJson, importGraphFromFile } from '../flow-import-export';
 import { applyInheritedPlaceOrderMaxPriceConfig, normalizePresetPlaceOrderConfig } from './helpers';
 import { FlowCanvasEditorLayout } from './layout';
+import { useCanvasSelection } from './use-canvas-selection';
 import { useMarketOutcomes } from './use-market-outcomes';
 import { useSelectedNodeUpstream } from './use-selected-node-upstream';
 import { useSyncPlaceOrderFormState } from './use-sync-place-order-form-state';
 
 export function FlowCanvasEditorBody({
   graph,
+  readOnly = false,
+  readOnlyReason = null,
   onGraphChange,
   onError,
   onPendingNodeDraftChange,
@@ -111,13 +114,11 @@ export function FlowCanvasEditorBody({
   const graphSyncGuardRef = useRef<{ until: number; nodes: number; edges: number } | null>(null);
   const canvasWrapperRef = useRef<HTMLDivElement | null>(null);
   const editorRootRef = useRef<HTMLDivElement | null>(null);
+  const lastCanvasPointerRef = useRef<{ x: number; y: number } | null>(null);
   const [pendingFocusNodeId, setPendingFocusNodeId] = useState<string | null>(null);
   const reactFlow = useReactFlow<FlowNode, FlowEdge>();
   const nodesInitialized = useNodesInitialized();
   const history = useCanvasHistory();
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const { upstreamAutoScope: selectedNodeUpstreamAutoScope, upstreamTriggerPrice: selectedNodeUpstreamTriggerPrice, upstreamMaxPriceResolution: selectedNodeUpstreamMaxPriceResolution, upstreamFixedMarketResolution: selectedNodeUpstreamFixedMarketResolution } = useSelectedNodeUpstream({ selectedNodeId, canvasNodes, canvasEdges });
   const [nodeInspectorTab, setNodeInspectorTab] = useState<'basic' | 'advanced'>('basic');
   const [edgeInspectorTab, setEdgeInspectorTab] = useState<'basic' | 'advanced'>('basic');
   const [openPositionApplyingKey, setOpenPositionApplyingKey] = useState<string | null>(null);
@@ -129,20 +130,11 @@ export function FlowCanvasEditorBody({
   const [edgeForm, setEdgeForm] = useState<EdgeConditionFormState | null>(null);
   const [nodePaletteCategory, setNodePaletteCategory] = useState<NodePaletteCategory>('all');
   const [nodePaletteSearch, setNodePaletteSearch] = useState('');
-  const [clipboard, setClipboard] = useState<FlowNode | null>(null);
   const [showNodeSearch, setShowNodeSearch] = useState(false);
   const [nodeSearchQuery, setNodeSearchQuery] = useState('');
   const nodeSearchInputRef = useRef<HTMLInputElement | null>(null);
   const [nodeGroups, setNodeGroups] = useState<NodeGroup[]>([]);
   const nextGroupColorIdx = useRef(0);
-  const selectedNode = useMemo(
-    () => (selectedNodeId ? canvasNodes.find((n) => n.id === selectedNodeId) || null : null),
-    [canvasNodes, selectedNodeId]
-  );
-  const selectedEdge = useMemo(
-    () => (selectedEdgeId ? canvasEdges.find((e) => e.id === selectedEdgeId) || null : null),
-    [canvasEdges, selectedEdgeId]
-  );
   const filteredNodeOptions = useMemo(() => {
     const search = nodePaletteSearch.trim().toLowerCase();
     return NODE_TYPE_OPTIONS.filter((option) => {
@@ -246,6 +238,62 @@ export function FlowCanvasEditorBody({
     },
     [history, onGraphChange, setCanvasGraphState]
   );
+  const getViewportCenterPosition = useCallback(() => {
+    const canvasRect = canvasWrapperRef.current?.getBoundingClientRect();
+    if (!canvasRect) {
+      const viewport = reactFlow.getViewport();
+      const zoom = viewport.zoom || 1;
+      return { x: Math.round((-viewport.x + 220) / zoom), y: Math.round((-viewport.y + 120) / zoom) };
+    }
+    const mapped = reactFlow.screenToFlowPosition({
+      x: canvasRect.left + canvasRect.width * 0.5,
+      y: canvasRect.top + canvasRect.height * 0.5,
+    });
+    return { x: Math.round(mapped.x), y: Math.round(mapped.y) };
+  }, [reactFlow]);
+  const {
+    clearSelection,
+    deleteSelectedEdge,
+    deleteSelectedNode,
+    deleteSelection,
+    handleCopy,
+    handlePaste,
+    hasActiveSelection,
+    hydrateNodeDraft,
+    inspectedNodeId,
+    isMultiSelection,
+    onSelectionChange,
+    selectedEdge,
+    selectedEdgeCount,
+    selectedEdgeIds,
+    selectedNode,
+    selectedNodeCount,
+    selectedNodeIds,
+  } = useCanvasSelection({
+    canvasEdges,
+    canvasEdgesRef,
+    canvasNodes,
+    canvasNodesRef,
+    commitGraph,
+    getPasteAnchor: () => lastCanvasPointerRef.current ?? getViewportCenterPosition(),
+    onError,
+    queueNodeFocus: (nodeId: string) => setPendingFocusNodeId(nodeId),
+    setCanvasGraphState,
+    setEdgeForm,
+    setEdgeInspectorTab,
+    setEdgeTypeDraft,
+    setHasPendingNodeDraft,
+    setNodeForm,
+    setNodeInspectorTab,
+    setNodeKeyDraft,
+    setNodeTypeDraft,
+  });
+  const {
+    upstreamAutoScope: selectedNodeUpstreamAutoScope,
+    upstreamTriggerPrice: selectedNodeUpstreamTriggerPrice,
+    upstreamMaxPriceResolution: selectedNodeUpstreamMaxPriceResolution,
+    upstreamFixedMarketResolution: selectedNodeUpstreamFixedMarketResolution,
+  } = useSelectedNodeUpstream({ selectedNodeId: inspectedNodeId, canvasNodes, canvasEdges });
   useEffect(() => {
     if (graphFingerprint === lastSeenPropGraphFingerprintRef.current) return;
     lastSeenPropGraphFingerprintRef.current = graphFingerprint;
@@ -256,6 +304,14 @@ export function FlowCanvasEditorBody({
     lastAppliedGraphFingerprintRef.current = graphFingerprint;
     setCanvasGraphState(graph.nodes.map(toCanvasNode), graph.edges.map(toCanvasEdge));
   }, [graph.edges, graph.nodes, graphFingerprint, setCanvasGraphState]);
+  useEffect(() => {
+    const nodeIdSet = new Set(canvasNodes.map((node) => node.id));
+    const edgeIdSet = new Set(canvasEdges.map((edge) => edge.id));
+    const hasInvalidSelection =
+      selectedNodeIds.some((nodeId) => !nodeIdSet.has(nodeId)) ||
+      selectedEdgeIds.some((edgeId) => !edgeIdSet.has(edgeId));
+    if (hasInvalidSelection) clearSelection();
+  }, [canvasEdges, canvasNodes, clearSelection, selectedEdgeIds, selectedNodeIds]);
   useEffect(() => {
     if (!pendingFocusNodeId) return;
     const timeout = window.setTimeout(() => {
@@ -279,63 +335,26 @@ export function FlowCanvasEditorBody({
     setPendingFocusNodeId(null);
   }, [canvasNodes, nodesInitialized, pendingFocusNodeId, reactFlow]);
   const queueNodeFocus = useCallback((nodeId: string) => setPendingFocusNodeId(nodeId), []);
+  const focusEditor = useCallback(() => editorRootRef.current?.focus(), []);
+  const ensureWritable = useCallback(() => {
+    if (!readOnly) return true;
+    onError(readOnlyReason ?? 'Flow yuklenirken duzenleme kilitli.');
+    return false;
+  }, [onError, readOnly, readOnlyReason]);
   const getInsertPosition = useCallback(() => {
     if (selectedNode) return { x: selectedNode.position.x + 260, y: selectedNode.position.y + 20 };
-    const canvasRect = canvasWrapperRef.current?.getBoundingClientRect();
-    if (!canvasRect) {
-      const viewport = reactFlow.getViewport();
-      const zoom = viewport.zoom || 1;
-      return { x: Math.round((-viewport.x + 220) / zoom), y: Math.round((-viewport.y + 120) / zoom) };
-    }
-    const mapped = reactFlow.screenToFlowPosition({
-      x: canvasRect.left + canvasRect.width * 0.46,
-      y: canvasRect.top + canvasRect.height * 0.32,
-    });
-    return { x: Math.round(mapped.x), y: Math.round(mapped.y) };
-  }, [reactFlow, selectedNode]);
-  const clearSelection = useCallback(() => {
-    setSelectedNodeId(null);
-    setSelectedEdgeId(null);
-    setNodeForm(null);
-    setEdgeForm(null);
-    setHasPendingNodeDraft(false);
-  }, []);
-  const hydrateNodeDraft = useCallback((node: FlowNode) => {
-    setSelectedNodeId(node.id);
-    setSelectedEdgeId(null);
-    setNodeInspectorTab('basic');
-    setNodeKeyDraft(node.id);
-    setNodeTypeDraft(node.data.nodeType);
-    const form = parseNodeConfigToForm(node.data.nodeType, node.data.config);
-    setNodeForm(form);
-    const nt = node.data.nodeType;
-    if (
-      nt === 'trigger.open_positions' ||
-      nt === 'trigger.market_price' ||
-      nt === 'trigger.position_drawdown'
-    ) {
-    }
-    setEdgeForm(null);
-    setHasPendingNodeDraft(false);
-  }, []);
-  const hydrateEdgeDraft = useCallback((edge: FlowEdge) => {
-    setSelectedEdgeId(edge.id);
-    setSelectedNodeId(null);
-    setEdgeInspectorTab('basic');
-    setEdgeTypeDraft(edge.data?.edgeType || 'default');
-    setEdgeForm(parseEdgeConditionToForm(edge.data?.condition ?? null));
-    setNodeForm(null);
-  }, []);
-  const onSelectionChange = useCallback(
-    ({ nodes: pn, edges: pe }: { nodes: FlowNode[]; edges: FlowEdge[] }) => {
-      if (pn.length > 0) { hydrateNodeDraft(pn[0]); onError(null); return; }
-      if (pe.length > 0) { hydrateEdgeDraft(pe[0]); onError(null); return; }
-      clearSelection();
+    return getViewportCenterPosition();
+  }, [getViewportCenterPosition, selectedNode]);
+  const updateCanvasPointer = useCallback(
+    (clientX: number, clientY: number) => {
+      const position = reactFlow.screenToFlowPosition({ x: clientX, y: clientY });
+      lastCanvasPointerRef.current = { x: Math.round(position.x), y: Math.round(position.y) };
     },
-    [clearSelection, hydrateEdgeDraft, hydrateNodeDraft, onError]
+    [reactFlow]
   );
   const handleNodesChange = useCallback(
     (changes: NodeChange<FlowNode>[]) => {
+      if (!ensureWritable()) return;
       const currentNodes = canvasNodesRef.current;
       const currentEdges = canvasEdgesRef.current;
       const nextNodes = applyNodeChanges(changes, currentNodes);
@@ -347,26 +366,33 @@ export function FlowCanvasEditorBody({
       const droppedExistingNodeWithoutRemoval = !hasRemoval &&
         currentNodes.some((node) => !nodeIdSet.has(node.id));
       if (droppedExistingNodeWithoutRemoval) return;
-      if (selectedNodeId && !nodeIdSet.has(selectedNodeId)) clearSelection();
+      const nextEdgeIdSet = new Set(nextEdges.map((edge) => edge.id));
+      const selectionInvalidated =
+        selectedNodeIds.some((nodeId) => !nodeIdSet.has(nodeId)) ||
+        selectedEdgeIds.some((edgeId) => !nextEdgeIdSet.has(edgeId));
+      if (selectionInvalidated) clearSelection();
       commitGraph(nextNodes, nextEdges, !hasRemoval, hasRemoval);
     },
-    [clearSelection, commitGraph, selectedNodeId]
+    [clearSelection, commitGraph, ensureWritable, selectedEdgeIds, selectedNodeIds]
   );
   const handleEdgesChange = useCallback(
     (changes: EdgeChange<FlowEdge>[]) => {
+      if (!ensureWritable()) return;
       const currentEdges = canvasEdgesRef.current;
       const nextEdges = applyEdgeChanges(changes, currentEdges);
       const hasRemoval = changes.some((c) => c.type === 'remove');
       const droppedExistingEdgeWithoutRemoval = !hasRemoval &&
         currentEdges.some((edge) => !nextEdges.some((nextEdge) => nextEdge.id === edge.id));
       if (droppedExistingEdgeWithoutRemoval) return;
-      if (selectedEdgeId && !nextEdges.some((e) => e.id === selectedEdgeId)) clearSelection();
+      const nextEdgeIdSet = new Set(nextEdges.map((edge) => edge.id));
+      if (selectedEdgeIds.some((edgeId) => !nextEdgeIdSet.has(edgeId))) clearSelection();
       commitGraph(canvasNodesRef.current, nextEdges, !hasRemoval, hasRemoval);
     },
-    [clearSelection, commitGraph, selectedEdgeId]
+    [clearSelection, commitGraph, ensureWritable, selectedEdgeIds]
   );
   const handleConnect = useCallback(
     (connection: Connection) => {
+      if (!ensureWritable()) return;
       if (!connection.source || !connection.target) return;
       const edgeId = createEdgeKey(new Set(canvasEdges.map((e) => e.id)));
       const next = addEdge<FlowEdge>(
@@ -388,20 +414,22 @@ export function FlowCanvasEditorBody({
       commitGraph(canvasNodes, next);
       onError(null);
     },
-    [canvasEdges, canvasNodes, commitGraph, onError]
+    [canvasEdges, canvasNodes, commitGraph, ensureWritable, onError]
   );
   const addNode = (nodeType: string) => {
+    if (!ensureWritable()) return;
     const nodeId = createNodeKey(nodeType, new Set(canvasNodes.map((n) => n.id)));
     const nextNode: FlowNode = {
       id: nodeId, type: 'flowNode', position: getInsertPosition(),
       data: { nodeType, config: {} },
     };
     commitGraph([...canvasNodes, nextNode], canvasEdges);
-    hydrateNodeDraft(nextNode);
+    hydrateNodeDraft(nextNode, true);
     queueNodeFocus(nextNode.id);
     onError(null);
   };
   const addPresetPlaceOrderNode = (kind: PlaceOrderPresetKind) => {
+    if (!ensureWritable()) return;
     const fromSel = selectedNode ? extractPositionSeedFromNode(selectedNode) : null;
     const fromCtx: PlaceOrderPresetSeed = {
       sourceTradeId: toFiniteNumberValue(graph.context.sourceTradeId),
@@ -421,7 +449,7 @@ export function FlowCanvasEditorBody({
       data: { nodeType: 'action.place_order', config: buildPlaceOrderPresetConfig(kind, seed) },
     };
     commitGraph([...canvasNodes, nextNode], canvasEdges);
-    hydrateNodeDraft(nextNode);
+    hydrateNodeDraft(nextNode, true);
     queueNodeFocus(nextNode.id);
     if (!hasRequiredPlaceOrderSeed(seed)) {
       onError(kind === 'sell_current_position'
@@ -429,20 +457,6 @@ export function FlowCanvasEditorBody({
         : 'Alis preset node eklendi. Eksik alanlar icin sag paneldeki acik pozisyon listesinden secim yapabilirsin.');
       return;
     }
-    onError(null);
-  };
-  const deleteSelectedNode = () => {
-    if (!selectedNode) return;
-    const nextNodes = canvasNodes.filter((n) => n.id !== selectedNode.id);
-    const nextEdges = canvasEdges.filter((e) => e.source !== selectedNode.id && e.target !== selectedNode.id);
-    commitGraph(nextNodes, nextEdges, false, true);
-    clearSelection();
-    onError(null);
-  };
-  const deleteSelectedEdge = () => {
-    if (!selectedEdge) return;
-    commitGraph(canvasNodes, canvasEdges.filter((e) => e.id !== selectedEdge.id), false, true);
-    clearSelection();
     onError(null);
   };
   const updateNodeField = (key: string, value: string) => {
@@ -455,7 +469,7 @@ export function FlowCanvasEditorBody({
   };
   useSyncPlaceOrderFormState({
     nodeTypeDraft,
-    selectedNodeId,
+    selectedNodeId: inspectedNodeId,
     placeOrderMaxTriggers: nodeForm?.fields.maxTriggers,
     upstreamFixedMarketResolution: selectedNodeUpstreamFixedMarketResolution,
     upstreamMaxPriceResolution: selectedNodeUpstreamMaxPriceResolution,
@@ -464,6 +478,7 @@ export function FlowCanvasEditorBody({
   const canApplyOpenPosition = (p: TradeFlowOpenPositionOption) =>
     p.matchedTradeId != null ? true : Boolean(p.marketSlug.trim() && p.tokenId.trim());
   const applyOpenPositionSelection = async (position: TradeFlowOpenPositionOption) => {
+    if (!ensureWritable()) return;
     if (!canApplyOpenPosition(position)) {
       onError('Bu pozisyon icin marketSlug/tokenId eksik, sourceTradeId atanamadi.');
       return;
@@ -582,6 +597,7 @@ export function FlowCanvasEditorBody({
     }
   };
   const createOrUpdateNode = (mode: 'create' | 'update', source: 'basic' | 'advanced') => {
+    if (!ensureWritable()) return;
     const nextKey = nodeKeyDraft.trim();
     const nextType = nodeTypeDraft.trim();
     if (!nextKey || !nextType) { onError('Node key ve type bos olamaz.'); return; }
@@ -732,7 +748,7 @@ export function FlowCanvasEditorBody({
       if (canvasNodes.some((n) => n.id === nextKey)) { onError(`Ayni key ile baska node var: ${nextKey}`); return; }
       const nextNode: FlowNode = { id: nextKey, type: 'flowNode', position: getInsertPosition(), data: { nodeType: nextType, config: parsedConfig } };
       commitGraph([...canvasNodes, nextNode], canvasEdges);
-      hydrateNodeDraft(nextNode);
+      hydrateNodeDraft(nextNode, true);
       queueNodeFocus(nextNode.id);
       setHasPendingNodeDraft(false);
       toast.success('Node eklendi');
@@ -741,9 +757,9 @@ export function FlowCanvasEditorBody({
       if (nextKey !== selectedNode.id && canvasNodes.some((n) => n.id === nextKey)) { onError(`Ayni key ile baska node var: ${nextKey}`); return; }
       const nextNodes = canvasNodes.map((n) => n.id !== selectedNode.id ? n : { ...n, id: nextKey, data: { ...n.data, nodeType: nextType, config: parsedConfig } });
       const nextEdges = canvasEdges.map((e) => ({ ...e, source: e.source === selectedNode.id ? nextKey : e.source, target: e.target === selectedNode.id ? nextKey : e.target }));
+      const updatedNode = nextNodes.find((node) => node.id === nextKey);
       commitGraph(nextNodes, nextEdges, false, true);
-      setSelectedNodeId(nextKey);
-      setNodeForm(parseNodeConfigToForm(nextType, parsedConfig));
+      if (updatedNode) hydrateNodeDraft(updatedNode, true);
       setHasPendingNodeDraft(false);
       toast.success('Node guncellendi');
     }
@@ -756,6 +772,7 @@ export function FlowCanvasEditorBody({
     setEdgeForm((prev) => prev ? { ...prev, conditionRow: { ...prev.conditionRow, ...patch } } : prev);
   };
   const applyEdge = (source: 'basic' | 'advanced') => {
+    if (!ensureWritable()) return;
     if (!selectedEdge || !edgeForm) return;
     const nextEdgeType = edgeTypeDraft.trim() || 'default';
     let nextCondition: Record<string, unknown> | null = null;
@@ -784,6 +801,7 @@ export function FlowCanvasEditorBody({
   };
   // Undo/Redo
   const handleUndo = useCallback(() => {
+    if (!ensureWritable()) return;
     const snapshot = history.undo(canvasNodesRef.current, canvasEdgesRef.current);
     if (!snapshot) return;
     setCanvasGraphState(snapshot.nodes, snapshot.edges);
@@ -794,9 +812,10 @@ export function FlowCanvasEditorBody({
       { context: graphContextRef.current, nodes: dn, edges: de },
       { allowGraphShrink: true }
     );
-    clearSelection();
-  }, [clearSelection, history, onGraphChange, setCanvasGraphState]);
+    clearSelection(true);
+  }, [clearSelection, ensureWritable, history, onGraphChange, setCanvasGraphState]);
   const handleRedo = useCallback(() => {
+    if (!ensureWritable()) return;
     const snapshot = history.redo(canvasNodesRef.current, canvasEdgesRef.current);
     if (!snapshot) return;
     setCanvasGraphState(snapshot.nodes, snapshot.edges);
@@ -807,34 +826,20 @@ export function FlowCanvasEditorBody({
       { context: graphContextRef.current, nodes: dn, edges: de },
       { allowGraphShrink: true }
     );
-    clearSelection();
-  }, [clearSelection, history, onGraphChange, setCanvasGraphState]);
-  // Copy/Paste
-  const handleCopy = useCallback(() => {
-    if (selectedNode) setClipboard(structuredClone(selectedNode));
-  }, [selectedNode]);
-  const handlePaste = useCallback(() => {
-    if (!clipboard) return;
-    const newId = createNodeKey(clipboard.data.nodeType, new Set(canvasNodes.map((n) => n.id)));
-    const pasted: FlowNode = {
-      ...structuredClone(clipboard),
-      id: newId,
-      position: { x: clipboard.position.x + 40, y: clipboard.position.y + 40 },
-    };
-    commitGraph([...canvasNodes, pasted], canvasEdges);
-    hydrateNodeDraft(pasted);
-    queueNodeFocus(pasted.id);
-  }, [canvasEdges, canvasNodes, clipboard, commitGraph, hydrateNodeDraft, queueNodeFocus]);
+    clearSelection(true);
+  }, [clearSelection, ensureWritable, history, onGraphChange, setCanvasGraphState]);
   // Auto-Layout
   const handleAutoLayout = useCallback(() => {
+    if (!ensureWritable()) return;
     const laid = autoLayoutNodes(canvasNodes, canvasEdges);
     commitGraph(laid, canvasEdges);
-  }, [canvasEdges, canvasNodes, commitGraph]);
+  }, [canvasEdges, canvasNodes, commitGraph, ensureWritable]);
   // Import/Export
   const handleExport = useCallback(() => {
     exportGraphAsJson({ context: graph.context, nodes: canvasNodes.map(toDomainNode), edges: canvasEdges.map(toDomainEdge) });
   }, [canvasEdges, canvasNodes, graph.context]);
   const handleImport = useCallback(async () => {
+    if (!ensureWritable()) return;
     try {
       const imported = await importGraphFromFile();
       const nextNodes = imported.nodes.map(toCanvasNode);
@@ -844,9 +849,10 @@ export function FlowCanvasEditorBody({
     } catch (err) {
       onError(err instanceof Error ? err.message : 'JSON yukleme hatasi.');
     }
-  }, [commitGraph, onError]);
+  }, [commitGraph, ensureWritable, onError]);
   // Group / Ungroup
   const handleGroupSelected = useCallback(() => {
+    if (!ensureWritable()) return;
     if (!selectedNode) return;
     const colorSet = GROUP_COLORS[nextGroupColorIdx.current % GROUP_COLORS.length];
     nextGroupColorIdx.current += 1;
@@ -857,8 +863,9 @@ export function FlowCanvasEditorBody({
       n.id === selectedNode.id ? { ...n, data: { ...n.data, groupId, groupColor: colorSet.border } } : n
     );
     commitGraph(nextNodes, canvasEdges);
-  }, [canvasEdges, canvasNodes, commitGraph, nodeGroups.length, selectedNode]);
+  }, [canvasEdges, canvasNodes, commitGraph, ensureWritable, nodeGroups.length, selectedNode]);
   const handleAssignToGroup = useCallback((groupId: string) => {
+    if (!ensureWritable()) return;
     if (!selectedNode) return;
     const group = nodeGroups.find((g) => g.id === groupId);
     if (!group) return;
@@ -866,24 +873,41 @@ export function FlowCanvasEditorBody({
       n.id === selectedNode.id ? { ...n, data: { ...n.data, groupId, groupColor: group.color } } : n
     );
     commitGraph(nextNodes, canvasEdges);
-  }, [canvasEdges, canvasNodes, commitGraph, nodeGroups, selectedNode]);
+  }, [canvasEdges, canvasNodes, commitGraph, ensureWritable, nodeGroups, selectedNode]);
   const handleUngroupSelected = useCallback(() => {
+    if (!ensureWritable()) return;
     if (!selectedNode) return;
     const nextNodes = canvasNodes.map((n) =>
       n.id === selectedNode.id ? { ...n, data: { ...n.data, groupId: undefined, groupColor: undefined } } : n
     );
     commitGraph(nextNodes, canvasEdges);
-  }, [canvasEdges, canvasNodes, commitGraph, selectedNode]);
+  }, [canvasEdges, canvasNodes, commitGraph, ensureWritable, selectedNode]);
+  const guardedDeleteSelection = useCallback(() => {
+    if (!ensureWritable()) return;
+    deleteSelection();
+  }, [deleteSelection, ensureWritable]);
+  const guardedHandlePaste = useCallback(() => {
+    if (!ensureWritable()) return;
+    handlePaste();
+  }, [ensureWritable, handlePaste]);
+  const guardedDeleteSelectedNode = useCallback(() => {
+    if (!ensureWritable()) return;
+    deleteSelectedNode();
+  }, [deleteSelectedNode, ensureWritable]);
+  const guardedDeleteSelectedEdge = useCallback(() => {
+    if (!ensureWritable()) return;
+    deleteSelectedEdge();
+  }, [deleteSelectedEdge, ensureWritable]);
   // Keyboard
   useCanvasKeyboard({
     onSave: () => {},
     onUndo: handleUndo,
     onRedo: handleRedo,
     onCopy: handleCopy,
-    onPaste: handlePaste,
+    onPaste: guardedHandlePaste,
     onSelectAll: () => {},
-    onDeselect: clearSelection,
-    onDelete: () => { if (selectedNode) deleteSelectedNode(); else if (selectedEdge) deleteSelectedEdge(); },
+    onDeselect: () => clearSelection(true),
+    onDelete: guardedDeleteSelection,
     onSearch: () => { setShowNodeSearch(true); setTimeout(() => nodeSearchInputRef.current?.focus(), 50); },
   }, editorRootRef);
   // Node search overlay focus
@@ -902,7 +926,7 @@ export function FlowCanvasEditorBody({
     updateNodeField,
     updateTriggerSizeRow,
     createOrUpdateNode,
-    deleteSelectedNode,
+    deleteSelectedNode: guardedDeleteSelectedNode,
     applyOpenPositionSelection,
     updateExpressionRow,
     addExpressionRow,
@@ -923,12 +947,16 @@ export function FlowCanvasEditorBody({
     setEdgeForm,
     updateEdgeConditionRow,
     applyEdge,
-    deleteSelectedEdge,
+    deleteSelectedEdge: guardedDeleteSelectedEdge,
   });
   return (
     <FlowCanvasEditorLayout
+      readOnly={readOnly}
+      readOnlyReason={readOnlyReason}
       editorRootRef={editorRootRef}
       canvasWrapperRef={canvasWrapperRef}
+      focusEditor={focusEditor}
+      onCanvasPointerMove={updateCanvasPointer}
       leftPanelTopSlot={leftPanelTopSlot}
       showNodeSearch={showNodeSearch}
       setShowNodeSearch={setShowNodeSearch}
@@ -952,8 +980,11 @@ export function FlowCanvasEditorBody({
       actionCount={actionCount}
       selectedNode={selectedNode}
       selectedEdge={selectedEdge}
-      deleteSelectedNode={deleteSelectedNode}
-      deleteSelectedEdge={deleteSelectedEdge}
+      selectedNodeCount={selectedNodeCount}
+      selectedEdgeCount={selectedEdgeCount}
+      hasActiveSelection={hasActiveSelection}
+      isMultiSelection={isMultiSelection}
+      deleteSelection={guardedDeleteSelection}
       handleGroupSelected={handleGroupSelected}
       handleUngroupSelected={handleUngroupSelected}
       nodeGroups={nodeGroups}

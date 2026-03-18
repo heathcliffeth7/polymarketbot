@@ -87,9 +87,11 @@ fn open_position_ws_price_node_specs(
                 .and_then(value_as_f64)
                 .map(|v| v / 100.0)
                 .or_else(|| cond.get("triggerPrice").and_then(value_as_f64));
-            if token_id.is_empty()
-                || !matches!(trigger_condition.as_str(), "cross_above" | "cross_below")
+            if token_id.is_empty() || !is_supported_market_price_trigger_condition(&trigger_condition)
             {
+                continue;
+            }
+            if market_price_trigger_condition_requires_once(&trigger_condition) && !once_mode {
                 continue;
             }
             let tp = match trigger_price {
@@ -129,7 +131,10 @@ fn open_position_ws_price_node_specs(
         Some(tc) => tc,
         None => return Vec::new(),
     };
-    if !matches!(trigger_condition.as_str(), "cross_above" | "cross_below") {
+    if !is_supported_market_price_trigger_condition(&trigger_condition) {
+        return Vec::new();
+    }
+    if market_price_trigger_condition_requires_once(&trigger_condition) && !once_mode {
         return Vec::new();
     }
     let trigger_price = match node_config_f64(node, "triggerPrice")
@@ -187,10 +192,11 @@ fn ws_price_trigger_step_idempotency_key(
     once_mode: bool,
     once_scope_market: bool,
     market_slug: Option<&str>,
+    generation: i64,
 ) -> String {
     if once_mode {
         // once mode must enqueue at most one step for a once scope.
-        if once_scope_market {
+        let base = if once_scope_market {
             let scope_slug = market_slug
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
@@ -198,6 +204,11 @@ fn ws_price_trigger_step_idempotency_key(
             format!("ws-once:{run_id}:{node_key}:{scope_slug}")
         } else {
             format!("ws-once:{run_id}:{node_key}")
+        };
+        if generation > 0 {
+            format!("{base}:gen{generation}")
+        } else {
+            base
         }
     } else {
         let dedupe_ts = event_ts.unwrap_or_else(|| Utc::now().timestamp_millis());

@@ -189,6 +189,15 @@ export function NodeInspectorPanel({
         const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
         return placeOrderSide === 'buy' && slEnabled === 'true';
       }
+      if (field.key === 'reenterOnSlHit') {
+        const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
+        return placeOrderSide === 'buy' && slEnabled === 'true';
+      }
+      if (field.key === 'reentryMaxAttempts') {
+        const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
+        const reenterOnSlHit = (form.fields.reenterOnSlHit ?? '').toString().trim().toLowerCase();
+        return placeOrderSide === 'buy' && slEnabled === 'true' && reenterOnSlHit === 'true';
+      }
       if (field.key === 'notifyOnTriggerPriceBlocked') {
         return placeOrderSide === 'buy' && placeOrderTriggerGuardChecked;
       }
@@ -899,6 +908,7 @@ export function NodeInspectorPanel({
                 marketOutcomes={marketOutcomes}
                 marketOutcomesLoading={marketOutcomesLoading}
                 actions={actions}
+                nodeType={nodeTypeDraft}
               />
             )}
 

@@ -106,13 +106,26 @@ fn flow_node_state_truthy(context: &Value, node_key: &str, state_key: &str) -> b
         .unwrap_or(false)
 }
 
+fn flow_node_state_i64(context: &Value, node_key: &str, state_key: &str) -> Option<i64> {
+    flow_node_state(context, node_key, state_key).and_then(Value::as_i64)
+}
+
+fn flow_node_reentry_generation(context: &Value, node_key: &str) -> i64 {
+    flow_node_state_i64(context, node_key, FLOW_NODE_STATE_REENTRY_GENERATION).unwrap_or(0)
+}
+
+fn flow_node_reentry_attempts_used(context: &Value, node_key: &str) -> i64 {
+    flow_node_state_i64(context, node_key, FLOW_NODE_STATE_REENTRY_ATTEMPTS_USED).unwrap_or(0)
+}
+
 fn trade_flow_market_price_once_idempotency_key(
     run_id: i64,
     node_key: &str,
     once_scope_market: bool,
     market_slug: Option<&str>,
+    generation: i64,
 ) -> String {
-    if once_scope_market {
+    let base = if once_scope_market {
         let market_scope = market_slug
             .map(str::trim)
             .filter(|v| !v.is_empty())
@@ -120,6 +133,11 @@ fn trade_flow_market_price_once_idempotency_key(
         format!("flow-once-fired:{run_id}:{node_key}:{market_scope}")
     } else {
         format!("flow-once-fired:{run_id}:{node_key}")
+    };
+    if generation > 0 {
+        format!("{base}:gen{generation}")
+    } else {
+        base
     }
 }
 
@@ -615,6 +633,13 @@ async fn process_trade_builder_orders(
                 error = %err_text,
                 "TRADE_BUILDER_ORDER_ERROR"
             );
+        }
+        if trade_flow_ws_fast_path_cache_requires_refresh_now().await {
+            if let Err(e) = refresh_trade_flow_ws_fast_path_for_boundary(
+                repo, run_id, ws, &mut user_cfg_cache,
+            ).await {
+                warn!(run_id, error = %e, "TRADE_FLOW_BOUNDARY_REFRESH_FAILED");
+            }
         }
     }
 

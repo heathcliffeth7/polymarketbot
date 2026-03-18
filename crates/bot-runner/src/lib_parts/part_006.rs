@@ -1,4 +1,3 @@
-
 async fn record_market_discovery_event(
     repo: &PostgresRepository,
     run_id: i64,
@@ -93,6 +92,28 @@ fn updown_scope_candidate_slugs(scope_def: UpdownScopeDef, now: DateTime<Utc>) -
         .collect()
 }
 
+fn scope_candidate_window_markets(
+    scope_def: UpdownScopeDef,
+    markets: &[GammaMarket],
+    now: DateTime<Utc>,
+) -> Vec<GammaMarket> {
+    let candidate_slugs: HashSet<String> = updown_scope_candidate_slugs(scope_def, now)
+        .into_iter()
+        .collect();
+    markets
+        .iter()
+        .filter(|market| {
+            if !candidate_slugs.contains(&market.slug) {
+                return false;
+            }
+            // Gamma API gecikmesi nedeniyle bitmiş market dönebilir — hariç tut
+            let (_, ends_at) = infer_updown_market_window(market);
+            ends_at.map(|e| e > now).unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
 pub(crate) async fn list_markets_for_scope(
     gamma: &GammaHttpClient,
     scope: &str,
@@ -113,32 +134,15 @@ pub(crate) async fn list_markets_for_scope(
     if !markets.is_empty() {
         // Prefer markets around the current time window so DCA targets the
         // currently traded 5m/15m market instead of a far-future active slug.
-        let candidate_slugs: HashSet<String> = updown_scope_candidate_slugs(scope_def, Utc::now())
-            .into_iter()
-            .collect();
         let now_for_filter = Utc::now();
-        let in_window: Vec<GammaMarket> = markets
-            .iter()
-            .filter(|market| {
-                if !candidate_slugs.contains(&market.slug) {
-                    return false;
-                }
-                // Gamma API gecikmesi nedeniyle bitmiş market dönebilir — hariç tut
-                let (_, ends_at) = infer_updown_market_window(market);
-                ends_at.map(|e| e > now_for_filter).unwrap_or(true)
-            })
-            .cloned()
-            .collect();
+        let in_window = scope_candidate_window_markets(scope_def, &markets, now_for_filter);
         if !in_window.is_empty() {
             return Ok(in_window);
         }
-        return Ok(markets);
     }
 
-    let mut seen_slugs: HashSet<String> = HashSet::new();
-    for market in &markets {
-        seen_slugs.insert(market.slug.clone());
-    }
+    let mut seen_slugs: HashSet<String> =
+        markets.iter().map(|market| market.slug.clone()).collect();
 
     for slug in updown_scope_candidate_slugs(scope_def, Utc::now()) {
         if !seen_slugs.insert(slug.clone()) {
@@ -158,6 +162,12 @@ pub(crate) async fn list_markets_for_scope(
             continue;
         }
         markets.push(market);
+    }
+
+    let now_for_retry = Utc::now();
+    let in_window_retry = scope_candidate_window_markets(scope_def, &markets, now_for_retry);
+    if !in_window_retry.is_empty() {
+        return Ok(in_window_retry);
     }
 
     Ok(markets)

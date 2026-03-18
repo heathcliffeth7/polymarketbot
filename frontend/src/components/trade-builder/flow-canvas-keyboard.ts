@@ -17,9 +17,19 @@ export function useCanvasKeyboard(
   containerRef: React.RefObject<HTMLDivElement | null>
 ) {
   const handlersRef = useRef(handlers);
+  const activeRef = useRef(false);
   useEffect(() => {
     handlersRef.current = handlers;
   });
+
+  const isInsideContainer = useCallback((target: EventTarget | null) => {
+    const container = containerRef.current;
+    return !!(
+      container &&
+      target instanceof Node &&
+      container.contains(target)
+    );
+  }, [containerRef]);
 
   const onKeyDown = useCallback((e: KeyboardEvent) => {
     const target = e.target instanceof HTMLElement ? e.target : null;
@@ -31,8 +41,12 @@ export function useCanvasKeyboard(
         tagName === 'textarea' ||
         tagName === 'select');
     const ctrl = e.ctrlKey || e.metaKey;
+    const isEditorShortcutActive = activeRef.current || isInsideContainer(e.target);
 
-    if (ctrl && e.key === 'k') {
+    if (!isEditorShortcutActive) return;
+
+    if (ctrl && e.key.toLowerCase() === 'k') {
+      if (e.repeat) return;
       e.preventDefault();
       handlersRef.current.onSearch();
       return;
@@ -40,32 +54,38 @@ export function useCanvasKeyboard(
 
     if (isInput) return;
 
-    if (ctrl && e.key === 's') {
+    if (ctrl && e.key.toLowerCase() === 's') {
+      if (e.repeat) return;
       e.preventDefault();
       handlersRef.current.onSave();
       return;
     }
-    if (ctrl && e.key === 'z' && !e.shiftKey) {
+    if (ctrl && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+      if (e.repeat) return;
       e.preventDefault();
       handlersRef.current.onUndo();
       return;
     }
-    if (ctrl && ((e.key === 'z' && e.shiftKey) || e.key === 'y')) {
+    if (ctrl && ((e.key.toLowerCase() === 'z' && e.shiftKey) || e.key.toLowerCase() === 'y')) {
+      if (e.repeat) return;
       e.preventDefault();
       handlersRef.current.onRedo();
       return;
     }
-    if (ctrl && e.key === 'c') {
+    if (ctrl && e.key.toLowerCase() === 'c') {
+      if (e.repeat) return;
       e.preventDefault();
       handlersRef.current.onCopy();
       return;
     }
-    if (ctrl && e.key === 'v') {
+    if (ctrl && e.key.toLowerCase() === 'v') {
+      if (e.repeat) return;
       e.preventDefault();
       handlersRef.current.onPaste();
       return;
     }
-    if (ctrl && e.key === 'a') {
+    if (ctrl && e.key.toLowerCase() === 'a') {
+      if (e.repeat) return;
       e.preventDefault();
       handlersRef.current.onSelectAll();
       return;
@@ -80,12 +100,25 @@ export function useCanvasKeyboard(
       handlersRef.current.onDelete();
       return;
     }
-  }, []);
+  }, [isInsideContainer]);
 
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    el.addEventListener('keydown', onKeyDown);
-    return () => el.removeEventListener('keydown', onKeyDown);
-  }, [containerRef, onKeyDown]);
+    const onPointerDown = (event: PointerEvent) => {
+      activeRef.current = isInsideContainer(event.target);
+    };
+
+    const onFocusIn = (event: FocusEvent) => {
+      activeRef.current = isInsideContainer(event.target);
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('focusin', onFocusIn, true);
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('focusin', onFocusIn, true);
+    };
+  }, [isInsideContainer, onKeyDown]);
 }

@@ -136,6 +136,8 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
     let mut last_seen_updates: HashMap<i64, f64> = HashMap::new();
     let mut triggered_order_ids: HashSet<i64> = HashSet::new();
     let mut selected_token_ids = Vec::with_capacity(selected_orders.len());
+    let mut composite_bid_entering: Vec<(i64, Option<f64>, Option<f64>, Option<f64>)> = Vec::new();
+    let mut composite_bid_releasing: Vec<(i64, f64, Option<f64>)> = Vec::new();
 
     for (token_id, orders) in selected_orders {
         selected_token_ids.push(token_id.clone());
@@ -169,16 +171,43 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
                 trigger_eval_price,
             );
             if evaluation.should_trigger {
-                triggered_order_ids.insert(order.id);
+                if should_skip_trade_builder_composite_sl_bid_confirmation(&order, &runtime_price) {
+                    last_seen_updates.insert(order.id, persisted_last_seen_price);
+                    if order.last_error.as_deref()
+                        != Some("composite_bid_confirmation_waiting")
+                    {
+                        composite_bid_entering.push((
+                            order.id,
+                            order.trigger_price,
+                            runtime_price.best_bid,
+                            runtime_price.last_trade_price,
+                        ));
+                    }
+                } else {
+                    triggered_order_ids.insert(order.id);
+                }
             } else {
+                if order.last_error.as_deref()
+                    == Some("composite_bid_confirmation_waiting")
+                {
+                    composite_bid_releasing.push((
+                        order.id,
+                        trigger_eval_price,
+                        runtime_price.best_bid,
+                    ));
+                }
                 last_seen_updates.insert(order.id, persisted_last_seen_price);
             }
         }
     }
 
-    if triggered_order_ids.is_empty() && last_seen_updates.is_empty() {
+    let has_composite_changes = !composite_bid_entering.is_empty() || !composite_bid_releasing.is_empty();
+    if triggered_order_ids.is_empty() && last_seen_updates.is_empty() && !has_composite_changes {
         return Ok(());
     }
+
+    let composite_entering_ids: HashSet<i64> = composite_bid_entering.iter().map(|(id, ..)| *id).collect();
+    let composite_releasing_ids: HashSet<i64> = composite_bid_releasing.iter().map(|(id, ..)| *id).collect();
 
     let mut orders_to_spawn = Vec::new();
     {
@@ -200,6 +229,13 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
                 if let Some(last_seen_price) = last_seen_updates.get(&order_id).copied() {
                     bucket[idx].last_seen_price = Some(last_seen_price);
                 }
+                if composite_entering_ids.contains(&order_id) {
+                    bucket[idx].last_error =
+                        Some("composite_bid_confirmation_waiting".to_string());
+                }
+                if composite_releasing_ids.contains(&order_id) {
+                    bucket[idx].last_error = None;
+                }
                 idx += 1;
             }
             if bucket.is_empty() {
@@ -214,6 +250,60 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
 
     for (order_id, user_id) in orders_to_spawn {
         spawn_armed_order_immediate_processing(repo, run_id, ws, order_id, user_id);
+    }
+
+    for (order_id, trigger_price, best_bid, last_trade_price) in composite_bid_entering {
+        let _ = repo
+            .set_trade_builder_order_last_error(
+                order_id,
+                Some("composite_bid_confirmation_waiting"),
+            )
+            .await;
+        let _ = repo
+            .append_trade_builder_order_event(
+                order_id,
+                "composite_bid_confirmation_waiting",
+                &json!({
+                    "trigger_price": trigger_price,
+                    "best_bid": best_bid,
+                    "last_trade_price": last_trade_price,
+                    "source": "ws_fast_path",
+                }),
+            )
+            .await;
+        info!(
+            run_id,
+            builder_order_id = order_id,
+            ?trigger_price,
+            ?best_bid,
+            ?last_trade_price,
+            "COMPOSITE_BID_CONFIRMATION_WAITING"
+        );
+    }
+
+    for (order_id, trigger_eval_price, best_bid) in composite_bid_releasing {
+        let _ = repo
+            .set_trade_builder_order_last_error(order_id, None)
+            .await;
+        let _ = repo
+            .append_trade_builder_order_event(
+                order_id,
+                "composite_bid_confirmation_released",
+                &json!({
+                    "reason_code": "trigger_no_longer_valid",
+                    "trigger_eval_price": trigger_eval_price,
+                    "best_bid": best_bid,
+                    "source": "ws_fast_path",
+                }),
+            )
+            .await;
+        info!(
+            run_id,
+            builder_order_id = order_id,
+            trigger_eval_price,
+            ?best_bid,
+            "COMPOSITE_BID_CONFIRMATION_RELEASED"
+        );
     }
 
     Ok(())
@@ -348,6 +438,9 @@ mod armed_ws_eval_tests {
             retry_on_execution_floor_guard_block: false,
             retry_on_max_price_block: false,
             sl_trigger_price_mode: None,
+            reenter_on_sl_hit: false,
+            reentry_max_attempts: 0,
+            reentry_trigger_node_key: None,
             notify_on_fill: false,
             notify_on_trigger_guard_blocked: false,
             notify_on_execution_floor_blocked: false,

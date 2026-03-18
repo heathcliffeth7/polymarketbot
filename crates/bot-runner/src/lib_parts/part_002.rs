@@ -121,6 +121,42 @@ fn evaluate_trigger_market_price_condition(
     max_price: Option<f64>,
 ) -> (bool, &'static str) {
     match trigger_condition {
+        "level_above" => {
+            let in_range = current_price >= trigger_price
+                && max_price.map_or(true, |mp| current_price <= mp);
+            if in_range {
+                if let Some(mp) = max_price {
+                    if current_price > mp {
+                        return (false, "above_max_price");
+                    }
+                    return (true, "level_in_range");
+                }
+                return (true, "level_threshold_met");
+            }
+            if max_price.is_some() && current_price > max_price.unwrap_or(f64::INFINITY) {
+                return (false, "above_max_price");
+            }
+            if previous_price.is_none() && !allow_first_tick_threshold {
+                (false, "no_previous")
+            } else {
+                (false, "level_not_met")
+            }
+        }
+        "level_below" => {
+            let in_range = current_price <= trigger_price
+                && max_price.map_or(true, |mp| current_price <= mp);
+            if in_range {
+                return (true, "level_threshold_met");
+            }
+            if max_price.is_some() && current_price > max_price.unwrap_or(f64::INFINITY) {
+                return (false, "above_max_price");
+            }
+            if previous_price.is_none() && !allow_first_tick_threshold {
+                (false, "no_previous")
+            } else {
+                (false, "level_not_met")
+            }
+        }
         "cross_above" => {
             let crossed = if let Some(mp) = max_price {
                 if current_price > mp {
@@ -213,6 +249,17 @@ fn evaluate_trigger_market_price_condition(
     }
 }
 
+fn is_supported_market_price_trigger_condition(trigger_condition: &str) -> bool {
+    matches!(
+        trigger_condition,
+        "cross_above" | "cross_below" | "level_above" | "level_below"
+    )
+}
+
+fn market_price_trigger_condition_requires_once(trigger_condition: &str) -> bool {
+    matches!(trigger_condition, "level_above" | "level_below")
+}
+
 fn should_apply_ws_cross_confirmed_short_circuit(
     ws_sourced: bool,
     ws_evaluation_mode_from_step: &str,
@@ -226,14 +273,13 @@ fn should_apply_ws_cross_confirmed_short_circuit(
 fn should_allow_ws_first_tick_threshold_override(
     ws_sourced: bool,
     node_type: &str,
-    auto_scope: bool,
+    allow_first_tick_replay: bool,
     ws_evaluation_mode_from_step: &str,
-    boundary_open_source: bool,
     ws_hard_ignore_reason: Option<&str>,
 ) -> bool {
     ws_sourced
         && node_type == "trigger.market_price"
-        && (auto_scope || boundary_open_source)
+        && allow_first_tick_replay
         && matches!(
             ws_evaluation_mode_from_step,
             "first_tick_threshold" | "first_tick_in_range"

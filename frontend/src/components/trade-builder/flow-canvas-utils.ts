@@ -443,7 +443,12 @@ function hasValidOutcomeTriggerPrice(config: Record<string, unknown>): boolean {
   return config.outcomeConditions.some((row) => {
     if (!isRecord(row)) return false;
     const triggerCondition = toTrimmedStringValue(row.triggerCondition).toLowerCase();
-    if (triggerCondition !== 'cross_above' && triggerCondition !== 'cross_below') {
+    if (
+      triggerCondition !== 'cross_above' &&
+      triggerCondition !== 'cross_below' &&
+      triggerCondition !== 'level_above' &&
+      triggerCondition !== 'level_below'
+    ) {
       return false;
     }
     return hasValidTriggerPriceConfig(row);

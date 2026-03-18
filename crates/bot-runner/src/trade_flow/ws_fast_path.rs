@@ -43,11 +43,36 @@ async fn refresh_trade_flow_ws_fast_path_cache(
     Ok(())
 }
 
+async fn refresh_trade_flow_ws_fast_path_for_boundary(
+    repo: &PostgresRepository,
+    run_id: i64,
+    ws: &ClobWsClient,
+    user_cfg_cache: &mut HashMap<i64, AppConfig>,
+) -> Result<()> {
+    let definitions = repo
+        .list_published_trade_flow_definitions(FLOW_DEFINITION_PROCESS_LIMIT)
+        .await?;
+    refresh_trade_flow_ws_fast_path_cache(repo, run_id, ws, &definitions, user_cfg_cache).await
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AutoScopeMarketRotation {
     node_key: String,
     old_market_slug: String,
     new_market_slug: String,
+    expected_market_start: Option<DateTime<Utc>>,
+    rotation_detected_at: DateTime<Utc>,
+    selection_reason: Option<String>,
+}
+
+fn auto_scope_rotation_lag_ms(rotation: &AutoScopeMarketRotation) -> Option<i64> {
+    rotation.expected_market_start.map(|expected_start| {
+        rotation
+            .rotation_detected_at
+            .signed_duration_since(expected_start)
+            .num_milliseconds()
+            .max(0)
+    })
 }
 
 fn clear_trade_flow_market_price_ws_runtime_state(context: &mut Value, node_key: &str) -> bool {
@@ -88,10 +113,26 @@ fn clear_trade_flow_market_price_ws_runtime_state(context: &mut Value, node_key:
     changed
 }
 
+async fn replace_trade_flow_ws_fast_path_run_context(run_id: i64, context: &Value) -> bool {
+    let mut cache = TRADE_FLOW_WS_FAST_PATH_CACHE.write().await;
+    let mut replaced = false;
+    for run_spec in &mut cache.run_specs {
+        if run_spec.run_id != run_id {
+            continue;
+        }
+        run_spec.context = context.clone();
+        run_spec.context_dirty = false;
+        replaced = true;
+    }
+    replaced
+}
+
 fn sync_trade_flow_auto_scope_market_rollover_state(
     previous_context: &Value,
     context: &mut Value,
     node_specs: &[WsOpenPositionPriceNodeSpec],
+    selected_markets_by_node: &HashMap<String, SelectedLiveMarket>,
+    rotation_detected_at: DateTime<Utc>,
 ) -> Vec<AutoScopeMarketRotation> {
     let mut processed = HashSet::new();
     let mut rotations = Vec::new();
@@ -131,6 +172,11 @@ fn sync_trade_flow_auto_scope_market_rollover_state(
                     node_key: node_spec.node_key.clone(),
                     old_market_slug,
                     new_market_slug: new_market_slug.to_string(),
+                    expected_market_start: MarketCycleId(new_market_slug.to_string()).start_time(),
+                    rotation_detected_at,
+                    selection_reason: selected_markets_by_node
+                        .get(&node_spec.node_key)
+                        .map(|selected| selected.selection_reason.as_str().to_string()),
                 });
             }
         }
@@ -507,10 +553,15 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
 
                 let still_in_zone = match node_spec.trigger_condition.as_str() {
                     "cross_below" => current_price <= node_spec.trigger_price,
+                    "level_below" => current_price <= node_spec.trigger_price,
+                    "level_above" => {
+                        let above_trigger = current_price >= node_spec.trigger_price;
+                        let below_max = node_spec.max_price.map_or(true, |mp| current_price <= mp);
+                        above_trigger && below_max
+                    }
                     "cross_above" => {
                         let above_trigger = current_price >= node_spec.trigger_price;
-                        let below_max =
-                            node_spec.max_price.map_or(true, |mp| current_price <= mp);
+                        let below_max = node_spec.max_price.map_or(true, |mp| current_price <= mp);
                         above_trigger && below_max
                     }
                     _ => false,
@@ -624,6 +675,10 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
                 &token_id,
                 queued_at,
             );
+            let allow_first_tick_replay = matches!(
+                final_eval_mode,
+                "first_tick_threshold" | "first_tick_in_range"
+            );
             let input_json = json!({
                 "triggerSource": "ws_market_price",
                 "tokenId": token_id,
@@ -642,6 +697,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
                 "wsLastTradePrice": price_last_trade,
                 "wsSnapshotAgeMs": price_snapshot_age_ms,
                 "wsSiteDisplayModeDecision": price_site_display_decision,
+                "wsAllowFirstTickReplay": allow_first_tick_replay,
                 "queuedAt": queued_at_rfc3339
             });
             let idempotency_key = ws_price_trigger_step_idempotency_key(
@@ -653,6 +709,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
                 node_spec.once_mode,
                 node_spec.once_scope_market,
                 node_spec.market_slug.as_deref(),
+                flow_node_reentry_generation(&run_spec.context, &node_spec.node_key),
             );
 
             let enqueued = repo
@@ -691,6 +748,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
                     "once_mode": node_spec.once_mode,
                     "once_scope": if node_spec.once_scope_market { "market" } else { "run" },
                     "market_slug": node_spec.market_slug.clone(),
+                    "reentry_generation": flow_node_reentry_generation(&run_spec.context, &node_spec.node_key),
                     "idempotency_key": idempotency_key
                 });
                 if let Some(diagnostics) = cycle_window_followup.as_ref() {
@@ -725,6 +783,7 @@ async fn build_trade_flow_ws_fast_path_cache(
 ) -> Result<TradeFlowWsFastPathCache> {
     let mut run_specs: Vec<WsOpenPositionPriceRunSpec> = Vec::new();
     let mut token_targets: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    let mut warm_market_slugs: HashSet<String> = HashSet::new();
 
     for definition in definitions {
         let Some(run) = repo.get_active_trade_flow_run(definition.id).await? else {
@@ -750,6 +809,7 @@ async fn build_trade_flow_ws_fast_path_cache(
         let graph = parse_trade_flow_graph(&version)?;
         let mut context = normalize_trade_flow_context(run.context_json.clone(), &graph.context);
         let mut nodes = Vec::new();
+        let mut auto_scope_selected_by_node: HashMap<String, SelectedLiveMarket> = HashMap::new();
         for node in &graph.nodes {
             if node_market_mode(node) == "auto_scope"
                 && matches!(
@@ -758,7 +818,9 @@ async fn build_trade_flow_ws_fast_path_cache(
                 )
             {
                 match sync_trigger_market_auto_scope_context(&flow_cfg, node, &mut context).await {
-                    Ok(Some(_)) => {}
+                    Ok(Some(selected)) => {
+                        auto_scope_selected_by_node.insert(node.key.clone(), selected);
+                    }
                     Ok(None) => continue,
                     Err(err) => {
                         warn!(
@@ -798,11 +860,17 @@ async fn build_trade_flow_ws_fast_path_cache(
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+        if !updated_slug.is_empty() {
+            warm_market_slugs.insert(updated_slug.clone());
+        }
         let slug_changed = !updated_slug.is_empty() && original_slug != updated_slug;
+        let rotation_detected_at = Utc::now();
         let rotations = sync_trade_flow_auto_scope_market_rollover_state(
             &run.context_json,
             &mut context,
             &nodes,
+            &auto_scope_selected_by_node,
+            rotation_detected_at,
         );
         if slug_changed {
             info!(
@@ -814,12 +882,18 @@ async fn build_trade_flow_ws_fast_path_cache(
             );
         }
         for rotation in &rotations {
+            warm_market_slugs.insert(rotation.new_market_slug.clone());
+            let rotation_lag_ms = auto_scope_rotation_lag_ms(rotation);
             info!(
                 run_id,
                 flow_run_id = run.id,
                 node_key = %rotation.node_key,
                 old_slug = %rotation.old_market_slug,
                 new_slug = %rotation.new_market_slug,
+                expected_market_start = ?rotation.expected_market_start,
+                rotation_detected_at = %rotation.rotation_detected_at,
+                rotation_lag_ms,
+                selection_reason = ?rotation.selection_reason,
                 "TRADE_FLOW_TRIGGER_AUTO_SCOPE_MARKET_ROTATED"
             );
             if let Err(err) = repo
@@ -835,6 +909,11 @@ async fn build_trade_flow_ws_fast_path_cache(
                         "new_market_slug": rotation.new_market_slug,
                         "rotation_reason": "cycle_rollover",
                         "state_reset": true,
+                        "expected_market_start": rotation.expected_market_start
+                            .map(|value| value.to_rfc3339()),
+                        "rotation_detected_at": rotation.rotation_detected_at.to_rfc3339(),
+                        "rotation_lag_ms": rotation_lag_ms,
+                        "selection_reason": rotation.selection_reason,
                     }),
                 )
                 .await
@@ -856,6 +935,15 @@ async fn build_trade_flow_ws_fast_path_cache(
             context,
             nodes,
             context_dirty: slug_changed || !rotations.is_empty(),
+        });
+    }
+
+    for warm_slug in warm_market_slugs {
+        tokio::spawn(async move {
+            crate::trade_flow::guards::polymarket_price_to_beat::warm_price_to_beat_cache(
+                &warm_slug,
+            )
+            .await;
         });
     }
 

@@ -118,18 +118,19 @@ fn market_once_state_clears_legacy_run_state_without_market_slug() {
 }
 
 #[test]
-fn auto_scope_last_cycle_window_allows_first_tick_threshold() {
+fn auto_scope_cycle_window_first_tick_threshold_only_applies_to_last_mode() {
     let mut node = test_node_spec("cross_above", 0.80, 15_000);
     node.cycle_window_mode = Some("last".to_string());
     node.cycle_window_secs = Some(60);
     assert!(allow_first_tick_threshold_for_ws_node(&node, None));
+    assert!(!allow_first_tick_threshold_for_ws_node(&node, Some(0.79)));
 
     let mut fixed_node = node.clone();
     fixed_node.auto_scope = false;
     assert!(!allow_first_tick_threshold_for_ws_node(&fixed_node, None));
 
     node.cycle_window_mode = Some("first".to_string());
-    assert!(allow_first_tick_threshold_for_ws_node(&node, None));
+    assert!(!allow_first_tick_threshold_for_ws_node(&node, None));
 }
 
 #[test]
@@ -642,13 +643,12 @@ fn cross_confirmed_unexpected_fail_helper_flags_only_real_regression_case() {
 }
 
 #[test]
-fn first_tick_threshold_override_helper_requires_auto_scope_market_price_and_clean_ws_context() {
+fn first_tick_threshold_override_helper_requires_explicit_replay_flag_and_clean_ws_context() {
     assert!(should_allow_ws_first_tick_threshold_override(
         true,
         "trigger.market_price",
         true,
         "first_tick_threshold",
-        false,
         None
     ));
     assert!(!should_allow_ws_first_tick_threshold_override(
@@ -656,7 +656,6 @@ fn first_tick_threshold_override_helper_requires_auto_scope_market_price_and_cle
         "trigger.market_price",
         false,
         "first_tick_threshold",
-        false,
         None
     ));
     assert!(!should_allow_ws_first_tick_threshold_override(
@@ -664,7 +663,6 @@ fn first_tick_threshold_override_helper_requires_auto_scope_market_price_and_cle
         "trigger.open_positions",
         true,
         "first_tick_threshold",
-        false,
         None
     ));
     assert!(!should_allow_ws_first_tick_threshold_override(
@@ -672,7 +670,6 @@ fn first_tick_threshold_override_helper_requires_auto_scope_market_price_and_cle
         "trigger.market_price",
         true,
         "cross_confirmed",
-        false,
         None
     ));
     assert!(!should_allow_ws_first_tick_threshold_override(
@@ -680,7 +677,6 @@ fn first_tick_threshold_override_helper_requires_auto_scope_market_price_and_cle
         "trigger.market_price",
         true,
         "first_tick_threshold",
-        false,
         Some("ws_market_slug_mismatch:a!=b")
     ));
     assert!(should_allow_ws_first_tick_threshold_override(
@@ -688,7 +684,6 @@ fn first_tick_threshold_override_helper_requires_auto_scope_market_price_and_cle
         "trigger.market_price",
         true,
         "first_tick_in_range",
-        false,
         None
     ));
 }
@@ -714,7 +709,6 @@ fn first_tick_threshold_override_replays_auto_scope_once_execution() {
         "trigger.market_price",
         true,
         "first_tick_threshold",
-        false,
         None,
     );
     let (with_override, with_mode) = evaluate_trigger_market_price_condition(

@@ -8,10 +8,107 @@ fn market_once_idempotency_key_contains_market_slug() {
         "trigger_market",
         true,
         Some("btc-updown-5m-1772296200"),
+        0,
     );
     assert_eq!(
         key,
         "flow-once-fired:77:trigger_market:btc-updown-5m-1772296200"
+    );
+}
+
+#[test]
+fn market_once_idempotency_key_appends_reentry_generation_suffix() {
+    let key = trade_flow_market_price_once_idempotency_key(
+        77,
+        "trigger_market",
+        true,
+        Some("btc-updown-5m-1772296200"),
+        2,
+    );
+    assert_eq!(
+        key,
+        "flow-once-fired:77:trigger_market:btc-updown-5m-1772296200:gen2"
+    );
+}
+
+#[test]
+fn upstream_market_price_trigger_key_requires_exactly_one_trigger() {
+    let unique_graph = TradeFlowGraphRuntime {
+        context: json!({}),
+        nodes: vec![
+            TradeFlowNode {
+                key: "trigger_market".to_string(),
+                node_type: "trigger.market_price".to_string(),
+                config: json!({ "repeatMode": "once" }),
+            },
+            TradeFlowNode {
+                key: "logic_delay".to_string(),
+                node_type: "logic.delay".to_string(),
+                config: json!({}),
+            },
+            TradeFlowNode {
+                key: "action_buy".to_string(),
+                node_type: "action.place_order".to_string(),
+                config: json!({}),
+            },
+        ],
+        edges: vec![
+            TradeFlowEdge {
+                source: "trigger_market".to_string(),
+                target: "logic_delay".to_string(),
+                edge_type: "default".to_string(),
+                condition: None,
+            },
+            TradeFlowEdge {
+                source: "logic_delay".to_string(),
+                target: "action_buy".to_string(),
+                edge_type: "default".to_string(),
+                condition: None,
+            },
+        ],
+    };
+    assert_eq!(
+        find_upstream_market_price_trigger_key("action_buy", &unique_graph),
+        Some("trigger_market".to_string())
+    );
+
+    let multiple_graph = TradeFlowGraphRuntime {
+        context: json!({}),
+        nodes: vec![
+            TradeFlowNode {
+                key: "trigger_a".to_string(),
+                node_type: "trigger.market_price".to_string(),
+                config: json!({ "repeatMode": "once" }),
+            },
+            TradeFlowNode {
+                key: "trigger_b".to_string(),
+                node_type: "trigger.market_price".to_string(),
+                config: json!({ "repeatMode": "once" }),
+            },
+            TradeFlowNode {
+                key: "action_buy".to_string(),
+                node_type: "action.place_order".to_string(),
+                config: json!({}),
+            },
+        ],
+        edges: vec![
+            TradeFlowEdge {
+                source: "trigger_a".to_string(),
+                target: "action_buy".to_string(),
+                edge_type: "default".to_string(),
+                condition: None,
+            },
+            TradeFlowEdge {
+                source: "trigger_b".to_string(),
+                target: "action_buy".to_string(),
+                edge_type: "default".to_string(),
+                condition: None,
+            },
+        ],
+    };
+    assert_eq!(
+        find_upstream_market_price_trigger_key("action_buy", &multiple_graph),
+        None
     );
 }
 
@@ -133,7 +230,7 @@ fn market_price_once_detection_only_matches_once_mode() {
 }
 
 #[test]
-fn publish_marker_change_resets_once_state_for_once_nodes() {
+fn publish_marker_change_resets_fixed_once_trigger_publish_state() {
     let graph = TradeFlowGraphRuntime {
         context: json!({}),
         nodes: vec![
@@ -161,7 +258,18 @@ fn publish_marker_change_resets_once_state_for_once_nodes() {
             "trigger_once": {
                 "once_fired": true,
                 "once_fired_at": "2026-02-28T00:00:00Z",
-                "once_blocked_logged": true
+                "once_fired_market_slug": "tur-gal-iba-2026-03-14",
+                "once_blocked_logged": true,
+                "last_price": 0.62,
+                "last_ws_market_slug": "tur-gal-iba-2026-03-14",
+                "previous_price": 0.62,
+                "previous_price_123": 0.62,
+                "price_samples_123": [{ "price": 0.62, "ts_ms": 1773509181571i64 }],
+                "cross_pending_at_123": "2026-03-14T17:26:21Z",
+                "cross_pending_price_123": 0.62,
+                "cross_pending_prev_123": 0.61,
+                "cycle_window_boundary_marker_123": "open",
+                "cycle_window_last_eval_123": "2026-03-14T17:26:21Z"
             },
             "trigger_loop": {
                 "once_fired": true
@@ -182,11 +290,149 @@ fn publish_marker_change_resets_once_state_for_once_nodes() {
         "trigger_once",
         FLOW_NODE_STATE_ONCE_FIRED
     ));
+    assert!(flow_node_state(&context, "trigger_once", "last_price").is_none());
+    assert!(flow_node_state(&context, "trigger_once", "last_ws_market_slug").is_none());
+    assert!(flow_node_state(&context, "trigger_once", "previous_price").is_none());
+    assert!(flow_node_state(&context, "trigger_once", "previous_price_123").is_none());
+    assert!(flow_node_state(&context, "trigger_once", "price_samples_123").is_none());
+    assert!(flow_node_state(&context, "trigger_once", "cross_pending_at_123").is_none());
+    assert!(flow_node_state(&context, "trigger_once", "cross_pending_price_123").is_none());
+    assert!(flow_node_state(&context, "trigger_once", "cross_pending_prev_123").is_none());
+    assert!(
+        flow_node_state(&context, "trigger_once", "cycle_window_boundary_marker_123").is_none()
+    );
+    assert!(flow_node_state(&context, "trigger_once", "cycle_window_last_eval_123").is_none());
     assert!(flow_node_state_truthy(
         &context,
         "trigger_loop",
         FLOW_NODE_STATE_ONCE_FIRED
     ));
+}
+
+#[test]
+fn publish_marker_change_preserves_auto_scope_publish_lock_behavior() {
+    let graph = TradeFlowGraphRuntime {
+        context: json!({
+            "marketSlug": "tur-gal-iba-2026-03-14"
+        }),
+        nodes: vec![TradeFlowNode {
+            key: "trigger_auto".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            config: json!({
+                "repeatMode": "once",
+                "marketMode": "auto_scope",
+                "onceScope": "run",
+                "onceScopeVersion": 2
+            }),
+        }],
+        edges: vec![],
+    };
+    let mut context = json!({
+        "flowContext": {
+            "marketSlug": "tur-gal-iba-2026-03-14"
+        },
+        "vars": {},
+        "state": {
+            "__publish_marker": "101:1000"
+        },
+        "refs": {},
+        "nodeState": {
+            "trigger_auto": {
+                "once_fired": true,
+                "once_fired_at": "2026-02-28T00:00:00Z",
+                "once_fired_market_slug": "tur-gal-iba-2026-03-14",
+                "once_blocked_logged": true,
+                "previous_price_123": 0.62
+            }
+        }
+    });
+
+    let (previous_marker, reset_nodes) =
+        sync_trade_flow_once_state_for_publish(&graph, &mut context, "101:2000");
+    assert_eq!(previous_marker.as_deref(), Some("101:1000"));
+    assert_eq!(reset_nodes, vec!["trigger_auto".to_string()]);
+    assert_eq!(
+        flow_state_string(&context, FLOW_STATE_PUBLISH_MARKER).as_deref(),
+        Some("101:2000")
+    );
+    assert!(!flow_node_state_truthy(
+        &context,
+        "trigger_auto",
+        FLOW_NODE_STATE_ONCE_FIRED
+    ));
+    assert_eq!(
+        flow_node_state_string(
+            &context,
+            "trigger_auto",
+            FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG
+        )
+        .as_deref(),
+        Some("tur-gal-iba-2026-03-14")
+    );
+    assert_eq!(
+        flow_node_state(&context, "trigger_auto", "previous_price_123").and_then(value_as_f64),
+        Some(0.62)
+    );
+}
+
+#[test]
+fn publish_marker_change_keeps_auto_scope_market_once_state_intact() {
+    let graph = TradeFlowGraphRuntime {
+        context: json!({
+            "marketSlug": "tur-gal-iba-2026-03-14"
+        }),
+        nodes: vec![TradeFlowNode {
+            key: "trigger_auto_market".to_string(),
+            node_type: "trigger.market_price".to_string(),
+            config: json!({
+                "repeatMode": "once",
+                "marketMode": "auto_scope",
+                "onceScope": "market"
+            }),
+        }],
+        edges: vec![],
+    };
+    let mut context = json!({
+        "flowContext": {
+            "marketSlug": "tur-gal-iba-2026-03-14"
+        },
+        "vars": {},
+        "state": {
+            "__publish_marker": "101:1000"
+        },
+        "refs": {},
+        "nodeState": {
+            "trigger_auto_market": {
+                "once_fired": true,
+                "once_fired_market_slug": "tur-gal-iba-2026-03-14",
+                "previous_price_123": 0.62
+            }
+        }
+    });
+
+    let (previous_marker, reset_nodes) =
+        sync_trade_flow_once_state_for_publish(&graph, &mut context, "101:2000");
+    assert_eq!(previous_marker.as_deref(), Some("101:1000"));
+    assert!(reset_nodes.is_empty());
+    assert!(flow_node_state_truthy(
+        &context,
+        "trigger_auto_market",
+        FLOW_NODE_STATE_ONCE_FIRED
+    ));
+    assert_eq!(
+        flow_node_state_string(
+            &context,
+            "trigger_auto_market",
+            FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG
+        )
+        .as_deref(),
+        Some("tur-gal-iba-2026-03-14")
+    );
+    assert_eq!(
+        flow_node_state(&context, "trigger_auto_market", "previous_price_123")
+            .and_then(value_as_f64),
+        Some(0.62)
+    );
 }
 
 #[test]
@@ -384,6 +630,25 @@ fn select_preferred_live_market_falls_back_to_latest_slug() {
     assert_eq!(
         selected.selection_reason,
         LiveMarketSelectionReason::LatestBySlugFallback
+    );
+}
+
+#[test]
+fn scope_candidate_window_markets_prefers_current_window_after_probe_merge() {
+    let scope_def = find_updown_scope_by_scope("btc_5m_updown").expect("scope should exist");
+    let now = DateTime::<Utc>::from_timestamp(1_771_886_101, 0).expect("timestamp should exist");
+    let markets = vec![
+        gamma_market_for_test("btc-updown-5m-1771885800"),
+        gamma_market_for_test("btc-updown-5m-1771886100"),
+    ];
+
+    let selected = scope_candidate_window_markets(scope_def, &markets, now);
+    assert_eq!(
+        selected
+            .into_iter()
+            .map(|market| market.slug)
+            .collect::<Vec<_>>(),
+        vec!["btc-updown-5m-1771886100".to_string()]
     );
 }
 

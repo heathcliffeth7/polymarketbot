@@ -9,7 +9,28 @@ const FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG = 'once_fired_market_slug';
 const FLOW_NODE_STATE_ONCE_BLOCK_LOGGED = 'once_blocked_logged';
 const FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG =
   'publish_auto_scope_locked_market_slug';
+const FLOW_NODE_STATE_CYCLE_WINDOW_BOUNDARY_MARKER_PREFIX = 'cycle_window_boundary_marker_';
+const FLOW_NODE_STATE_CYCLE_WINDOW_LAST_EVAL_PREFIX = 'cycle_window_last_eval_';
 const TRIGGER_MARKET_ONCE_SCOPE_VERSION_CURRENT = 2;
+const FIXED_ONCE_TRIGGER_PUBLISH_RESET_EXACT_KEYS = [
+  FLOW_NODE_STATE_ONCE_FIRED,
+  FLOW_NODE_STATE_ONCE_FIRED_AT,
+  FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG,
+  FLOW_NODE_STATE_ONCE_BLOCK_LOGGED,
+  FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG,
+  'last_price',
+  'last_ws_market_slug',
+  'previous_price',
+] as const;
+const FIXED_ONCE_TRIGGER_PUBLISH_RESET_PREFIXES = [
+  'previous_price_',
+  'price_samples_',
+  'cross_pending_at_',
+  'cross_pending_price_',
+  'cross_pending_prev_',
+  FLOW_NODE_STATE_CYCLE_WINDOW_BOUNDARY_MARKER_PREFIX,
+  FLOW_NODE_STATE_CYCLE_WINDOW_LAST_EVAL_PREFIX,
+] as const;
 
 interface ActiveTradeFlowRunRow {
   id: number;
@@ -75,6 +96,34 @@ function nodeOnceScope(node: TradeFlowNode): 'market' | 'run' {
   return String(node.config.onceScope ?? '').trim().toLowerCase() === 'market' ? 'market' : 'run';
 }
 
+function isFixedOnceMarketPriceNode(node: TradeFlowNode): boolean {
+  return (
+    node.type === 'trigger.market_price' &&
+    nodeRepeatMode(node) === 'once' &&
+    nodeMarketMode(node) === 'fixed'
+  );
+}
+
+function resetFixedOnceMarketPriceStateForPublish(stateForNode: Record<string, unknown>): boolean {
+  let changed = false;
+
+  for (const key of FIXED_ONCE_TRIGGER_PUBLISH_RESET_EXACT_KEYS) {
+    if (!(key in stateForNode)) continue;
+    delete stateForNode[key];
+    changed = true;
+  }
+
+  for (const key of Object.keys(stateForNode)) {
+    if (!FIXED_ONCE_TRIGGER_PUBLISH_RESET_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+      continue;
+    }
+    delete stateForNode[key];
+    changed = true;
+  }
+
+  return changed;
+}
+
 function buildInitialTradeFlowContext(graphContext: Record<string, unknown>): Record<string, unknown> {
   return {
     flowContext: cloneJson(graphContext),
@@ -115,6 +164,10 @@ function normalizeTradeFlowContextForPublish(
       continue;
     }
     const stateForNode = nodeState[node.key] as Record<string, unknown>;
+    if (isFixedOnceMarketPriceNode(node)) {
+      resetFixedOnceMarketPriceStateForPublish(stateForNode);
+      continue;
+    }
     if (
       node.type === 'trigger.market_price' &&
       nodeRepeatMode(node) === 'once' &&

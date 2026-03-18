@@ -99,6 +99,7 @@ interface UpdateTradeFlowDefinitionInput {
   name?: string;
   description?: string | null;
   graphJson?: unknown;
+  syncNormalizedTables?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -107,6 +108,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isSupportedTriggerCondition(value: unknown): value is 'cross_above' | 'cross_below' {
   return value === 'cross_above' || value === 'cross_below';
+}
+
+function isSupportedMarketPriceTriggerCondition(
+  value: unknown
+): value is 'cross_above' | 'cross_below' | 'level_above' | 'level_below' {
+  return (
+    value === 'cross_above' ||
+    value === 'cross_below' ||
+    value === 'level_above' ||
+    value === 'level_below'
+  );
 }
 
 function toFiniteNumber(value: unknown): number | null {
@@ -179,6 +191,33 @@ function countValidOutcomeConditions(config: Record<string, unknown>): number {
     const hasValidMaxPrice = hasValidOptionalMaxPrice(item.maxPriceCent, item.maxPrice);
     if (!tokenId || !outcomeLabel) continue;
     if (!isSupportedTriggerCondition(triggerCondition)) continue;
+    if (!hasValidTriggerPriceCent && !hasValidTriggerPrice) continue;
+    if (!hasValidMaxPrice) continue;
+    validCount += 1;
+  }
+
+  return validCount;
+}
+
+function countValidMarketPriceOutcomeConditions(config: Record<string, unknown>): number {
+  const raw = config.outcomeConditions;
+  if (!Array.isArray(raw)) return 0;
+
+  let validCount = 0;
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const tokenId = toTrimmedString(item.tokenId);
+    const outcomeLabel = toTrimmedString(item.outcomeLabel);
+    const triggerCondition = toTrimmedString(item.triggerCondition);
+    const triggerPriceCent = toFiniteNumber(item.triggerPriceCent);
+    const triggerPrice = toFiniteNumber(item.triggerPrice);
+    const hasValidTriggerPriceCent =
+      triggerPriceCent != null && triggerPriceCent > 0 && triggerPriceCent <= 100;
+    const hasValidTriggerPrice =
+      triggerPrice != null && triggerPrice > 0 && triggerPrice <= 1;
+    const hasValidMaxPrice = hasValidOptionalMaxPrice(item.maxPriceCent, item.maxPrice);
+    if (!tokenId || !outcomeLabel) continue;
+    if (!isSupportedMarketPriceTriggerCondition(triggerCondition)) continue;
     if (!hasValidTriggerPriceCent && !hasValidTriggerPrice) continue;
     if (!hasValidMaxPrice) continue;
     validCount += 1;
@@ -545,12 +584,14 @@ export {
   RESOLVE_MARKET_ALLOWED_ASSETS,
   RESOLVE_MARKET_ALLOWED_TIMEFRAMES,
   isRecord,
+  isSupportedMarketPriceTriggerCondition,
   isSupportedTriggerCondition,
   toFiniteNumber,
   hasProvidedValue,
   hasValidOptionalMaxPrice,
   resolveConfiguredBinaryPrice,
   countValidOutcomeConditions,
+  countValidMarketPriceOutcomeConditions,
   toBooleanish,
   toTrimmedString,
   normalizeDualDcaAsset,

@@ -414,6 +414,7 @@
             "trigger_market",
             true,
             Some("btc-updown-5m-1772296200"),
+            0,
         );
         assert_eq!(
             key,
@@ -910,6 +911,9 @@ mod place_order_binding_tests {
             retry_on_execution_floor_guard_block: false,
             retry_on_max_price_block: false,
             sl_trigger_price_mode: None,
+            reenter_on_sl_hit: false,
+            reentry_max_attempts: 0,
+            reentry_trigger_node_key: None,
             notify_on_fill: false,
             notify_on_trigger_guard_blocked: false,
             notify_on_execution_floor_blocked: false,

@@ -1,7 +1,7 @@
 'use client';
 
 import { usePolling } from './use-polling';
-import { requestJson } from '@/lib/http-client';
+import { requestJson, type RequestJsonOptions } from '@/lib/http-client';
 import type {
   PaginatedResponse,
   TradeFlowDefinition,
@@ -30,7 +30,8 @@ export function useTradeFlowDefinitions(
   page = 1,
   limit = 20,
   status?: string,
-  autoMigrateLegacy = true
+  autoMigrateLegacy = false,
+  paused = false
 ) {
   const query = buildSearchParams({
     page: String(page),
@@ -39,12 +40,12 @@ export function useTradeFlowDefinitions(
     autoMigrateLegacy: autoMigrateLegacy ? '1' : '0',
   });
   const endpoint = `/api/trade-flow/definitions?${query}`;
-  return usePolling<PaginatedResponse<TradeFlowDefinition>>(endpoint, 4000);
+  return usePolling<PaginatedResponse<TradeFlowDefinition>>(endpoint, 4000, paused);
 }
 
-export function useTradeFlowDefinitionDetail(definitionId: number | null) {
+export function useTradeFlowDefinitionDetail(definitionId: number | null, paused = false) {
   const endpoint = definitionId ? `/api/trade-flow/definitions/${definitionId}` : null;
-  return usePolling<{ data: TradeFlowDefinitionDetail }>(endpoint, 4000);
+  return usePolling<{ data: TradeFlowDefinitionDetail }>(endpoint, 4000, paused);
 }
 
 export function useTradeFlowVersions(definitionId: number | null) {
@@ -52,8 +53,12 @@ export function useTradeFlowVersions(definitionId: number | null) {
   return usePolling<{ data: TradeFlowVersion[] }>(endpoint, 7000);
 }
 
-export function useTradeFlowOpenPositions() {
-  return usePolling<TradeFlowOpenPositionsResponse>('/api/trade-flow/open-positions', 8000);
+export function useTradeFlowOpenPositions(paused = false) {
+  return usePolling<TradeFlowOpenPositionsResponse>(
+    '/api/trade-flow/open-positions',
+    8000,
+    paused
+  );
 }
 
 export async function ensureTradeFlowSourceTrade(payload: TradeFlowEnsureSourceTradeRequest) {
@@ -139,7 +144,8 @@ export async function createTradeFlowDefinition(payload: Record<string, unknown>
 
 export async function patchTradeFlowDefinitionDraft(
   definitionId: number,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  options?: RequestJsonOptions
 ) {
   return requestJson<{ data: TradeFlowDefinitionDetail }>(
     `/api/trade-flow/definitions/${definitionId}`,
@@ -148,7 +154,7 @@ export async function patchTradeFlowDefinitionDraft(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     },
-    { timeoutMs: 15_000 }
+    { timeoutMs: 30_000, ...options }
   );
 }
 
@@ -183,10 +189,10 @@ export async function stopTradeFlowDefinition(definitionId: number) {
   );
 }
 
-export async function archiveTradeFlowDefinition(definitionId: number) {
-  return requestJson<{ data: TradeFlowDefinitionDetail }>(
-    `/api/trade-flow/definitions/${definitionId}/archive`,
-    { method: 'POST' },
-    { timeoutMs: 15_000 }
+export async function deleteTradeFlowDefinition(definitionId: number) {
+  return requestJson<{ success: boolean; data: null }>(
+    `/api/trade-flow/definitions/${definitionId}`,
+    { method: 'DELETE' },
+    { timeoutMs: 60_000 }
   );
 }

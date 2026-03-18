@@ -226,10 +226,11 @@ fn allow_first_tick_threshold_for_ws_node(
     if node_spec.node_type != "trigger.market_price" {
         return false;
     }
-    // auto_scope markets rotate every cycle; when the selected window is already
-    // active (including `last`), treat the first in-zone price as a valid entry.
+    // auto_scope market rotation may replay the first in-zone tick only for the
+    // explicit `last` window behavior. `first` mode still requires a real cross.
     if node_spec.auto_scope {
-        return previous_price.is_none();
+        return matches!(node_spec.cycle_window_mode.as_deref(), Some("last"))
+            && previous_price.is_none();
     }
     if matches!(node_spec.cycle_window_mode.as_deref(), Some("last")) {
         return false;
@@ -395,6 +396,64 @@ fn trade_flow_publish_marker(version: &TradeFlowVersionRuntime) -> String {
     format!("{}:{marker_ts}", version.id)
 }
 
+fn is_fixed_once_market_price_node(node: &TradeFlowNode) -> bool {
+    is_trade_flow_market_price_once_node(node) && node_market_mode(node) == "fixed"
+}
+
+fn clear_trade_flow_market_price_publish_reset_state(
+    context: &mut Value,
+    node_key: &str,
+) -> bool {
+    const EXACT_KEYS: [&str; 8] = [
+        FLOW_NODE_STATE_ONCE_FIRED,
+        FLOW_NODE_STATE_ONCE_FIRED_AT,
+        FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG,
+        FLOW_NODE_STATE_ONCE_BLOCK_LOGGED,
+        FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG,
+        "last_price",
+        "last_ws_market_slug",
+        "previous_price",
+    ];
+    const PREFIX_KEYS: [&str; 7] = [
+        "previous_price_",
+        "price_samples_",
+        "cross_pending_at_",
+        "cross_pending_price_",
+        "cross_pending_prev_",
+        FLOW_NODE_STATE_CYCLE_WINDOW_BOUNDARY_MARKER_PREFIX,
+        FLOW_NODE_STATE_CYCLE_WINDOW_LAST_EVAL_PREFIX,
+    ];
+
+    let Some(node_state) = context.get_mut("nodeState").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let Some(state_for_node) = node_state.get_mut(node_key).and_then(Value::as_object_mut) else {
+        return false;
+    };
+
+    let mut changed = false;
+    for key in EXACT_KEYS {
+        changed |= state_for_node.remove(key).is_some();
+    }
+
+    let prefixed_keys: Vec<String> = state_for_node
+        .keys()
+        .filter(|key| PREFIX_KEYS.iter().any(|prefix| key.starts_with(prefix)))
+        .cloned()
+        .collect();
+    for key in prefixed_keys {
+        changed |= state_for_node.remove(&key).is_some();
+    }
+
+    let remove_node_entry = state_for_node.is_empty();
+    if remove_node_entry {
+        node_state.remove(node_key);
+        changed = true;
+    }
+
+    changed
+}
+
 fn sync_trade_flow_once_state_for_publish(
     graph: &TradeFlowGraphRuntime,
     context: &mut Value,
@@ -410,6 +469,47 @@ fn sync_trade_flow_once_state_for_publish(
         if !is_trade_flow_market_price_once_node(node) {
             continue;
         }
+
+        if is_fixed_once_market_price_node(node) {
+            if clear_trade_flow_market_price_publish_reset_state(context, &node.key) {
+                reset_nodes.push(node.key.clone());
+            }
+            continue;
+        }
+
+        if node_market_mode(node) == "auto_scope"
+            && !is_trade_flow_market_price_once_scope_market(node)
+            && flow_node_state_truthy(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED)
+        {
+            let current_market_slug = flow_context_string(context, "marketSlug").or_else(|| {
+                flow_node_state_string(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG)
+            });
+            if let Some(current_market_slug) =
+                current_market_slug.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+            {
+                set_flow_node_state(
+                    context,
+                    &node.key,
+                    FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG,
+                    json!(current_market_slug),
+                );
+                remove_flow_node_state(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED);
+                remove_flow_node_state(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED_AT);
+                remove_flow_node_state(context, &node.key, FLOW_NODE_STATE_ONCE_BLOCK_LOGGED);
+                remove_flow_node_state(
+                    context,
+                    &node.key,
+                    FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG,
+                );
+                reset_nodes.push(node.key.clone());
+            }
+            continue;
+        }
+
+        if node_market_mode(node) == "auto_scope" {
+            continue;
+        }
+
         if flow_node_state_truthy(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED) {
             reset_nodes.push(node.key.clone());
         }

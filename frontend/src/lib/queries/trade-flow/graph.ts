@@ -178,6 +178,41 @@ function hasUpstreamAutoScopeMarketTrigger(nodeKey: string, graph: TradeFlowGrap
   return false;
 }
 
+function findUniqueUpstreamMarketPriceTrigger(
+  nodeKey: string,
+  graph: TradeFlowGraph
+): string | null {
+  const nodeMap = new Map(graph.nodes.map((node) => [node.key, node]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const list = incomingByTarget.get(edge.target) ?? [];
+    list.push(edge.source);
+    incomingByTarget.set(edge.target, list);
+  }
+
+  const visited = new Set<string>();
+  const queue = [nodeKey];
+  let foundKey: string | null = null;
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const sourceKey of incomingByTarget.get(current) ?? []) {
+      const sourceNode = nodeMap.get(sourceKey);
+      if (!sourceNode) continue;
+      if (sourceNode.type === 'trigger.market_price') {
+        if (foundKey && foundKey !== sourceKey) {
+          return null;
+        }
+        foundKey = sourceKey;
+      }
+      queue.push(sourceKey);
+    }
+  }
+
+  return foundKey;
+}
+
 function hasValidTriggerPriceConfig(config: Record<string, unknown>): boolean {
   const triggerPriceCent = Number(config.triggerPriceCent);
   if (Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100) {
@@ -195,11 +230,45 @@ function hasValidOutcomeTriggerPrice(config: Record<string, unknown>): boolean {
   return rows.some((row) => {
     if (!isRecord(row)) return false;
     const triggerCondition = toTrimmedString(row.triggerCondition).toLowerCase();
-    if (triggerCondition !== 'cross_above' && triggerCondition !== 'cross_below') {
+    if (
+      triggerCondition !== 'cross_above' &&
+      triggerCondition !== 'cross_below' &&
+      triggerCondition !== 'level_above' &&
+      triggerCondition !== 'level_below'
+    ) {
       return false;
     }
     return hasValidTriggerPriceConfig(row);
   });
+}
+
+function hasUpstreamBuyPlaceOrderNode(nodeKey: string, graph: TradeFlowGraph): boolean {
+  const nodeMap = new Map(graph.nodes.map((node) => [node.key, node]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const list = incomingByTarget.get(edge.target) ?? [];
+    list.push(edge.source);
+    incomingByTarget.set(edge.target, list);
+  }
+  const visited = new Set<string>();
+  const queue = [nodeKey];
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const sourceKey of incomingByTarget.get(current) ?? []) {
+      const sourceNode = nodeMap.get(sourceKey);
+      if (!sourceNode) continue;
+      if (
+        sourceNode.type === 'action.place_order' &&
+        toTrimmedString((isRecord(sourceNode.config) ? sourceNode.config : {}).side).toLowerCase() === 'buy'
+      ) {
+        return true;
+      }
+      queue.push(sourceKey);
+    }
+  }
+  return false;
 }
 
 function hasUpstreamTriggerWithTriggerPrice(nodeKey: string, graph: TradeFlowGraph): boolean {
@@ -243,4 +312,6 @@ export {
   collectReachableFromTriggers,
   hasUpstreamAutoScopeMarketTrigger,
   hasUpstreamTriggerWithTriggerPrice,
+  hasUpstreamBuyPlaceOrderNode,
+  findUniqueUpstreamMarketPriceTrigger,
 };

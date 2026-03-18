@@ -171,7 +171,7 @@ async fn execute_trigger_market_price(
         .and_then(value_as_f64)
         .map(clamp_probability);
     let ws_previous_price_present = step.input_json.as_ref().is_some_and(|input| input.get("wsPreviousPrice").is_some());
-    let ws_boundary_open_source = step.input_json.as_ref().and_then(|input| input.get("windowBoundaryOpen")).and_then(Value::as_bool).unwrap_or(false);
+    let ws_allow_first_tick_replay = step.input_json.as_ref().and_then(|input| input.get("wsAllowFirstTickReplay")).and_then(Value::as_bool).unwrap_or(false);
     // Prevalidated WS paths (for example cross_confirmed) must bypass strict cross re-check.
     let ws_evaluation_mode_from_step = step
         .input_json
@@ -326,9 +326,8 @@ async fn execute_trigger_market_price(
     let ws_first_tick_threshold_override = should_allow_ws_first_tick_threshold_override(
         ws_sourced,
         &node.node_type,
-        node_market_mode(node) == "auto_scope",
+        ws_allow_first_tick_replay,
         ws_evaluation_mode_from_step,
-        ws_boundary_open_source,
         ws_hard_ignore_reason.as_deref(),
     );
 
@@ -470,8 +469,17 @@ async fn execute_trigger_market_price(
                 .map(|v| v / 100.0)
                 .or_else(|| cond.get("maxPrice").and_then(value_as_f64))
                 .filter(|v| *v > 0.0 && *v <= 1.0);
-            if cond_token_id.is_empty() || cond_trigger_condition.is_empty() {
+            if cond_token_id.is_empty()
+                || cond_trigger_condition.is_empty()
+                || !is_supported_market_price_trigger_condition(&cond_trigger_condition)
+            {
                 continue;
+            }
+            if market_price_trigger_condition_requires_once(&cond_trigger_condition) && !once_mode {
+                anyhow::bail!(
+                    "trigger.market_price {} requires repeatMode=once",
+                    cond_trigger_condition
+                );
             }
             let tp = match cond_trigger_price {
                 Some(v) => v,
@@ -695,24 +703,36 @@ async fn execute_trigger_market_price(
         triggered_max_price = legacy_max_price;
         pass = if let Some(cur_price) = cur {
             match (trigger_condition.as_deref(), trigger_price) {
-                (Some("cross_above"), Some(tp)) => {
+                (Some(condition @ ("cross_above" | "level_above")), Some(tp)) => {
+                    if market_price_trigger_condition_requires_once(condition) && !once_mode {
+                        anyhow::bail!(
+                            "trigger.market_price {} requires repeatMode=once",
+                            condition
+                        );
+                    }
                     let (matched, eval_mode) = evaluate_trigger_market_price_condition(
                         previous_price,
                         cur_price,
                         tp,
-                        "cross_above",
+                        condition,
                         allow_first_tick,
                         legacy_max_price,
                     );
                     trigger_evaluation_mode = eval_mode;
                     matched
                 }
-                (Some("cross_below"), Some(tp)) => {
+                (Some(condition @ ("cross_below" | "level_below")), Some(tp)) => {
+                    if market_price_trigger_condition_requires_once(condition) && !once_mode {
+                        anyhow::bail!(
+                            "trigger.market_price {} requires repeatMode=once",
+                            condition
+                        );
+                    }
                     let (matched, eval_mode) = evaluate_trigger_market_price_condition(
                         previous_price,
                         cur_price,
                         tp,
-                        "cross_below",
+                        condition,
                         allow_first_tick,
                         legacy_max_price,
                     );
@@ -903,6 +923,7 @@ async fn execute_trigger_market_price(
             &node.key,
             once_scope_market,
             Some(market_slug.as_str()),
+            flow_node_reentry_generation(context, &node.key),
         );
         if repo.try_record_idempotency_key(&once_fire_key).await? {
             let fired_at = Utc::now();

@@ -227,9 +227,10 @@ interface OutcomeConditionsSectionProps {
   marketOutcomes: TradeBuilderOutcome[];
   marketOutcomesLoading: boolean;
   actions: NodeInspectorActions;
+  nodeType: string;
 }
 
-export function OutcomeConditionsSection({ rows, marketOutcomes, marketOutcomesLoading, actions }: OutcomeConditionsSectionProps) {
+export function OutcomeConditionsSection({ rows, marketOutcomes, marketOutcomesLoading, actions, nodeType }: OutcomeConditionsSectionProps) {
   const marketOutcomeByTokenId = new Map(marketOutcomes.map((outcome) => [outcome.token_id, outcome]));
 
   return (
@@ -300,6 +301,12 @@ export function OutcomeConditionsSection({ rows, marketOutcomes, marketOutcomesL
                       <SelectItem value="__none__">Seciniz...</SelectItem>
                       <SelectItem value="cross_above">Yukari Gecerse ↑</SelectItem>
                       <SelectItem value="cross_below">Asagi Gecerse ↓</SelectItem>
+                      {nodeType === 'trigger.market_price' && (
+                        <SelectItem value="level_above">Ustundeyse ↑</SelectItem>
+                      )}
+                      {nodeType === 'trigger.market_price' && (
+                        <SelectItem value="level_below">Altindaysa ↓</SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
                 </div>

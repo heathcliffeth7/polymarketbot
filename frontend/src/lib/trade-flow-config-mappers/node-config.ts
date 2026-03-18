@@ -43,6 +43,12 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
       fields.slTriggerPriceMode = 'best_bid';
     }
     if (
+      (fields.reenterOnSlHit ?? '').trim().toLowerCase() === 'true' &&
+      !(fields.reentryMaxAttempts ?? '').trim()
+    ) {
+      fields.reentryMaxAttempts = '1';
+    }
+    if (
       (fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
       !(fields.notifyOnPriceToBeatGapBlocked ?? '').trim()
     ) {
@@ -419,6 +425,8 @@ export function buildNodeConfigFromForm(
       delete config.notifyOnPriceToBeatGapBlocked;
       delete config.notifyOnTpHit;
       delete config.notifyOnSlHit;
+      delete config.reenterOnSlHit;
+      delete config.reentryMaxAttempts;
     } else {
       if (config.triggerPriceGuardEnabled !== true) {
         delete config.notifyOnTriggerPriceBlocked;
@@ -454,6 +462,11 @@ export function buildNodeConfigFromForm(
         delete config.slPrice;
         delete config.slTriggerPriceMode;
         delete config.notifyOnSlHit;
+        delete config.reenterOnSlHit;
+        delete config.reentryMaxAttempts;
+      }
+      if (config.reenterOnSlHit !== true) {
+        delete config.reentryMaxAttempts;
       }
     }
   }
@@ -707,7 +720,11 @@ export function buildNodeConfigFromForm(
           !maxPriceCentRaw ||
           (Number.isFinite(maxPriceCent) && (maxPriceCent as number) > 0 && (maxPriceCent as number) <= 100);
         if (!tokenId || !outcomeLabel) return false;
-        if (triggerCondition !== 'cross_above' && triggerCondition !== 'cross_below') return false;
+        const isSupportedTriggerCondition =
+          nodeType === 'trigger.market_price'
+            ? ['cross_above', 'cross_below', 'level_above', 'level_below'].includes(triggerCondition)
+            : triggerCondition === 'cross_above' || triggerCondition === 'cross_below';
+        if (!isSupportedTriggerCondition) return false;
         return Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100 && hasValidMaxPriceCent;
       })
       .map((row) => {

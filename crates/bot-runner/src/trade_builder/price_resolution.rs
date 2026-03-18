@@ -29,10 +29,10 @@ fn resolve_composite_price(
     last_trade_price: Option<f64>,
 ) -> Option<(f64, &'static str)> {
     match (trigger_condition.map(str::trim), bid, last_trade_price) {
-        (Some("cross_above"), Some(bid), Some(last_trade_price)) => {
+        (Some("cross_above" | "level_above"), Some(bid), Some(last_trade_price)) => {
             Some((bid.max(last_trade_price), "composite_max_bid_last_trade"))
         }
-        (Some("cross_below"), Some(bid), Some(last_trade_price)) => {
+        (Some("cross_below" | "level_below"), Some(bid), Some(last_trade_price)) => {
             let filtered = if bid > 0.0
                 && last_trade_price < bid * SL_COMPOSITE_DIVERGENCE_KEEP_RATIO
             {

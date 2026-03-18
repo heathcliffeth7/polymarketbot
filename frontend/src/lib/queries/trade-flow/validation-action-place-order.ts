@@ -1,8 +1,13 @@
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
-import { hasUpstreamAutoScopeMarketTrigger, hasUpstreamTriggerWithTriggerPrice } from './graph';
+import {
+  findUniqueUpstreamMarketPriceTrigger,
+  hasUpstreamAutoScopeMarketTrigger,
+  hasUpstreamTriggerWithTriggerPrice,
+  hasUpstreamBuyPlaceOrderNode,
+} from './graph';
 import {
   isRecord,
-  isSupportedTriggerCondition,
+  isSupportedMarketPriceTriggerCondition,
   resolveConfiguredBinaryPrice,
   toBooleanish,
   toFiniteNumber,
@@ -24,8 +29,9 @@ export function validateActionPlaceOrderConfig(
   const sourceTradeId = toFiniteNumber(config.sourceTradeId);
   const side = String(config.side ?? '').trim().toLowerCase();
   const effectiveSourceTradeId = sourceTradeId ?? graphSourceTradeId ?? 0;
-  const allowBuyAutoScopeSourceTrade = side === 'buy' && hasUpstreamMarketPriceAutoScope;
-  if (effectiveSourceTradeId <= 0 && !allowBuyAutoScopeSourceTrade) {
+  const allowBuyAutoScopeSourceTrade = side === 'buy';
+  const hasUpstreamBuyOrder = hasUpstreamBuyPlaceOrderNode(node.key, graph);
+  if (effectiveSourceTradeId <= 0 && !allowBuyAutoScopeSourceTrade && !hasUpstreamBuyOrder) {
     pushNodeError(
       issues,
       node,
@@ -181,12 +187,12 @@ export function validateActionPlaceOrderConfig(
       );
     }
   }
-  if (side === 'buy' && usesPctSizing && effectiveSourceTradeId <= 0 && hasUpstreamMarketPriceAutoScope) {
+  if (side === 'buy' && usesPctSizing && effectiveSourceTradeId <= 0 && !hasUpstreamBuyOrder) {
     pushNodeError(
       issues,
       node,
       'pct_buy_requires_source_trade',
-      'action.place_order buy + auto_scope zincirinde pct sizing icin sourceTradeId gerekir. Buy auto source trade yalnizca usdc sizing ile desteklenir.'
+      'action.place_order buy + pct sizing icin sourceTradeId gerekir. Buy auto source trade yalnizca usdc sizing ile desteklenir.'
     );
   }
 
@@ -201,12 +207,15 @@ export function validateActionPlaceOrderConfig(
   }
 
   const triggerCondition = config.triggerCondition;
-  if (triggerCondition != null && !isSupportedTriggerCondition(triggerCondition)) {
+  if (
+    triggerCondition != null &&
+    !isSupportedMarketPriceTriggerCondition(triggerCondition)
+  ) {
     pushNodeError(
       issues,
       node,
       'invalid_trigger_condition',
-      'action.place_order triggerCondition must be cross_above or cross_below.'
+      'action.place_order triggerCondition must be cross_above, cross_below, level_above, or level_below.'
     );
   }
 
@@ -288,6 +297,90 @@ export function validateActionPlaceOrderConfig(
         'invalid_sl_trigger_price_mode',
         'action.place_order slTriggerPriceMode must be one of: best_bid, composite, last_trade.'
       );
+    }
+  }
+  const reenterOnSlHit = toBooleanish(config.reenterOnSlHit);
+  if (config.reenterOnSlHit != null && reenterOnSlHit == null) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_reenter_on_sl_hit',
+      'action.place_order reenterOnSlHit must be boolean (true/false).'
+    );
+  }
+  const reentryMaxAttempts = toFiniteNumber(config.reentryMaxAttempts);
+  if (
+    config.reentryMaxAttempts != null &&
+    (reentryMaxAttempts == null || reentryMaxAttempts < 1 || reentryMaxAttempts > 10 || !Number.isInteger(reentryMaxAttempts))
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_reentry_max_attempts',
+      'action.place_order reentryMaxAttempts must be an integer in [1, 10].'
+    );
+  }
+  if (reenterOnSlHit === true && side !== 'buy') {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_reenter_on_sl_hit_side',
+      'action.place_order reenterOnSlHit is only valid for side=buy.'
+    );
+  }
+  if (reenterOnSlHit === true && slEnabled !== true) {
+    pushNodeError(
+      issues,
+      node,
+      'reenter_on_sl_hit_requires_sl',
+      'action.place_order reenterOnSlHit requires slEnabled=true.'
+    );
+  }
+  const explicitKind = String(config.kind ?? '').trim().toLowerCase();
+  const resolvedOrderKind =
+    explicitKind === 'conditional' || explicitKind === 'immediate'
+      ? explicitKind
+      : isSupportedMarketPriceTriggerCondition(triggerCondition) &&
+          (config.triggerPriceCent != null || config.triggerPrice != null)
+        ? 'conditional'
+        : 'immediate';
+  if (reenterOnSlHit === true && resolvedOrderKind !== 'immediate') {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_reentry_kind',
+      'action.place_order reenterOnSlHit only supports immediate buy nodes.'
+    );
+  }
+  if (reenterOnSlHit === true) {
+    if (reentryMaxAttempts == null || reentryMaxAttempts < 1 || reentryMaxAttempts > 10) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_reentry_max_attempts',
+        'action.place_order reentryMaxAttempts must be set to an integer in [1, 10] when reenterOnSlHit=true.'
+      );
+    }
+    const triggerKey = findUniqueUpstreamMarketPriceTrigger(node.key, graph);
+    if (!triggerKey) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_unique_upstream_reentry_trigger',
+        'action.place_order reenterOnSlHit requires exactly one upstream trigger.market_price.'
+      );
+    } else {
+      const triggerNode = graph.nodes.find((candidate) => candidate.key === triggerKey);
+      const triggerConfig = isRecord(triggerNode?.config) ? triggerNode.config : {};
+      const repeatMode = String(triggerConfig.repeatMode ?? '').trim().toLowerCase();
+      if (repeatMode !== 'once') {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_reentry_trigger_repeat_mode',
+          'action.place_order reenterOnSlHit requires upstream trigger.market_price repeatMode=once.'
+        );
+      }
     }
   }
   if (

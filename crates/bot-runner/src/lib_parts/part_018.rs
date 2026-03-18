@@ -8,6 +8,7 @@ async fn execute_action_place_order(
     run: &TradeFlowRun,
     step: &TradeFlowRunStep,
     node: &TradeFlowNode,
+    graph: &TradeFlowGraphRuntime,
     context: &mut Value,
 ) -> Result<TradeFlowNodeExecution> {
     let side = node_config_string(node, "side")
@@ -347,8 +348,11 @@ async fn execute_action_place_order(
         .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
     if let Some(condition) = trigger_condition.as_deref() {
         anyhow::ensure!(
-            matches!(condition, "cross_above" | "cross_below"),
-            "action.place_order triggerCondition must be cross_above/cross_below"
+            matches!(
+                condition,
+                "cross_above" | "cross_below" | "level_above" | "level_below"
+            ),
+            "action.place_order triggerCondition must be cross_above/cross_below/level_above/level_below"
         );
     }
     let mut kind = node_config_string(node, "kind").unwrap_or_else(|| {
@@ -570,6 +574,37 @@ async fn execute_action_place_order(
             None => "best_bid",
         };
         Some(mode)
+    } else {
+        None
+    };
+    let reenter_on_sl_hit = node_config_bool(node, "reenterOnSlHit").unwrap_or(false)
+        && sl_enabled
+        && side == "buy";
+    let reentry_max_attempts = if reenter_on_sl_hit {
+        node_config_i64(node, "reentryMaxAttempts")
+            .unwrap_or(1)
+            .clamp(1, 10) as i32
+    } else {
+        0
+    };
+    let reentry_trigger_node_key = if reenter_on_sl_hit {
+        anyhow::ensure!(
+            kind == "immediate",
+            "action.place_order reenterOnSlHit is only supported for immediate buy nodes"
+        );
+        let trigger_key = find_upstream_market_price_trigger_key(&node.key, graph).ok_or_else(
+            || anyhow::anyhow!("action.place_order reenterOnSlHit requires exactly one upstream trigger.market_price"),
+        )?;
+        let trigger_node = flow_node(graph, &trigger_key).ok_or_else(|| {
+            anyhow::anyhow!(
+                "action.place_order upstream trigger.market_price missing for re-entry: {trigger_key}"
+            )
+        })?;
+        anyhow::ensure!(
+            node_repeat_mode(trigger_node) == "once",
+            "action.place_order reenterOnSlHit requires upstream trigger.market_price repeatMode=once"
+        );
+        Some(trigger_key)
     } else {
         None
     };
@@ -841,6 +876,9 @@ async fn execute_action_place_order(
             Some(run.id),
             Some(&node.key),
             sl_trigger_price_mode,
+            reenter_on_sl_hit,
+            reentry_max_attempts,
+            reentry_trigger_node_key.as_deref(),
             notify_on_fill,
             notify_on_trigger_guard_blocked,
             notify_on_execution_floor_blocked,
@@ -852,94 +890,205 @@ async fn execute_action_place_order(
             retry_on_max_price_block,
         )
         .await?;
+    let initial_status = if side == "sell" && kind == "immediate" {
+        "triggered"
+    } else {
+        "pending"
+    };
+    let mut flow_created_payload = serde_json::Map::new();
+    flow_created_payload.insert("flow_run_id".to_string(), json!(run.id));
+    flow_created_payload.insert("node_key".to_string(), json!(node.key));
+    flow_created_payload.insert("source_trade_id".to_string(), json!(source_trade_id));
+    flow_created_payload.insert("execution_mode".to_string(), json!(execution_mode));
+    flow_created_payload.insert(
+        "order_type".to_string(),
+        json!(clob_order_type_for_execution_mode(&execution_mode)),
+    );
+    flow_created_payload.insert("initial_status".to_string(), json!(initial_status));
+    flow_created_payload.insert("size_basis".to_string(), json!(sizing.size_basis));
+    flow_created_payload.insert("size_mode".to_string(), json!(sizing.resolved_size_mode));
+    flow_created_payload.insert("size_pct".to_string(), json!(sizing.resolved_size_pct));
+    flow_created_payload.insert("size_usdc".to_string(), json!(sizing.size_usdc));
+    flow_created_payload.insert("target_qty".to_string(), json!(sizing.target_qty));
+    flow_created_payload.insert("remaining_qty".to_string(), json!(sizing.remaining_qty));
+    flow_created_payload.insert(
+        "eligible_after_at".to_string(),
+        json!(eligible_after_at.as_ref().map(|value| value.to_rfc3339())),
+    );
+    flow_created_payload.insert(
+        "eligible_before_at".to_string(),
+        json!(eligible_before_at.as_ref().map(|value| value.to_rfc3339())),
+    );
+    flow_created_payload.insert("trigger_sizes".to_string(), json!(trigger_sizes));
+    flow_created_payload.insert("max_price".to_string(), json!(max_price));
+    flow_created_payload.insert(
+        "guard_trigger_price".to_string(),
+        json!(guard_trigger_price),
+    );
+    flow_created_payload.insert(
+        "trigger_price_guard_enabled".to_string(),
+        json!(trigger_price_guard_enabled),
+    );
+    flow_created_payload.insert(
+        "best_ask_floor_price".to_string(),
+        json!(best_ask_floor_price),
+    );
+    flow_created_payload.insert(
+        "execution_floor_guard_enabled".to_string(),
+        json!(execution_floor_guard_enabled),
+    );
+    flow_created_payload.insert(
+        "ignored_stale_existing_order".to_string(),
+        json!(ignored_existing_order.is_some()),
+    );
+    flow_created_payload.insert(
+        "ignored_existing_order_id".to_string(),
+        json!(ignored_existing_order.as_ref().and_then(|(id, _)| *id)),
+    );
+    flow_created_payload.insert(
+        "ignored_existing_order_reason".to_string(),
+        json!(ignored_existing_order.as_ref().map(|(_, reason)| *reason)),
+    );
+    flow_created_payload.insert("protection".to_string(), protection_output.clone());
+    flow_created_payload.insert("tp_enabled".to_string(), json!(tp_enabled));
+    flow_created_payload.insert("tp_price".to_string(), json!(tp_price));
+    flow_created_payload.insert("sl_enabled".to_string(), json!(sl_enabled));
+    flow_created_payload.insert("sl_price".to_string(), json!(sl_price));
+    flow_created_payload.insert(
+        "sl_trigger_price_mode".to_string(),
+        json!(sl_trigger_price_mode),
+    );
+    flow_created_payload.insert(
+        "reenter_on_sl_hit".to_string(),
+        json!(reenter_on_sl_hit),
+    );
+    flow_created_payload.insert(
+        "reentry_max_attempts".to_string(),
+        json!(reentry_max_attempts),
+    );
+    flow_created_payload.insert(
+        "reentry_trigger_node_key".to_string(),
+        json!(reentry_trigger_node_key.as_deref()),
+    );
+    flow_created_payload.insert("notify_on_fill".to_string(), json!(notify_on_fill));
+    flow_created_payload.insert(
+        "notify_on_trigger_guard_blocked".to_string(),
+        json!(notify_on_trigger_guard_blocked),
+    );
+    flow_created_payload.insert(
+        "notify_on_execution_floor_blocked".to_string(),
+        json!(notify_on_execution_floor_blocked),
+    );
+    flow_created_payload.insert(
+        "retry_on_trigger_guard_block".to_string(),
+        json!(retry_on_trigger_guard_block),
+    );
+    flow_created_payload.insert(
+        "retry_on_execution_floor_guard_block".to_string(),
+        json!(retry_on_execution_floor_guard_block),
+    );
+    flow_created_payload.insert(
+        "retry_on_max_price_block".to_string(),
+        json!(retry_on_max_price_block),
+    );
+    flow_created_payload.insert("notify_on_tp_hit".to_string(), json!(notify_on_tp_hit));
+    flow_created_payload.insert("notify_on_sl_hit".to_string(), json!(notify_on_sl_hit));
+    flow_created_payload.insert(
+        "notify_on_max_price_blocked".to_string(),
+        json!(notify_on_max_price_blocked),
+    );
+    flow_created_payload.insert(
+        "should_inline_submit".to_string(),
+        json!(should_inline_submit),
+    );
     repo.append_trade_builder_order_event(
         builder_order_id,
         "flow_created",
-        &json!({
-            "flow_run_id": run.id,
-            "node_key": node.key,
-            "source_trade_id": source_trade_id,
-            "execution_mode": execution_mode,
-            "order_type": clob_order_type_for_execution_mode(&execution_mode),
-            "initial_status": if side == "sell" && kind == "immediate" { "triggered" } else { "pending" },
-            "size_basis": sizing.size_basis,
-            "size_mode": sizing.resolved_size_mode,
-            "size_pct": sizing.resolved_size_pct,
-            "size_usdc": sizing.size_usdc,
-            "target_qty": sizing.target_qty,
-            "remaining_qty": sizing.remaining_qty,
-            "eligible_after_at": eligible_after_at.as_ref().map(|value| value.to_rfc3339()),
-            "eligible_before_at": eligible_before_at.as_ref().map(|value| value.to_rfc3339()),
-            "trigger_sizes": trigger_sizes,
-            "max_price": max_price,
-            "guard_trigger_price": guard_trigger_price,
-            "trigger_price_guard_enabled": trigger_price_guard_enabled,
-            "best_ask_floor_price": best_ask_floor_price,
-            "execution_floor_guard_enabled": execution_floor_guard_enabled,
-            "ignored_stale_existing_order": ignored_existing_order.is_some(),
-            "ignored_existing_order_id": ignored_existing_order.as_ref().and_then(|(id, _)| *id),
-            "ignored_existing_order_reason": ignored_existing_order.as_ref().map(|(_, reason)| *reason),
-            "protection": protection_output.clone(),
-            "tp_enabled": tp_enabled,
-            "tp_price": tp_price,
-            "sl_enabled": sl_enabled,
-            "sl_price": sl_price,
-            "sl_trigger_price_mode": sl_trigger_price_mode,
-            "notify_on_fill": notify_on_fill,
-            "notify_on_trigger_guard_blocked": notify_on_trigger_guard_blocked,
-            "notify_on_execution_floor_blocked": notify_on_execution_floor_blocked,
-            "retry_on_trigger_guard_block": retry_on_trigger_guard_block,
-            "retry_on_execution_floor_guard_block": retry_on_execution_floor_guard_block,
-            "retry_on_max_price_block": retry_on_max_price_block,
-            "notify_on_tp_hit": notify_on_tp_hit,
-            "notify_on_sl_hit": notify_on_sl_hit,
-            "notify_on_max_price_blocked": notify_on_max_price_blocked,
-            "should_inline_submit": should_inline_submit,
-        }),
+        &Value::Object(flow_created_payload),
     )
     .await?;
 
     set_flow_ref(context, &ref_key, json!(builder_order_id));
     set_flow_ref(context, &node.key, json!(builder_order_id));
 
+    let mut output = serde_json::Map::new();
+    output.insert("node_key".to_string(), json!(node.key));
+    output.insert("builder_order_id".to_string(), json!(builder_order_id));
+    output.insert("ref_key".to_string(), json!(ref_key));
+    output.insert("source_trade_id".to_string(), json!(source_trade_id));
+    output.insert("kind".to_string(), json!(kind));
+    output.insert("side".to_string(), json!(side));
+    output.insert("execution_mode".to_string(), json!(execution_mode));
+    output.insert(
+        "order_type".to_string(),
+        json!(clob_order_type_for_execution_mode(&execution_mode)),
+    );
+    output.insert("market_slug".to_string(), json!(market_slug));
+    output.insert("token_id".to_string(), json!(token_id));
+    output.insert("max_price".to_string(), json!(max_price));
+    output.insert("guard_trigger_price".to_string(), json!(guard_trigger_price));
+    output.insert(
+        "best_ask_floor_price".to_string(),
+        json!(best_ask_floor_price),
+    );
+    output.insert("protection".to_string(), protection_output);
+    output.insert("size_basis".to_string(), json!(sizing.size_basis));
+    output.insert("size_mode".to_string(), json!(sizing.resolved_size_mode));
+    output.insert("size_pct".to_string(), json!(sizing.resolved_size_pct));
+    output.insert("size_usdc".to_string(), json!(sizing.size_usdc));
+    output.insert("target_qty".to_string(), json!(sizing.target_qty));
+    output.insert("remaining_qty".to_string(), json!(sizing.remaining_qty));
+    output.insert("tp_enabled".to_string(), json!(tp_enabled));
+    output.insert("tp_price".to_string(), json!(tp_price));
+    output.insert("sl_enabled".to_string(), json!(sl_enabled));
+    output.insert("sl_price".to_string(), json!(sl_price));
+    output.insert(
+        "execution_floor_guard_enabled".to_string(),
+        json!(execution_floor_guard_enabled),
+    );
+    output.insert(
+        "sl_trigger_price_mode".to_string(),
+        json!(sl_trigger_price_mode),
+    );
+    output.insert("reenter_on_sl_hit".to_string(), json!(reenter_on_sl_hit));
+    output.insert(
+        "reentry_max_attempts".to_string(),
+        json!(reentry_max_attempts),
+    );
+    output.insert(
+        "reentry_trigger_node_key".to_string(),
+        json!(reentry_trigger_node_key.as_deref()),
+    );
+    output.insert("notify_on_fill".to_string(), json!(notify_on_fill));
+    output.insert(
+        "notify_on_trigger_guard_blocked".to_string(),
+        json!(notify_on_trigger_guard_blocked),
+    );
+    output.insert(
+        "notify_on_execution_floor_blocked".to_string(),
+        json!(notify_on_execution_floor_blocked),
+    );
+    output.insert(
+        "retry_on_trigger_guard_block".to_string(),
+        json!(retry_on_trigger_guard_block),
+    );
+    output.insert(
+        "retry_on_execution_floor_guard_block".to_string(),
+        json!(retry_on_execution_floor_guard_block),
+    );
+    output.insert(
+        "retry_on_max_price_block".to_string(),
+        json!(retry_on_max_price_block),
+    );
+    output.insert("notify_on_tp_hit".to_string(), json!(notify_on_tp_hit));
+    output.insert("notify_on_sl_hit".to_string(), json!(notify_on_sl_hit));
+    output.insert(
+        "should_inline_submit".to_string(),
+        json!(should_inline_submit),
+    );
+
     Ok(TradeFlowNodeExecution {
-        output: json!({
-            "node_key": node.key,
-            "builder_order_id": builder_order_id,
-            "ref_key": ref_key,
-            "source_trade_id": source_trade_id,
-            "kind": kind,
-            "side": side,
-            "execution_mode": execution_mode,
-            "order_type": clob_order_type_for_execution_mode(&execution_mode),
-            "market_slug": market_slug,
-            "token_id": token_id,
-            "max_price": max_price,
-            "guard_trigger_price": guard_trigger_price,
-            "best_ask_floor_price": best_ask_floor_price,
-            "protection": protection_output,
-            "size_basis": sizing.size_basis,
-            "size_mode": sizing.resolved_size_mode,
-            "size_pct": sizing.resolved_size_pct,
-            "size_usdc": sizing.size_usdc,
-            "target_qty": sizing.target_qty,
-            "remaining_qty": sizing.remaining_qty,
-            "tp_enabled": tp_enabled,
-            "tp_price": tp_price,
-            "sl_enabled": sl_enabled,
-            "sl_price": sl_price,
-            "execution_floor_guard_enabled": execution_floor_guard_enabled,
-            "sl_trigger_price_mode": sl_trigger_price_mode,
-            "notify_on_fill": notify_on_fill,
-            "notify_on_trigger_guard_blocked": notify_on_trigger_guard_blocked,
-            "notify_on_execution_floor_blocked": notify_on_execution_floor_blocked,
-            "retry_on_trigger_guard_block": retry_on_trigger_guard_block,
-            "retry_on_execution_floor_guard_block": retry_on_execution_floor_guard_block,
-            "retry_on_max_price_block": retry_on_max_price_block,
-            "notify_on_tp_hit": notify_on_tp_hit,
-            "notify_on_sl_hit": notify_on_sl_hit,
-            "should_inline_submit": should_inline_submit,
-        }),
+        output: Value::Object(output),
         routes: vec![TradeFlowRouteDecision {
             edge_type: "on_success".to_string(),
             available_at: Utc::now(),

@@ -8,4 +8,4 @@
 - Component içinde raw SQL, raw fetch veya shell/systemctl mantığı yazma.
 - Ortak tip, mapper ve query builder varken kopya mantık üretme.
 - Sunucu ve istemci ayrımını net tut; side effect içeren mantığı `lib/` tarafına taşı.
-- Yeni dosyalar ve büyüyen modüller 1000 satır sınırını aşmamalı.
+- Yeni dosyalar ve büyüyen modüller 1500 satır sınırını aşmamalı.

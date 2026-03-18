@@ -10,7 +10,7 @@ async fn execute_trade_flow_node(
     run: &TradeFlowRun,
     step: &TradeFlowRunStep,
     node: &TradeFlowNode,
-    _graph: &TradeFlowGraphRuntime,
+    graph: &TradeFlowGraphRuntime,
     context: &mut Value,
 ) -> Result<TradeFlowNodeExecution> {
     match node.node_type.as_str() {
@@ -32,8 +32,10 @@ async fn execute_trade_flow_node(
         "action.resolve_market" => execute_action_resolve_market(cfg, node, context).await,
         "action.dual_dca" => execute_action_dual_dca(repo, run, node, context).await,
         "action.place_order" => {
-            execute_action_place_order(repo, run_id, cfg, limits, policy, run, step, node, context)
-                .await
+            execute_action_place_order(
+                repo, run_id, cfg, limits, policy, run, step, node, graph, context,
+            )
+            .await
         }
         "action.cancel_order" => execute_action_cancel_order(repo, node, context).await,
         "action.update_order" => execute_action_update_order(repo, node, context).await,

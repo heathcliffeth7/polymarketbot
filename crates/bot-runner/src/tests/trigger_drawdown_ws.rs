@@ -66,6 +66,7 @@ fn ws_once_idempotency_key_is_stable_per_run_and_node() {
         true,
         false,
         None,
+        0,
     );
     let key_2 = ws_price_trigger_step_idempotency_key(
         42,
@@ -76,6 +77,7 @@ fn ws_once_idempotency_key_is_stable_per_run_and_node() {
         true,
         false,
         None,
+        0,
     );
 
     assert_eq!(key_1, "ws-once:42:trigger_market");
@@ -93,6 +95,7 @@ fn ws_loop_idempotency_key_depends_on_event_and_price() {
         false,
         false,
         None,
+        0,
     );
     let key_b = ws_price_trigger_step_idempotency_key(
         42,
@@ -103,6 +106,7 @@ fn ws_loop_idempotency_key_depends_on_event_and_price() {
         false,
         false,
         None,
+        0,
     );
     let key_c = ws_price_trigger_step_idempotency_key(
         42,
@@ -113,6 +117,7 @@ fn ws_loop_idempotency_key_depends_on_event_and_price() {
         false,
         false,
         None,
+        0,
     );
 
     assert_eq!(key_a, key_b);
@@ -130,6 +135,7 @@ fn ws_market_once_idempotency_key_is_scoped_by_market_slug() {
         true,
         true,
         Some("btc-updown-5m-1"),
+        0,
     );
     let key_2 = ws_price_trigger_step_idempotency_key(
         42,
@@ -140,6 +146,7 @@ fn ws_market_once_idempotency_key_is_scoped_by_market_slug() {
         true,
         true,
         Some("btc-updown-5m-2"),
+        0,
     );
 
     assert_eq!(key_1, "ws-once:42:trigger_market:btc-updown-5m-1");
@@ -479,9 +486,8 @@ fn fixed_market_boundary_open_allows_first_tick_override() {
     assert!(should_allow_ws_first_tick_threshold_override(
         true,
         "trigger.market_price",
-        false,
-        "first_tick_in_range",
         true,
+        "first_tick_in_range",
         None,
     ));
     assert!(!should_allow_ws_first_tick_threshold_override(
@@ -489,9 +495,129 @@ fn fixed_market_boundary_open_allows_first_tick_override() {
         "trigger.market_price",
         false,
         "first_tick_in_range",
-        false,
         None,
     ));
+}
+
+#[test]
+fn cycle_window_first_boundary_requires_real_cross() {
+    let node_spec = WsOpenPositionPriceNodeSpec {
+        node_key: "trigger_market".to_string(),
+        node_type: "trigger.market_price".to_string(),
+        once_mode: true,
+        once_scope_market: true,
+        auto_scope: true,
+        price_mode: WsPriceMode::Composite,
+        market_slug: Some("btc-updown-5m-1773498600".to_string()),
+        token_id: "tok-up".to_string(),
+        outcome_label: "Up".to_string(),
+        trigger_condition: "cross_above".to_string(),
+        trigger_price: 0.50,
+        max_price: Some(0.92),
+        protection_mode: "off".to_string(),
+        protection_asset: None,
+        confirmation_ms: None,
+        cycle_window_mode: Some("first".to_string()),
+        cycle_window_secs: Some(60),
+    };
+
+    let allow_first_tick_at_boundary = node_spec.cycle_window_mode.as_deref() == Some("last");
+    assert!(!allow_first_tick_at_boundary);
+
+    let (matched, evaluation_mode) = evaluate_trigger_market_price_condition(
+        None,
+        0.57,
+        node_spec.trigger_price,
+        &node_spec.trigger_condition,
+        allow_first_tick_at_boundary,
+        node_spec.max_price,
+    );
+    assert!(!matched);
+    assert_eq!(evaluation_mode, "no_previous");
+}
+
+#[test]
+fn auto_scope_market_boundary_delay_returns_remaining_time_before_market_end() {
+    let node_spec = WsOpenPositionPriceNodeSpec {
+        node_key: "trigger_market".to_string(),
+        node_type: "trigger.market_price".to_string(),
+        once_mode: true,
+        once_scope_market: false,
+        auto_scope: true,
+        price_mode: WsPriceMode::SiteDisplay,
+        market_slug: Some("sol-updown-5m-1773079500".to_string()),
+        token_id: "tok-down".to_string(),
+        outcome_label: "Down".to_string(),
+        trigger_condition: "cross_above".to_string(),
+        trigger_price: 0.77,
+        max_price: Some(0.90),
+        protection_mode: "off".to_string(),
+        protection_asset: None,
+        confirmation_ms: None,
+        cycle_window_mode: None,
+        cycle_window_secs: None,
+    };
+    let now = DateTime::parse_from_rfc3339("2026-03-09T18:09:59Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    assert_eq!(
+        auto_scope_market_boundary_delay(&node_spec, now),
+        Some(Duration::from_secs(1))
+    );
+}
+
+#[test]
+fn auto_scope_market_boundary_delay_returns_zero_after_market_end() {
+    let node_spec = WsOpenPositionPriceNodeSpec {
+        node_key: "trigger_market".to_string(),
+        node_type: "trigger.market_price".to_string(),
+        once_mode: true,
+        once_scope_market: false,
+        auto_scope: true,
+        price_mode: WsPriceMode::SiteDisplay,
+        market_slug: Some("sol-updown-5m-1773079500".to_string()),
+        token_id: "tok-down".to_string(),
+        outcome_label: "Down".to_string(),
+        trigger_condition: "cross_above".to_string(),
+        trigger_price: 0.77,
+        max_price: Some(0.90),
+        protection_mode: "off".to_string(),
+        protection_asset: None,
+        confirmation_ms: None,
+        cycle_window_mode: None,
+        cycle_window_secs: None,
+    };
+    let now = DateTime::parse_from_rfc3339("2026-03-09T18:10:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    assert_eq!(
+        auto_scope_market_boundary_delay(&node_spec, now),
+        Some(Duration::ZERO)
+    );
+}
+
+#[test]
+fn effective_boundary_refresh_delay_applies_retry_backoff_for_stale_boundary() {
+    let now = Instant::now();
+    let retry_at = now + Duration::from_millis(750);
+    let effective = effective_boundary_refresh_delay(Some(Duration::ZERO), Some(retry_at), now)
+        .expect("effective delay should exist");
+
+    assert!(effective > Duration::from_millis(600));
+    assert!(effective <= Duration::from_millis(750));
+}
+
+#[test]
+fn effective_boundary_refresh_delay_keeps_non_due_boundary_unchanged() {
+    let now = Instant::now();
+    let retry_at = now + Duration::from_secs(1);
+
+    assert_eq!(
+        effective_boundary_refresh_delay(Some(Duration::from_secs(2)), Some(retry_at), now),
+        Some(Duration::from_secs(2))
+    );
 }
 
 #[test]
@@ -725,10 +851,26 @@ fn auto_scope_market_rollover_updates_last_ws_slug_and_clears_transient_state() 
         cycle_window_secs: Some(120),
     }];
 
+    let detected_at = DateTime::parse_from_rfc3339("2026-03-09T18:10:01Z")
+        .unwrap()
+        .with_timezone(&Utc);
     let rotations = sync_trade_flow_auto_scope_market_rollover_state(
         &previous_context,
         &mut context,
         &node_specs,
+        &HashMap::from([(
+            "trigger_market".to_string(),
+            SelectedLiveMarket {
+                slug: "btc-updown-5m-1773084000".to_string(),
+                yes_token_id: Some("yes-token".to_string()),
+                no_token_id: Some("no-token".to_string()),
+                maker_base_fee: 0,
+                starts_at: MarketCycleId("btc-updown-5m-1773084000".to_string()).start_time(),
+                ends_at: None,
+                selection_reason: LiveMarketSelectionReason::InWindow,
+            },
+        )]),
+        detected_at,
     );
 
     assert_eq!(
@@ -737,6 +879,10 @@ fn auto_scope_market_rollover_updates_last_ws_slug_and_clears_transient_state() 
             node_key: "trigger_market".to_string(),
             old_market_slug: "btc-updown-5m-1773083700".to_string(),
             new_market_slug: "btc-updown-5m-1773084000".to_string(),
+            expected_market_start: MarketCycleId("btc-updown-5m-1773084000".to_string())
+                .start_time(),
+            rotation_detected_at: detected_at,
+            selection_reason: Some("in_window".to_string()),
         }]
     );
     assert_eq!(
@@ -801,6 +947,10 @@ fn auto_scope_market_rollover_ignores_non_market_price_nodes() {
         &previous_context,
         &mut context,
         &node_specs,
+        &HashMap::new(),
+        DateTime::parse_from_rfc3339("2026-03-09T18:10:01Z")
+            .unwrap()
+            .with_timezone(&Utc),
     );
 
     assert!(rotations.is_empty());
@@ -851,6 +1001,57 @@ fn trigger_market_price_allows_first_tick_threshold_hit() {
         evaluate_trigger_market_price_condition(None, 0.35, 0.30, "cross_above", false, None);
     assert!(!strict_pass);
     assert_eq!(strict_mode, "no_previous");
+}
+
+#[test]
+fn level_above_passes_without_cross_when_threshold_is_already_met() {
+    let (matched_without_prev, mode_without_prev) =
+        evaluate_trigger_market_price_condition(None, 0.35, 0.30, "level_above", false, None);
+    assert!(matched_without_prev);
+    assert_eq!(mode_without_prev, "level_threshold_met");
+
+    let (matched_with_prev, mode_with_prev) =
+        evaluate_trigger_market_price_condition(Some(0.34), 0.36, 0.30, "level_above", false, None);
+    assert!(matched_with_prev);
+    assert_eq!(mode_with_prev, "level_threshold_met");
+}
+
+#[test]
+fn level_below_passes_without_cross_when_threshold_is_already_met() {
+    let (matched_without_prev, mode_without_prev) =
+        evaluate_trigger_market_price_condition(None, 0.25, 0.30, "level_below", false, None);
+    assert!(matched_without_prev);
+    assert_eq!(mode_without_prev, "level_threshold_met");
+
+    let (matched_with_prev, mode_with_prev) =
+        evaluate_trigger_market_price_condition(Some(0.28), 0.27, 0.30, "level_below", false, None);
+    assert!(matched_with_prev);
+    assert_eq!(mode_with_prev, "level_threshold_met");
+}
+
+#[test]
+fn level_above_respects_optional_max_price_band() {
+    let (matched_in_band, mode_in_band) = evaluate_trigger_market_price_condition(
+        Some(0.20),
+        0.50,
+        0.30,
+        "level_above",
+        false,
+        Some(0.69),
+    );
+    assert!(matched_in_band);
+    assert_eq!(mode_in_band, "level_in_range");
+
+    let (matched_above_band, mode_above_band) = evaluate_trigger_market_price_condition(
+        Some(0.20),
+        0.75,
+        0.30,
+        "level_above",
+        false,
+        Some(0.69),
+    );
+    assert!(!matched_above_band);
+    assert_eq!(mode_above_band, "above_max_price");
 }
 
 #[test]

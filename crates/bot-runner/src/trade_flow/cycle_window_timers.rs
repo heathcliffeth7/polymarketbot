@@ -21,8 +21,7 @@ struct CycleWindowEvalDiagnostics {
 fn cycle_window_boundary_state_key(node_spec: &WsOpenPositionPriceNodeSpec) -> String {
     format!(
         "{}{}",
-        FLOW_NODE_STATE_CYCLE_WINDOW_BOUNDARY_MARKER_PREFIX,
-        node_spec.token_id
+        FLOW_NODE_STATE_CYCLE_WINDOW_BOUNDARY_MARKER_PREFIX, node_spec.token_id
     )
 }
 
@@ -163,8 +162,12 @@ fn cycle_window_followup_diagnostics_from_context(
     token_id: &str,
     observed_at: DateTime<Utc>,
 ) -> Option<Value> {
-    let state = flow_node_state(context, node_key, &cycle_window_last_eval_state_key(token_id))?
-        .as_object()?;
+    let state = flow_node_state(
+        context,
+        node_key,
+        &cycle_window_last_eval_state_key(token_id),
+    )?
+    .as_object()?;
     let window_open_at = state
         .get("window_open_at")
         .and_then(Value::as_str)
@@ -258,11 +261,57 @@ async fn trade_flow_next_trigger_market_price_timer_delay() -> Option<Duration> 
                 if deadline <= now {
                     return Some(Duration::from_millis(0));
                 }
-                let delay_ms =
-                    deadline.signed_duration_since(now).num_milliseconds().max(0) as u64;
+                let delay_ms = deadline
+                    .signed_duration_since(now)
+                    .num_milliseconds()
+                    .max(0) as u64;
                 let delay = Duration::from_millis(delay_ms);
                 next_delay = Some(next_delay.map_or(delay, |current| current.min(delay)));
             }
+        }
+    }
+
+    next_delay
+}
+
+fn auto_scope_market_boundary_delay(
+    node_spec: &WsOpenPositionPriceNodeSpec,
+    now: DateTime<Utc>,
+) -> Option<Duration> {
+    if node_spec.node_type != "trigger.market_price" || !node_spec.auto_scope {
+        return None;
+    }
+
+    let market_slug = node_spec.market_slug.as_deref()?;
+    let scope_def = find_updown_scope_by_slug(market_slug)?;
+    let window_secs = updown_scope_window_seconds(scope_def);
+    let market_start = MarketCycleId(market_slug.to_string()).start_time()?;
+    let market_end = market_start + ChronoDuration::seconds(window_secs);
+    if now >= market_end {
+        return Some(Duration::ZERO);
+    }
+
+    let delay_ms = market_end
+        .signed_duration_since(now)
+        .num_milliseconds()
+        .max(0) as u64;
+    Some(Duration::from_millis(delay_ms))
+}
+
+async fn trade_flow_next_auto_scope_boundary_refresh_delay() -> Option<Duration> {
+    let cache = TRADE_FLOW_WS_FAST_PATH_CACHE.read().await;
+    if cache.run_specs.is_empty() {
+        return None;
+    }
+
+    let now = Utc::now();
+    let mut next_delay: Option<Duration> = None;
+    for run_spec in &cache.run_specs {
+        for node_spec in &run_spec.nodes {
+            let Some(delay) = auto_scope_market_boundary_delay(node_spec, now) else {
+                continue;
+            };
+            next_delay = Some(next_delay.map_or(delay, |current| current.min(delay)));
         }
     }
 
@@ -367,6 +416,7 @@ async fn enqueue_cycle_window_prevalidated_step(
             true,
             node_spec.once_scope_market,
             node_spec.market_slug.as_deref(),
+            flow_node_reentry_generation(&run_spec.context, &node_spec.node_key),
         )
     } else {
         format!(
@@ -396,6 +446,7 @@ async fn enqueue_cycle_window_prevalidated_step(
         "wsLastTradePrice": resolved_price.detail.last_trade_price,
         "wsSnapshotAgeMs": resolved_price.detail.snapshot_age_ms,
         "wsSiteDisplayModeDecision": resolved_price.detail.site_display_mode_decision,
+        "wsAllowFirstTickReplay": window_mode == "last",
         "windowBoundaryOpen": true,
         "windowBoundaryMode": window_mode,
         "queuedAt": queued_at_rfc3339
@@ -527,8 +578,7 @@ async fn process_trade_flow_trigger_market_price_timers(
         touched = true;
 
         let boundary_state_key = cycle_window_boundary_state_key(&node_spec);
-        let diagnostics =
-            cycle_window_eval_diagnostics(&node_spec, &target.window_mode, now);
+        let diagnostics = cycle_window_eval_diagnostics(&node_spec, &target.window_mode, now);
 
         let mut entered_payload = json!({
             "node_key": node_spec.node_key,
@@ -574,13 +624,10 @@ async fn process_trade_flow_trigger_market_price_timers(
             continue;
         }
 
-        let Some(resolved_price) = resolve_ws_fast_path_trigger_price(
-            run_id,
-            &node_spec,
-            &boundary_snapshots,
-            client,
-        )
-        .await else {
+        let Some(resolved_price) =
+            resolve_ws_fast_path_trigger_price(run_id, &node_spec, &boundary_snapshots, client)
+                .await
+        else {
             if let Some(diagnostics) = diagnostics.as_ref() {
                 set_cycle_window_last_eval_state(
                     &mut run_spec.context,
@@ -639,12 +686,13 @@ async fn process_trade_flow_trigger_market_price_timers(
         );
         run_spec.context_dirty = true;
 
+        let allow_first_tick_at_boundary = target.window_mode == "last";
         let (matched, evaluation_mode) = evaluate_trigger_market_price_condition(
             None,
             resolved_price.price,
             node_spec.trigger_price,
             &node_spec.trigger_condition,
-            true,
+            allow_first_tick_at_boundary,
             node_spec.max_price,
         );
 
@@ -694,14 +742,7 @@ async fn process_trade_flow_trigger_market_price_timers(
                     &cycle_window_eval_payload_fields(diagnostics),
                 );
             }
-            append_cycle_window_event(
-                repo,
-                run_spec,
-                &node_spec,
-                event_type,
-                &event_payload,
-            )
-            .await;
+            append_cycle_window_event(repo, run_spec, &node_spec, event_type, &event_payload).await;
             continue;
         }
 

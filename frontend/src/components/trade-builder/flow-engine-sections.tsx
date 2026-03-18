@@ -313,7 +313,7 @@ interface CreateFlowSlotProps {
   definitionsLoading: boolean;
   filteredDefinitions: TradeFlowDefinition[];
   selectedDefinitionId: number | null;
-  archivingDefinitionId: number | null;
+  deletingDefinitionId: number | null;
   onCreateNameChange: (v: string) => void;
   onCreateDescriptionChange: (v: string) => void;
   onTemplateKindChange: (v: TemplateKind) => void;
@@ -321,14 +321,14 @@ interface CreateFlowSlotProps {
   onToggleWorkflowList: () => void;
   onWorkflowListQueryChange: (v: string) => void;
   onSelectDefinition: (id: number) => void;
-  onArchiveFromList: (id: number) => void;
+  onDeleteFromList: (id: number) => void;
   showWorkflowActions?: boolean;
   workflowActionsDisabled?: boolean;
   onSaveDraft?: () => void;
   onValidate?: () => void;
   onReloadDraft?: () => void;
   onPublish?: () => void;
-  onArchiveFlow?: () => void;
+  onDeleteFlow?: () => void;
   publishDisabled?: boolean;
   canStopFlow?: boolean;
   onStopFlow?: () => void;
@@ -337,8 +337,8 @@ interface CreateFlowSlotProps {
   onToggleDefinitionSelection?: (id: number) => void;
   onSelectAllDefinitions?: () => void;
   onDeselectAllDefinitions?: () => void;
-  onBulkArchive?: () => void;
-  bulkArchiving?: boolean;
+  onBulkDelete?: () => void;
+  bulkDeleting?: boolean;
   autoClaimEnabled?: boolean;
   onAutoClaimEnabledChange?: (enabled: boolean) => void;
 }
@@ -346,14 +346,14 @@ interface CreateFlowSlotProps {
 export function CreateFlowSlot({
   createName, createDescription, createTemplateKind, busyAction,
   isWorkflowListOpen, workflowListQuery, definitionsLoading,
-  filteredDefinitions, selectedDefinitionId, archivingDefinitionId,
+  filteredDefinitions, selectedDefinitionId, deletingDefinitionId,
   onCreateNameChange, onCreateDescriptionChange, onTemplateKindChange,
   onCreateFromTemplate, onToggleWorkflowList, onWorkflowListQueryChange,
-  onSelectDefinition, onArchiveFromList,
+  onSelectDefinition, onDeleteFromList,
   showWorkflowActions = false, workflowActionsDisabled = false,
-  onSaveDraft, onValidate, onReloadDraft, onPublish, onArchiveFlow, publishDisabled = false,
+  onSaveDraft, onValidate, onReloadDraft, onPublish, onDeleteFlow, publishDisabled = false,
   canStopFlow, onStopFlow, stoppingFlow,
-  selectedDefinitionIds, onToggleDefinitionSelection, onSelectAllDefinitions, onDeselectAllDefinitions, onBulkArchive, bulkArchiving,
+  selectedDefinitionIds, onToggleDefinitionSelection, onSelectAllDefinitions, onDeselectAllDefinitions, onBulkDelete, bulkDeleting,
   autoClaimEnabled = false, onAutoClaimEnabledChange,
 }: CreateFlowSlotProps) {
   return (
@@ -406,10 +406,10 @@ export function CreateFlowSlot({
               size="sm"
               variant="outline"
               className="h-8 w-full border-red-300 text-red-600 hover:bg-red-50"
-              disabled={workflowActionsDisabled || !onArchiveFlow}
-              onClick={onArchiveFlow}
+              disabled={workflowActionsDisabled || !onDeleteFlow}
+              onClick={onDeleteFlow}
             >
-              Sil (Arsivle)
+              Kalici Sil
             </Button>
             {onStopFlow && (
               <Button
@@ -468,7 +468,7 @@ export function CreateFlowSlot({
         <span>Workflow Listesi</span>
         <span className="text-[10px] text-slate-500">{isWorkflowListOpen ? 'Gizle' : 'Goster'}</span>
       </button>
-      <p className="text-[10px] text-slate-500">Sil butonu workflowu arsivler ve listeden kaldirir.</p>
+      <p className="text-[10px] text-slate-500">Sil butonu workflowu kalici olarak siler; arsive atmaz.</p>
 
       {isWorkflowListOpen && (
         <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-2">
@@ -484,11 +484,11 @@ export function CreateFlowSlot({
                 />
                 Tumunu Sec
               </label>
-              {selectedDefinitionIds.size > 0 && onBulkArchive && (
+              {selectedDefinitionIds.size > 0 && onBulkDelete && (
                 <Button type="button" size="sm" variant="outline"
                   className="h-6 border-red-300 px-2 text-[10px] text-red-600 hover:bg-red-50"
-                  disabled={bulkArchiving} onClick={onBulkArchive}>
-                  {bulkArchiving ? 'Siliniyor...' : `Secilenleri Sil (${selectedDefinitionIds.size})`}
+                  disabled={bulkDeleting} onClick={onBulkDelete}>
+                  {bulkDeleting ? 'Siliniyor...' : `Secilenleri Sil (${selectedDefinitionIds.size})`}
                 </Button>
               )}
             </div>
@@ -516,8 +516,8 @@ export function CreateFlowSlot({
                   </button>
                   <Button type="button" size="sm" variant="outline"
                     className="h-auto min-h-0 whitespace-nowrap border-red-300 px-2 py-1 text-[11px] text-red-600 hover:bg-red-50"
-                    disabled={busyAction !== null} onClick={() => onArchiveFromList(def.id)}>
-                    {archivingDefinitionId === def.id ? 'Siliniyor...' : 'Sil'}
+                    disabled={busyAction !== null} onClick={() => onDeleteFromList(def.id)}>
+                    {deletingDefinitionId === def.id ? 'Siliniyor...' : 'Sil'}
                   </Button>
                 </div>
               ))

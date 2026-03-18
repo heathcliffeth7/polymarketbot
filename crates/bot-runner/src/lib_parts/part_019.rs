@@ -550,6 +550,43 @@ fn resolve_action_place_order_existing_order_id(
         .or_else(|| refs.get(&node.key).and_then(value_as_i64))
 }
 
+fn find_upstream_market_price_trigger_key(
+    node_key: &str,
+    graph: &TradeFlowGraphRuntime,
+) -> Option<String> {
+    let mut incoming_by_target: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in &graph.edges {
+        incoming_by_target
+            .entry(edge.target.as_str())
+            .or_default()
+            .push(edge.source.as_str());
+    }
+
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::from([node_key]);
+    let mut found_key: Option<&str> = None;
+
+    while let Some(current) = queue.pop_front() {
+        if !visited.insert(current) {
+            continue;
+        }
+        for source_key in incoming_by_target.get(current).into_iter().flatten().copied() {
+            let Some(source_node) = flow_node(graph, source_key) else {
+                continue;
+            };
+            if source_node.node_type == "trigger.market_price" {
+                if found_key.is_some_and(|existing| existing != source_key) {
+                    return None;
+                }
+                found_key = Some(source_key);
+            }
+            queue.push_back(source_key);
+        }
+    }
+
+    found_key.map(str::to_string)
+}
+
 fn classify_action_place_order_existing_order(
     order: &TradeBuilderOrder,
     side: &str,

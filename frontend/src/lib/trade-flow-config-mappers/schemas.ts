@@ -105,7 +105,7 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'best bid (satış için)', value: 'best_bid' },
         { label: 'best ask (alış için)', value: 'best_ask' },
       ],
-      help: 'composite: cross_above icin best_bid ile last_trade fiyatinin yuksek olanini, cross_below icin dusuk olanini kullanir. site_display: Polymarket UI fiyati; spread 10c altindaysa midpoint, ustundeyse son islem fiyati. midpoint: best bid/ask ortalamasi. raw: son islem fiyatini kullanir, yoksa midpoint fallback yapar. last_trade: sadece son islem fiyatini kullanir, fallback yapmaz. best_bid: en iyi alim fiyati. best_ask: en iyi satim fiyati.',
+      help: 'composite: cross_above/level_above icin best_bid ile last_trade fiyatinin yuksek olanini, cross_below/level_below icin dusuk olanini kullanir. site_display: Polymarket UI fiyati; spread 10c altindaysa midpoint, ustundeyse son islem fiyati. midpoint: best bid/ask ortalamasi. raw: son islem fiyatini kullanir, yoksa midpoint fallback yapar. last_trade: sadece son islem fiyatini kullanir, fallback yapmaz. best_bid: en iyi alim fiyati. best_ask: en iyi satim fiyati.',
     },
   ],
   'trigger.sell_progress': [
@@ -127,6 +127,8 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'Yok', value: '' },
         { label: 'cross_above', value: 'cross_above' },
         { label: 'cross_below', value: 'cross_below' },
+        { label: 'level_above', value: 'level_above' },
+        { label: 'level_below', value: 'level_below' },
       ],
     },
     {
@@ -139,7 +141,7 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       key: 'maxPriceCent',
       label: 'Tavan Fiyati (cent)',
       input: 'number',
-      help: 'Opsiyonel. cross_above ile birlikte kullanirsan triggerPrice ile bu tavan arasina girildiginde tetik sayilir; tavanin ustu tetiklenmez.',
+      help: 'Opsiyonel. cross_above/level_above ile birlikte kullanirsan triggerPrice ile bu tavan arasina girildiginde tetik sayilir; tavanin ustu tetiklenmez.',
     },
     {
       key: 'minIntervalMs',
@@ -376,9 +378,11 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'Yok', value: '' },
         { label: 'cross_above', value: 'cross_above' },
         { label: 'cross_below', value: 'cross_below' },
+        { label: 'level_above', value: 'level_above' },
+        { label: 'level_below', value: 'level_below' },
       ],
     },
-    { key: 'triggerPrice', label: 'Tetik Fiyatı', input: 'number' },
+    { key: 'triggerPrice', label: 'Tetik Fiyatı', input: 'number', help: 'cross_* icin gecis seviyesi, level_* icin durum eşiği olarak kullanılır.' },
     { key: 'expiresAt', label: 'Bitiş Zamanı', input: 'datetime-local' },
     {
       key: 'tpEnabled',
@@ -412,6 +416,18 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'Last Trade', value: 'last_trade' },
       ],
       help: 'Stop-loss tetik fiyatinin hangi kaynaktan alinacagini belirler. Tetik fiyati ile fiili satis fiyati farkli olabilir.',
+    },
+    {
+      key: 'reenterOnSlHit',
+      label: 'SL Sonrasi Re-entry',
+      input: 'checkbox',
+      help: 'Yalniz upstream trigger.market_price repeatMode=once arkasindaki immediate buy node icin gecerli. SL child fill olunca ayni flow run icindeki trigger.market_price yeniden izlenir.',
+    },
+    {
+      key: 'reentryMaxAttempts',
+      label: 'Re-entry Deneme Limiti',
+      input: 'number',
+      help: 'SL sonrasi maksimum yeniden alis deneme sayisi. Gecerli aralik: 1-10.',
     },
     {
       key: 'maxPriceCent',

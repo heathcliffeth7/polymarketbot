@@ -2,12 +2,15 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
+import { usePathname } from 'next/navigation';
 import type {
   TradeFlowEvent,
   TradeFlowRealtimeHeartbeat,
@@ -24,6 +27,8 @@ interface TradeFlowRealtimeContextValue {
   latestPriceTicks: Record<string, TradeFlowRealtimePriceTick>;
   lastEventAt: string | null;
   lastEventLagMs: number | null;
+  setSavePaused: (paused: boolean) => void;
+  closeStream: () => void;
 }
 
 const TradeFlowRealtimeContext = createContext<TradeFlowRealtimeContextValue>({
@@ -33,6 +38,8 @@ const TradeFlowRealtimeContext = createContext<TradeFlowRealtimeContextValue>({
   latestPriceTicks: {},
   lastEventAt: null,
   lastEventLagMs: null,
+  setSavePaused: () => {},
+  closeStream: () => {},
 });
 
 function parseRealtimeData<T>(raw: string): T | null {
@@ -51,30 +58,67 @@ function computeLagMs(iso: string | null): number | null {
 }
 
 export function TradeFlowRealtimeProvider({ children }: { children: ReactNode }) {
-  const [connectionState, setConnectionState] =
-    useState<TradeFlowRealtimeConnectionState>('connecting');
+  const pathname = usePathname();
+  const [streamConnectionState, setStreamConnectionState] =
+    useState<TradeFlowRealtimeConnectionState>('closed');
   const [flowEvents, setFlowEvents] = useState<TradeFlowEvent[]>([]);
   const [latestPriceTicks, setLatestPriceTicks] = useState<Record<string, TradeFlowRealtimePriceTick>>({});
   const [lastEventAt, setLastEventAt] = useState<string | null>(null);
   const [lastEventLagMs, setLastEventLagMs] = useState<number | null>(null);
+  const [savePaused, setSavePaused] = useState(false);
+  const sourceRef = useRef<EventSource | null>(null);
+  const [isPageVisible, setIsPageVisible] = useState(() =>
+    typeof document === 'undefined' ? true : document.visibilityState === 'visible'
+  );
+
+  const closeStream = useCallback(() => {
+    if (sourceRef.current) {
+      sourceRef.current.close();
+      sourceRef.current = null;
+      setStreamConnectionState('closed');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+
+    const handleVisibilityChange = () => {
+      setIsPageVisible(document.visibilityState === 'visible');
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  const shouldConnect = pathname.startsWith('/trade-builder') && isPageVisible && !savePaused;
+  const connectionState: TradeFlowRealtimeConnectionState =
+    shouldConnect && streamConnectionState === 'closed'
+      ? 'connecting'
+      : shouldConnect
+        ? streamConnectionState
+        : 'closed';
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (!shouldConnect) return;
 
     const source = new EventSource('/api/trade-flow/stream?status=running');
+    sourceRef.current = source;
 
     const handleOpen = () => {
-      setConnectionState('open');
+      setStreamConnectionState('open');
     };
 
     const handleError = () => {
-      setConnectionState('error');
+      setStreamConnectionState('error');
     };
 
     const handleReady = (event: Event) => {
       const data = parseRealtimeData<TradeFlowRealtimeReady>((event as MessageEvent).data);
       const ts = data?.connected_at ?? null;
-      setConnectionState('open');
+      setStreamConnectionState('open');
       setLastEventAt(ts);
       setLastEventLagMs(computeLagMs(ts));
     };
@@ -82,7 +126,7 @@ export function TradeFlowRealtimeProvider({ children }: { children: ReactNode })
     const handleHeartbeat = (event: Event) => {
       const data = parseRealtimeData<TradeFlowRealtimeHeartbeat>((event as MessageEvent).data);
       const ts = data?.now ?? null;
-      setConnectionState('open');
+      setStreamConnectionState('open');
       setLastEventAt(ts);
       setLastEventLagMs(computeLagMs(ts));
     };
@@ -90,7 +134,7 @@ export function TradeFlowRealtimeProvider({ children }: { children: ReactNode })
     const handleFlowEvent = (event: Event) => {
       const data = parseRealtimeData<TradeFlowEvent>((event as MessageEvent).data);
       if (!data) return;
-      setConnectionState('open');
+      setStreamConnectionState('open');
       setLastEventAt(data.created_at);
       setLastEventLagMs(computeLagMs(data.created_at));
       setFlowEvents((prev) => {
@@ -103,7 +147,7 @@ export function TradeFlowRealtimeProvider({ children }: { children: ReactNode })
     const handlePriceTick = (event: Event) => {
       const data = parseRealtimeData<TradeFlowRealtimePriceTick>((event as MessageEvent).data);
       if (!data) return;
-      setConnectionState('open');
+      setStreamConnectionState('open');
       setLastEventAt(data.created_at);
       setLastEventLagMs(computeLagMs(data.created_at));
       setLatestPriceTicks((prev) => ({
@@ -126,8 +170,10 @@ export function TradeFlowRealtimeProvider({ children }: { children: ReactNode })
       source.removeEventListener('flow_event', handleFlowEvent as EventListener);
       source.removeEventListener('price_tick', handlePriceTick as EventListener);
       source.close();
+      sourceRef.current = null;
+      setStreamConnectionState('closed');
     };
-  }, []);
+  }, [shouldConnect]);
 
   const livePrices = useMemo(
     () =>
@@ -146,6 +192,8 @@ export function TradeFlowRealtimeProvider({ children }: { children: ReactNode })
         latestPriceTicks,
         lastEventAt,
         lastEventLagMs,
+        setSavePaused,
+        closeStream,
       }}
     >
       {children}

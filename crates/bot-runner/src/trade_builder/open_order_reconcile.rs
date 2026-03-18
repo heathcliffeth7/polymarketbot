@@ -581,7 +581,7 @@ async fn reconcile_trade_builder_open_order(
         }
     }
 
-    let market_spec = resolve_trade_builder_market_spec(cfg, &order.market_slug).await;
+    let market_spec = resolve_trade_builder_market_spec(cfg, &order.market_slug, &order.token_id).await;
     let replace_req = PlaceOrderRequest {
         market: order.market_slug.clone(),
         token_id: Some(order.token_id.clone()),

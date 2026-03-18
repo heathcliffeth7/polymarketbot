@@ -203,6 +203,19 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
             continue;
         }
 
+        if trade_builder_is_stop_loss_child(sibling)
+            && sibling.sl_trigger_price_mode.as_deref() == Some("composite")
+        {
+            let bid_unconfirmed = match (sibling.trigger_price, runtime_price.best_bid) {
+                (Some(trigger_price), Some(best_bid)) => best_bid > trigger_price,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if bid_unconfirmed {
+                continue;
+            }
+        }
+
         stop_loss_sibling_ids.push(sibling.id);
         stop_loss_current_price.get_or_insert(sibling_current_price);
         if !trade_builder_stop_loss_latched(sibling) {

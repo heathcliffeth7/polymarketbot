@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth';
-import { archiveTradeFlowDefinition } from '@/lib/queries/trade-flow';
+import { hardDeleteTradeFlowDefinition } from '@/lib/queries/trade-flow';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,15 +19,15 @@ export async function POST(
       return NextResponse.json({ error: 'Invalid definition id' }, { status: 400 });
     }
 
-    const data = await archiveTradeFlowDefinition(user.userId, definitionId);
-    return NextResponse.json({ data });
+    await hardDeleteTradeFlowDefinition(user.userId, definitionId);
+    return NextResponse.json({ success: true, data: null });
   } catch (err) {
     if (err instanceof Error && err.message === 'Flow definition not found') {
       return NextResponse.json({ error: err.message }, { status: 404 });
     }
-    console.error('Trade flow archive error:', err);
+    console.error('Trade flow delete alias error:', err);
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Failed to archive flow' },
+      { error: err instanceof Error ? err.message : 'Failed to delete flow definition' },
       { status: 500 }
     );
   }
