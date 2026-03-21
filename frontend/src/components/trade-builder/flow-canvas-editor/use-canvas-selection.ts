@@ -30,7 +30,8 @@ interface UseCanvasSelectionArgs {
     nextNodes: FlowNode[],
     nextEdges: FlowEdge[],
     skipHistory?: boolean,
-    allowGraphShrink?: boolean
+    allowGraphShrink?: boolean,
+    persistImmediately?: boolean
   ) => void;
   onError: (message: string | null) => void;
   queueNodeFocus: (nodeId: string) => void;
@@ -202,7 +203,7 @@ export function useCanvasSelection({
         !nodeIdSet.has(edge.target)
     );
 
-    commitGraph(nextNodes, nextEdges, false, true);
+    commitGraph(nextNodes, nextEdges, false, true, true);
     clearSelection();
     onError(null);
   }, [canvasEdges, canvasNodes, clearSelection, commitGraph, onError, selectedEdgeIds, selectedNodeIds]);

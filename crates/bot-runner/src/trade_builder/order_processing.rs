@@ -24,7 +24,10 @@ fn try_acquire_trade_builder_order_processing_guard(
 }
 
 fn trade_builder_order_age_ms(created_at: DateTime<Utc>) -> i64 {
-    Utc::now().signed_duration_since(created_at).num_milliseconds().max(0)
+    Utc::now()
+        .signed_duration_since(created_at)
+        .num_milliseconds()
+        .max(0)
 }
 
 fn log_trade_builder_submit_trace(
@@ -100,6 +103,13 @@ async fn maybe_handle_trade_builder_order_eligibility_window(
                 }),
             )
             .await?;
+            maybe_send_order_not_filled_notification(
+                repo,
+                order,
+                "outside_cycle_window",
+                "Eligible penceresi kapandigi icin emir icra edilemeden expire oldu.",
+            )
+            .await;
             Ok(true)
         }
         TradeBuilderEligibilityWindowState::Allow => Ok(false),
@@ -280,6 +290,13 @@ async fn process_trade_builder_order(
                     &json!({ "expires_at": expires_at }),
                 )
                 .await?;
+                maybe_send_order_not_filled_notification(
+                    repo,
+                    &order,
+                    "ttl_expired",
+                    "Sure asildi, emir icra edilemeden expire oldu.",
+                )
+                .await;
             }
             return Ok(());
         }
@@ -324,7 +341,9 @@ async fn process_trade_builder_order(
     let mut runtime_price = runtime_price;
     if order.best_ask_floor_price.is_some() && runtime_price.best_ask.is_none() {
         match client.best_bid_ask(&order.token_id).await {
-            Ok((_, Some(best_ask))) if best_ask.is_finite() && best_ask > 0.0 && best_ask <= 1.0 => {
+            Ok((_, Some(best_ask)))
+                if best_ask.is_finite() && best_ask > 0.0 && best_ask <= 1.0 =>
+            {
                 runtime_price.best_ask = Some(clamp_probability(best_ask));
             }
             Ok(_) => {}
@@ -361,12 +380,9 @@ async fn process_trade_builder_order(
         )
         .await?;
     }
-    let tp_preempted = maybe_preempt_trade_builder_take_profit_for_stop_loss(
-        repo,
-        &mut order,
-        &runtime_price,
-    )
-    .await?;
+    let tp_preempted =
+        maybe_preempt_trade_builder_take_profit_for_stop_loss(repo, &mut order, &runtime_price)
+            .await?;
     if tp_preempted && order.active_exchange_order_id.is_none() {
         repo.set_trade_builder_last_seen_price(order.id, persisted_last_seen_price)
             .await?;
@@ -592,8 +608,8 @@ async fn process_trade_builder_order(
         "TRADE_BUILDER_TRIGGER_CONDITION_MET"
     );
     if should_skip_trade_builder_composite_sl_bid_confirmation(&order, &runtime_price) {
-        let already_waiting = order.last_error.as_deref()
-            == Some("composite_bid_confirmation_waiting");
+        let already_waiting =
+            order.last_error.as_deref() == Some("composite_bid_confirmation_waiting");
         if !already_waiting {
             repo.set_trade_builder_order_last_error(
                 order.id,
@@ -713,7 +729,10 @@ fn should_skip_trade_builder_composite_sl_bid_confirmation(
     runtime_price: &TradeBuilderRuntimePrice,
 ) -> bool {
     if !trade_builder_is_stop_loss_child(order)
-        || order.sl_trigger_price_mode.as_deref() != Some("composite")
+        || !matches!(
+            order.sl_trigger_price_mode.as_deref(),
+            Some("composite" | "composite_safe")
+        )
     {
         return false;
     }
@@ -787,11 +806,13 @@ mod eligibility_window_tests {
             reentry_max_attempts: 0,
             reentry_trigger_node_key: None,
             notify_on_fill: false,
+            notify_on_order_not_filled: false,
             notify_on_trigger_guard_blocked: false,
             notify_on_execution_floor_blocked: false,
             notify_on_tp_hit: false,
             notify_on_sl_hit: false,
             notify_on_max_price_blocked: false,
+            last_guard_notification_reason: None,
         }
     }
 

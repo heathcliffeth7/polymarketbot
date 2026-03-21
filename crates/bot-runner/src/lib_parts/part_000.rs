@@ -92,7 +92,17 @@ const UNDERLYING_REFERENCE_BALANCED_FLAT_DELTA_PCT: f64 = 0.02;
 const UNDERLYING_REFERENCE_STRICT_DELTA_10S_PCT: f64 = 0.04;
 const UNDERLYING_REFERENCE_STRICT_DELTA_30S_PCT: f64 = 0.08;
 
+#[derive(Debug, Clone)]
+struct CachedMarketTokens {
+    yes_token_id: Option<String>,
+    no_token_id: Option<String>,
+    maker_base_fee: u64,
+    neg_risk: bool,
+}
+
 static AUTO_SCOPE_MARKET_CACHE: LazyLock<StdMutex<HashMap<String, (Instant, Vec<GammaMarket>)>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+static AUTO_SCOPE_TOKEN_ID_CACHE: LazyLock<StdMutex<HashMap<String, CachedMarketTokens>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 static TRADE_FLOW_WS_FAST_PATH_CACHE: LazyLock<RwLock<TradeFlowWsFastPathCache>> =
     LazyLock::new(|| RwLock::new(TradeFlowWsFastPathCache::default()));
@@ -114,6 +124,7 @@ const FLOW_NODE_STATE_ONCE_BLOCK_LOGGED: &str = "once_blocked_logged";
 const FLOW_NODE_STATE_REENTRY_GENERATION: &str = "reentry_generation";
 const FLOW_NODE_STATE_REENTRY_ATTEMPTS_USED: &str = "reentry_attempts_used";
 const FLOW_NODE_STATE_CYCLE_WINDOW_BOUNDARY_MARKER_PREFIX: &str = "cycle_window_boundary_marker_";
+const FLOW_NODE_STATE_CYCLE_WINDOW_END_SELL_MARKER_PREFIX: &str = "cycle_window_end_sell_marker_";
 const FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG: &str =
     "publish_auto_scope_locked_market_slug";
 const TRADE_BUILDER_GUARD_BLOCKED_STATUS: &str = "guard_blocked";

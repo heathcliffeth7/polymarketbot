@@ -157,11 +157,13 @@ mod tick_trigger_eval_tests {
             reentry_max_attempts: 0,
             reentry_trigger_node_key: None,
             notify_on_fill: false,
+            notify_on_order_not_filled: false,
             notify_on_trigger_guard_blocked: false,
             notify_on_execution_floor_blocked: false,
             notify_on_tp_hit: false,
             notify_on_sl_hit: false,
             notify_on_max_price_blocked: false,
+            last_guard_notification_reason: None,
         }
     }
 

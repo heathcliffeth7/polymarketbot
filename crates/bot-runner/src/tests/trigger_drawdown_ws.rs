@@ -330,6 +330,76 @@ fn auto_scope_specs_prefer_context_market_slug_over_stale_config_slug() {
 }
 
 #[test]
+fn mixed_auto_scope_specs_use_node_scoped_market_and_token_context() {
+    let btc_node = TradeFlowNode {
+        key: "trigger_btc".to_string(),
+        node_type: "trigger.market_price".to_string(),
+        config: json!({
+            "repeatMode": "once",
+            "onceScope": "market",
+            "marketMode": "auto_scope",
+            "marketScope": "btc_5m_updown",
+            "outcomeConditions": [{
+                "outcomeLabel": "Up",
+                "triggerCondition": "level_above",
+                "triggerPriceCent": 49
+            }]
+        }),
+    };
+    let eth_node = TradeFlowNode {
+        key: "trigger_eth".to_string(),
+        node_type: "trigger.market_price".to_string(),
+        config: json!({
+            "repeatMode": "once",
+            "onceScope": "market",
+            "marketMode": "auto_scope",
+            "marketScope": "eth_5m_updown",
+            "outcomeConditions": [{
+                "outcomeLabel": "Down",
+                "triggerCondition": "level_above",
+                "triggerPriceCent": 49
+            }]
+        }),
+    };
+    let context = json!({
+        "flowContext": {
+            "marketSlug": "btc-updown-5m-global-stale",
+            "yesTokenId": "btc-yes-global-stale",
+            "noTokenId": "btc-no-global-stale"
+        },
+        "nodeState": {
+            "trigger_btc": {
+                "auto_scope_market_slug": "btc-updown-5m-1774052400",
+                "auto_scope_yes_token_id": "btc-yes-node",
+                "auto_scope_no_token_id": "btc-no-node"
+            },
+            "trigger_eth": {
+                "auto_scope_market_slug": "eth-updown-5m-1774052400",
+                "auto_scope_yes_token_id": "eth-yes-node",
+                "auto_scope_no_token_id": "eth-no-node"
+            }
+        }
+    });
+
+    let btc_specs = open_position_ws_price_node_specs(&btc_node, &context);
+    let eth_specs = open_position_ws_price_node_specs(&eth_node, &context);
+
+    assert_eq!(btc_specs.len(), 1);
+    assert_eq!(btc_specs[0].token_id, "btc-yes-node");
+    assert_eq!(
+        btc_specs[0].market_slug.as_deref(),
+        Some("btc-updown-5m-1774052400")
+    );
+
+    assert_eq!(eth_specs.len(), 1);
+    assert_eq!(eth_specs[0].token_id, "eth-no-node");
+    assert_eq!(
+        eth_specs[0].market_slug.as_deref(),
+        Some("eth-updown-5m-1774052400")
+    );
+}
+
+#[test]
 fn market_price_specs_parse_price_mode_and_default_to_composite() {
     let context = json!({
         "flowContext": {
@@ -402,6 +472,96 @@ fn market_price_specs_parse_price_mode_and_default_to_composite() {
     assert_eq!(raw_specs[0].price_mode, WsPriceMode::Raw);
     assert_eq!(site_display_specs[0].price_mode, WsPriceMode::SiteDisplay);
     assert_eq!(last_trade_specs[0].price_mode, WsPriceMode::LastTrade);
+}
+
+#[test]
+fn auto_scope_market_price_specs_allow_ptb_only_rows() {
+    let node = TradeFlowNode {
+        key: "trigger_market".to_string(),
+        node_type: "trigger.market_price".to_string(),
+        config: json!({
+            "marketMode": "auto_scope",
+            "priceToBeatTriggerEnabled": true,
+            "priceToBeatTriggerMinGap": 30,
+            "priceToBeatTriggerUnit": "cent",
+            "outcomeConditions": [{
+                "outcomeLabel": "Up"
+            }]
+        }),
+    };
+    let context = json!({
+        "flowContext": {
+            "marketSlug": "btc-updown-5m-1772296200",
+            "yesTokenId": "yes-token",
+            "noTokenId": "no-token"
+        }
+    });
+
+    let specs = open_position_ws_price_node_specs(&node, &context);
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].trigger_condition, "");
+    assert_eq!(specs[0].trigger_price, 0.0);
+    assert!(specs[0].price_to_beat_trigger_enabled);
+    assert_eq!(specs[0].price_to_beat_trigger_min_gap, Some(30.0));
+    assert_eq!(
+        specs[0].price_to_beat_trigger_unit,
+        crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Cent
+    );
+}
+
+#[test]
+fn fixed_market_price_specs_do_not_allow_ptb_only_rows() {
+    let node = TradeFlowNode {
+        key: "trigger_market".to_string(),
+        node_type: "trigger.market_price".to_string(),
+        config: json!({
+            "marketMode": "fixed",
+            "marketSlug": "btc-updown-5m-1772296200",
+            "priceToBeatTriggerEnabled": true,
+            "priceToBeatTriggerMinGap": 30,
+            "outcomeConditions": [{
+                "tokenId": "tok-yes",
+                "outcomeLabel": "Up"
+            }]
+        }),
+    };
+
+    let specs = open_position_ws_price_node_specs(&node, &json!({}));
+    assert!(specs.is_empty());
+}
+
+#[test]
+fn market_price_specs_keep_standard_trigger_and_ptb_gate_together() {
+    let node = TradeFlowNode {
+        key: "trigger_market".to_string(),
+        node_type: "trigger.market_price".to_string(),
+        config: json!({
+            "marketMode": "auto_scope",
+            "priceToBeatTriggerEnabled": true,
+            "priceToBeatTriggerMinGap": 30,
+            "priceToBeatTriggerMaxGap": 60,
+            "priceToBeatTriggerUnit": "usd",
+            "outcomeConditions": [{
+                "outcomeLabel": "Yes",
+                "triggerCondition": "cross_above",
+                "triggerPriceCent": 60
+            }]
+        }),
+    };
+    let context = json!({
+        "flowContext": {
+            "marketSlug": "btc-updown-5m-1772296200",
+            "yesTokenId": "yes-token",
+            "noTokenId": "no-token"
+        }
+    });
+
+    let specs = open_position_ws_price_node_specs(&node, &context);
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].trigger_condition, "cross_above");
+    assert_eq!(specs[0].trigger_price, 0.60);
+    assert_eq!(specs[0].price_to_beat_trigger_min_gap, Some(30.0));
+    assert_eq!(specs[0].price_to_beat_trigger_max_gap, Some(60.0));
 }
 
 #[test]
@@ -514,11 +674,19 @@ fn cycle_window_first_boundary_requires_real_cross() {
         trigger_condition: "cross_above".to_string(),
         trigger_price: 0.50,
         max_price: Some(0.92),
+        price_to_beat_trigger_enabled: false,
+        price_to_beat_trigger_min_gap: None,
+        price_to_beat_trigger_max_gap: None,
+        price_to_beat_trigger_unit:
+            crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd,
         protection_mode: "off".to_string(),
         protection_asset: None,
         confirmation_ms: None,
         cycle_window_mode: Some("first".to_string()),
         cycle_window_secs: Some(60),
+        cycle_window_start_sec: None,
+        cycle_window_end_sec: None,
+        auto_sell_on_window_end: false,
     };
 
     let allow_first_tick_at_boundary = node_spec.cycle_window_mode.as_deref() == Some("last");
@@ -551,11 +719,19 @@ fn auto_scope_market_boundary_delay_returns_remaining_time_before_market_end() {
         trigger_condition: "cross_above".to_string(),
         trigger_price: 0.77,
         max_price: Some(0.90),
+        price_to_beat_trigger_enabled: false,
+        price_to_beat_trigger_min_gap: None,
+        price_to_beat_trigger_max_gap: None,
+        price_to_beat_trigger_unit:
+            crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd,
         protection_mode: "off".to_string(),
         protection_asset: None,
         confirmation_ms: None,
         cycle_window_mode: None,
         cycle_window_secs: None,
+        cycle_window_start_sec: None,
+        cycle_window_end_sec: None,
+        auto_sell_on_window_end: false,
     };
     let now = DateTime::parse_from_rfc3339("2026-03-09T18:09:59Z")
         .unwrap()
@@ -582,11 +758,19 @@ fn auto_scope_market_boundary_delay_returns_zero_after_market_end() {
         trigger_condition: "cross_above".to_string(),
         trigger_price: 0.77,
         max_price: Some(0.90),
+        price_to_beat_trigger_enabled: false,
+        price_to_beat_trigger_min_gap: None,
+        price_to_beat_trigger_max_gap: None,
+        price_to_beat_trigger_unit:
+            crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd,
         protection_mode: "off".to_string(),
         protection_asset: None,
         confirmation_ms: None,
         cycle_window_mode: None,
         cycle_window_secs: None,
+        cycle_window_start_sec: None,
+        cycle_window_end_sec: None,
+        auto_sell_on_window_end: false,
     };
     let now = DateTime::parse_from_rfc3339("2026-03-09T18:10:00Z")
         .unwrap()
@@ -635,11 +819,19 @@ fn cycle_window_boundary_due_target_only_fires_once_per_market_window() {
         trigger_condition: "cross_above".to_string(),
         trigger_price: 0.77,
         max_price: Some(0.90),
+        price_to_beat_trigger_enabled: false,
+        price_to_beat_trigger_min_gap: None,
+        price_to_beat_trigger_max_gap: None,
+        price_to_beat_trigger_unit:
+            crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd,
         protection_mode: "off".to_string(),
         protection_asset: None,
         confirmation_ms: None,
         cycle_window_mode: Some("last".to_string()),
         cycle_window_secs: Some(120),
+        cycle_window_start_sec: None,
+        cycle_window_end_sec: None,
+        auto_sell_on_window_end: false,
     };
     let now = DateTime::parse_from_rfc3339("2026-03-09T18:08:01Z")
         .unwrap()
@@ -690,11 +882,19 @@ fn cycle_window_last_eval_state_payload_captures_boundary_diagnostics() {
         trigger_condition: "cross_above".to_string(),
         trigger_price: 0.77,
         max_price: Some(0.90),
+        price_to_beat_trigger_enabled: false,
+        price_to_beat_trigger_min_gap: None,
+        price_to_beat_trigger_max_gap: None,
+        price_to_beat_trigger_unit:
+            crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd,
         protection_mode: "off".to_string(),
         protection_asset: None,
         confirmation_ms: None,
         cycle_window_mode: Some("last".to_string()),
         cycle_window_secs: Some(120),
+        cycle_window_start_sec: None,
+        cycle_window_end_sec: None,
+        auto_sell_on_window_end: false,
     };
     let now = DateTime::parse_from_rfc3339("2026-03-09T18:08:01Z")
         .unwrap()
@@ -844,11 +1044,19 @@ fn auto_scope_market_rollover_updates_last_ws_slug_and_clears_transient_state() 
         trigger_condition: "cross_above".to_string(),
         trigger_price: 0.77,
         max_price: Some(0.90),
+        price_to_beat_trigger_enabled: false,
+        price_to_beat_trigger_min_gap: None,
+        price_to_beat_trigger_max_gap: None,
+        price_to_beat_trigger_unit:
+            crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd,
         protection_mode: "off".to_string(),
         protection_asset: None,
         confirmation_ms: None,
         cycle_window_mode: Some("last".to_string()),
         cycle_window_secs: Some(120),
+        cycle_window_start_sec: None,
+        cycle_window_end_sec: None,
+        auto_sell_on_window_end: false,
     }];
 
     let detected_at = DateTime::parse_from_rfc3339("2026-03-09T18:10:01Z")
@@ -936,11 +1144,19 @@ fn auto_scope_market_rollover_ignores_non_market_price_nodes() {
         trigger_condition: "cross_above".to_string(),
         trigger_price: 0.77,
         max_price: None,
+        price_to_beat_trigger_enabled: false,
+        price_to_beat_trigger_min_gap: None,
+        price_to_beat_trigger_max_gap: None,
+        price_to_beat_trigger_unit:
+            crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd,
         protection_mode: "off".to_string(),
         protection_asset: None,
         confirmation_ms: None,
         cycle_window_mode: None,
         cycle_window_secs: None,
+        cycle_window_start_sec: None,
+        cycle_window_end_sec: None,
+        auto_sell_on_window_end: false,
     }];
 
     let rotations = sync_trade_flow_auto_scope_market_rollover_state(

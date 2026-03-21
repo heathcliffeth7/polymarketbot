@@ -86,11 +86,13 @@ pub struct TradeBuilderOrder {
     pub reentry_max_attempts: i32,
     pub reentry_trigger_node_key: Option<String>,
     pub notify_on_fill: bool,
+    pub notify_on_order_not_filled: bool,
     pub notify_on_trigger_guard_blocked: bool,
     pub notify_on_execution_floor_blocked: bool,
     pub notify_on_tp_hit: bool,
     pub notify_on_sl_hit: bool,
     pub notify_on_max_price_blocked: bool,
+    pub last_guard_notification_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]

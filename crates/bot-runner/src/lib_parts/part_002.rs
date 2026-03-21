@@ -306,6 +306,18 @@ fn market_price_confirmation_ms(node_spec: &WsOpenPositionPriceNodeSpec) -> Opti
     node_spec.confirmation_ms.filter(|value| *value > 0)
 }
 
+fn should_enqueue_market_price_without_confirmation(
+    gate_mode: TriggerMarketPriceGateMode,
+    crossed: bool,
+    confirmation_ms: Option<i64>,
+) -> bool {
+    matches!(
+        gate_mode,
+        TriggerMarketPriceGateMode::StandardOnly | TriggerMarketPriceGateMode::StandardAndPtb
+    ) && crossed
+        && confirmation_ms.is_none()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum WsPriceMode {
     Composite,

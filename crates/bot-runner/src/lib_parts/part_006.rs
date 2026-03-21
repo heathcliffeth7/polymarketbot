@@ -114,6 +114,57 @@ fn scope_candidate_window_markets(
         .collect()
 }
 
+fn populate_token_id_cache(markets: &[GammaMarket]) {
+    let mut cache = AUTO_SCOPE_TOKEN_ID_CACHE.lock().unwrap();
+    for market in markets {
+        cache.insert(
+            market.slug.clone(),
+            CachedMarketTokens {
+                yes_token_id: market.yes_token_id.clone(),
+                no_token_id: market.no_token_id.clone(),
+                maker_base_fee: market.maker_base_fee,
+                neg_risk: market.neg_risk,
+            },
+        );
+    }
+    let cutoff_ts = Utc::now().timestamp() - 86_400;
+    cache.retain(|slug, _| {
+        MarketCycleId(slug.clone())
+            .start_time()
+            .map(|t| t.timestamp() >= cutoff_ts)
+            .unwrap_or(false)
+    });
+}
+
+fn build_synthetic_markets_from_cache(
+    scope_def: UpdownScopeDef,
+    now: DateTime<Utc>,
+) -> Vec<GammaMarket> {
+    let candidates = updown_scope_candidate_slugs(scope_def, now);
+    let cache = AUTO_SCOPE_TOKEN_ID_CACHE.lock().unwrap();
+    candidates
+        .into_iter()
+        .filter_map(|slug| {
+            let cached = cache.get(&slug)?;
+            if cached.yes_token_id.is_none() || cached.no_token_id.is_none() {
+                return None;
+            }
+            Some(GammaMarket {
+                slug,
+                end_date_iso: None,
+                active: true,
+                closed: false,
+                yes_token_id: cached.yes_token_id.clone(),
+                no_token_id: cached.no_token_id.clone(),
+                maker_base_fee: cached.maker_base_fee,
+                neg_risk: cached.neg_risk,
+                order_price_min_tick_size: None,
+                order_min_size: None,
+            })
+        })
+        .collect()
+}
+
 pub(crate) async fn list_markets_for_scope(
     gamma: &GammaHttpClient,
     scope: &str,
@@ -124,12 +175,31 @@ pub(crate) async fn list_markets_for_scope(
             supported_updown_scope_names_csv()
         )
     })?;
-    let mut markets: Vec<GammaMarket> = gamma
-        .list_active_updown_markets()
-        .await?
-        .into_iter()
-        .filter(|market| market.slug.starts_with(scope_def.slug_prefix))
-        .collect();
+    let mut markets: Vec<GammaMarket> = match gamma.list_active_updown_markets().await {
+        Ok(all) => {
+            let filtered: Vec<GammaMarket> = all
+                .into_iter()
+                .filter(|market| market.slug.starts_with(scope_def.slug_prefix))
+                .collect();
+            populate_token_id_cache(&filtered);
+            filtered
+        }
+        Err(gamma_err) => {
+            let synthetic = build_synthetic_markets_from_cache(scope_def, Utc::now());
+            if synthetic.is_empty() {
+                return Err(gamma_err.context(
+                    "Gamma API failed and no cached token IDs available for fallback",
+                ));
+            }
+            tracing::warn!(
+                scope,
+                synthetic_count = synthetic.len(),
+                error = %gamma_err,
+                "AUTO_SCOPE_GAMMA_FALLBACK_SYNTHETIC_MARKETS"
+            );
+            synthetic
+        }
+    };
 
     if !markets.is_empty() {
         // Prefer markets around the current time window so DCA targets the
@@ -163,6 +233,8 @@ pub(crate) async fn list_markets_for_scope(
         }
         markets.push(market);
     }
+
+    populate_token_id_cache(&markets);
 
     let now_for_retry = Utc::now();
     let in_window_retry = scope_candidate_window_markets(scope_def, &markets, now_for_retry);

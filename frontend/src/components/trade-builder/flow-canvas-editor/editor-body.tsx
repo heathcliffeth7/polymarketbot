@@ -213,7 +213,8 @@ export function FlowCanvasEditorBody({
       nextNodes: FlowNode[],
       nextEdges: FlowEdge[],
       skipHistory = false,
-      allowGraphShrink = false
+      allowGraphShrink = false,
+      persistImmediately = false
     ) => {
       const currentNodes = canvasNodesRef.current;
       const currentEdges = canvasEdgesRef.current;
@@ -230,7 +231,13 @@ export function FlowCanvasEditorBody({
       setCanvasGraphState(nextNodes, nextEdges);
       const domainNodes = nextNodes.map(toDomainNode), domainEdges = nextEdges.map(toDomainEdge);
       lastAppliedGraphFingerprintRef.current = createGraphFingerprint(domainNodes, domainEdges);
-      const changeOptions: FlowCanvasGraphChangeOptions | undefined = allowGraphShrink ? { allowGraphShrink: true } : undefined;
+      const changeOptions: FlowCanvasGraphChangeOptions | undefined =
+        allowGraphShrink || persistImmediately
+          ? {
+              ...(allowGraphShrink ? { allowGraphShrink: true } : {}),
+              ...(persistImmediately ? { persistImmediately: true } : {}),
+            }
+          : undefined;
       onGraphChange(
         { context: graphContextRef.current, nodes: domainNodes, edges: domainEdges },
         changeOptions
@@ -423,7 +430,7 @@ export function FlowCanvasEditorBody({
       id: nodeId, type: 'flowNode', position: getInsertPosition(),
       data: { nodeType, config: {} },
     };
-    commitGraph([...canvasNodes, nextNode], canvasEdges);
+    commitGraph([...canvasNodes, nextNode], canvasEdges, false, false, true);
     hydrateNodeDraft(nextNode, true);
     queueNodeFocus(nextNode.id);
     onError(null);
@@ -448,7 +455,7 @@ export function FlowCanvasEditorBody({
       id: nodeId, type: 'flowNode', position: getInsertPosition(),
       data: { nodeType: 'action.place_order', config: buildPlaceOrderPresetConfig(kind, seed) },
     };
-    commitGraph([...canvasNodes, nextNode], canvasEdges);
+    commitGraph([...canvasNodes, nextNode], canvasEdges, false, false, true);
     hydrateNodeDraft(nextNode, true);
     queueNodeFocus(nextNode.id);
     if (!hasRequiredPlaceOrderSeed(seed)) {
@@ -512,7 +519,7 @@ export function FlowCanvasEditorBody({
           ...n, data: { ...n.data, config: { ...n.data.config, sourceTradeId: nid,
             marketSlug: position.marketSlug, tokenId: position.tokenId, outcomeLabel: position.outcomeLabel } },
         });
-        commitGraph(nextNodes, canvasEdges);
+        commitGraph(nextNodes, canvasEdges, false, false, true);
         setHasPendingNodeDraft(false);
       }
       onApplyContextPatch({ sourceTradeId: nid, marketSlug: position.marketSlug,
@@ -747,7 +754,7 @@ export function FlowCanvasEditorBody({
     if (mode === 'create') {
       if (canvasNodes.some((n) => n.id === nextKey)) { onError(`Ayni key ile baska node var: ${nextKey}`); return; }
       const nextNode: FlowNode = { id: nextKey, type: 'flowNode', position: getInsertPosition(), data: { nodeType: nextType, config: parsedConfig } };
-      commitGraph([...canvasNodes, nextNode], canvasEdges);
+      commitGraph([...canvasNodes, nextNode], canvasEdges, false, false, true);
       hydrateNodeDraft(nextNode, true);
       queueNodeFocus(nextNode.id);
       setHasPendingNodeDraft(false);
@@ -758,7 +765,7 @@ export function FlowCanvasEditorBody({
       const nextNodes = canvasNodes.map((n) => n.id !== selectedNode.id ? n : { ...n, id: nextKey, data: { ...n.data, nodeType: nextType, config: parsedConfig } });
       const nextEdges = canvasEdges.map((e) => ({ ...e, source: e.source === selectedNode.id ? nextKey : e.source, target: e.target === selectedNode.id ? nextKey : e.target }));
       const updatedNode = nextNodes.find((node) => node.id === nextKey);
-      commitGraph(nextNodes, nextEdges, false, true);
+      commitGraph(nextNodes, nextEdges, false, true, true);
       if (updatedNode) hydrateNodeDraft(updatedNode, true);
       setHasPendingNodeDraft(false);
       toast.success('Node guncellendi');

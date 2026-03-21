@@ -1,4 +1,4 @@
-const PRICE_TO_BEAT_GUARD_RETRY_DELAY_MS: i64 = 500;
+const PRICE_TO_BEAT_GUARD_RETRY_DELAY_MS: i64 = 150;
 
 fn trade_builder_is_guard_blocked_for_reason(order: &TradeBuilderOrder, reason: &str) -> bool {
     order.status == TRADE_BUILDER_GUARD_BLOCKED_STATUS
@@ -13,6 +13,7 @@ async fn transition_trade_builder_order_to_guard_waiting(
     payload: &Value,
     remaining_size: Option<f64>,
     remaining_qty: Option<f64>,
+    candidate_reason: Option<&str>,
     notification_type: Option<&str>,
     notification_message: Option<String>,
 ) -> Result<()> {
@@ -26,8 +27,18 @@ async fn transition_trade_builder_order_to_guard_waiting(
     repo.append_trade_builder_order_event(order.id, event_type, payload)
         .await?;
 
-    if let (Some(notification_type), Some(message)) = (notification_type, notification_message) {
-        send_trade_builder_notification(repo, order, notification_type, &message).await;
+    if let (Some(candidate_reason), Some(notification_type), Some(message)) =
+        (candidate_reason, notification_type, notification_message)
+    {
+        maybe_send_guard_transition_notification(
+            repo,
+            order,
+            candidate_reason,
+            true,
+            notification_type,
+            &message,
+        )
+        .await?;
     }
 
     Ok(())
@@ -62,7 +73,8 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
     .unwrap_or(current_price);
     match client.cancel(exchange_order_id).await {
         Ok(()) => {
-            repo.mark_order_status(exchange_order_id, "canceled").await?;
+            repo.mark_order_status(exchange_order_id, "canceled")
+                .await?;
         }
         Err(err) => {
             let error_text = err.to_string();
@@ -166,9 +178,11 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
         )
         .await?;
     } else if order.retry_on_trigger_guard_block {
-        let notification_message = order.notify_on_trigger_guard_blocked.then(|| {
-            build_trigger_guard_waiting_notification_message(order, current_price)
-        });
+        let candidate_reason =
+            build_guard_notification_reason("trigger_price", "below_trigger_price_guard");
+        let notification_message = order
+            .notify_on_trigger_guard_blocked
+            .then(|| build_trigger_guard_waiting_notification_message(order, current_price));
         transition_trade_builder_order_to_guard_waiting(
             repo,
             order,
@@ -185,19 +199,34 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
             }),
             remaining_size,
             remaining_qty,
-            order.notify_on_trigger_guard_blocked.then_some("trigger_price_waiting"),
+            Some(candidate_reason.as_str()),
+            order
+                .notify_on_trigger_guard_blocked
+                .then_some("trigger_price_waiting"),
             notification_message,
         )
         .await?;
     } else {
         repo.clear_trade_builder_active_exchange_order(order.id, "canceled")
             .await?;
-        repo.set_trade_builder_order_status(order.id, "canceled", Some("below_trigger_price_guard"))
-            .await?;
-        if order.notify_on_trigger_guard_blocked {
-            let message = build_trigger_guard_blocked_notification_message(order, current_price);
-            send_trade_builder_notification(repo, order, "trigger_price_blocked", &message).await;
-        }
+        repo.set_trade_builder_order_status(
+            order.id,
+            "canceled",
+            Some("below_trigger_price_guard"),
+        )
+        .await?;
+        let candidate_reason =
+            build_guard_notification_reason("trigger_price", "below_trigger_price_guard");
+        let message = build_trigger_guard_blocked_notification_message(order, current_price);
+        maybe_send_guard_transition_notification(
+            repo,
+            order,
+            candidate_reason.as_str(),
+            order.notify_on_trigger_guard_blocked,
+            "trigger_price_blocked",
+            &message,
+        )
+        .await?;
     }
     Ok(true)
 }

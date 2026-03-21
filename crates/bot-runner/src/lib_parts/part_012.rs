@@ -489,7 +489,7 @@ async fn process_trade_flow_step(
             }
 
             if let Some(repeat_at) = execution.repeat_at {
-                let _ = repo
+                let enqueued = repo
                     .enqueue_trade_flow_step(
                         run.id,
                         &node.key,
@@ -501,6 +501,9 @@ async fn process_trade_flow_step(
                         execution.repeat_idempotency_key.as_deref(),
                     )
                     .await?;
+                if enqueued.is_some() {
+                    schedule_flow_process_notify_at(repeat_at);
+                }
             }
             info!(
                 run_id,
@@ -598,17 +601,16 @@ fn spawn_trade_flow_immediate_submit_if_needed(
     let cfg = cfg.clone();
     let ws = ws.clone();
     tokio::spawn(async move {
-        if let Err(err) =
-            try_immediate_submit_single_builder_order(
-                &repo,
-                run_id,
-                &cfg,
-                &ws,
-                client,
-                builder_order_id,
-                "immediate",
-            )
-                .await
+        if let Err(err) = try_immediate_submit_single_builder_order(
+            &repo,
+            run_id,
+            &cfg,
+            &ws,
+            client,
+            builder_order_id,
+            "immediate",
+        )
+        .await
         {
             warn!(
                 run_id,
@@ -849,11 +851,49 @@ async fn enqueue_trade_flow_edges(
                 None,
             )
             .await?;
-        if enqueued.is_some() && available_at <= Utc::now() {
-            FLOW_PROCESS_NOTIFY.notify_one();
-        }
+        schedule_enqueued_flow_process_notify(enqueued, available_at);
     }
     Ok(())
+}
+
+fn schedule_flow_process_notify_at(available_at: DateTime<Utc>) {
+    schedule_flow_process_notify_at_with_notify(&FLOW_PROCESS_NOTIFY, available_at);
+}
+
+fn schedule_enqueued_flow_process_notify(
+    enqueued_step_id: Option<i64>,
+    available_at: DateTime<Utc>,
+) {
+    schedule_enqueued_flow_process_notify_with_notify(
+        &FLOW_PROCESS_NOTIFY,
+        enqueued_step_id,
+        available_at,
+    );
+}
+
+fn schedule_flow_process_notify_at_with_notify(
+    notify: &'static Notify,
+    available_at: DateTime<Utc>,
+) {
+    let delay = (available_at - Utc::now()).to_std().unwrap_or_default();
+    if delay.is_zero() {
+        notify.notify_one();
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        notify.notify_one();
+    });
+}
+
+fn schedule_enqueued_flow_process_notify_with_notify(
+    notify: &'static Notify,
+    enqueued_step_id: Option<i64>,
+    available_at: DateTime<Utc>,
+) {
+    if enqueued_step_id.is_some() {
+        schedule_flow_process_notify_at_with_notify(notify, available_at);
+    }
 }
 
 #[cfg(test)]
@@ -897,5 +937,54 @@ mod part_012_tests {
         let step = test_repeat_step(None);
 
         assert_eq!(trade_flow_repeat_step_input(&step), None);
+    }
+
+    #[tokio::test]
+    async fn schedule_flow_process_notify_at_notifies_immediately_for_due_steps() {
+        let notify = Box::leak(Box::new(Notify::new()));
+
+        schedule_flow_process_notify_at_with_notify(notify, Utc::now());
+
+        tokio::time::timeout(Duration::from_millis(20), notify.notified())
+            .await
+            .expect("immediate wake");
+    }
+
+    #[tokio::test]
+    async fn schedule_flow_process_notify_at_waits_for_future_steps() {
+        let notify = Box::leak(Box::new(Notify::new()));
+
+        schedule_flow_process_notify_at_with_notify(
+            notify,
+            Utc::now() + ChronoDuration::milliseconds(50),
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), notify.notified())
+                .await
+                .is_err(),
+            "wake should not happen before the scheduled time",
+        );
+        tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .expect("delayed wake");
+    }
+
+    #[tokio::test]
+    async fn schedule_enqueued_flow_process_notify_skips_duplicate_noop_enqueue() {
+        let notify = Box::leak(Box::new(Notify::new()));
+
+        schedule_enqueued_flow_process_notify_with_notify(
+            notify,
+            None,
+            Utc::now() + ChronoDuration::milliseconds(20),
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), notify.notified())
+                .await
+                .is_err(),
+            "no wake should be scheduled when enqueue was ignored",
+        );
     }
 }

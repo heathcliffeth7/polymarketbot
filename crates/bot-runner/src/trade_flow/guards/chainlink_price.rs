@@ -1,12 +1,12 @@
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde::Deserialize;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         LazyLock,
     },
     time::Duration,
@@ -21,37 +21,53 @@ const RECONNECT_DELAY_SECS: u64 = 2;
 const MAX_PRICE_AGE_SECS: i64 = 30;
 const MAX_TICK_HISTORY_AGE_SECS: i64 = 4 * 60 * 60;
 const MAX_TICK_HISTORY_SAMPLES_PER_SYMBOL: usize = 20_000;
-const MAX_CYCLE_OPEN_LATENCY_MS: i64 = 1_000;
-const INITIAL_FETCH_RETRIES: usize = 10;
-const INITIAL_FETCH_DELAY_MS: u64 = 500;
-const CYCLE_OPEN_FETCH_RETRIES: usize = 8;
-const CYCLE_OPEN_FETCH_DELAY_MS: u64 = 250;
-const NO_CYCLE_OPEN_SNAPSHOT_ERROR_PREFIX: &str = "no cycle-open snapshot for ";
+const MAX_NEAR_TIMESTAMP_PAST_TOLERANCE_MS: i64 = 60_000;
+const MAX_NEAR_TIMESTAMP_FUTURE_TOLERANCE_MS: i64 = 2_000;
+const STALE_PROVIDER_WARN_INTERVAL_MS: i64 = MAX_PRICE_AGE_SECS * 1_000;
 
 #[derive(Debug, Clone)]
 struct CachedPrice {
     value: f64,
     timestamp_ms: i64,
+    received_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ChainlinkCycleOpenSnapshot {
+pub(crate) struct ChainlinkPriceTimestampSnapshot {
     pub(crate) price: f64,
     pub(crate) timestamp_ms: i64,
-    pub(crate) latency_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChainlinkStalePriceDetails {
+    pub(crate) provider_age_ms: i64,
+    pub(crate) receive_age_ms: i64,
+    pub(crate) provider_timestamp_ms: i64,
+    pub(crate) received_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChainlinkNearTimestampRejectionDetails {
+    pub(crate) gap_ms: i64,
+    pub(crate) provider_age_ms: i64,
+    pub(crate) candidate_timestamp_ms: i64,
+    pub(crate) candidate_received_at_ms: i64,
 }
 
 #[derive(Debug, Default)]
 struct SymbolPriceState {
     latest: Option<CachedPrice>,
     ticks: VecDeque<CachedPrice>,
-    cycle_open_by_ts: HashMap<i64, ChainlinkCycleOpenSnapshot>,
+    last_received_at_ms: Option<i64>,
+    last_stale_reason: Option<String>,
+    last_stale_warning_at_ms: Option<i64>,
 }
 
 struct ChainlinkPriceService {
     state: RwLock<HashMap<String, SymbolPriceState>>,
     last_error: RwLock<Option<String>>,
     started: AtomicBool,
+    session_seq: AtomicU64,
 }
 
 static SERVICE: LazyLock<ChainlinkPriceService> = LazyLock::new(ChainlinkPriceService::new);
@@ -75,6 +91,7 @@ impl ChainlinkPriceService {
             state: RwLock::new(HashMap::new()),
             last_error: RwLock::new(None),
             started: AtomicBool::new(false),
+            session_seq: AtomicU64::new(0),
         }
     }
 
@@ -84,53 +101,114 @@ impl ChainlinkPriceService {
         }
     }
 
+    fn next_session_id(&self) -> u64 {
+        self.session_seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     fn get_price(&self, asset: &str) -> Result<f64> {
         let symbol = asset_to_symbol(asset).ok_or_else(|| anyhow!("unsupported asset: {asset}"))?;
-        let state = self.state.read();
-        let cached = state
-            .get(symbol)
-            .and_then(|entry| entry.latest.as_ref())
-            .ok_or_else(|| self.no_cached_price_error(symbol))?;
-        let age_secs = (Utc::now().timestamp_millis() - cached.timestamp_ms) / 1_000;
+        let (cached, last_received_at_ms) = {
+            let state = self.state.read();
+            let entry = state
+                .get(symbol)
+                .ok_or_else(|| self.no_cached_price_error(symbol))?;
+            let cached = entry
+                .latest
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| self.no_cached_price_error(symbol))?;
+            (cached, entry.last_received_at_ms)
+        };
+        let age_secs = diff_ms(Utc::now().timestamp_millis(), cached.timestamp_ms) / 1_000;
         if age_secs > MAX_PRICE_AGE_SECS {
-            return Err(anyhow!("stale price for {symbol}: {age_secs}s old"));
+            let error = self.build_stale_price_error(symbol, &cached, last_received_at_ms);
+            self.record_stale_reason(symbol, error.to_string());
+            return Err(error);
         }
         Ok(cached.value)
     }
 
-    fn get_cycle_open_snapshot(
+    fn get_price_near_timestamp(
         &self,
         asset: &str,
-        cycle_start: DateTime<Utc>,
-    ) -> Result<ChainlinkCycleOpenSnapshot> {
+        target_ms: i64,
+    ) -> Result<ChainlinkPriceTimestampSnapshot> {
         let symbol = asset_to_symbol(asset).ok_or_else(|| anyhow!("unsupported asset: {asset}"))?;
-        let cycle_start_ms = cycle_start.timestamp_millis();
+        let state = self.state.read();
+        let entry = state
+            .get(symbol)
+            .ok_or_else(|| self.no_cached_price_error(symbol))?;
 
-        {
-            let state = self.state.read();
-            if let Some(snapshot) = state
-                .get(symbol)
-                .and_then(|entry| entry.cycle_open_by_ts.get(&cycle_start_ms))
-                .cloned()
+        let mut best_before: Option<&CachedPrice> = None;
+        let mut best_future: Option<&CachedPrice> = None;
+        for sample in entry.ticks.iter() {
+            if sample.timestamp_ms <= target_ms {
+                if best_before
+                    .map(|current| sample.timestamp_ms > current.timestamp_ms)
+                    .unwrap_or(true)
+                {
+                    best_before = Some(sample);
+                }
+                continue;
+            }
+
+            if best_future
+                .map(|current| sample.timestamp_ms < current.timestamp_ms)
+                .unwrap_or(true)
             {
-                return Ok(snapshot);
+                best_future = Some(sample);
+            }
+        }
+        if let Some(latest) = entry.latest.as_ref() {
+            let latest_is_already_tracked = entry
+                .ticks
+                .back()
+                .map(|tick| tick.timestamp_ms == latest.timestamp_ms)
+                .unwrap_or(false);
+            if !latest_is_already_tracked {
+                if latest.timestamp_ms <= target_ms {
+                    if best_before
+                        .map(|current| latest.timestamp_ms > current.timestamp_ms)
+                        .unwrap_or(true)
+                    {
+                        best_before = Some(latest);
+                    }
+                } else if best_future
+                    .map(|current| latest.timestamp_ms < current.timestamp_ms)
+                    .unwrap_or(true)
+                {
+                    best_future = Some(latest);
+                }
             }
         }
 
-        let snapshot = {
-            let state = self.state.read();
-            let Some(entry) = state.get(symbol) else {
-                return Err(self.no_cycle_open_snapshot_error(symbol, cycle_start_ms, None));
-            };
-            resolve_cycle_open_snapshot_from_ticks(symbol, &entry.ticks, cycle_start_ms)?
-        };
+        if let Some(sample) = best_before {
+            let gap_ms = target_ms - sample.timestamp_ms;
+            if gap_ms > MAX_NEAR_TIMESTAMP_PAST_TOLERANCE_MS {
+                return Err(self.build_near_timestamp_past_too_old_error(symbol, sample, gap_ms));
+            }
+            return Ok(ChainlinkPriceTimestampSnapshot {
+                price: sample.value,
+                timestamp_ms: sample.timestamp_ms,
+            });
+        }
 
-        let mut state = self.state.write();
-        let entry = state.entry(symbol.to_string()).or_default();
-        entry
-            .cycle_open_by_ts
-            .insert(cycle_start_ms, snapshot.clone());
-        Ok(snapshot)
+        let Some(sample) = best_future else {
+            return Err(anyhow!(
+                "no cached price near timestamp for {symbol}: target_ms={target_ms}"
+            ));
+        };
+        let diff_ms = sample.timestamp_ms - target_ms;
+        if diff_ms > MAX_NEAR_TIMESTAMP_FUTURE_TOLERANCE_MS {
+            return Err(anyhow!(
+                "no cached price near timestamp for {symbol}: first future tick is {diff_ms}ms away"
+            ));
+        }
+
+        Ok(ChainlinkPriceTimestampSnapshot {
+            price: sample.value,
+            timestamp_ms: sample.timestamp_ms,
+        })
     }
 
     fn no_cached_price_error(&self, symbol: &str) -> anyhow::Error {
@@ -142,27 +220,67 @@ impl ChainlinkPriceService {
         }
     }
 
-    fn no_cycle_open_snapshot_error(
+    fn build_near_timestamp_past_too_old_error(
         &self,
         symbol: &str,
-        cycle_start_ms: i64,
-        detail: Option<String>,
+        cached: &CachedPrice,
+        gap_ms: i64,
     ) -> anyhow::Error {
-        let base = format!("{NO_CYCLE_OPEN_SNAPSHOT_ERROR_PREFIX}{symbol} at {cycle_start_ms}");
-        match detail {
-            Some(detail) => anyhow!("{base}; {detail}"),
+        let provider_age_ms = diff_ms(Utc::now().timestamp_millis(), cached.timestamp_ms);
+        anyhow!(
+            "no cached price near timestamp for {symbol}: closest past tick is {gap_ms}ms away (gap_ms={gap_ms}, provider_age_ms={provider_age_ms}, candidate_timestamp_ms={}, candidate_received_at_ms={})",
+            cached.timestamp_ms,
+            cached.received_at_ms,
+        )
+    }
+
+    fn build_stale_price_error(
+        &self,
+        symbol: &str,
+        cached: &CachedPrice,
+        last_received_at_ms: Option<i64>,
+    ) -> anyhow::Error {
+        let now_ms = Utc::now().timestamp_millis();
+        let provider_age_ms = diff_ms(now_ms, cached.timestamp_ms);
+        let received_at_ms = last_received_at_ms.unwrap_or(cached.received_at_ms);
+        let receive_age_ms = diff_ms(now_ms, received_at_ms);
+        let base = format!(
+            "stale price for {symbol}: {}s old (provider_age_ms={provider_age_ms}, receive_age_ms={receive_age_ms}, provider_timestamp_ms={}, received_at_ms={received_at_ms})",
+            provider_age_ms / 1_000,
+            cached.timestamp_ms,
+        );
+        match self.last_error.read().clone() {
+            Some(last_error) => anyhow!("{base}; last ws error: {last_error}"),
             None => anyhow!("{base}"),
         }
     }
 
-    fn update_price(&self, payload: PricePayload) {
+    fn record_stale_reason(&self, symbol: &str, reason: String) {
+        if let Some(entry) = self.state.write().get_mut(symbol) {
+            entry.last_stale_reason = Some(reason);
+        }
+    }
+
+    fn update_price(&self, payload: PricePayload, session_id: u64) {
+        let received_at_ms = Utc::now().timestamp_millis();
+        let provider_age_ms = diff_ms(received_at_ms, payload.timestamp);
+        let stale_on_arrival_reason = (provider_age_ms > (MAX_PRICE_AGE_SECS * 1_000)).then(|| {
+            format!(
+                "provider timestamp stale on arrival for {} (provider_age_ms={provider_age_ms}, receive_age_ms=0, provider_timestamp_ms={}, received_at_ms={received_at_ms})",
+                payload.symbol,
+                payload.timestamp,
+            )
+        });
         let tick = CachedPrice {
             value: payload.value,
             timestamp_ms: payload.timestamp,
+            received_at_ms,
         };
         let cutoff_ms = payload.timestamp - (MAX_TICK_HISTORY_AGE_SECS * 1_000);
+        let mut should_warn_stale_on_arrival = false;
         let mut state = self.state.write();
-        let entry = state.entry(payload.symbol).or_default();
+        let entry = state.entry(payload.symbol.clone()).or_default();
+        entry.last_received_at_ms = Some(received_at_ms);
         entry.latest = Some(tick.clone());
         if let Some(last_tick) = entry.ticks.back_mut() {
             if last_tick.timestamp_ms == tick.timestamp_ms {
@@ -184,15 +302,90 @@ impl ChainlinkPriceService {
         while entry.ticks.len() > MAX_TICK_HISTORY_SAMPLES_PER_SYMBOL {
             entry.ticks.pop_front();
         }
-        entry.cycle_open_by_ts.retain(|cycle_start_ms, snapshot| {
-            *cycle_start_ms >= cutoff_ms && snapshot.timestamp_ms >= cutoff_ms
-        });
+        if let Some(reason) = stale_on_arrival_reason.clone() {
+            entry.last_stale_reason = Some(reason);
+            should_warn_stale_on_arrival = entry
+                .last_stale_warning_at_ms
+                .map(|last_warn_at_ms| {
+                    diff_ms(received_at_ms, last_warn_at_ms) >= STALE_PROVIDER_WARN_INTERVAL_MS
+                })
+                .unwrap_or(true);
+            if should_warn_stale_on_arrival {
+                entry.last_stale_warning_at_ms = Some(received_at_ms);
+            }
+        } else {
+            entry.last_stale_reason = None;
+            entry.last_stale_warning_at_ms = None;
+        }
+        drop(state);
+        tracing::debug!(
+            session_id,
+            symbol = %payload.symbol,
+            value = payload.value,
+            provider_timestamp_ms = payload.timestamp,
+            received_at_ms,
+            provider_age_ms,
+            "CHAINLINK_LIVE_DATA_WS_TICK"
+        );
+        if should_warn_stale_on_arrival {
+            tracing::warn!(
+                session_id,
+                symbol = %payload.symbol,
+                value = payload.value,
+                provider_timestamp_ms = payload.timestamp,
+                received_at_ms,
+                provider_age_ms,
+                "CHAINLINK_LIVE_DATA_WS_STALE_PROVIDER_TIMESTAMP"
+            );
+        }
         *self.last_error.write() = None;
     }
 
     fn record_error(&self, error: &anyhow::Error) {
         *self.last_error.write() = Some(error.to_string());
     }
+}
+
+fn diff_ms(later_ms: i64, earlier_ms: i64) -> i64 {
+    (later_ms - earlier_ms).max(0)
+}
+
+fn parse_named_i64_field(text: &str, field: &str) -> Option<i64> {
+    let needle = format!("{field}=");
+    let start = text.find(&needle)? + needle.len();
+    let end = text[start..]
+        .find(|ch: char| !matches!(ch, '-' | '0'..='9'))
+        .map(|offset| start + offset)
+        .unwrap_or(text.len());
+    text[start..end].parse().ok()
+}
+
+pub(crate) fn parse_chainlink_stale_price_details(
+    error_text: &str,
+) -> Option<ChainlinkStalePriceDetails> {
+    if !error_text.starts_with("stale price for ") {
+        return None;
+    }
+    Some(ChainlinkStalePriceDetails {
+        provider_age_ms: parse_named_i64_field(error_text, "provider_age_ms")?,
+        receive_age_ms: parse_named_i64_field(error_text, "receive_age_ms")?,
+        provider_timestamp_ms: parse_named_i64_field(error_text, "provider_timestamp_ms")?,
+        received_at_ms: parse_named_i64_field(error_text, "received_at_ms")?,
+    })
+}
+
+pub(crate) fn parse_chainlink_near_timestamp_rejection_details(
+    error_text: &str,
+) -> Option<ChainlinkNearTimestampRejectionDetails> {
+    if !error_text.contains("closest past tick is") {
+        return None;
+    }
+    Some(ChainlinkNearTimestampRejectionDetails {
+        gap_ms: parse_named_i64_field(error_text, "gap_ms")?,
+        provider_age_ms: parse_named_i64_field(error_text, "provider_age_ms")?,
+        candidate_timestamp_ms: parse_named_i64_field(error_text, "candidate_timestamp_ms")?,
+        candidate_received_at_ms: parse_named_i64_field(error_text, "candidate_received_at_ms")?,
+    })
 }
 
 fn asset_to_symbol(asset: &str) -> Option<&'static str> {
@@ -205,49 +398,18 @@ fn asset_to_symbol(asset: &str) -> Option<&'static str> {
     }
 }
 
-fn resolve_cycle_open_snapshot_from_ticks(
-    symbol: &str,
-    ticks: &VecDeque<CachedPrice>,
-    cycle_start_ms: i64,
-) -> Result<ChainlinkCycleOpenSnapshot> {
-    let Some(tick) = ticks
-        .iter()
-        .find(|sample| sample.timestamp_ms >= cycle_start_ms)
-    else {
-        let latest_tick_detail = ticks
-            .back()
-            .map(|sample| format!("latest cached tick ts={}", sample.timestamp_ms))
-            .unwrap_or_else(|| "no cached ticks".to_string());
-        return Err(anyhow!(
-            "{NO_CYCLE_OPEN_SNAPSHOT_ERROR_PREFIX}{symbol} at {cycle_start_ms}; {latest_tick_detail}"
-        ));
-    };
-    let latency_ms = tick.timestamp_ms - cycle_start_ms;
-    if latency_ms > MAX_CYCLE_OPEN_LATENCY_MS {
-        return Err(anyhow!(
-            "{NO_CYCLE_OPEN_SNAPSHOT_ERROR_PREFIX}{symbol} at {cycle_start_ms}; first tick latency {}ms exceeds {}ms",
-            latency_ms,
-            MAX_CYCLE_OPEN_LATENCY_MS
-        ));
-    }
-    Ok(ChainlinkCycleOpenSnapshot {
-        price: tick.value,
-        timestamp_ms: tick.timestamp_ms,
-        latency_ms,
-    })
-}
-
 async fn ws_stream_loop() {
     loop {
-        if let Err(err) = ws_stream_once().await {
+        let session_id = SERVICE.next_session_id();
+        if let Err(err) = ws_stream_once(session_id).await {
             SERVICE.record_error(&err);
-            tracing::warn!(error = %err, "CHAINLINK_LIVE_DATA_WS_ERROR");
+            tracing::warn!(session_id, error = %err, "CHAINLINK_LIVE_DATA_WS_ERROR");
         }
         tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
     }
 }
 
-async fn ws_stream_once() -> Result<()> {
+async fn ws_stream_once(session_id: u64) -> Result<()> {
     let url = std::env::var(WS_URL_ENV).unwrap_or_else(|_| WS_URL_DEFAULT.to_string());
     let (ws, _) = tokio_tungstenite::connect_async(&url)
         .await
@@ -265,7 +427,7 @@ async fn ws_stream_once() -> Result<()> {
     sink.send(Message::Text(subscription.to_string().into()))
         .await
         .context("sending live data websocket subscription")?;
-    tracing::info!("CHAINLINK_LIVE_DATA_WS_CONNECTED");
+    tracing::info!(session_id, url, "CHAINLINK_LIVE_DATA_WS_CONNECTED");
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL_SECS));
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -282,13 +444,13 @@ async fn ws_stream_once() -> Result<()> {
                 let Some(message) = message else {
                     return Err(anyhow!("live data websocket stream ended"));
                 };
-                handle_ws_message(message?)?;
+                handle_ws_message(message?, session_id)?;
             }
         }
     }
 }
 
-fn handle_ws_message(message: Message) -> Result<()> {
+fn handle_ws_message(message: Message, session_id: u64) -> Result<()> {
     match message {
         Message::Text(text) => {
             if text == "PONG" {
@@ -307,7 +469,7 @@ fn handle_ws_message(message: Message) -> Result<()> {
             if !payload.value.is_finite() || payload.value <= 0.0 {
                 return Ok(());
             }
-            SERVICE.update_price(payload);
+            SERVICE.update_price(payload, session_id);
             Ok(())
         }
         Message::Ping(_) | Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => Ok(()),
@@ -325,47 +487,17 @@ fn handle_ws_message(message: Message) -> Result<()> {
     }
 }
 
-pub(crate) async fn fetch_chainlink_price(asset: &str) -> Result<f64> {
+pub(crate) fn get_chainlink_price_cached(asset: &str) -> Result<f64> {
     SERVICE.ensure_started();
-
-    for attempt in 0..=INITIAL_FETCH_RETRIES {
-        match SERVICE.get_price(asset) {
-            Ok(price) => return Ok(price),
-            Err(err)
-                if err.to_string().starts_with("no cached price for ")
-                    && attempt < INITIAL_FETCH_RETRIES =>
-            {
-                tokio::time::sleep(Duration::from_millis(INITIAL_FETCH_DELAY_MS)).await;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-
     SERVICE.get_price(asset)
 }
 
-pub(crate) async fn fetch_chainlink_cycle_open(
+pub(crate) fn get_chainlink_price_near_timestamp(
     asset: &str,
-    cycle_start: DateTime<Utc>,
-) -> Result<ChainlinkCycleOpenSnapshot> {
+    target_ms: i64,
+) -> Result<ChainlinkPriceTimestampSnapshot> {
     SERVICE.ensure_started();
-
-    for attempt in 0..=CYCLE_OPEN_FETCH_RETRIES {
-        match SERVICE.get_cycle_open_snapshot(asset, cycle_start) {
-            Ok(snapshot) => return Ok(snapshot),
-            Err(err)
-                if err
-                    .to_string()
-                    .starts_with(NO_CYCLE_OPEN_SNAPSHOT_ERROR_PREFIX)
-                    && attempt < CYCLE_OPEN_FETCH_RETRIES =>
-            {
-                tokio::time::sleep(Duration::from_millis(CYCLE_OPEN_FETCH_DELAY_MS)).await;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-
-    SERVICE.get_cycle_open_snapshot(asset, cycle_start)
+    SERVICE.get_price_near_timestamp(asset, target_ms)
 }
 
 #[cfg(test)]
@@ -391,20 +523,23 @@ mod tests {
     #[test]
     fn get_price_errors_when_price_is_stale() {
         let service = ChainlinkPriceService::new();
+        let now_ms = Utc::now().timestamp_millis();
         service.state.write().insert(
             "btc/usd".to_string(),
             SymbolPriceState {
                 latest: Some(CachedPrice {
                     value: 70_505.34,
-                    timestamp_ms: Utc::now().timestamp_millis()
-                        - ((MAX_PRICE_AGE_SECS + 1) * 1_000),
+                    timestamp_ms: now_ms - ((MAX_PRICE_AGE_SECS + 1) * 1_000),
+                    received_at_ms: now_ms - 250,
                 }),
+                last_received_at_ms: Some(now_ms - 250),
                 ..SymbolPriceState::default()
             },
         );
 
         let err = service.get_price("btc").unwrap_err().to_string();
         assert!(err.contains("stale price for btc/usd"));
+        assert!(err.contains("receive_age_ms=250"));
     }
 
     #[test]
@@ -416,6 +551,7 @@ mod tests {
                 latest: Some(CachedPrice {
                     value: 2_069.351149877574,
                     timestamp_ms: Utc::now().timestamp_millis(),
+                    received_at_ms: Utc::now().timestamp_millis(),
                 }),
                 ..SymbolPriceState::default()
             },
@@ -426,24 +562,26 @@ mod tests {
     }
 
     #[test]
-    fn get_cycle_open_snapshot_returns_first_tick_after_cycle_start() {
+    fn get_price_near_timestamp_prefers_latest_tick_before_target() {
         let service = ChainlinkPriceService::new();
-        let cycle_start = DateTime::<Utc>::from_timestamp_millis(1_770_000_000_000).unwrap();
         service.state.write().insert(
-            "sol/usd".to_string(),
+            "btc/usd".to_string(),
             SymbolPriceState {
                 ticks: VecDeque::from(vec![
                     CachedPrice {
-                        value: 100.0,
-                        timestamp_ms: cycle_start.timestamp_millis() - 250,
+                        value: 70_010.0,
+                        timestamp_ms: 1_770_000_000_000,
+                        received_at_ms: 1_770_000_000_000,
                     },
                     CachedPrice {
-                        value: 101.5,
-                        timestamp_ms: cycle_start.timestamp_millis() + 250,
+                        value: 70_020.0,
+                        timestamp_ms: 1_770_000_001_500,
+                        received_at_ms: 1_770_000_001_500,
                     },
                     CachedPrice {
-                        value: 103.0,
-                        timestamp_ms: cycle_start.timestamp_millis() + 750,
+                        value: 70_030.0,
+                        timestamp_ms: 1_770_000_003_000,
+                        received_at_ms: 1_770_000_003_000,
                     },
                 ]),
                 ..SymbolPriceState::default()
@@ -451,55 +589,93 @@ mod tests {
         );
 
         let snapshot = service
-            .get_cycle_open_snapshot("sol", cycle_start)
-            .expect("cycle-open snapshot");
-        assert_eq!(snapshot.price, 101.5);
-        assert_eq!(snapshot.latency_ms, 250);
+            .get_price_near_timestamp("btc", 1_770_000_002_000)
+            .expect("snapshot");
+        assert_eq!(
+            snapshot,
+            ChainlinkPriceTimestampSnapshot {
+                price: 70_020.0,
+                timestamp_ms: 1_770_000_001_500,
+            }
+        );
     }
 
     #[test]
-    fn get_cycle_open_snapshot_rejects_high_latency_tick() {
+    fn get_price_near_timestamp_uses_near_future_tick_when_no_prior_tick_exists() {
         let service = ChainlinkPriceService::new();
-        let cycle_start = DateTime::<Utc>::from_timestamp_millis(1_770_000_000_000).unwrap();
+        service.state.write().insert(
+            "eth/usd".to_string(),
+            SymbolPriceState {
+                ticks: VecDeque::from(vec![CachedPrice {
+                    value: 2_215.5,
+                    timestamp_ms: 1_770_000_001_250,
+                    received_at_ms: 1_770_000_001_250,
+                }]),
+                ..SymbolPriceState::default()
+            },
+        );
+
+        let snapshot = service
+            .get_price_near_timestamp("eth", 1_770_000_000_000)
+            .expect("snapshot");
+        assert_eq!(
+            snapshot,
+            ChainlinkPriceTimestampSnapshot {
+                price: 2_215.5,
+                timestamp_ms: 1_770_000_001_250,
+            }
+        );
+    }
+
+    #[test]
+    fn get_price_near_timestamp_rejects_past_tick_outside_tolerance() {
+        let service = ChainlinkPriceService::new();
         service.state.write().insert(
             "btc/usd".to_string(),
             SymbolPriceState {
                 ticks: VecDeque::from(vec![CachedPrice {
-                    value: 70_100.0,
-                    timestamp_ms: cycle_start.timestamp_millis() + MAX_CYCLE_OPEN_LATENCY_MS + 1,
+                    value: 70_010.0,
+                    timestamp_ms: 1_770_000_000_000,
+                    received_at_ms: 1_770_000_000_000,
                 }]),
                 ..SymbolPriceState::default()
             },
         );
 
         let err = service
-            .get_cycle_open_snapshot("btc", cycle_start)
+            .get_price_near_timestamp(
+                "btc",
+                1_770_000_000_000 + MAX_NEAR_TIMESTAMP_PAST_TOLERANCE_MS + 1,
+            )
             .unwrap_err()
             .to_string();
-        assert!(err.contains("first tick latency"));
+        assert!(err.contains("closest past tick is"));
+        assert!(err.contains("gap_ms="));
+        assert!(err.contains("provider_age_ms="));
+        assert!(err.contains("candidate_timestamp_ms="));
+        assert!(err.contains("candidate_received_at_ms="));
     }
 
     #[test]
-    fn get_cycle_open_snapshot_uses_cached_entry() {
+    fn get_price_near_timestamp_rejects_future_tick_outside_tolerance() {
         let service = ChainlinkPriceService::new();
-        let cycle_start = DateTime::<Utc>::from_timestamp_millis(1_770_000_000_000).unwrap();
-        let cached = ChainlinkCycleOpenSnapshot {
-            price: 2_105.2,
-            timestamp_ms: cycle_start.timestamp_millis() + 125,
-            latency_ms: 125,
-        };
         service.state.write().insert(
-            "eth/usd".to_string(),
+            "sol/usd".to_string(),
             SymbolPriceState {
-                cycle_open_by_ts: HashMap::from([(cycle_start.timestamp_millis(), cached.clone())]),
+                ticks: VecDeque::from(vec![CachedPrice {
+                    value: 145.0,
+                    timestamp_ms: 1_770_000_005_000,
+                    received_at_ms: 1_770_000_005_000,
+                }]),
                 ..SymbolPriceState::default()
             },
         );
 
-        let snapshot = service
-            .get_cycle_open_snapshot("eth", cycle_start)
-            .expect("cached cycle-open snapshot");
-        assert_eq!(snapshot, cached);
+        let err = service
+            .get_price_near_timestamp("sol", 1_770_000_000_000)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("first future tick is"));
     }
 
     #[test]
@@ -511,20 +687,25 @@ mod tests {
                 latest: Some(CachedPrice {
                     value: 2_150.0,
                     timestamp_ms: 1_770_000_005_000,
+                    received_at_ms: 1_770_000_005_000,
                 }),
                 ticks: VecDeque::from(vec![CachedPrice {
                     value: 2_150.0,
                     timestamp_ms: 1_770_000_005_000,
+                    received_at_ms: 1_770_000_005_000,
                 }]),
                 ..SymbolPriceState::default()
             },
         );
 
-        service.update_price(PricePayload {
-            symbol: "eth/usd".to_string(),
-            value: 2_141.25,
-            timestamp: 1_770_000_003_000,
-        });
+        service.update_price(
+            PricePayload {
+                symbol: "eth/usd".to_string(),
+                value: 2_141.25,
+                timestamp: 1_770_000_003_000,
+            },
+            42,
+        );
 
         let state = service.state.read();
         let entry = state.get("eth/usd").expect("eth state");
@@ -536,5 +717,54 @@ mod tests {
             1,
             "out-of-order tick should not extend history"
         );
+    }
+
+    #[test]
+    fn stale_price_error_includes_provider_and_receive_age_details() {
+        let service = ChainlinkPriceService::new();
+        let now_ms = Utc::now().timestamp_millis();
+        service.state.write().insert(
+            "btc/usd".to_string(),
+            SymbolPriceState {
+                latest: Some(CachedPrice {
+                    value: 70_505.34,
+                    timestamp_ms: now_ms - ((MAX_PRICE_AGE_SECS + 1) * 1_000),
+                    received_at_ms: now_ms - 250,
+                }),
+                last_received_at_ms: Some(now_ms - 250),
+                ..SymbolPriceState::default()
+            },
+        );
+
+        let err = service.get_price("btc").unwrap_err().to_string();
+        assert!(err.contains("stale price for btc/usd"));
+        assert!(err.contains("provider_age_ms="));
+        assert!(err.contains("receive_age_ms="));
+        assert!(err.contains("provider_timestamp_ms="));
+        assert!(err.contains("received_at_ms="));
+    }
+
+    #[test]
+    fn parse_chainlink_stale_price_details_extracts_structured_fields() {
+        let details = parse_chainlink_stale_price_details(
+            "stale price for btc/usd: 123s old (provider_age_ms=123000, receive_age_ms=250, provider_timestamp_ms=1774000000000, received_at_ms=1774000122750)",
+        )
+        .expect("structured stale detail");
+        assert_eq!(details.provider_age_ms, 123000);
+        assert_eq!(details.receive_age_ms, 250);
+        assert_eq!(details.provider_timestamp_ms, 1774000000000);
+        assert_eq!(details.received_at_ms, 1774000122750);
+    }
+
+    #[test]
+    fn parse_chainlink_near_timestamp_rejection_details_extracts_structured_fields() {
+        let details = parse_chainlink_near_timestamp_rejection_details(
+            "no cached price near timestamp for btc/usd: closest past tick is 217000ms away (gap_ms=217000, provider_age_ms=216937, candidate_timestamp_ms=1774012890000, candidate_received_at_ms=1774013106847)",
+        )
+        .expect("structured near-timestamp detail");
+        assert_eq!(details.gap_ms, 217000);
+        assert_eq!(details.provider_age_ms, 216937);
+        assert_eq!(details.candidate_timestamp_ms, 1774012890000);
+        assert_eq!(details.candidate_received_at_ms, 1774013106847);
     }
 }

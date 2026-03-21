@@ -1,34 +1,46 @@
+use super::chainlink_price::{get_chainlink_price_near_timestamp, ChainlinkPriceTimestampSnapshot};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use parking_lot::Mutex;
 use reqwest::{
     header::{ACCEPT, CACHE_CONTROL, PRAGMA, USER_AGENT},
-    Proxy,
+    Proxy, Url,
 };
+use serde::Deserialize;
 use serde_json::Value;
-use std::{collections::HashMap, sync::LazyLock};
-
-use super::chainlink_price::{fetch_chainlink_cycle_open, ChainlinkCycleOpenSnapshot};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+};
 
 const POLYMARKET_EVENT_BASE_URL: &str = "https://polymarket.com/event";
+const POLYMARKET_CRYPTO_PRICE_API_URL: &str = "https://polymarket.com/api/crypto/crypto-price";
 const POLYMARKET_PRICE_TO_BEAT_TIMEOUT_SECS: u64 = 10;
 const POLYMARKET_PRICE_TO_BEAT_CONNECT_TIMEOUT_SECS: u64 = 3;
-const QUERY_NOT_FOUND_RETRY_ATTEMPTS: usize = 3;
-const QUERY_NOT_FOUND_RETRY_DELAY_MS: u64 = 2_000;
+#[allow(dead_code)]
+const QUERY_NOT_FOUND_RETRY_ATTEMPTS: usize = 2;
+#[allow(dead_code)]
+const QUERY_NOT_FOUND_RETRY_DELAY_MS: u64 = 1_000;
+const BG_FETCH_RETRY_ATTEMPTS: usize = 9;
+const BG_FETCH_RETRY_DELAY_MS: u64 = 100;
 const QUERY_NOT_FOUND_ERROR_PREFIX: &str = "price to beat query not found in polymarket page for ";
+const VERIFICATION_PENDING_ERROR_PREFIX: &str = "price to beat awaiting previous window close for ";
 const PRICE_TO_BEAT_USER_AGENT: &str = "polymarketbot/price-to-beat-guard";
+const PROMOTION_INITIAL_DELAY_MS: u64 = 500;
+const PROMOTION_RETRY_DELAY_MS: u64 = 500;
+const PROMOTION_MAX_ATTEMPTS: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PriceToBeatSource {
     Polymarket,
-    ChainlinkSnapshot,
+    ChainlinkCarryover,
 }
 
 impl PriceToBeatSource {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Polymarket => "polymarket",
-            Self::ChainlinkSnapshot => "chainlink_snapshot",
+            Self::ChainlinkCarryover => "chainlink_carryover",
         }
     }
 }
@@ -51,14 +63,62 @@ pub(crate) struct PolymarketPriceToBeatSnapshot {
     pub(crate) timeframe: String,
     pub(crate) price_to_beat: f64,
     pub(crate) source: PriceToBeatSource,
+    pub(crate) verified: bool,
     pub(crate) source_latency_ms: Option<i64>,
+    #[allow(dead_code)]
     pub(crate) fetched_at: DateTime<Utc>,
+}
+
+impl PolymarketPriceToBeatSnapshot {
+    fn is_verified_polymarket(&self) -> bool {
+        self.source == PriceToBeatSource::Polymarket && self.verified
+    }
+
+    fn is_guard_ready(&self) -> bool {
+        self.source == PriceToBeatSource::ChainlinkCarryover || self.is_verified_polymarket()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PriceToBeatLookup {
+    Ready(PolymarketPriceToBeatSnapshot),
+    Pending,
+    Unavailable(String),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CryptoPriceApiResponse {
+    open_price: Option<f64>,
+    close_price: Option<f64>,
+    #[serde(default)]
+    completed: bool,
+}
+
+impl CryptoPriceApiResponse {
+    fn sanitized_open_price(&self) -> Option<f64> {
+        self.open_price
+            .filter(|value| value.is_finite() && *value > 0.0)
+    }
+
+    fn sanitized_close_price(&self) -> Option<f64> {
+        self.close_price
+            .filter(|value| value.is_finite() && *value > 0.0)
+    }
+
+    fn verified_close_price(&self) -> Option<f64> {
+        self.completed.then_some(())?;
+        self.sanitized_close_price()
+    }
 }
 
 #[derive(Debug)]
 struct PolymarketPriceToBeatService {
     client: reqwest::Client,
     cache: Mutex<HashMap<String, PolymarketPriceToBeatSnapshot>>,
+    fetch_inflight: Mutex<HashSet<String>>,
+    terminal_failures: Mutex<HashMap<String, String>>,
+    promotion_inflight: Mutex<HashSet<String>>,
 }
 
 static POLYMARKET_PRICE_TO_BEAT_SERVICE: LazyLock<PolymarketPriceToBeatService> =
@@ -69,6 +129,9 @@ impl PolymarketPriceToBeatService {
         Self {
             client: build_price_to_beat_http_client(),
             cache: Mutex::new(HashMap::new()),
+            fetch_inflight: Mutex::new(HashSet::new()),
+            terminal_failures: Mutex::new(HashMap::new()),
+            promotion_inflight: Mutex::new(HashSet::new()),
         }
     }
 
@@ -76,55 +139,349 @@ impl PolymarketPriceToBeatService {
         self.cache.lock().contains_key(market_slug)
     }
 
-    async fn fetch_snapshot(&self, market_slug: &str) -> Result<PolymarketPriceToBeatSnapshot> {
-        if let Some(snapshot) = self.cache.lock().get(market_slug).cloned() {
-            return Ok(snapshot);
+    fn current_snapshot(&self, market_slug: &str) -> Option<PolymarketPriceToBeatSnapshot> {
+        self.cache.lock().get(market_slug).cloned()
+    }
+
+    fn take_terminal_failure(&self, market_slug: &str) -> Option<String> {
+        self.terminal_failures.lock().remove(market_slug)
+    }
+
+    fn record_terminal_failure(&self, market_slug: &str, detail: String) {
+        self.terminal_failures
+            .lock()
+            .insert(market_slug.to_string(), detail);
+    }
+
+    fn begin_background_fetch(&self, market_slug: &str) -> bool {
+        self.fetch_inflight.lock().insert(market_slug.to_string())
+    }
+
+    fn finish_background_fetch(&self, market_slug: &str) {
+        self.fetch_inflight.lock().remove(market_slug);
+    }
+
+    fn has_authoritative_snapshot(&self, market_slug: &str) -> bool {
+        self.current_snapshot(market_slug)
+            .map(|snapshot| snapshot.is_verified_polymarket())
+            .unwrap_or(false)
+    }
+
+    fn seed_snapshot(
+        &self,
+        market_slug: &str,
+        asset: &str,
+        timeframe: &str,
+        price: f64,
+        source_latency_ms: Option<i64>,
+    ) -> bool {
+        let mut cache = self.cache.lock();
+        if let Some(snapshot) = cache.get(market_slug) {
+            if snapshot.is_guard_ready() || snapshot.is_verified_polymarket() {
+                return false;
+            }
+        }
+        cache.insert(
+            market_slug.to_string(),
+            PolymarketPriceToBeatSnapshot {
+                event_url: format!("{POLYMARKET_EVENT_BASE_URL}/{market_slug}"),
+                asset: asset.to_ascii_lowercase(),
+                timeframe: timeframe.to_string(),
+                price_to_beat: price,
+                source: PriceToBeatSource::ChainlinkCarryover,
+                verified: true,
+                source_latency_ms,
+                fetched_at: Utc::now(),
+            },
+        );
+        true
+    }
+
+    fn try_seed_snapshot_from_chainlink_with<F>(
+        &self,
+        market_slug: &str,
+        resolve_chainlink_seed: F,
+    ) -> Result<Option<PolymarketPriceToBeatSnapshot>>
+    where
+        F: FnOnce(&PriceToBeatQuerySpec) -> Result<ChainlinkPriceTimestampSnapshot>,
+    {
+        if let Some(snapshot) = self.current_snapshot(market_slug) {
+            if snapshot.is_guard_ready() {
+                return Ok(Some(snapshot));
+            }
         }
 
         let spec = build_price_to_beat_query_spec(market_slug)?;
+        let chainlink_snapshot = resolve_chainlink_seed(&spec)?;
+        let source_latency_ms =
+            Some((chainlink_snapshot.timestamp_ms - spec.start_at.timestamp_millis()).abs());
+        let seeded = self.seed_snapshot(
+            market_slug,
+            &spec.asset,
+            &spec.timeframe,
+            chainlink_snapshot.price,
+            source_latency_ms,
+        );
+        if seeded {
+            tracing::info!(
+                market_slug = %spec.market_slug,
+                asset = %spec.asset,
+                timeframe = %spec.timeframe,
+                price_to_beat = chainlink_snapshot.price,
+                chainlink_tick_ts = chainlink_snapshot.timestamp_ms,
+                source_latency_ms,
+                "PRICE_TO_BEAT_SEEDED_FROM_CHAINLINK_ON_DEMAND"
+            );
+        }
+        Ok(self.current_snapshot(market_slug).filter(PolymarketPriceToBeatSnapshot::is_guard_ready))
+    }
+
+    fn begin_promotion(&self, market_slug: &str) -> bool {
+        self.promotion_inflight
+            .lock()
+            .insert(market_slug.to_string())
+    }
+
+    fn finish_promotion(&self, market_slug: &str) {
+        self.promotion_inflight.lock().remove(market_slug);
+    }
+
+    #[allow(dead_code)]
+    async fn fetch_snapshot(&self, market_slug: &str) -> Result<PolymarketPriceToBeatSnapshot> {
+        if let Some(snapshot) = self.current_snapshot(market_slug) {
+            if snapshot.is_guard_ready() {
+                return Ok(snapshot);
+            }
+        }
+        self.fetch_snapshot_from_network(market_slug).await
+    }
+
+    async fn fetch_snapshot_once(
+        &self,
+        market_slug: &str,
+        cache_buster_ms: Option<i64>,
+    ) -> Result<PolymarketPriceToBeatSnapshot> {
+        if let Some(snapshot) = self.current_snapshot(market_slug) {
+            if snapshot.is_verified_polymarket() {
+                return Ok(snapshot);
+            }
+        }
+        let spec = build_price_to_beat_query_spec(market_slug)?;
+        let previous_spec = build_previous_price_to_beat_query_spec(&spec)?;
+        let (current_api_result, previous_api_result) = tokio::join!(
+            self.fetch_crypto_price_window_from_api(&spec),
+            self.fetch_crypto_price_window_from_api(&previous_spec)
+        );
+
+        let current_api = match current_api_result {
+            Ok(response) => Some(response),
+            Err(err) => {
+                tracing::warn!(
+                    market_slug = %spec.market_slug,
+                    error = %err,
+                    "PRICE_TO_BEAT_API_FETCH_FAILED"
+                );
+                None
+            }
+        };
+        let previous_api = match previous_api_result {
+            Ok(response) => Some(response),
+            Err(err) => {
+                tracing::warn!(
+                    market_slug = %spec.market_slug,
+                    previous_market_slug = %previous_spec.market_slug,
+                    error = %err,
+                    "PRICE_TO_BEAT_PREVIOUS_CLOSE_FETCH_FAILED"
+                );
+                None
+            }
+        };
+
+        if let Some(price_to_beat) = previous_api
+            .as_ref()
+            .and_then(CryptoPriceApiResponse::verified_close_price)
+        {
+            let snapshot = build_polymarket_snapshot(&spec, price_to_beat, true);
+            if let Some(current_open_price) = current_api
+                .as_ref()
+                .and_then(CryptoPriceApiResponse::sanitized_open_price)
+            {
+                let mismatch = (current_open_price - price_to_beat).abs();
+                if mismatch > 0.0 {
+                    tracing::warn!(
+                        market_slug = %spec.market_slug,
+                        previous_market_slug = %previous_spec.market_slug,
+                        provisional_open_price = current_open_price,
+                        verified_close_price = price_to_beat,
+                        mismatch,
+                        "PRICE_TO_BEAT_PROVISIONAL_MISMATCH_DETECTED"
+                    );
+                }
+            }
+            if let Some(previous_snapshot) =
+                self.store_verified_polymarket_snapshot(market_slug, snapshot.clone())
+            {
+                let mismatch = (previous_snapshot.price_to_beat - snapshot.price_to_beat).abs();
+                if mismatch > 0.0 {
+                    tracing::warn!(
+                        market_slug = %spec.market_slug,
+                        previous_price_to_beat = previous_snapshot.price_to_beat,
+                        previous_source = previous_snapshot.source.as_str(),
+                        previous_verified = previous_snapshot.verified,
+                        verified_price_to_beat = snapshot.price_to_beat,
+                        mismatch,
+                        "PRICE_TO_BEAT_VERIFIED_CACHE_OVERWRITE"
+                    );
+                }
+            }
+            tracing::info!(
+                market_slug = %spec.market_slug,
+                previous_market_slug = %previous_spec.market_slug,
+                price_to_beat = snapshot.price_to_beat,
+                "PRICE_TO_BEAT_VERIFIED_FROM_PREVIOUS_CLOSE"
+            );
+            return Ok(snapshot);
+        }
+
+        if let Some(price_to_beat) = current_api
+            .as_ref()
+            .and_then(CryptoPriceApiResponse::sanitized_open_price)
+        {
+            let snapshot = build_polymarket_snapshot(&spec, price_to_beat, false);
+            self.store_provisional_polymarket_snapshot(market_slug, snapshot.clone());
+            tracing::info!(
+                market_slug = %spec.market_slug,
+                previous_market_slug = %previous_spec.market_slug,
+                price_to_beat = snapshot.price_to_beat,
+                "PRICE_TO_BEAT_API_PROVISIONAL_CAPTURED"
+            );
+            return Ok(snapshot);
+        }
+
+        let request_url = build_event_request_url(&spec.event_url, cache_buster_ms);
+        tracing::debug!(
+            market_slug = %spec.market_slug,
+            cache_buster_ms,
+            "PRICE_TO_BEAT_HTML_FALLBACK_STARTED"
+        );
+        let html = self
+            .client
+            .get(&request_url)
+            .header(USER_AGENT, PRICE_TO_BEAT_USER_AGENT)
+            .header(ACCEPT, "text/html,application/xhtml+xml")
+            .header(CACHE_CONTROL, "no-cache")
+            .header(PRAGMA, "no-cache")
+            .send()
+            .await
+            .context("requesting polymarket event page")?
+            .error_for_status()
+            .context("polymarket event page returned error status")?
+            .text()
+            .await
+            .context("reading polymarket event html")?;
+        let price_to_beat = parse_open_price_from_html(&html, &spec)?;
+        let snapshot = build_polymarket_snapshot(&spec, price_to_beat, false);
+        tracing::info!(
+            market_slug = %spec.market_slug,
+            price_to_beat = snapshot.price_to_beat,
+            "PRICE_TO_BEAT_HTML_FALLBACK_PROVISIONAL_CAPTURED"
+        );
+        self.store_provisional_polymarket_snapshot(market_slug, snapshot.clone());
+        Ok(snapshot)
+    }
+
+    fn store_verified_polymarket_snapshot(
+        &self,
+        market_slug: &str,
+        snapshot: PolymarketPriceToBeatSnapshot,
+    ) -> Option<PolymarketPriceToBeatSnapshot> {
+        self.cache.lock().insert(market_slug.to_string(), snapshot)
+    }
+
+    fn store_provisional_polymarket_snapshot(
+        &self,
+        market_slug: &str,
+        snapshot: PolymarketPriceToBeatSnapshot,
+    ) {
+        let mut cache = self.cache.lock();
+        if cache
+            .get(market_slug)
+            .map(PolymarketPriceToBeatSnapshot::is_guard_ready)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        cache.insert(market_slug.to_string(), snapshot);
+    }
+
+    async fn fetch_crypto_price_window_from_api(
+        &self,
+        spec: &PriceToBeatQuerySpec,
+    ) -> Result<CryptoPriceApiResponse> {
+        let request_url = build_crypto_price_api_url(spec)?;
+        let response_body = self
+            .client
+            .get(request_url)
+            .header(USER_AGENT, PRICE_TO_BEAT_USER_AGENT)
+            .header(ACCEPT, "application/json")
+            .header(CACHE_CONTROL, "no-cache")
+            .header(PRAGMA, "no-cache")
+            .send()
+            .await
+            .context("requesting polymarket crypto-price api")?
+            .error_for_status()
+            .context("polymarket crypto-price api returned error status")?
+            .text()
+            .await
+            .context("reading polymarket crypto-price api body")?;
+        parse_crypto_price_api_response(&response_body, spec)
+    }
+
+    #[allow(dead_code)]
+    async fn fetch_snapshot_from_network(
+        &self,
+        market_slug: &str,
+    ) -> Result<PolymarketPriceToBeatSnapshot> {
+        if let Some(snapshot) = self.current_snapshot(market_slug) {
+            if snapshot.is_verified_polymarket() {
+                return Ok(snapshot);
+            }
+        }
         let mut last_error = None;
 
         for attempt in 0..=QUERY_NOT_FOUND_RETRY_ATTEMPTS {
             // Cache-bust after the first miss because Polymarket sometimes serves a stale
             // dehydrated payload around cycle rollover that is missing the crypto-prices query.
-            let request_url = build_event_request_url(
-                &spec.event_url,
-                (attempt > 0).then(|| Utc::now().timestamp_millis()),
-            );
-            let html = self
-                .client
-                .get(&request_url)
-                .header(USER_AGENT, PRICE_TO_BEAT_USER_AGENT)
-                .header(ACCEPT, "text/html,application/xhtml+xml")
-                .header(CACHE_CONTROL, "no-cache")
-                .header(PRAGMA, "no-cache")
-                .send()
+            match self
+                .fetch_snapshot_once(
+                    market_slug,
+                    (attempt > 0).then(|| Utc::now().timestamp_millis()),
+                )
                 .await
-                .context("requesting polymarket event page")?
-                .error_for_status()
-                .context("polymarket event page returned error status")?
-                .text()
-                .await
-                .context("reading polymarket event html")?;
-
-            match parse_open_price_from_html(&html, &spec) {
-                Ok(price_to_beat) => {
-                    if attempt > 0 {
-                        tracing::info!(market_slug, attempt, "PRICE_TO_BEAT_QUERY_RETRY_SUCCEEDED");
+            {
+                Ok(snapshot) => {
+                    if snapshot.is_guard_ready() {
+                        if attempt > 0 {
+                            tracing::info!(market_slug, attempt, "PRICE_TO_BEAT_QUERY_RETRY_SUCCEEDED");
+                        }
+                        return Ok(snapshot);
                     }
-                    let snapshot = PolymarketPriceToBeatSnapshot {
-                        event_url: spec.event_url,
-                        asset: spec.asset.to_ascii_lowercase(),
-                        timeframe: spec.timeframe,
-                        price_to_beat,
-                        source: PriceToBeatSource::Polymarket,
-                        source_latency_ms: None,
-                        fetched_at: Utc::now(),
-                    };
-                    self.cache
-                        .lock()
-                        .insert(market_slug.to_string(), snapshot.clone());
-                    return Ok(snapshot);
+                    if attempt < QUERY_NOT_FOUND_RETRY_ATTEMPTS {
+                        tracing::warn!(
+                            market_slug,
+                            attempt,
+                            max_attempts = QUERY_NOT_FOUND_RETRY_ATTEMPTS,
+                            price_to_beat = snapshot.price_to_beat,
+                            "PRICE_TO_BEAT_VERIFICATION_RETRYING"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            QUERY_NOT_FOUND_RETRY_DELAY_MS,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    last_error = Some(anyhow!("{VERIFICATION_PENDING_ERROR_PREFIX}{market_slug}"));
+                    break;
                 }
                 Err(err)
                     if err.to_string().starts_with(QUERY_NOT_FOUND_ERROR_PREFIX)
@@ -148,35 +505,156 @@ impl PolymarketPriceToBeatService {
             }
         }
 
-        match build_chainlink_fallback_snapshot(&spec).await {
-            Ok(snapshot) => {
-                tracing::info!(
-                    market_slug,
-                    asset = %snapshot.asset,
-                    latency_ms = snapshot.source_latency_ms,
-                    "PRICE_TO_BEAT_CHAINLINK_FALLBACK_USED"
-                );
-                self.cache
-                    .lock()
-                    .insert(market_slug.to_string(), snapshot.clone());
-                Ok(snapshot)
-            }
-            Err(fallback_err) => {
-                let base_err = last_error.unwrap_or_else(|| {
-                    anyhow!(
-                        "price to beat query not found after {} retries for {}",
-                        QUERY_NOT_FOUND_RETRY_ATTEMPTS,
-                        market_slug
-                    )
-                });
-                Err(anyhow!(
-                    "{base_err}; chainlink fallback failed: {fallback_err}"
-                ))
+        Err(last_error.unwrap_or_else(|| {
+            anyhow!(
+                "price to beat query not found after {} retries for {}",
+                QUERY_NOT_FOUND_RETRY_ATTEMPTS,
+                market_slug
+            )
+        }))
+    }
+
+    fn ensure_background_fetch(&'static self, market_slug: &str) {
+        if let Some(snapshot) = self.current_snapshot(market_slug) {
+            if snapshot.is_verified_polymarket() {
+                return;
             }
         }
+        if !self.begin_background_fetch(market_slug) {
+            return;
+        }
+
+        let market_slug = market_slug.to_string();
+        tokio::spawn(async move {
+            let result = async {
+                tracing::info!(market_slug = %market_slug, "PRICE_TO_BEAT_BACKGROUND_FETCH_STARTED");
+                for attempt in 0..=BG_FETCH_RETRY_ATTEMPTS {
+                    match self
+                        .fetch_snapshot_once(
+                            &market_slug,
+                            (attempt > 0).then(|| Utc::now().timestamp_millis()),
+                        )
+                        .await
+                    {
+                        Ok(snapshot) => {
+                            if snapshot.is_guard_ready() {
+                                tracing::info!(
+                                    market_slug = %market_slug,
+                                    attempt,
+                                    source = snapshot.source.as_str(),
+                                    verified = snapshot.verified,
+                                    "PRICE_TO_BEAT_BACKGROUND_FETCH_SUCCEEDED"
+                                );
+                                crate::FLOW_PROCESS_NOTIFY.notify_one();
+                                return None;
+                            }
+                            if attempt < BG_FETCH_RETRY_ATTEMPTS {
+                                tracing::debug!(
+                                    market_slug = %market_slug,
+                                    attempt,
+                                    max_attempts = BG_FETCH_RETRY_ATTEMPTS,
+                                    price_to_beat = snapshot.price_to_beat,
+                                    "PRICE_TO_BEAT_VERIFICATION_RETRYING"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    BG_FETCH_RETRY_DELAY_MS,
+                                ))
+                                .await;
+                                continue;
+                            }
+                            return None;
+                        }
+                        Err(err)
+                            if is_price_to_beat_query_pending(&err)
+                                && attempt < BG_FETCH_RETRY_ATTEMPTS =>
+                        {
+                            tracing::debug!(
+                                market_slug = %market_slug,
+                                attempt,
+                                max_attempts = BG_FETCH_RETRY_ATTEMPTS,
+                                "PRICE_TO_BEAT_BACKGROUND_FETCH_RETRYING"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                BG_FETCH_RETRY_DELAY_MS,
+                            ))
+                            .await;
+                        }
+                        Err(err) => {
+                            if is_price_to_beat_query_pending(&err) {
+                                return None;
+                            }
+                            let detail = err.to_string();
+                            tracing::warn!(
+                                market_slug = %market_slug,
+                                attempt,
+                                error = %detail,
+                                "PRICE_TO_BEAT_BACKGROUND_FETCH_FAILED"
+                            );
+                            return Some(detail);
+                        }
+                    }
+                }
+                None
+            }
+            .await;
+
+            if let Some(detail) = result {
+                self.record_terminal_failure(&market_slug, detail);
+                crate::FLOW_PROCESS_NOTIFY.notify_one();
+            }
+            self.finish_background_fetch(&market_slug);
+        });
+    }
+
+    #[cfg(test)]
+    fn try_cached_or_spawn(&'static self, market_slug: &str) -> PriceToBeatLookup {
+        self.try_cached_or_spawn_with(market_slug, |_| {
+            Err(anyhow!("chainlink seed unavailable in local test service"))
+        })
+    }
+
+    fn try_cached_or_spawn_with<F>(
+        &'static self,
+        market_slug: &str,
+        resolve_chainlink_seed: F,
+    ) -> PriceToBeatLookup
+    where
+        F: FnOnce(&PriceToBeatQuerySpec) -> Result<ChainlinkPriceTimestampSnapshot>,
+    {
+        if let Some(snapshot) = self.current_snapshot(market_slug) {
+            if snapshot.is_guard_ready() {
+                return PriceToBeatLookup::Ready(snapshot);
+            }
+        }
+        match self.try_seed_snapshot_from_chainlink_with(market_slug, resolve_chainlink_seed) {
+            Ok(Some(snapshot)) => {
+                return PriceToBeatLookup::Ready(snapshot);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::debug!(
+                    market_slug,
+                    error = %err,
+                    "PRICE_TO_BEAT_CHAINLINK_ON_DEMAND_SEED_MISS"
+                );
+            }
+        }
+        if let Some(snapshot) = self.current_snapshot(market_slug) {
+            if snapshot.is_guard_ready() {
+                return PriceToBeatLookup::Ready(snapshot);
+            }
+            self.ensure_background_fetch(market_slug);
+            return PriceToBeatLookup::Pending;
+        }
+        if let Some(detail) = self.take_terminal_failure(market_slug) {
+            return PriceToBeatLookup::Unavailable(detail);
+        }
+        self.ensure_background_fetch(market_slug);
+        PriceToBeatLookup::Pending
     }
 }
 
+#[allow(dead_code)]
 pub(crate) async fn fetch_polymarket_price_to_beat(
     market_slug: &str,
 ) -> Result<PolymarketPriceToBeatSnapshot> {
@@ -185,12 +663,139 @@ pub(crate) async fn fetch_polymarket_price_to_beat(
         .await
 }
 
-pub(crate) async fn warm_price_to_beat_cache(market_slug: &str) {
+pub(crate) fn get_price_to_beat_cached(market_slug: &str) -> Option<PolymarketPriceToBeatSnapshot> {
+    POLYMARKET_PRICE_TO_BEAT_SERVICE
+        .current_snapshot(market_slug)
+        .filter(PolymarketPriceToBeatSnapshot::is_guard_ready)
+}
+
+pub(crate) fn try_price_to_beat_cached_or_spawn(market_slug: &str) -> PriceToBeatLookup {
+    let lookup = POLYMARKET_PRICE_TO_BEAT_SERVICE.try_cached_or_spawn_with(market_slug, |spec| {
+        get_chainlink_price_near_timestamp(&spec.asset, spec.start_at.timestamp_millis())
+    });
+    if matches!(
+        &lookup,
+        PriceToBeatLookup::Ready(snapshot) if snapshot.source == PriceToBeatSource::ChainlinkCarryover
+    ) {
+        schedule_price_to_beat_promotion(market_slug);
+    }
+    lookup
+}
+
+pub(crate) fn seed_price_to_beat_from_chainlink(
+    market_slug: &str,
+    asset: &str,
+    timeframe: &str,
+    price: f64,
+    source_latency_ms: Option<i64>,
+) -> bool {
+    POLYMARKET_PRICE_TO_BEAT_SERVICE.seed_snapshot(
+        market_slug,
+        asset,
+        timeframe,
+        price,
+        source_latency_ms,
+    )
+}
+
+pub(crate) fn schedule_price_to_beat_promotion(market_slug: &str) {
+    if POLYMARKET_PRICE_TO_BEAT_SERVICE.has_authoritative_snapshot(market_slug) {
+        return;
+    }
+    if !POLYMARKET_PRICE_TO_BEAT_SERVICE.begin_promotion(market_slug) {
+        return;
+    }
+
+    let market_slug = market_slug.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(PROMOTION_INITIAL_DELAY_MS)).await;
+
+        for attempt in 0..PROMOTION_MAX_ATTEMPTS {
+            if POLYMARKET_PRICE_TO_BEAT_SERVICE.has_authoritative_snapshot(&market_slug) {
+                break;
+            }
+
+            match POLYMARKET_PRICE_TO_BEAT_SERVICE
+                .fetch_snapshot_once(
+                    &market_slug,
+                    (attempt > 0).then(|| Utc::now().timestamp_millis()),
+                )
+                .await
+            {
+                Ok(snapshot) => {
+                    if snapshot.is_guard_ready() {
+                        tracing::info!(
+                            market_slug,
+                            price_to_beat = snapshot.price_to_beat,
+                            source = snapshot.source.as_str(),
+                            verified = snapshot.verified,
+                            "PRICE_TO_BEAT_UPGRADED_TO_POLYMARKET"
+                        );
+                        crate::FLOW_PROCESS_NOTIFY.notify_one();
+                        break;
+                    }
+                    if attempt + 1 < PROMOTION_MAX_ATTEMPTS {
+                        tracing::warn!(
+                            market_slug,
+                            attempt,
+                            max_attempts = PROMOTION_MAX_ATTEMPTS,
+                            price_to_beat = snapshot.price_to_beat,
+                            "PRICE_TO_BEAT_VERIFICATION_RETRYING"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(PROMOTION_RETRY_DELAY_MS))
+                            .await;
+                    }
+                }
+                Err(err)
+                    if is_price_to_beat_query_pending(&err)
+                        && attempt + 1 < PROMOTION_MAX_ATTEMPTS =>
+                {
+                    tracing::warn!(
+                        market_slug,
+                        attempt,
+                        max_attempts = PROMOTION_MAX_ATTEMPTS,
+                        "PRICE_TO_BEAT_PROMOTION_RETRYING"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(PROMOTION_RETRY_DELAY_MS))
+                        .await;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        market_slug,
+                        error = %err,
+                        "PRICE_TO_BEAT_UPGRADE_FAILED"
+                    );
+                    break;
+                }
+            }
+        }
+
+        POLYMARKET_PRICE_TO_BEAT_SERVICE.finish_promotion(&market_slug);
+    });
+}
+
+pub(crate) fn warm_price_to_beat_cache_bg(market_slug: &str) {
+    if POLYMARKET_PRICE_TO_BEAT_SERVICE.has_authoritative_snapshot(market_slug) {
+        return;
+    }
     if POLYMARKET_PRICE_TO_BEAT_SERVICE.has_cached_snapshot(market_slug) {
+        schedule_price_to_beat_promotion(market_slug);
+        return;
+    }
+    POLYMARKET_PRICE_TO_BEAT_SERVICE.ensure_background_fetch(market_slug);
+}
+
+#[allow(dead_code)]
+pub(crate) async fn warm_price_to_beat_cache(market_slug: &str) {
+    if POLYMARKET_PRICE_TO_BEAT_SERVICE.has_authoritative_snapshot(market_slug) {
+        return;
+    }
+    if POLYMARKET_PRICE_TO_BEAT_SERVICE.has_cached_snapshot(market_slug) {
+        schedule_price_to_beat_promotion(market_slug);
         return;
     }
     match POLYMARKET_PRICE_TO_BEAT_SERVICE
-        .fetch_snapshot(market_slug)
+        .fetch_snapshot_from_network(market_slug)
         .await
     {
         Ok(snapshot) => {
@@ -209,6 +814,14 @@ pub(crate) async fn warm_price_to_beat_cache(market_slug: &str) {
             );
         }
     }
+}
+
+/// Polymarket sayfasi yuklendi ama cycle-open `crypto-prices` query'si henuz hazir degil.
+pub(crate) fn is_price_to_beat_query_pending(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.starts_with(QUERY_NOT_FOUND_ERROR_PREFIX)
+        || msg.starts_with("price to beat query not found after")
+        || msg.starts_with(VERIFICATION_PENDING_ERROR_PREFIX)
 }
 
 fn build_price_to_beat_http_client() -> reqwest::Client {
@@ -246,31 +859,99 @@ fn build_event_request_url(event_url: &str, cache_buster_ms: Option<i64>) -> Str
     }
 }
 
-async fn build_chainlink_fallback_snapshot(
-    spec: &PriceToBeatQuerySpec,
-) -> Result<PolymarketPriceToBeatSnapshot> {
-    let cycle_open = fetch_chainlink_cycle_open(&spec.asset, spec.start_at)
-        .await
-        .context("fetching chainlink cycle-open fallback")?;
-    Ok(chainlink_snapshot_to_price_to_beat_snapshot(
-        spec,
-        &cycle_open,
-    ))
+fn build_crypto_price_api_url(spec: &PriceToBeatQuerySpec) -> Result<String> {
+    build_crypto_price_api_url_for_window(
+        spec.asset.as_str(),
+        spec.query_timeframe,
+        spec.start_at,
+        spec.end_at,
+    )
 }
 
-fn chainlink_snapshot_to_price_to_beat_snapshot(
+fn build_crypto_price_api_url_for_window(
+    asset: &str,
+    query_timeframe: &str,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+) -> Result<String> {
+    let expected_start = start_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let expected_end = end_at.to_rfc3339_opts(SecondsFormat::Secs, true);
+    Url::parse_with_params(
+        POLYMARKET_CRYPTO_PRICE_API_URL,
+        &[
+            ("symbol", asset),
+            ("eventStartTime", expected_start.as_str()),
+            ("variant", query_timeframe),
+            ("endDate", expected_end.as_str()),
+        ],
+    )
+    .map(|url| url.to_string())
+    .context("building polymarket crypto-price api url")
+}
+
+fn parse_crypto_price_api_response(
+    response_body: &str,
     spec: &PriceToBeatQuerySpec,
-    cycle_open: &ChainlinkCycleOpenSnapshot,
+) -> Result<CryptoPriceApiResponse> {
+    let response: CryptoPriceApiResponse =
+        serde_json::from_str(response_body).context("parsing polymarket crypto-price json")?;
+    if response.sanitized_open_price().is_none() && response.verified_close_price().is_none() {
+        tracing::debug!(
+            market_slug = %spec.market_slug,
+            expected_asset = %spec.asset,
+            expected_start = %spec.start_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+            expected_end = %spec.end_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+            expected_timeframe = spec.query_timeframe,
+            response_body = %response_body,
+            "PRICE_TO_BEAT_API_OPEN_PRICE_PENDING"
+        );
+    }
+    Ok(response)
+}
+
+fn build_polymarket_snapshot(
+    spec: &PriceToBeatQuerySpec,
+    price_to_beat: f64,
+    verified: bool,
 ) -> PolymarketPriceToBeatSnapshot {
     PolymarketPriceToBeatSnapshot {
         event_url: spec.event_url.clone(),
         asset: spec.asset.to_ascii_lowercase(),
         timeframe: spec.timeframe.clone(),
-        price_to_beat: cycle_open.price,
-        source: PriceToBeatSource::ChainlinkSnapshot,
-        source_latency_ms: Some(cycle_open.latency_ms),
+        price_to_beat,
+        source: PriceToBeatSource::Polymarket,
+        verified,
+        source_latency_ms: None,
         fetched_at: Utc::now(),
     }
+}
+
+fn build_previous_price_to_beat_query_spec(
+    spec: &PriceToBeatQuerySpec,
+) -> Result<PriceToBeatQuerySpec> {
+    let scope = crate::find_updown_scope_by_asset_timeframe(
+        spec.asset.as_str(),
+        spec.timeframe.as_str(),
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "unsupported asset/timeframe for previous price to beat query: {}/{}",
+            spec.asset,
+            spec.timeframe
+        )
+    })?;
+    let window = spec.end_at - spec.start_at;
+    let start_at = spec.start_at - window;
+    let market_slug = format!("{}{}", scope.slug_prefix, start_at.timestamp());
+    Ok(PriceToBeatQuerySpec {
+        market_slug: market_slug.clone(),
+        asset: spec.asset.clone(),
+        timeframe: spec.timeframe.clone(),
+        query_timeframe: spec.query_timeframe,
+        start_at,
+        end_at: spec.start_at,
+        event_url: format!("{POLYMARKET_EVENT_BASE_URL}/{market_slug}"),
+    })
 }
 
 pub(crate) fn build_price_to_beat_query_spec(market_slug: &str) -> Result<PriceToBeatQuerySpec> {
@@ -387,6 +1068,19 @@ mod tests {
         )
     }
 
+    fn test_snapshot(source: PriceToBeatSource) -> PolymarketPriceToBeatSnapshot {
+        PolymarketPriceToBeatSnapshot {
+            event_url: "https://polymarket.com/event/btc-updown-5m-1773232500".to_string(),
+            asset: "btc".to_string(),
+            timeframe: "5m".to_string(),
+            price_to_beat: 69_279.93484689768,
+            source,
+            verified: source == PriceToBeatSource::Polymarket,
+            source_latency_ms: Some(125),
+            fetched_at: Utc::now(),
+        }
+    }
+
     #[test]
     fn build_query_spec_for_five_minute_market() {
         let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
@@ -477,20 +1171,297 @@ mod tests {
     }
 
     #[test]
-    fn chainlink_snapshot_conversion_marks_source_and_latency() {
-        let spec = build_price_to_beat_query_spec("sol-updown-5m-1773324600").expect("spec");
-        let snapshot = ChainlinkCycleOpenSnapshot {
-            price: 87.13950000781921,
-            timestamp_ms: spec.start_at.timestamp_millis() + 125,
-            latency_ms: 125,
-        };
+    fn build_crypto_price_api_url_for_five_minute_market() {
+        let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
 
-        let converted = chainlink_snapshot_to_price_to_beat_snapshot(&spec, &snapshot);
-        assert_eq!(converted.asset, "sol");
-        assert_eq!(converted.timeframe, "5m");
-        assert_eq!(converted.price_to_beat, 87.13950000781921);
-        assert_eq!(converted.source, PriceToBeatSource::ChainlinkSnapshot);
-        assert_eq!(converted.source_latency_ms, Some(125));
-        assert!(converted.fetched_at <= Utc::now());
+        let url = build_crypto_price_api_url(&spec).expect("url");
+
+        assert_eq!(
+            url,
+            "https://polymarket.com/api/crypto/crypto-price?symbol=BTC&eventStartTime=2026-03-11T12%3A35%3A00Z&variant=fiveminute&endDate=2026-03-11T12%3A40%3A00Z"
+        );
+    }
+
+    #[test]
+    fn build_crypto_price_api_url_for_fifteen_minute_market() {
+        let spec = build_price_to_beat_query_spec("btc-updown-15m-1773232200").expect("spec");
+
+        let url = build_crypto_price_api_url(&spec).expect("url");
+
+        assert_eq!(
+            url,
+            "https://polymarket.com/api/crypto/crypto-price?symbol=BTC&eventStartTime=2026-03-11T12%3A30%3A00Z&variant=fifteen&endDate=2026-03-11T12%3A45%3A00Z"
+        );
+    }
+
+    #[test]
+    fn builds_previous_query_spec_for_five_minute_market() {
+        let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
+
+        let previous = build_previous_price_to_beat_query_spec(&spec).expect("previous spec");
+
+        assert_eq!(previous.market_slug, "btc-updown-5m-1773232200");
+        assert_eq!(
+            previous.start_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+            "2026-03-11T12:30:00Z"
+        );
+        assert_eq!(
+            previous.end_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+            "2026-03-11T12:35:00Z"
+        );
+    }
+
+    #[test]
+    fn parses_open_price_from_crypto_price_api_response() {
+        let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
+        let response_body = r#"{"openPrice":69279.93484689768,"closePrice":null,"completed":false,"incomplete":true,"cached":true}"#;
+
+        let response = parse_crypto_price_api_response(response_body, &spec).expect("response");
+
+        assert_eq!(response.sanitized_open_price(), Some(69_279.93484689768));
+        assert_eq!(response.verified_close_price(), None);
+    }
+
+    #[test]
+    fn parses_null_open_price_from_crypto_price_api_response_as_pending() {
+        let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
+        let response_body =
+            r#"{"openPrice":null,"closePrice":null,"completed":false,"incomplete":true,"cached":false}"#;
+
+        let response = parse_crypto_price_api_response(response_body, &spec).expect("pending");
+
+        assert_eq!(response.sanitized_open_price(), None);
+        assert_eq!(response.verified_close_price(), None);
+    }
+
+    #[test]
+    fn parses_verified_close_price_from_crypto_price_api_response() {
+        let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
+        let response_body =
+            r#"{"openPrice":69279.93484689768,"closePrice":69282.125,"completed":true,"incomplete":false,"cached":true}"#;
+
+        let response = parse_crypto_price_api_response(response_body, &spec).expect("response");
+
+        assert_eq!(response.sanitized_open_price(), Some(69_279.93484689768));
+        assert_eq!(response.verified_close_price(), Some(69_282.125));
+    }
+
+    #[test]
+    fn detects_query_pending_error_prefixes() {
+        let err = anyhow!(
+            "price to beat query not found in polymarket page for btc-updown-5m-1773232500"
+        );
+        assert!(is_price_to_beat_query_pending(&err));
+
+        let retry_err = anyhow!(
+            "price to beat query not found after {} retries for {}",
+            QUERY_NOT_FOUND_RETRY_ATTEMPTS,
+            "btc-updown-5m-1773232500"
+        );
+        assert!(is_price_to_beat_query_pending(&retry_err));
+
+        let verification_err =
+            anyhow!("price to beat awaiting previous window close for btc-updown-5m-1773232500");
+        assert!(is_price_to_beat_query_pending(&verification_err));
+
+        let other_err = anyhow!("__NEXT_DATA__ script tag not found in html");
+        assert!(!is_price_to_beat_query_pending(&other_err));
+    }
+
+    #[test]
+    fn seed_snapshot_inserts_chainlink_carryover_when_cache_is_empty() {
+        let service = PolymarketPriceToBeatService::new();
+
+        let seeded =
+            service.seed_snapshot("btc-updown-5m-1773232500", "btc", "5m", 69_200.0, Some(450));
+
+        assert!(seeded);
+        let snapshot = service
+            .current_snapshot("btc-updown-5m-1773232500")
+            .expect("snapshot");
+        assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
+        assert!(snapshot.verified);
+        assert_eq!(snapshot.price_to_beat, 69_200.0);
+        assert_eq!(snapshot.source_latency_ms, Some(450));
+    }
+
+    #[test]
+    fn seed_snapshot_does_not_overwrite_polymarket_value() {
+        let service = PolymarketPriceToBeatService::new();
+        service.cache.lock().insert(
+            "btc-updown-5m-1773232500".to_string(),
+            test_snapshot(PriceToBeatSource::Polymarket),
+        );
+
+        let seeded =
+            service.seed_snapshot("btc-updown-5m-1773232500", "btc", "5m", 69_100.0, Some(900));
+
+        assert!(!seeded);
+        let snapshot = service
+            .current_snapshot("btc-updown-5m-1773232500")
+            .expect("snapshot");
+        assert_eq!(snapshot.source, PriceToBeatSource::Polymarket);
+        assert!(snapshot.verified);
+        assert_eq!(snapshot.price_to_beat, 69_279.93484689768);
+    }
+
+    #[test]
+    fn seed_snapshot_overwrites_unverified_polymarket_value() {
+        let service = PolymarketPriceToBeatService::new();
+        service.cache.lock().insert(
+            "btc-updown-5m-1773232500".to_string(),
+            PolymarketPriceToBeatSnapshot {
+                event_url: "https://polymarket.com/event/btc-updown-5m-1773232500".to_string(),
+                asset: "btc".to_string(),
+                timeframe: "5m".to_string(),
+                price_to_beat: 69_100.0,
+                source: PriceToBeatSource::Polymarket,
+                verified: false,
+                source_latency_ms: None,
+                fetched_at: Utc::now(),
+            },
+        );
+
+        let seeded =
+            service.seed_snapshot("btc-updown-5m-1773232500", "btc", "5m", 69_200.0, Some(450));
+
+        assert!(seeded);
+        let snapshot = service
+            .current_snapshot("btc-updown-5m-1773232500")
+            .expect("snapshot");
+        assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
+        assert!(snapshot.verified);
+        assert_eq!(snapshot.price_to_beat, 69_200.0);
+        assert_eq!(snapshot.source_latency_ms, Some(450));
+    }
+
+    #[tokio::test]
+    async fn fetch_snapshot_returns_seeded_cache_without_network_lookup() {
+        let service = PolymarketPriceToBeatService::new();
+        service.cache.lock().insert(
+            "btc-updown-5m-1773232500".to_string(),
+            test_snapshot(PriceToBeatSource::ChainlinkCarryover),
+        );
+
+        let snapshot = service
+            .fetch_snapshot("btc-updown-5m-1773232500")
+            .await
+            .expect("seeded snapshot");
+
+        assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
+        assert_eq!(snapshot.price_to_beat, 69_279.93484689768);
+    }
+
+    #[test]
+    fn try_cached_or_spawn_returns_ready_for_seeded_snapshot() {
+        let service = Box::leak(Box::new(PolymarketPriceToBeatService::new()));
+        service.cache.lock().insert(
+            "btc-updown-5m-1773232500".to_string(),
+            test_snapshot(PriceToBeatSource::ChainlinkCarryover),
+        );
+
+        let lookup = service.try_cached_or_spawn("btc-updown-5m-1773232500");
+
+        match lookup {
+            PriceToBeatLookup::Ready(snapshot) => {
+                assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
+            }
+            other => panic!("expected ready lookup, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn try_cached_or_spawn_returns_pending_for_provisional_snapshot() {
+        let service = Box::leak(Box::new(PolymarketPriceToBeatService::new()));
+        service.cache.lock().insert(
+            "btc-updown-5m-1773232500".to_string(),
+            PolymarketPriceToBeatSnapshot {
+                event_url: "https://polymarket.com/event/btc-updown-5m-1773232500".to_string(),
+                asset: "btc".to_string(),
+                timeframe: "5m".to_string(),
+                price_to_beat: 69_300.0,
+                source: PriceToBeatSource::Polymarket,
+                verified: false,
+                source_latency_ms: None,
+                fetched_at: Utc::now(),
+            },
+        );
+
+        let lookup = service.try_cached_or_spawn("btc-updown-5m-1773232500");
+
+        assert!(matches!(lookup, PriceToBeatLookup::Pending));
+    }
+
+    #[test]
+    fn try_cached_or_spawn_with_returns_ready_when_chainlink_seed_is_available() {
+        let service = Box::leak(Box::new(PolymarketPriceToBeatService::new()));
+
+        let lookup = service.try_cached_or_spawn_with("btc-updown-5m-1773232500", |_| {
+            Ok(ChainlinkPriceTimestampSnapshot {
+                price: 69_200.0,
+                timestamp_ms: 1_773_232_500_000,
+            })
+        });
+
+        match lookup {
+            PriceToBeatLookup::Ready(snapshot) => {
+                assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
+                assert_eq!(snapshot.price_to_beat, 69_200.0);
+            }
+            other => panic!("expected ready lookup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_cached_or_spawn_with_promotes_provisional_snapshot_from_chainlink_seed() {
+        let service = Box::leak(Box::new(PolymarketPriceToBeatService::new()));
+        service.cache.lock().insert(
+            "btc-updown-5m-1773232500".to_string(),
+            PolymarketPriceToBeatSnapshot {
+                event_url: "https://polymarket.com/event/btc-updown-5m-1773232500".to_string(),
+                asset: "btc".to_string(),
+                timeframe: "5m".to_string(),
+                price_to_beat: 69_100.0,
+                source: PriceToBeatSource::Polymarket,
+                verified: false,
+                source_latency_ms: None,
+                fetched_at: Utc::now(),
+            },
+        );
+
+        let lookup = service.try_cached_or_spawn_with("btc-updown-5m-1773232500", |_| {
+            Ok(ChainlinkPriceTimestampSnapshot {
+                price: 69_200.0,
+                timestamp_ms: 1_773_232_500_000,
+            })
+        });
+
+        match lookup {
+            PriceToBeatLookup::Ready(snapshot) => {
+                assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
+                assert_eq!(snapshot.price_to_beat, 69_200.0);
+            }
+            other => panic!("expected ready lookup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_cached_or_spawn_returns_terminal_failure_once() {
+        let service = Box::leak(Box::new(PolymarketPriceToBeatService::new()));
+        service.record_terminal_failure(
+            "btc-updown-5m-1773232500",
+            "__NEXT_DATA__ script tag not found in html".to_string(),
+        );
+
+        let first = service.try_cached_or_spawn("btc-updown-5m-1773232500");
+        let second = service.take_terminal_failure("btc-updown-5m-1773232500");
+
+        match first {
+            PriceToBeatLookup::Unavailable(detail) => {
+                assert_eq!(detail, "__NEXT_DATA__ script tag not found in html");
+            }
+            other => panic!("expected unavailable lookup, got {other:?}"),
+        }
+        assert!(second.is_none());
     }
 }

@@ -543,7 +543,7 @@ fn strict_stop_loss_trigger_modes_require_selected_source() {
 }
 
 #[test]
-fn composite_sl_bid_confirmation_guard_blocks_when_bid_above_trigger() {
+fn legacy_composite_sl_bid_confirmation_guard_blocks_when_bid_above_trigger() {
     let runtime_price = TradeBuilderRuntimePrice {
         price: 0.60,
         source: "ws_fast_last_trade",
@@ -560,7 +560,8 @@ fn composite_sl_bid_confirmation_guard_blocks_when_bid_above_trigger() {
 
     assert!(should_skip_trade_builder_composite_sl_bid_confirmation(
         &order,
-        &runtime_price));
+        &runtime_price
+    ));
 }
 
 #[test]
@@ -579,18 +580,20 @@ fn composite_sl_bid_confirmation_guard_allows_equal_or_lower_bid() {
         last_trade_price: Some(0.45),
     };
     assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
-        &order, &equal_bid));
+        &order, &equal_bid
+    ));
 
     let lower_bid = TradeBuilderRuntimePrice {
         best_bid: Some(0.20),
         ..equal_bid
     };
     assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
-        &order, &lower_bid));
+        &order, &lower_bid
+    ));
 }
 
 #[test]
-fn composite_sl_bid_confirmation_guard_blocks_without_bid() {
+fn legacy_composite_sl_bid_confirmation_guard_blocks_without_bid() {
     let runtime_price = TradeBuilderRuntimePrice {
         price: 0.45,
         source: "ws_fast_last_trade",
@@ -607,7 +610,75 @@ fn composite_sl_bid_confirmation_guard_blocks_without_bid() {
 
     assert!(should_skip_trade_builder_composite_sl_bid_confirmation(
         &order,
-        &runtime_price));
+        &runtime_price
+    ));
+}
+
+#[test]
+fn composite_fast_stop_loss_uses_last_trade_even_when_bid_is_far_higher() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.55,
+        source: "ws_fast_book_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.55),
+        best_ask: Some(0.57),
+        last_trade_price: Some(0.20),
+    };
+
+    let mut order = test_builder_order("sell", Some(9));
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.40);
+    order.sl_trigger_price_mode = Some("composite_fast".to_string());
+
+    assert_eq!(
+        trade_builder_trigger_eval_price_for_order(&order, &runtime_price),
+        0.20
+    );
+    assert!(evaluate_trade_builder_order_trigger(&order, None, 0.20).should_trigger);
+}
+
+#[test]
+fn composite_safe_matches_legacy_composite_guard_behavior() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.60,
+        source: "ws_fast_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.88),
+        best_ask: Some(0.90),
+        last_trade_price: Some(0.45),
+    };
+
+    let mut order = test_builder_order("sell", Some(9));
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.60);
+    order.sl_trigger_price_mode = Some("composite_safe".to_string());
+
+    assert!(should_skip_trade_builder_composite_sl_bid_confirmation(
+        &order,
+        &runtime_price
+    ));
+}
+
+#[test]
+fn composite_fast_does_not_wait_for_bid_confirmation() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.60,
+        source: "ws_fast_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.88),
+        best_ask: Some(0.90),
+        last_trade_price: Some(0.45),
+    };
+
+    let mut order = test_builder_order("sell", Some(9));
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.60);
+    order.sl_trigger_price_mode = Some("composite_fast".to_string());
+
+    assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
+        &order,
+        &runtime_price
+    ));
 }
 
 #[test]
@@ -627,7 +698,8 @@ fn composite_sl_bid_confirmation_guard_ignores_other_orders() {
     best_bid_sl.sl_trigger_price_mode = Some("best_bid".to_string());
     assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
         &best_bid_sl,
-        &runtime_price));
+        &runtime_price
+    ));
 
     let mut last_trade_sl = test_builder_order("sell", Some(9));
     last_trade_sl.trigger_condition = Some("cross_below".to_string());
@@ -635,7 +707,8 @@ fn composite_sl_bid_confirmation_guard_ignores_other_orders() {
     last_trade_sl.sl_trigger_price_mode = Some("last_trade".to_string());
     assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
         &last_trade_sl,
-        &runtime_price));
+        &runtime_price
+    ));
 
     let mut buy_order = test_builder_order("buy", None);
     buy_order.trigger_condition = Some("cross_above".to_string());
@@ -643,7 +716,8 @@ fn composite_sl_bid_confirmation_guard_ignores_other_orders() {
     buy_order.sl_trigger_price_mode = Some("composite".to_string());
     assert!(!should_skip_trade_builder_composite_sl_bid_confirmation(
         &buy_order,
-        &runtime_price));
+        &runtime_price
+    ));
 }
 
 #[test]
@@ -688,6 +762,39 @@ fn fast_runtime_scope_excludes_parentless_conditional_sell() {
     assert!(trade_builder_uses_fast_runtime_pricing(&child_sell));
     assert!(trade_builder_uses_fast_runtime_pricing(&entry_buy));
     assert!(!trade_builder_uses_fast_runtime_pricing(&workflow_sell));
+}
+
+#[test]
+fn armed_builder_ws_eval_logs_meaningful_activity_without_passive_sample() {
+    let activity = ArmedBuilderWsEvalActivity {
+        selected_token_count: 1,
+        selected_order_count: 1,
+        evaluated_order_count: 1,
+        last_seen_update_count: 1,
+        triggered_order_count: 0,
+        composite_waiting_count: 1,
+        composite_released_count: 0,
+        selected_source_missing_count: 0,
+    };
+
+    assert!(armed_builder_ws_eval_should_log(activity, false));
+}
+
+#[test]
+fn armed_builder_ws_eval_skips_passive_cycle_without_sample() {
+    let activity = ArmedBuilderWsEvalActivity {
+        selected_token_count: 1,
+        selected_order_count: 2,
+        evaluated_order_count: 2,
+        last_seen_update_count: 2,
+        triggered_order_count: 0,
+        composite_waiting_count: 0,
+        composite_released_count: 0,
+        selected_source_missing_count: 0,
+    };
+
+    assert!(!armed_builder_ws_eval_should_log(activity, false));
+    assert!(armed_builder_ws_eval_should_log(activity, true));
 }
 
 #[test]

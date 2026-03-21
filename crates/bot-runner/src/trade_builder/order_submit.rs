@@ -110,6 +110,55 @@ async fn resolve_trade_builder_market_spec(
     None
 }
 
+fn trade_builder_guard_diagnostic_payload(
+    configured: bool,
+    decision: &str,
+    reason_code: &str,
+    details: Value,
+) -> Value {
+    json!({
+        "configured": configured,
+        "decision": decision,
+        "reason_code": reason_code,
+        "details": details,
+    })
+}
+
+async fn append_trade_builder_guard_diagnostics_event(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    current_price: f64,
+    desired_price: f64,
+    best_ask: Option<f64>,
+    trigger_price_guard: Value,
+    execution_floor_guard: Value,
+    max_price_guard: Value,
+    effective_guard_scope: Option<&str>,
+    effective_decision: &str,
+    effective_reason_code: &str,
+) -> Result<()> {
+    repo.append_trade_builder_order_event(
+        order.id,
+        "guard_evaluated",
+        &json!({
+            "market_slug": &order.market_slug,
+            "token_id": &order.token_id,
+            "outcome_label": &order.outcome_label,
+            "status_before": &order.status,
+            "current_price": current_price,
+            "desired_price": desired_price,
+            "best_ask": best_ask,
+            "trigger_price_guard": trigger_price_guard,
+            "execution_floor_guard": execution_floor_guard,
+            "max_price_guard": max_price_guard,
+            "effective_guard_scope": effective_guard_scope,
+            "effective_decision": effective_decision,
+            "effective_reason_code": effective_reason_code,
+        }),
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn submit_trade_builder_trigger_order(
     repo: &PostgresRepository,
@@ -161,7 +210,131 @@ async fn submit_trade_builder_trigger_order(
         };
     anyhow::ensure!(size > 0.0, "computed builder order size is zero");
 
-    if trade_builder_price_below_guard_trigger(order, current_price) {
+    let trigger_price_guard_configured = order.side == "buy" && order.guard_trigger_price.is_some();
+    let trigger_price_guard_blocked =
+        trigger_price_guard_configured && trade_builder_price_below_guard_trigger(order, current_price);
+    let trigger_price_guard_payload = if trigger_price_guard_blocked {
+        trade_builder_guard_diagnostic_payload(
+            true,
+            if order.retry_on_trigger_guard_block {
+                "waiting"
+            } else {
+                "blocked"
+            },
+            "below_trigger_price_guard",
+            json!({
+                "guard_trigger_price": order.guard_trigger_price,
+                "current_price": current_price,
+            }),
+        )
+    } else if trigger_price_guard_configured {
+        trade_builder_guard_diagnostic_payload(
+            true,
+            "passed",
+            "passed",
+            json!({
+                "guard_trigger_price": order.guard_trigger_price,
+                "current_price": current_price,
+            }),
+        )
+    } else {
+        trade_builder_guard_diagnostic_payload(false, "not_configured", "not_configured", Value::Null)
+    };
+
+    let execution_floor_reason = if trade_builder_execution_floor_missing_best_ask(order, best_ask) {
+        Some("best_ask_unavailable")
+    } else {
+        trade_builder_execution_floor_block_reason(order, best_ask)
+    };
+    let execution_floor_configured = order.side == "buy" && order.best_ask_floor_price.is_some();
+    let execution_floor_payload = if let Some(reason_code) = execution_floor_reason {
+        trade_builder_guard_diagnostic_payload(
+            true,
+            if trade_builder_execution_floor_should_wait(order, reason_code) {
+                "waiting"
+            } else {
+                "blocked"
+            },
+            reason_code,
+            json!({
+                "best_ask_floor_price": order.best_ask_floor_price,
+                "best_ask": best_ask,
+            }),
+        )
+    } else if execution_floor_configured {
+        trade_builder_guard_diagnostic_payload(
+            true,
+            "passed",
+            "passed",
+            json!({
+                "best_ask_floor_price": order.best_ask_floor_price,
+                "best_ask": best_ask,
+            }),
+        )
+    } else {
+        trade_builder_guard_diagnostic_payload(false, "not_configured", "not_configured", Value::Null)
+    };
+
+    let max_price_configured = order.side == "buy" && order.max_price.is_some();
+    let (max_price_reference, max_price_reference_source) =
+        trade_builder_resolve_max_price_reference(order, best_ask, desired_price);
+    let max_price_blocked =
+        max_price_configured && trade_builder_price_exceeds_max_price(order, max_price_reference);
+    let max_price_payload = if max_price_blocked {
+        trade_builder_guard_diagnostic_payload(
+            true,
+            if order.retry_on_max_price_block {
+                "waiting"
+            } else {
+                "blocked"
+            },
+            "above_max_price",
+            json!({
+                "max_price": order.max_price,
+                "current_price": current_price,
+                "desired_price": desired_price,
+                "reference_price": max_price_reference,
+                "reference_price_source": max_price_reference_source,
+            }),
+        )
+    } else if max_price_configured {
+        trade_builder_guard_diagnostic_payload(
+            true,
+            "passed",
+            "passed",
+            json!({
+                "max_price": order.max_price,
+                "current_price": current_price,
+                "desired_price": desired_price,
+                "reference_price": max_price_reference,
+                "reference_price_source": max_price_reference_source,
+            }),
+        )
+    } else {
+        trade_builder_guard_diagnostic_payload(false, "not_configured", "not_configured", Value::Null)
+    };
+
+    if trigger_price_guard_blocked {
+        let candidate_reason =
+            build_guard_notification_reason("trigger_price", "below_trigger_price_guard");
+        append_trade_builder_guard_diagnostics_event(
+            repo,
+            order,
+            current_price,
+            desired_price,
+            best_ask,
+            trigger_price_guard_payload.clone(),
+            execution_floor_payload.clone(),
+            max_price_payload.clone(),
+            Some("trigger_price"),
+            if order.retry_on_trigger_guard_block {
+                "waiting"
+            } else {
+                "blocked"
+            },
+            "below_trigger_price_guard",
+        )
+        .await?;
         if order.retry_on_trigger_guard_block {
             let notification_message = order
                 .notify_on_trigger_guard_blocked
@@ -186,6 +359,7 @@ async fn submit_trade_builder_trigger_order(
                 }),
                 remaining_usdc,
                 remaining_qty,
+                Some(candidate_reason.as_str()),
                 order
                     .notify_on_trigger_guard_blocked
                     .then_some("trigger_price_waiting"),
@@ -217,12 +391,16 @@ async fn submit_trade_builder_trigger_order(
                 }),
             )
             .await?;
-            if order.notify_on_trigger_guard_blocked {
-                let message =
-                    build_trigger_guard_blocked_notification_message(order, current_price);
-                send_trade_builder_notification(repo, order, "trigger_price_blocked", &message)
-                    .await;
-            }
+            let message = build_trigger_guard_blocked_notification_message(order, current_price);
+            maybe_send_guard_transition_notification(
+                repo,
+                order,
+                candidate_reason.as_str(),
+                order.notify_on_trigger_guard_blocked,
+                "trigger_price_blocked",
+                &message,
+            )
+            .await?;
         }
         warn!(
             run_id,
@@ -239,14 +417,23 @@ async fn submit_trade_builder_trigger_order(
         return Ok(());
     }
 
-    let execution_floor_reason = if trade_builder_execution_floor_missing_best_ask(order, best_ask)
-    {
-        Some("best_ask_unavailable")
-    } else {
-        trade_builder_execution_floor_block_reason(order, best_ask)
-    };
     if let Some(reason_code) = execution_floor_reason {
+        let candidate_reason = build_guard_notification_reason("execution_floor", reason_code);
         let should_wait = trade_builder_execution_floor_should_wait(order, reason_code);
+        append_trade_builder_guard_diagnostics_event(
+            repo,
+            order,
+            current_price,
+            desired_price,
+            best_ask,
+            trigger_price_guard_payload.clone(),
+            execution_floor_payload.clone(),
+            max_price_payload.clone(),
+            Some("execution_floor"),
+            if should_wait { "waiting" } else { "blocked" },
+            reason_code,
+        )
+        .await?;
         let reason_message = match reason_code {
             "best_ask_unavailable" => {
                 "Best ask is unavailable, so the execution floor guard blocked the buy order."
@@ -279,6 +466,7 @@ async fn submit_trade_builder_trigger_order(
                 }),
                 remaining_usdc,
                 remaining_qty,
+                Some(candidate_reason.as_str()),
                 order
                     .notify_on_execution_floor_blocked
                     .then_some("execution_floor_waiting"),
@@ -307,11 +495,16 @@ async fn submit_trade_builder_trigger_order(
                 }),
             )
             .await?;
-            if order.notify_on_execution_floor_blocked {
-                let message = build_execution_floor_blocked_notification_message(order, best_ask);
-                send_trade_builder_notification(repo, order, "execution_floor_blocked", &message)
-                    .await;
-            }
+            let message = build_execution_floor_blocked_notification_message(order, best_ask);
+            maybe_send_guard_transition_notification(
+                repo,
+                order,
+                candidate_reason.as_str(),
+                order.notify_on_execution_floor_blocked,
+                "execution_floor_blocked",
+                &message,
+            )
+            .await?;
         }
         warn!(
             run_id,
@@ -329,10 +522,34 @@ async fn submit_trade_builder_trigger_order(
         return Ok(());
     }
 
-    if trade_builder_price_exceeds_max_price(order, desired_price) {
+    if max_price_blocked {
+        let candidate_reason = build_guard_notification_reason("max_price", "above_max_price");
+        append_trade_builder_guard_diagnostics_event(
+            repo,
+            order,
+            current_price,
+            desired_price,
+            best_ask,
+            trigger_price_guard_payload,
+            execution_floor_payload,
+            max_price_payload,
+            Some("max_price"),
+            if order.retry_on_max_price_block {
+                "waiting"
+            } else {
+                "blocked"
+            },
+            "above_max_price",
+        )
+        .await?;
         if order.retry_on_max_price_block {
             let notification_message = order.notify_on_max_price_blocked.then(|| {
-                build_max_price_waiting_notification_message(order, current_price, desired_price)
+                build_max_price_waiting_notification_message(
+                    order,
+                    current_price,
+                    max_price_reference,
+                    max_price_reference_source,
+                )
             });
             transition_trade_builder_order_to_guard_waiting(
                 repo,
@@ -349,11 +566,14 @@ async fn submit_trade_builder_trigger_order(
                     "max_price": order.max_price,
                     "current_price": current_price,
                     "desired_price": desired_price,
+                    "reference_price": max_price_reference,
+                    "reference_price_source": max_price_reference_source,
                     "status_before": &order.status,
                     "status_after": TRADE_BUILDER_GUARD_BLOCKED_STATUS
                 }),
                 remaining_usdc,
                 remaining_qty,
+                Some(candidate_reason.as_str()),
                 order
                     .notify_on_max_price_blocked
                     .then_some("max_price_waiting"),
@@ -368,7 +588,7 @@ async fn submit_trade_builder_trigger_order(
                 "max_price_blocked",
                 &json!({
                     "reason_code": "above_max_price",
-                    "reason_message": "Order price would exceed the configured max price.",
+                    "reason_message": "Reference price would exceed the configured max price.",
                     "market_slug": &order.market_slug,
                     "token_id": &order.token_id,
                     "trigger_condition": order.trigger_condition.as_deref(),
@@ -376,15 +596,30 @@ async fn submit_trade_builder_trigger_order(
                     "max_price": order.max_price,
                     "current_price": current_price,
                     "desired_price": desired_price,
+                    "reference_price": max_price_reference,
+                    "reference_price_source": max_price_reference_source,
                     "status_before": &order.status,
                     "status_after": "canceled"
                 }),
             )
             .await?;
             if let Some((notification_type, message)) =
-                build_max_price_blocked_notification(order, current_price, desired_price)
+                build_max_price_blocked_notification(
+                    order,
+                    current_price,
+                    max_price_reference,
+                    max_price_reference_source,
+                )
             {
-                send_trade_builder_notification(repo, order, notification_type, &message).await;
+                maybe_send_guard_transition_notification(
+                    repo,
+                    order,
+                    candidate_reason.as_str(),
+                    true,
+                    notification_type,
+                    &message,
+                )
+                .await?;
             }
         }
         warn!(
@@ -394,6 +629,8 @@ async fn submit_trade_builder_trigger_order(
             token_id = %order.token_id,
             current_price,
             desired_price,
+            reference_price = max_price_reference,
+            reference_price_source = max_price_reference_source,
             max_price = ?order.max_price,
             waiting = order.retry_on_max_price_block,
             reason_code = "above_max_price",
@@ -401,6 +638,21 @@ async fn submit_trade_builder_trigger_order(
         );
         return Ok(());
     }
+
+    append_trade_builder_guard_diagnostics_event(
+        repo,
+        order,
+        current_price,
+        desired_price,
+        best_ask,
+        trigger_price_guard_payload,
+        execution_floor_payload,
+        max_price_payload,
+        None,
+        "passed",
+        "guards_passed",
+    )
+    .await?;
 
     let risk = risk_gate_manual_order(
         repo,

@@ -19,7 +19,7 @@ If unavailable, UI falls back to manual restart messaging.
 For systemd deployments where frontend runs as `dextrabot`, passwordless sudo must allow:
 `/usr/bin/systemctl start|stop|restart|is-active <BOT_SERVICE_NAME>`.
 
-`AUTH_SECRET` is also used as login password.
+`AUTH_SECRET` is also used as login password and should be a random secret with at least 32 characters.
 
 ## Run
 
@@ -75,6 +75,7 @@ AUTH_COOKIE_SECURE=false
 ```
 
 Because login is mandatory, `AUTH_SECRET` and `CONFIG_ENCRYPTION_KEY` must be set to real values (not `CHANGE_ME`).
+`AUTH_SECRET` should be at least 32 characters and must not use a shared or guessable password.
 
 ## Dev Process Guard
 

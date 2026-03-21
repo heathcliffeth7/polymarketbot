@@ -205,25 +205,47 @@ function countValidMarketPriceOutcomeConditions(config: Record<string, unknown>)
 
   let validCount = 0;
   for (const item of raw) {
-    if (!isRecord(item)) continue;
-    const tokenId = toTrimmedString(item.tokenId);
-    const outcomeLabel = toTrimmedString(item.outcomeLabel);
-    const triggerCondition = toTrimmedString(item.triggerCondition);
-    const triggerPriceCent = toFiniteNumber(item.triggerPriceCent);
-    const triggerPrice = toFiniteNumber(item.triggerPrice);
-    const hasValidTriggerPriceCent =
-      triggerPriceCent != null && triggerPriceCent > 0 && triggerPriceCent <= 100;
-    const hasValidTriggerPrice =
-      triggerPrice != null && triggerPrice > 0 && triggerPrice <= 1;
-    const hasValidMaxPrice = hasValidOptionalMaxPrice(item.maxPriceCent, item.maxPrice);
-    if (!tokenId || !outcomeLabel) continue;
-    if (!isSupportedMarketPriceTriggerCondition(triggerCondition)) continue;
-    if (!hasValidTriggerPriceCent && !hasValidTriggerPrice) continue;
-    if (!hasValidMaxPrice) continue;
+    if (!isValidMarketPriceOutcomeCondition(item, config)) continue;
     validCount += 1;
   }
 
   return validCount;
+}
+
+function isValidMarketPriceOutcomeCondition(
+  row: unknown,
+  config: Record<string, unknown>
+): row is Record<string, unknown> {
+  if (!isRecord(row)) return false;
+
+  const tokenId = toTrimmedString(row.tokenId);
+  const outcomeLabel = toTrimmedString(row.outcomeLabel);
+  if (!tokenId || !outcomeLabel) return false;
+
+  const ptbEnabled = toBooleanish(config.priceToBeatTriggerEnabled) === true;
+  const triggerCondition = toTrimmedString(row.triggerCondition);
+  const triggerPriceCentProvided = hasProvidedValue(row.triggerPriceCent);
+  const triggerPriceProvided = !triggerPriceCentProvided && hasProvidedValue(row.triggerPrice);
+  const triggerPriceCent = toFiniteNumber(row.triggerPriceCent);
+  const triggerPrice = toFiniteNumber(row.triggerPrice);
+  const hasValidTriggerPriceCent =
+    triggerPriceCent != null && triggerPriceCent > 0 && triggerPriceCent <= 100;
+  const hasValidTriggerPrice =
+    triggerPrice != null && triggerPrice > 0 && triggerPrice <= 1;
+  const hasStandardTrigger =
+    isSupportedMarketPriceTriggerCondition(triggerCondition) &&
+    (hasValidTriggerPriceCent || hasValidTriggerPrice);
+  const isPtbOnly =
+    ptbEnabled &&
+    !triggerCondition &&
+    !triggerPriceCentProvided &&
+    !triggerPriceProvided;
+
+  if (!hasStandardTrigger && !isPtbOnly) return false;
+  if (hasStandardTrigger && !hasValidOptionalMaxPrice(row.maxPriceCent, row.maxPrice)) {
+    return false;
+  }
+  return true;
 }
 
 function toBooleanish(value: unknown): boolean | null {
@@ -592,6 +614,7 @@ export {
   resolveConfiguredBinaryPrice,
   countValidOutcomeConditions,
   countValidMarketPriceOutcomeConditions,
+  isValidMarketPriceOutcomeCondition,
   toBooleanish,
   toTrimmedString,
   normalizeDualDcaAsset,

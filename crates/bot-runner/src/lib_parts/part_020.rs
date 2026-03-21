@@ -110,6 +110,232 @@ fn flow_node_state_i64(context: &Value, node_key: &str, state_key: &str) -> Opti
     flow_node_state(context, node_key, state_key).and_then(Value::as_i64)
 }
 
+const FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SLUG: &str = "auto_scope_market_slug";
+const FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SCOPE: &str = "auto_scope_market_scope";
+const FLOW_NODE_STATE_AUTO_SCOPE_MARKET_ASSET: &str = "auto_scope_market_asset";
+const FLOW_NODE_STATE_AUTO_SCOPE_MARKET_TIMEFRAME: &str = "auto_scope_market_timeframe";
+const FLOW_NODE_STATE_AUTO_SCOPE_YES_TOKEN_ID: &str = "auto_scope_yes_token_id";
+const FLOW_NODE_STATE_AUTO_SCOPE_NO_TOKEN_ID: &str = "auto_scope_no_token_id";
+const FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_TOKEN_ID: &str = "auto_scope_resolved_token_id";
+const FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_OUTCOME_LABEL: &str = "auto_scope_resolved_outcome_label";
+const FLOW_NODE_STATE_AUTO_SCOPE_SELECTION_REASON: &str = "auto_scope_selection_reason";
+
+fn set_flow_node_state_optional_string(
+    context: &mut Value,
+    node_key: &str,
+    state_key: &str,
+    value: Option<&str>,
+) {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => set_flow_node_state(context, node_key, state_key, json!(value)),
+        None => remove_flow_node_state(context, node_key, state_key),
+    }
+}
+
+fn node_auto_scope_state_string(
+    context: &Value,
+    node_key: &str,
+    state_key: &str,
+) -> Option<String> {
+    flow_node_state_string(context, node_key, state_key)
+}
+
+fn node_auto_scope_market_slug(context: &Value, node_key: &str) -> Option<String> {
+    node_auto_scope_state_string(context, node_key, FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SLUG)
+        .or_else(|| flow_context_string(context, "marketSlug"))
+}
+
+fn node_auto_scope_market_scope(node: &TradeFlowNode, context: &Value) -> Option<String> {
+    node_auto_scope_state_string(context, &node.key, FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SCOPE)
+        .or_else(|| node_config_string(node, "marketScope"))
+        .or_else(|| flow_context_string(context, "marketScope"))
+}
+
+fn node_auto_scope_market_asset(context: &Value, node_key: &str) -> Option<String> {
+    node_auto_scope_state_string(context, node_key, FLOW_NODE_STATE_AUTO_SCOPE_MARKET_ASSET)
+        .or_else(|| flow_context_string(context, "marketAsset"))
+}
+
+fn node_auto_scope_market_timeframe(context: &Value, node_key: &str) -> Option<String> {
+    node_auto_scope_state_string(
+        context,
+        node_key,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_TIMEFRAME,
+    )
+    .or_else(|| flow_context_string(context, "marketTimeframe"))
+}
+
+fn node_auto_scope_yes_token_id(context: &Value, node_key: &str) -> Option<String> {
+    node_auto_scope_state_string(context, node_key, FLOW_NODE_STATE_AUTO_SCOPE_YES_TOKEN_ID)
+        .or_else(|| flow_context_string(context, "yesTokenId"))
+}
+
+fn node_auto_scope_no_token_id(context: &Value, node_key: &str) -> Option<String> {
+    node_auto_scope_state_string(context, node_key, FLOW_NODE_STATE_AUTO_SCOPE_NO_TOKEN_ID)
+        .or_else(|| flow_context_string(context, "noTokenId"))
+}
+
+fn node_auto_scope_resolved_token_id(context: &Value, node_key: &str) -> Option<String> {
+    node_auto_scope_state_string(
+        context,
+        node_key,
+        FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_TOKEN_ID,
+    )
+    .or_else(|| flow_context_string(context, "tokenId"))
+}
+
+fn node_auto_scope_resolved_outcome_label(context: &Value, node_key: &str) -> Option<String> {
+    node_auto_scope_state_string(
+        context,
+        node_key,
+        FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_OUTCOME_LABEL,
+    )
+    .or_else(|| flow_context_string(context, "outcomeLabel"))
+}
+
+fn set_trigger_node_auto_scope_context(
+    context: &mut Value,
+    node_key: &str,
+    market_scope: &str,
+    market_asset: &str,
+    market_timeframe: &str,
+    selected: &SelectedLiveMarket,
+    preferred_outcome: Option<&str>,
+) {
+    set_flow_node_state_optional_string(
+        context,
+        node_key,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SLUG,
+        Some(selected.slug.as_str()),
+    );
+    set_flow_node_state_optional_string(
+        context,
+        node_key,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SCOPE,
+        Some(market_scope),
+    );
+    set_flow_node_state_optional_string(
+        context,
+        node_key,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_ASSET,
+        Some(market_asset),
+    );
+    set_flow_node_state_optional_string(
+        context,
+        node_key,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_TIMEFRAME,
+        Some(market_timeframe),
+    );
+    set_flow_node_state_optional_string(
+        context,
+        node_key,
+        FLOW_NODE_STATE_AUTO_SCOPE_YES_TOKEN_ID,
+        selected.yes_token_id.as_deref(),
+    );
+    set_flow_node_state_optional_string(
+        context,
+        node_key,
+        FLOW_NODE_STATE_AUTO_SCOPE_NO_TOKEN_ID,
+        selected.no_token_id.as_deref(),
+    );
+    set_flow_node_state_optional_string(
+        context,
+        node_key,
+        FLOW_NODE_STATE_AUTO_SCOPE_SELECTION_REASON,
+        Some(selected.selection_reason.as_str()),
+    );
+
+    match preferred_outcome.and_then(normalized_binary_outcome_label) {
+        Some("yes") => {
+            set_flow_node_state_optional_string(
+                context,
+                node_key,
+                FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_TOKEN_ID,
+                selected.yes_token_id.as_deref(),
+            );
+            set_flow_node_state_optional_string(
+                context,
+                node_key,
+                FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_OUTCOME_LABEL,
+                Some("Yes"),
+            );
+        }
+        Some("no") => {
+            set_flow_node_state_optional_string(
+                context,
+                node_key,
+                FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_TOKEN_ID,
+                selected.no_token_id.as_deref(),
+            );
+            set_flow_node_state_optional_string(
+                context,
+                node_key,
+                FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_OUTCOME_LABEL,
+                Some("No"),
+            );
+        }
+        _ => {
+            remove_flow_node_state(
+                context,
+                node_key,
+                FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_TOKEN_ID,
+            );
+            remove_flow_node_state(
+                context,
+                node_key,
+                FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_OUTCOME_LABEL,
+            );
+        }
+    }
+}
+
+fn clear_trigger_node_auto_scope_context(context: &mut Value, node_key: &str) {
+    for state_key in [
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SLUG,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SCOPE,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_ASSET,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_TIMEFRAME,
+        FLOW_NODE_STATE_AUTO_SCOPE_YES_TOKEN_ID,
+        FLOW_NODE_STATE_AUTO_SCOPE_NO_TOKEN_ID,
+        FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_TOKEN_ID,
+        FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_OUTCOME_LABEL,
+        FLOW_NODE_STATE_AUTO_SCOPE_SELECTION_REASON,
+    ] {
+        remove_flow_node_state(context, node_key, state_key);
+    }
+}
+
+fn promote_trigger_node_auto_scope_context_to_flow_context(
+    context: &mut Value,
+    node_key: &str,
+    market_slug: &str,
+) {
+    set_flow_context(context, "marketSlug", json!(market_slug));
+    if let Some(market_scope) =
+        node_auto_scope_state_string(context, node_key, FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SCOPE)
+    {
+        set_flow_context(context, "marketScope", json!(market_scope));
+    }
+    if let Some(market_asset) =
+        node_auto_scope_state_string(context, node_key, FLOW_NODE_STATE_AUTO_SCOPE_MARKET_ASSET)
+    {
+        set_flow_context(context, "marketAsset", json!(market_asset));
+    }
+    if let Some(market_timeframe) = node_auto_scope_market_timeframe(context, node_key) {
+        set_flow_context(context, "marketTimeframe", json!(market_timeframe));
+    }
+    if let Some(yes_token_id) =
+        node_auto_scope_state_string(context, node_key, FLOW_NODE_STATE_AUTO_SCOPE_YES_TOKEN_ID)
+    {
+        set_flow_context(context, "yesTokenId", json!(yes_token_id));
+    }
+    if let Some(no_token_id) =
+        node_auto_scope_state_string(context, node_key, FLOW_NODE_STATE_AUTO_SCOPE_NO_TOKEN_ID)
+    {
+        set_flow_context(context, "noTokenId", json!(no_token_id));
+    }
+}
+
 fn flow_node_reentry_generation(context: &Value, node_key: &str) -> i64 {
     flow_node_state_i64(context, node_key, FLOW_NODE_STATE_REENTRY_GENERATION).unwrap_or(0)
 }
@@ -626,6 +852,15 @@ async fn process_trade_builder_orders(
                         &json!({ "error": err_text }),
                     )
                     .await;
+                if let Some(ref latest) = latest_order {
+                    let _ = maybe_send_order_not_filled_notification(
+                        repo,
+                        latest,
+                        "processing_error",
+                        &err_text,
+                    )
+                    .await;
+                }
             }
             warn!(
                 run_id,
@@ -635,9 +870,10 @@ async fn process_trade_builder_orders(
             );
         }
         if trade_flow_ws_fast_path_cache_requires_refresh_now().await {
-            if let Err(e) = refresh_trade_flow_ws_fast_path_for_boundary(
-                repo, run_id, ws, &mut user_cfg_cache,
-            ).await {
+            if let Err(e) =
+                refresh_trade_flow_ws_fast_path_for_boundary(repo, run_id, ws, &mut user_cfg_cache)
+                    .await
+            {
                 warn!(run_id, error = %e, "TRADE_FLOW_BOUNDARY_REFRESH_FAILED");
             }
         }

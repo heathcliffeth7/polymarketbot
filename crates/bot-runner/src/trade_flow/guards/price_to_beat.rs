@@ -1,19 +1,37 @@
-use super::chainlink_price::fetch_chainlink_price;
-use super::polymarket_price_to_beat::fetch_polymarket_price_to_beat;
+use super::chainlink_price::get_chainlink_price_cached;
+use super::polymarket_price_to_beat::{
+    get_price_to_beat_cached, try_price_to_beat_cached_or_spawn, PriceToBeatLookup,
+    PriceToBeatSource,
+};
 use anyhow::Result;
 use chrono::Duration as ChronoDuration;
 use serde_json::{json, Value};
 
-const CURRENT_PRICE_SOURCE: &str = "chainlink_live_data_ws";
+mod current_price;
+mod notification;
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+use self::current_price::{
+    map_current_price_error, resolve_current_price_result, CURRENT_PRICE_SOURCE_COINBASE_FALLBACK,
+};
+use self::current_price::{resolve_price_to_beat_current_price, CURRENT_PRICE_SOURCE_CHAINLINK};
+use self::notification::{
+    build_price_to_beat_guard_blocked_notification_message,
+    build_price_to_beat_guard_waiting_notification_message,
+};
+
+const PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY: &str = "lastGuardNotificationSeed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PriceToBeatDiffUnit {
+pub(crate) enum PriceToBeatDiffUnit {
     Usd,
     Cent,
 }
 
 impl PriceToBeatDiffUnit {
-    fn parse(raw: Option<&str>) -> Option<Self> {
+    pub(crate) fn parse(raw: Option<&str>) -> Option<Self> {
         match raw
             .map(str::trim)
             .unwrap_or_default()
@@ -26,7 +44,7 @@ impl PriceToBeatDiffUnit {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Usd => "usd",
             Self::Cent => "cent",
@@ -84,13 +102,93 @@ impl PriceToBeatGuardEvaluation {
 }
 
 fn clear_price_to_beat_guard_waiting_context(context: &mut Value) {
+    crate::set_flow_context(context, "priceToBeatGuardWaiting", Value::Null);
+    // Legacy key cleanup
     crate::set_flow_context(context, "priceToBeatGuardWaitingReason", Value::Null);
 }
 
-fn price_to_beat_guard_waiting_reason(context: &Value) -> Option<String> {
-    crate::flow_context_value(context, "priceToBeatGuardWaitingReason")
-        .and_then(|value| value.as_str().map(str::to_string))
-        .filter(|value| !value.trim().is_empty())
+fn price_to_beat_guard_notification_seed_reason(
+    context: &Value,
+    node_key: &str,
+    market_slug: &str,
+    token_id: &str,
+) -> Option<String> {
+    let seed = crate::flow_context_value(context, PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY)?;
+    let seed_node_key = seed.get("nodeKey")?.as_str()?;
+    let seed_market_slug = seed.get("marketSlug")?.as_str()?;
+    let seed_token_id = seed.get("tokenId")?.as_str()?;
+    let reason = seed.get("reason")?.as_str()?;
+    if seed_node_key != node_key || seed_market_slug != market_slug || seed_token_id != token_id {
+        return None;
+    }
+    Some(reason.to_string())
+}
+
+fn set_price_to_beat_guard_notification_seed(
+    context: &mut Value,
+    node_key: &str,
+    market_slug: &str,
+    token_id: &str,
+    reason: &str,
+) {
+    crate::set_flow_context(
+        context,
+        PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY,
+        json!({
+            "nodeKey": node_key,
+            "marketSlug": market_slug,
+            "tokenId": token_id,
+            "reason": reason,
+        }),
+    );
+}
+
+pub(crate) fn take_price_to_beat_guard_notification_seed(
+    context: &mut Value,
+    node_key: &str,
+    market_slug: &str,
+    token_id: &str,
+) -> Option<String> {
+    let reason =
+        price_to_beat_guard_notification_seed_reason(context, node_key, market_slug, token_id)?;
+    crate::set_flow_context(
+        context,
+        PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY,
+        Value::Null,
+    );
+    Some(reason)
+}
+
+struct PriceToBeatGuardWaitingState {
+    market_slug: String,
+    reason_code: String,
+}
+
+fn price_to_beat_guard_waiting_state(context: &Value) -> Option<PriceToBeatGuardWaitingState> {
+    let obj = crate::flow_context_value(context, "priceToBeatGuardWaiting")?;
+    let market_slug = obj.get("marketSlug")?.as_str()?.to_string();
+    let reason_code = obj.get("reasonCode")?.as_str()?.to_string();
+    if market_slug.is_empty() || reason_code.is_empty() {
+        return None;
+    }
+    Some(PriceToBeatGuardWaitingState {
+        market_slug,
+        reason_code,
+    })
+}
+
+fn set_price_to_beat_guard_waiting_state(
+    context: &mut Value,
+    market_slug: &str,
+    reason_code: &str,
+) {
+    crate::set_flow_context(
+        context,
+        "priceToBeatGuardWaiting",
+        json!({ "marketSlug": market_slug, "reasonCode": reason_code }),
+    );
+    // Clear legacy key if present
+    crate::set_flow_context(context, "priceToBeatGuardWaitingReason", Value::Null);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -127,6 +225,108 @@ fn evaluate_directional_gap(
         directional_gap,
         passed: directional_gap >= threshold_usd,
     })
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PriceToBeatTriggerGateResult {
+    pub(crate) passed: bool,
+    pub(crate) reason: &'static str,
+    pub(crate) directional_gap: Option<f64>,
+    pub(crate) price_to_beat: Option<f64>,
+    pub(crate) current_price: Option<f64>,
+    pub(crate) min_gap: f64,
+    pub(crate) max_gap: Option<f64>,
+}
+
+impl PriceToBeatTriggerGateResult {
+    pub(crate) fn to_value(&self) -> Value {
+        json!({
+            "passed": self.passed,
+            "reason": self.reason,
+            "directional_gap": self.directional_gap,
+            "price_to_beat": self.price_to_beat,
+            "current_price": self.current_price,
+            "min_gap": self.min_gap,
+            "max_gap": self.max_gap,
+        })
+    }
+}
+
+pub(crate) fn evaluate_price_to_beat_trigger_gate(
+    market_slug: &str,
+    outcome_label: &str,
+    min_gap: f64,
+    max_gap: Option<f64>,
+    unit: PriceToBeatDiffUnit,
+) -> PriceToBeatTriggerGateResult {
+    let min_gap_usd = normalize_price_to_beat_threshold_usd(min_gap, unit);
+    let max_gap_usd = max_gap.map(|value| normalize_price_to_beat_threshold_usd(value, unit));
+    let Some(snapshot) = get_price_to_beat_cached(market_slug) else {
+        return PriceToBeatTriggerGateResult {
+            passed: false,
+            reason: "price_to_beat_pending",
+            directional_gap: None,
+            price_to_beat: None,
+            current_price: None,
+            min_gap: min_gap_usd,
+            max_gap: max_gap_usd,
+        };
+    };
+    let current_price = match get_chainlink_price_cached(&snapshot.asset) {
+        Ok(price) => price,
+        Err(_) => {
+            return PriceToBeatTriggerGateResult {
+                passed: true,
+                reason: "chainlink_unavailable",
+                directional_gap: None,
+                price_to_beat: Some(snapshot.price_to_beat),
+                current_price: None,
+                min_gap: min_gap_usd,
+                max_gap: max_gap_usd,
+            };
+        }
+    };
+    let Some(directional) = evaluate_directional_gap(
+        current_price,
+        snapshot.price_to_beat,
+        min_gap_usd,
+        outcome_label,
+    ) else {
+        return PriceToBeatTriggerGateResult {
+            passed: false,
+            reason: "unsupported_outcome_label",
+            directional_gap: None,
+            price_to_beat: Some(snapshot.price_to_beat),
+            current_price: Some(current_price),
+            min_gap: min_gap_usd,
+            max_gap: max_gap_usd,
+        };
+    };
+
+    let passed = directional.directional_gap >= min_gap_usd
+        && max_gap_usd
+            .map(|threshold| directional.directional_gap <= threshold)
+            .unwrap_or(true);
+    let reason = if directional.directional_gap < min_gap_usd {
+        "below_min_gap"
+    } else if max_gap_usd
+        .map(|threshold| directional.directional_gap > threshold)
+        .unwrap_or(false)
+    {
+        "above_max_gap"
+    } else {
+        "in_range"
+    };
+
+    PriceToBeatTriggerGateResult {
+        passed,
+        reason,
+        directional_gap: Some(directional.directional_gap),
+        price_to_beat: Some(snapshot.price_to_beat),
+        current_price: Some(current_price),
+        min_gap: min_gap_usd,
+        max_gap: max_gap_usd,
+    }
 }
 
 pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
@@ -197,22 +397,35 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
 
     let should_notify =
         crate::node_config_bool(node, "notifyOnPriceToBeatGapBlocked").unwrap_or(true);
+    let candidate_reason =
+        crate::build_guard_notification_reason("price_to_beat", &evaluation.reason_code);
     if retry_on_guard_block {
-        let entered_waiting = price_to_beat_guard_waiting_reason(context).as_deref()
-            != Some(evaluation.reason_code.as_str());
-        crate::set_flow_context(
-            context,
-            "priceToBeatGuardWaitingReason",
-            json!(evaluation.reason_code.clone()),
-        );
-        if entered_waiting && should_notify {
-            let notification_key = format!(
-                "price_to_beat_guard_waiting:{}:{}:{}",
-                run.user_id, market_slug, evaluation.reason_code
-            );
-            if repo.try_record_idempotency_key(&notification_key).await? {
-                let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
-                send_price_to_beat_guard_notification(repo, run.user_id, &message).await;
+        let _entered_waiting = match price_to_beat_guard_waiting_state(context) {
+            Some(prev) => {
+                prev.market_slug != market_slug || prev.reason_code != evaluation.reason_code
+            }
+            None => true,
+        };
+        set_price_to_beat_guard_waiting_state(context, market_slug, &evaluation.reason_code);
+        if should_notify
+            && price_to_beat_guard_notification_seed_reason(
+                context,
+                &node.key,
+                market_slug,
+                token_id,
+            )
+            .as_deref()
+                != Some(candidate_reason.as_str())
+        {
+            let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
+            if send_price_to_beat_guard_notification(repo, run.user_id, &message).await {
+                set_price_to_beat_guard_notification_seed(
+                    context,
+                    &node.key,
+                    market_slug,
+                    token_id,
+                    &candidate_reason,
+                );
             }
         }
         let repeat_at = crate::Utc::now()
@@ -236,14 +449,20 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
             repeat_idempotency_key: None,
         }));
     }
-    if should_notify {
-        let notification_key = format!(
-            "price_to_beat_guard:{}:{}:{}",
-            run.user_id, market_slug, evaluation.reason_code
-        );
-        if repo.try_record_idempotency_key(&notification_key).await? {
-            let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
-            send_price_to_beat_guard_notification(repo, run.user_id, &message).await;
+    if should_notify
+        && price_to_beat_guard_notification_seed_reason(context, &node.key, market_slug, token_id)
+            .as_deref()
+            != Some(candidate_reason.as_str())
+    {
+        let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
+        if send_price_to_beat_guard_notification(repo, run.user_id, &message).await {
+            set_price_to_beat_guard_notification_seed(
+                context,
+                &node.key,
+                market_slug,
+                token_id,
+                &candidate_reason,
+            );
         }
     }
 
@@ -311,9 +530,26 @@ async fn evaluate_price_to_beat_guard(
         );
     }
 
-    let snapshot = match fetch_polymarket_price_to_beat(market_slug).await {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
+    let snapshot = match try_price_to_beat_cached_or_spawn(market_slug) {
+        PriceToBeatLookup::Ready(snapshot) => snapshot,
+        PriceToBeatLookup::Pending => {
+            return blocked_price_to_beat_guard_evaluation(
+                market_slug,
+                event_url,
+                threshold_value,
+                threshold_unit,
+                threshold_usd,
+                "price_to_beat_pending",
+                None,
+                Some(scope.timeframe.to_string()),
+                Some(scope.asset.to_string()),
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+        PriceToBeatLookup::Unavailable(detail) => {
             return blocked_price_to_beat_guard_evaluation(
                 market_slug,
                 event_url,
@@ -321,28 +557,35 @@ async fn evaluate_price_to_beat_guard(
                 threshold_unit,
                 threshold_usd,
                 "price_to_beat_unavailable",
-                Some(err.to_string()),
+                Some(detail),
                 Some(scope.timeframe.to_string()),
                 Some(scope.asset.to_string()),
                 None,
                 None,
                 None,
                 None,
-            )
+            );
         }
     };
 
-    let current_price = match fetch_chainlink_price(&snapshot.asset).await {
-        Ok(price) => price,
-        Err(err) => {
+    let (current_price, current_price_source) = match resolve_price_to_beat_current_price(
+        snapshot.source,
+        market_slug,
+        &snapshot.asset,
+        snapshot.source_latency_ms,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err((reason_code, reason_detail)) => {
             return blocked_price_to_beat_guard_evaluation(
                 market_slug,
                 snapshot.event_url.clone(),
                 threshold_value,
                 threshold_unit,
                 threshold_usd,
-                "current_price_unavailable",
-                Some(format!("chainlink ws error: {err}")),
+                reason_code,
+                Some(reason_detail),
                 Some(scope.timeframe.to_string()),
                 Some(scope.asset.to_string()),
                 Some(snapshot.price_to_beat),
@@ -409,75 +652,13 @@ async fn evaluate_price_to_beat_guard(
         price_to_beat_source: Some(snapshot.source.as_str().to_string()),
         price_to_beat_source_latency_ms: snapshot.source_latency_ms,
         current_price: Some(current_price),
-        current_price_source: CURRENT_PRICE_SOURCE,
+        current_price_source,
         directional_gap: Some(directional.directional_gap),
         gap_abs: Some(gap_abs),
         threshold_value,
         threshold_unit: threshold_unit.as_str().to_string(),
         threshold_usd,
     }
-}
-
-fn format_optional_direction(value: Option<&str>) -> String {
-    match value {
-        Some("up") => "Up".to_string(),
-        Some("down") => "Down".to_string(),
-        Some(other) => other.to_string(),
-        None => "N/A".to_string(),
-    }
-}
-
-pub(crate) fn build_price_to_beat_guard_blocked_notification_message(
-    evaluation: &PriceToBeatGuardEvaluation,
-) -> String {
-    let reason = match evaluation.reason_code.as_str() {
-        "price_to_beat_gap_below_threshold" => {
-            "Secilen yon icin Price to Beat farki gereken minimum seviyenin altinda."
-        }
-        "price_to_beat_unavailable" => {
-            "Polymarket Price to Beat verisi alinamadigi icin emir engellendi."
-        }
-        "current_price_unavailable" => {
-            "Chainlink current price verisi alinamadigi icin emir engellendi."
-        }
-        "unsupported_market" => "Bu market Price to Beat guard tarafindan desteklenmiyor.",
-        "unsupported_outcome_label" => {
-            "Outcome label Up/Down veya Yes/No yonlerinden biri olarak taninamadi."
-        }
-        _ => "Price to Beat guard emri engelledi.",
-    };
-
-    let detail_line = evaluation
-        .reason_detail
-        .as_deref()
-        .map(|detail| format!("\nDetay: {detail}"))
-        .unwrap_or_default();
-
-    format!(
-        "Price to Beat Korumasi Engelledi\nSebep: {}{}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nCurrent (Chainlink): {}\nYonsel Fark: {}\nMutlak Fark: {}\nLimit: {:.8} {} (~{:.8} USD)",
-        reason,
-        detail_line,
-        format_optional_direction(evaluation.direction.as_deref()),
-        evaluation.market_slug,
-        evaluation.asset.as_deref().unwrap_or("N/A"),
-        evaluation.timeframe.as_deref().unwrap_or("N/A"),
-        format_optional_guard_number(evaluation.price_to_beat),
-        format_optional_guard_number(evaluation.current_price),
-        format_optional_guard_number(evaluation.directional_gap),
-        format_optional_guard_number(evaluation.gap_abs),
-        evaluation.threshold_value,
-        evaluation.threshold_unit,
-        evaluation.threshold_usd
-    )
-}
-
-pub(crate) fn build_price_to_beat_guard_waiting_notification_message(
-    evaluation: &PriceToBeatGuardEvaluation,
-) -> String {
-    format!(
-        "{}\nDurum: Bekleme moduna alindi. Kosullar duzelince order yeniden denenecek.",
-        build_price_to_beat_guard_blocked_notification_message(evaluation)
-    )
 }
 
 fn blocked_price_to_beat_guard_evaluation(
@@ -509,7 +690,7 @@ fn blocked_price_to_beat_guard_evaluation(
         price_to_beat_source,
         price_to_beat_source_latency_ms,
         current_price,
-        current_price_source: CURRENT_PRICE_SOURCE,
+        current_price_source: CURRENT_PRICE_SOURCE_CHAINLINK,
         directional_gap: None,
         gap_abs: None,
         threshold_value,
@@ -528,32 +709,26 @@ fn normalize_price_to_beat_threshold_usd(
     }
 }
 
-fn format_optional_guard_number(value: Option<f64>) -> String {
-    value
-        .map(|value| format!("{value:.8}"))
-        .unwrap_or_else(|| "N/A".to_string())
-}
-
 async fn send_price_to_beat_guard_notification(
     repo: &crate::PostgresRepository,
     user_id: i64,
     message: &str,
-) {
+) -> bool {
     let Ok(telegram) = crate::load_user_telegram_config(repo, user_id).await else {
-        return;
+        return false;
     };
     let bot_token = telegram.bot_token.trim();
     let chat_id = telegram.chat_id.trim();
     if bot_token.is_empty() || chat_id.is_empty() {
-        return;
+        return false;
     }
 
     let Ok(bot_token) = crate::decrypt_config_string_if_needed("telegram.bot_token", bot_token)
     else {
-        return;
+        return false;
     };
     if bot_token.is_empty() {
-        return;
+        return false;
     }
 
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
@@ -570,6 +745,7 @@ async fn send_price_to_beat_guard_notification(
     match result {
         Ok(resp) if resp.status().is_success() => {
             tracing::info!(user_id, "PRICE_TO_BEAT_GUARD_NOTIFICATION_SENT");
+            true
         }
         Ok(resp) => {
             tracing::warn!(
@@ -577,6 +753,7 @@ async fn send_price_to_beat_guard_notification(
                 http_status = resp.status().as_u16(),
                 "PRICE_TO_BEAT_GUARD_NOTIFICATION_FAILED"
             );
+            false
         }
         Err(err) => {
             tracing::warn!(
@@ -584,259 +761,7 @@ async fn send_price_to_beat_guard_notification(
                 error = %err,
                 "PRICE_TO_BEAT_GUARD_NOTIFICATION_FAILED"
             );
+            false
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builds_gap_below_threshold_notification_with_values() {
-        let evaluation = PriceToBeatGuardEvaluation {
-            passed: false,
-            reason_code: "price_to_beat_gap_below_threshold".to_string(),
-            reason_detail: None,
-            normalized_outcome_label: Some("yes".to_string()),
-            direction: Some("up".to_string()),
-            market_slug: "btc-updown-5m-1773232500".to_string(),
-            event_url: "https://polymarket.com/event/btc-updown-5m-1773232500".to_string(),
-            timeframe: Some("5m".to_string()),
-            asset: Some("btc".to_string()),
-            price_to_beat: Some(69_279.93484689),
-            price_to_beat_source: Some("polymarket".to_string()),
-            price_to_beat_source_latency_ms: None,
-            current_price: Some(69_300.12),
-            current_price_source: CURRENT_PRICE_SOURCE,
-            directional_gap: Some(20.18515311),
-            gap_abs: Some(20.18515311),
-            threshold_value: 30.0,
-            threshold_unit: "usd".to_string(),
-            threshold_usd: 30.0,
-        };
-
-        let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
-        assert!(message.contains("Price to Beat Korumasi Engelledi"));
-        assert!(message.contains("Yon: Up"));
-        assert!(message.contains("Market: btc-updown-5m-1773232500"));
-        assert!(message.contains("Asset: btc"));
-        assert!(message.contains("gereken minimum seviyenin altinda"));
-        assert!(message.contains("Yonsel Fark: 20.18515311"));
-        assert!(message.contains("Limit: 30.00000000 usd (~30.00000000 USD)"));
-    }
-
-    #[test]
-    fn blocked_notification_includes_reason_detail_and_partial_prices() {
-        let evaluation = PriceToBeatGuardEvaluation {
-            passed: false,
-            reason_code: "price_to_beat_unavailable".to_string(),
-            reason_detail: Some("__NEXT_DATA__ script tag not found in html".to_string()),
-            normalized_outcome_label: None,
-            direction: None,
-            market_slug: "btc-updown-5m-1773242700".to_string(),
-            event_url: "https://polymarket.com/event/btc-updown-5m-1773242700".to_string(),
-            timeframe: Some("5m".to_string()),
-            asset: Some("btc".to_string()),
-            price_to_beat: None,
-            price_to_beat_source: None,
-            price_to_beat_source_latency_ms: None,
-            current_price: Some(70_404.25964978),
-            current_price_source: CURRENT_PRICE_SOURCE,
-            directional_gap: None,
-            gap_abs: None,
-            threshold_value: 30.0,
-            threshold_unit: "usd".to_string(),
-            threshold_usd: 30.0,
-        };
-
-        let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
-        assert!(message.contains("Detay: __NEXT_DATA__ script tag not found in html"));
-        assert!(message.contains("Current (Chainlink): 70404.25964978"));
-        assert!(message.contains("Price to Beat: N/A"));
-    }
-
-    #[test]
-    fn waiting_notification_mentions_recovery_retry() {
-        let evaluation = PriceToBeatGuardEvaluation {
-            passed: false,
-            reason_code: "price_to_beat_gap_below_threshold".to_string(),
-            reason_detail: None,
-            normalized_outcome_label: Some("yes".to_string()),
-            direction: Some("up".to_string()),
-            market_slug: "btc-updown-5m-1773232500".to_string(),
-            event_url: "https://polymarket.com/event/btc-updown-5m-1773232500".to_string(),
-            timeframe: Some("5m".to_string()),
-            asset: Some("btc".to_string()),
-            price_to_beat: Some(69_279.93484689),
-            price_to_beat_source: Some("polymarket".to_string()),
-            price_to_beat_source_latency_ms: None,
-            current_price: Some(69_300.12),
-            current_price_source: CURRENT_PRICE_SOURCE,
-            directional_gap: Some(20.18515311),
-            gap_abs: Some(20.18515311),
-            threshold_value: 30.0,
-            threshold_unit: "usd".to_string(),
-            threshold_usd: 30.0,
-        };
-
-        let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
-        assert!(message.contains("Bekleme moduna alindi"));
-        assert!(message.contains("yeniden denenecek"));
-    }
-
-    #[test]
-    fn cent_threshold_converts_to_usd() {
-        assert_eq!(
-            normalize_price_to_beat_threshold_usd(1.0, PriceToBeatDiffUnit::Cent),
-            0.01
-        );
-        assert_eq!(
-            normalize_price_to_beat_threshold_usd(0.01, PriceToBeatDiffUnit::Cent),
-            0.0001
-        );
-    }
-
-    #[test]
-    fn parses_threshold_units() {
-        assert_eq!(
-            PriceToBeatDiffUnit::parse(Some("usd")),
-            Some(PriceToBeatDiffUnit::Usd)
-        );
-        assert_eq!(
-            PriceToBeatDiffUnit::parse(Some("cent")),
-            Some(PriceToBeatDiffUnit::Cent)
-        );
-        assert_eq!(
-            PriceToBeatDiffUnit::parse(None),
-            Some(PriceToBeatDiffUnit::Usd)
-        );
-        assert_eq!(PriceToBeatDiffUnit::parse(Some("foo")), None);
-    }
-
-    #[test]
-    fn min_gap_mode_blocks_when_gap_is_below_threshold() {
-        let gap_abs = (70_230.57_f64 - 70_249.29979780_f64).abs();
-        assert!(gap_abs < 30.0);
-        assert!(!(gap_abs >= 30.0));
-    }
-
-    #[test]
-    fn min_gap_mode_allows_when_gap_equals_threshold() {
-        let gap_abs = 30.0_f64;
-        assert!(gap_abs >= 30.0);
-    }
-
-    #[test]
-    fn min_gap_mode_allows_when_gap_is_above_threshold() {
-        let gap_abs = 38.72979780_f64;
-        assert!(gap_abs >= 30.0);
-    }
-
-    #[test]
-    fn up_direction_passes_when_current_above_threshold() {
-        let evaluation = evaluate_directional_gap(105.0, 100.0, 4.0, "Up").expect("direction");
-        assert_eq!(
-            evaluation,
-            DirectionalGapEvaluation {
-                normalized_outcome_label: "yes",
-                direction: "up",
-                directional_gap: 5.0,
-                passed: true,
-            }
-        );
-    }
-
-    #[test]
-    fn up_direction_blocks_when_price_below() {
-        let evaluation = evaluate_directional_gap(95.0, 100.0, 4.0, "Up").expect("direction");
-        assert_eq!(evaluation.direction, "up");
-        assert_eq!(evaluation.directional_gap, -5.0);
-        assert!(!evaluation.passed);
-    }
-
-    #[test]
-    fn down_direction_passes_when_current_below_threshold() {
-        let evaluation = evaluate_directional_gap(95.0, 100.0, 4.0, "Down").expect("direction");
-        assert_eq!(
-            evaluation,
-            DirectionalGapEvaluation {
-                normalized_outcome_label: "no",
-                direction: "down",
-                directional_gap: 5.0,
-                passed: true,
-            }
-        );
-    }
-
-    #[test]
-    fn down_direction_blocks_when_price_above() {
-        let evaluation = evaluate_directional_gap(105.0, 100.0, 4.0, "Down").expect("direction");
-        assert_eq!(evaluation.direction, "down");
-        assert_eq!(evaluation.directional_gap, -5.0);
-        assert!(!evaluation.passed);
-    }
-
-    #[test]
-    fn unsupported_outcome_label_blocks() {
-        assert!(evaluate_directional_gap(105.0, 100.0, 4.0, "Flat").is_none());
-    }
-
-    #[test]
-    fn current_price_unavailable_reason_is_supported() {
-        let evaluation = PriceToBeatGuardEvaluation {
-            passed: false,
-            reason_code: "current_price_unavailable".to_string(),
-            reason_detail: Some("chainlink ws error: no cached price for btc/usd".to_string()),
-            normalized_outcome_label: None,
-            direction: None,
-            market_slug: "btc-updown-5m-1773246900".to_string(),
-            event_url: "https://polymarket.com/event/btc-updown-5m-1773246900".to_string(),
-            timeframe: Some("5m".to_string()),
-            asset: Some("btc".to_string()),
-            price_to_beat: Some(70_714.62472011),
-            price_to_beat_source: Some("chainlink_snapshot".to_string()),
-            price_to_beat_source_latency_ms: Some(125),
-            current_price: None,
-            current_price_source: CURRENT_PRICE_SOURCE,
-            directional_gap: None,
-            gap_abs: None,
-            threshold_value: 30.0,
-            threshold_unit: "usd".to_string(),
-            threshold_usd: 30.0,
-        };
-
-        let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
-        assert!(message.contains("Chainlink current price verisi alinamadigi"));
-        assert!(message.contains("Current (Chainlink): N/A"));
-    }
-
-    #[test]
-    fn unsupported_outcome_label_reason_is_supported() {
-        let evaluation = PriceToBeatGuardEvaluation {
-            passed: false,
-            reason_code: "unsupported_outcome_label".to_string(),
-            reason_detail: Some("outcome_label 'Flat' is not a recognized direction".to_string()),
-            normalized_outcome_label: None,
-            direction: None,
-            market_slug: "eth-updown-5m-1773710400".to_string(),
-            event_url: "https://polymarket.com/event/eth-updown-5m-1773710400".to_string(),
-            timeframe: Some("5m".to_string()),
-            asset: Some("eth".to_string()),
-            price_to_beat: Some(2366.97),
-            price_to_beat_source: Some("polymarket".to_string()),
-            price_to_beat_source_latency_ms: None,
-            current_price: Some(2368.11),
-            current_price_source: CURRENT_PRICE_SOURCE,
-            directional_gap: None,
-            gap_abs: Some(1.14),
-            threshold_value: 4.0,
-            threshold_unit: "usd".to_string(),
-            threshold_usd: 4.0,
-        };
-
-        let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
-        assert!(message.contains("Outcome label Up/Down veya Yes/No"));
-        assert!(message.contains("Yon: N/A"));
     }
 }

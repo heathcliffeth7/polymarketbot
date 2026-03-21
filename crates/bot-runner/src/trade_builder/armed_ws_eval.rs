@@ -5,6 +5,46 @@ struct ArmedBuilderOrderCache {
 
 static ARMED_BUILDER_ORDER_CACHE: LazyLock<RwLock<ArmedBuilderOrderCache>> =
     LazyLock::new(|| RwLock::new(ArmedBuilderOrderCache::default()));
+static LAST_ARMED_BUILDER_WS_PASSIVE_LOG_AT_MS: LazyLock<std::sync::atomic::AtomicI64> =
+    LazyLock::new(|| std::sync::atomic::AtomicI64::new(0));
+
+const ARMED_BUILDER_WS_PASSIVE_LOG_INTERVAL_MS: i64 = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ArmedBuilderWsEvalActivity {
+    selected_token_count: usize,
+    selected_order_count: usize,
+    evaluated_order_count: usize,
+    last_seen_update_count: usize,
+    triggered_order_count: usize,
+    composite_waiting_count: usize,
+    composite_released_count: usize,
+    selected_source_missing_count: usize,
+}
+
+fn armed_builder_ws_eval_should_log(
+    activity: ArmedBuilderWsEvalActivity,
+    passive_sample_due: bool,
+) -> bool {
+    activity.triggered_order_count > 0
+        || activity.composite_waiting_count > 0
+        || activity.composite_released_count > 0
+        || activity.selected_source_missing_count > 0
+        || (passive_sample_due && activity.evaluated_order_count > 0)
+}
+
+fn armed_builder_ws_eval_passive_sample_due(now_ms: i64) -> bool {
+    let last_logged_at =
+        LAST_ARMED_BUILDER_WS_PASSIVE_LOG_AT_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if now_ms.saturating_sub(last_logged_at) < ARMED_BUILDER_WS_PASSIVE_LOG_INTERVAL_MS {
+        return false;
+    }
+    true
+}
+
+fn mark_armed_builder_ws_eval_logged_at(now_ms: i64) {
+    LAST_ARMED_BUILDER_WS_PASSIVE_LOG_AT_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+}
 
 fn trade_builder_is_ws_fast_path_tp_sl_child(order: &TradeBuilderOrder) -> bool {
     trade_builder_is_child_exit_sell(order)
@@ -51,7 +91,10 @@ async fn refresh_armed_builder_order_cache(orders: Vec<TradeBuilderOrder>) {
         if !trade_builder_is_ws_fast_path_tp_sl_child(&order) {
             continue;
         }
-        by_token.entry(order.token_id.clone()).or_default().push(order);
+        by_token
+            .entry(order.token_id.clone())
+            .or_default()
+            .push(order);
     }
 
     let mut cache = ARMED_BUILDER_ORDER_CACHE.write().await;
@@ -138,9 +181,14 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
     let mut selected_token_ids = Vec::with_capacity(selected_orders.len());
     let mut composite_bid_entering: Vec<(i64, Option<f64>, Option<f64>, Option<f64>)> = Vec::new();
     let mut composite_bid_releasing: Vec<(i64, f64, Option<f64>)> = Vec::new();
+    let selected_token_count = selected_orders.len();
+    let mut selected_order_count = 0usize;
+    let mut evaluated_order_count = 0usize;
+    let mut selected_source_missing_count = 0usize;
 
     for (token_id, orders) in selected_orders {
         selected_token_ids.push(token_id.clone());
+        selected_order_count += orders.len();
         let Some(snapshot) = market_snapshots.get(&token_id) else {
             continue;
         };
@@ -150,15 +198,16 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
         };
 
         for order in orders {
-            if order
-                .sl_trigger_price_mode
-                .as_deref()
-                .is_some_and(|mode| sl_trigger_eval_price_for_mode(mode, &runtime_price).is_none())
-            {
-                continue;
+            if let Some(mode) = order.sl_trigger_price_mode.as_deref() {
+                if sl_trigger_eval_price_for_mode(mode, &runtime_price).is_none() {
+                    selected_source_missing_count += 1;
+                    continue;
+                }
             }
 
-            let trigger_eval_price = trade_builder_trigger_eval_price_for_order(&order, &runtime_price);
+            evaluated_order_count += 1;
+            let trigger_eval_price =
+                trade_builder_trigger_eval_price_for_order(&order, &runtime_price);
             let execution_price = trade_builder_execution_price_for_order(&order, &runtime_price);
             let persisted_last_seen_price = trade_builder_last_seen_price_for_order(
                 &order,
@@ -173,9 +222,7 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
             if evaluation.should_trigger {
                 if should_skip_trade_builder_composite_sl_bid_confirmation(&order, &runtime_price) {
                     last_seen_updates.insert(order.id, persisted_last_seen_price);
-                    if order.last_error.as_deref()
-                        != Some("composite_bid_confirmation_waiting")
-                    {
+                    if order.last_error.as_deref() != Some("composite_bid_confirmation_waiting") {
                         composite_bid_entering.push((
                             order.id,
                             order.trigger_price,
@@ -187,9 +234,7 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
                     triggered_order_ids.insert(order.id);
                 }
             } else {
-                if order.last_error.as_deref()
-                    == Some("composite_bid_confirmation_waiting")
-                {
+                if order.last_error.as_deref() == Some("composite_bid_confirmation_waiting") {
                     composite_bid_releasing.push((
                         order.id,
                         trigger_eval_price,
@@ -201,13 +246,45 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
         }
     }
 
-    let has_composite_changes = !composite_bid_entering.is_empty() || !composite_bid_releasing.is_empty();
+    let has_composite_changes =
+        !composite_bid_entering.is_empty() || !composite_bid_releasing.is_empty();
+    let activity = ArmedBuilderWsEvalActivity {
+        selected_token_count,
+        selected_order_count,
+        evaluated_order_count,
+        last_seen_update_count: last_seen_updates.len(),
+        triggered_order_count: triggered_order_ids.len(),
+        composite_waiting_count: composite_bid_entering.len(),
+        composite_released_count: composite_bid_releasing.len(),
+        selected_source_missing_count,
+    };
+    let now_ms = Utc::now().timestamp_millis();
+    let passive_sample_due = armed_builder_ws_eval_passive_sample_due(now_ms);
+    if armed_builder_ws_eval_should_log(activity, passive_sample_due) {
+        mark_armed_builder_ws_eval_logged_at(now_ms);
+        info!(
+            run_id,
+            dirty_token_count = dirty_token_ids.len(),
+            selected_token_count = activity.selected_token_count,
+            selected_order_count = activity.selected_order_count,
+            evaluated_order_count = activity.evaluated_order_count,
+            last_seen_update_count = activity.last_seen_update_count,
+            triggered_order_count = activity.triggered_order_count,
+            composite_waiting_count = activity.composite_waiting_count,
+            composite_released_count = activity.composite_released_count,
+            selected_source_missing_count = activity.selected_source_missing_count,
+            passive_sample_due,
+            "ARMED_BUILDER_WS_EVAL_CYCLE"
+        );
+    }
     if triggered_order_ids.is_empty() && last_seen_updates.is_empty() && !has_composite_changes {
         return Ok(());
     }
 
-    let composite_entering_ids: HashSet<i64> = composite_bid_entering.iter().map(|(id, ..)| *id).collect();
-    let composite_releasing_ids: HashSet<i64> = composite_bid_releasing.iter().map(|(id, ..)| *id).collect();
+    let composite_entering_ids: HashSet<i64> =
+        composite_bid_entering.iter().map(|(id, ..)| *id).collect();
+    let composite_releasing_ids: HashSet<i64> =
+        composite_bid_releasing.iter().map(|(id, ..)| *id).collect();
 
     let mut orders_to_spawn = Vec::new();
     {
@@ -230,8 +307,7 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
                     bucket[idx].last_seen_price = Some(last_seen_price);
                 }
                 if composite_entering_ids.contains(&order_id) {
-                    bucket[idx].last_error =
-                        Some("composite_bid_confirmation_waiting".to_string());
+                    bucket[idx].last_error = Some("composite_bid_confirmation_waiting".to_string());
                 }
                 if composite_releasing_ids.contains(&order_id) {
                     bucket[idx].last_error = None;
@@ -321,21 +397,21 @@ fn spawn_armed_order_immediate_processing(
     tokio::spawn(async move {
         let mut user_cfg_cache = HashMap::new();
         let mut user_executor_cache = HashMap::new();
-        let user_cfg =
-            match load_user_app_config_cached(&repo, user_id, &mut user_cfg_cache).await {
-                Ok(cfg) => cfg,
-                Err(err) => {
-                    warn!(
-                        run_id,
-                        builder_order_id = order_id,
-                        user_id,
-                        error = %err,
-                        "ARMED_ORDER_WS_USER_CONFIG_LOAD_FAILED"
-                    );
-                    rearm_builder_order_to_cache_if_armed(&repo, order_id).await;
-                    return;
-                }
-            };
+        let user_cfg = match load_user_app_config_cached(&repo, user_id, &mut user_cfg_cache).await
+        {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                warn!(
+                    run_id,
+                    builder_order_id = order_id,
+                    user_id,
+                    error = %err,
+                    "ARMED_ORDER_WS_USER_CONFIG_LOAD_FAILED"
+                );
+                rearm_builder_order_to_cache_if_armed(&repo, order_id).await;
+                return;
+            }
+        };
         let client = match load_user_order_executor_cached(
             &repo,
             user_id,
@@ -359,13 +435,7 @@ fn spawn_armed_order_immediate_processing(
         };
 
         let result = try_immediate_submit_single_builder_order(
-            &repo,
-            run_id,
-            &user_cfg,
-            &ws,
-            client,
-            order_id,
-            "ws_armed",
+            &repo, run_id, &user_cfg, &ws, client, order_id, "ws_armed",
         )
         .await;
         if let Err(err) = result {
@@ -442,11 +512,13 @@ mod armed_ws_eval_tests {
             reentry_max_attempts: 0,
             reentry_trigger_node_key: None,
             notify_on_fill: false,
+            notify_on_order_not_filled: false,
             notify_on_trigger_guard_blocked: false,
             notify_on_execution_floor_blocked: false,
             notify_on_tp_hit: false,
             notify_on_sl_hit: false,
             notify_on_max_price_blocked: false,
+            last_guard_notification_reason: None,
         }
     }
 

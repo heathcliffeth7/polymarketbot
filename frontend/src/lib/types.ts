@@ -324,6 +324,27 @@ export interface TradeBuilderOrderEvent {
   created_at: string;
 }
 
+export interface TradeBuilderOrderDiagnosticSummary {
+  buy_created: boolean;
+  processing_started: boolean;
+  guards_ran: boolean;
+  builder_guards_ran: boolean;
+  price_to_beat_ran: boolean;
+  price_to_beat_decision: string | null;
+  price_to_beat_reason_code: string | null;
+  last_guard_scope: string | null;
+  last_guard_decision: string | null;
+  last_guard_reason_code: string | null;
+  submit_attempted: boolean;
+  effective_outcome: string;
+  effective_reason_code: string | null;
+}
+
+export interface TradeBuilderOrderEventsResponse
+  extends PaginatedResponse<TradeBuilderOrderEvent> {
+  diagnostic_summary: TradeBuilderOrderDiagnosticSummary;
+}
+
 export interface TradeBuilderWorkflow {
   id: number;
   name: string;

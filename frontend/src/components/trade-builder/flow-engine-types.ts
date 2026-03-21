@@ -98,7 +98,7 @@ export interface FlowEngineControllerActions {
   handleStopFlow: () => Promise<void>;
   updateGraphFromCanvas: (
     nextGraph: TradeFlowGraph,
-    options?: { allowGraphShrink?: boolean }
+    options?: { allowGraphShrink?: boolean; persistImmediately?: boolean }
   ) => void;
   applyContextFromForm: () => Record<string, unknown>;
   applyContextFromAdvanced: () => Record<string, unknown> | null;

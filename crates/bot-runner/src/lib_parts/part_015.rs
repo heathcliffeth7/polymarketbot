@@ -1,4 +1,3 @@
-
 async fn execute_trigger_sell_progress(
     repo: &PostgresRepository,
     run: &TradeFlowRun,
@@ -93,9 +92,16 @@ async fn execute_trigger_open_positions(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| node.key.clone());
 
-    let market_slug = node_config_string(node, "marketSlug")
-        .or_else(|| flow_context_string(context, "marketSlug"))
-        .unwrap_or_default();
+    let market_slug = if node_market_mode(node) == "auto_scope" {
+        node_auto_scope_market_slug(context, &node.key)
+            .or_else(|| flow_context_string(context, "marketSlug"))
+            .or_else(|| node_config_string(node, "marketSlug"))
+            .unwrap_or_default()
+    } else {
+        node_config_string(node, "marketSlug")
+            .or_else(|| flow_context_string(context, "marketSlug"))
+            .unwrap_or_default()
+    };
 
     // --- Multi-outcome conditions (outcomeConditions array) ---
     let outcome_conditions = node
@@ -178,6 +184,15 @@ async fn execute_trigger_open_positions(
                 .unwrap_or("")
                 .trim()
                 .to_string();
+            let cond_token_id = if node_market_mode(node) == "auto_scope"
+                && !cond_outcome_label.is_empty()
+            {
+                resolve_token_id_for_outcome_label_for_node(&node.key, &cond_outcome_label, context)
+                    .or_else(|| resolve_token_id_for_outcome_label(&cond_outcome_label, context))
+                    .unwrap_or(cond_token_id)
+            } else {
+                cond_token_id
+            };
             let cond_trigger_condition = cond
                 .get("triggerCondition")
                 .and_then(|v| v.as_str())
@@ -279,9 +294,23 @@ async fn execute_trigger_open_positions(
     } else {
         // Legacy single-token path (backward compatibility)
         let token_id = node_config_string(node, "tokenId")
+            .or_else(|| {
+                if node_market_mode(node) == "auto_scope" {
+                    node_auto_scope_resolved_token_id(context, &node.key)
+                } else {
+                    None
+                }
+            })
             .or_else(|| flow_context_string(context, "tokenId"))
             .unwrap_or_default();
         let outcome_label = node_config_string(node, "outcomeLabel")
+            .or_else(|| {
+                if node_market_mode(node) == "auto_scope" {
+                    node_auto_scope_resolved_outcome_label(context, &node.key)
+                } else {
+                    None
+                }
+            })
             .or_else(|| flow_context_string(context, "outcomeLabel"))
             .unwrap_or_default();
         let trigger_condition = node_config_string(node, "triggerCondition");

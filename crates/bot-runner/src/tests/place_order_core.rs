@@ -183,6 +183,174 @@ fn place_order_resolves_runtime_binding_from_step_input() {
 }
 
 #[test]
+fn place_order_resolves_runtime_binding_prefers_step_input_over_flow_context() {
+    let node = test_node(json!({}));
+    let step = test_step(json!({
+        "market_slug": "btc-updown-5m-1772729700",
+        "triggered_token_id": "tok-down",
+        "triggered_outcome_label": "Down",
+    }));
+    let context = json!({
+        "flowContext": {
+            "marketSlug": "btc-updown-5m-stale",
+            "tokenId": "tok-up",
+            "outcomeLabel": "Up"
+        },
+        "vars": {},
+        "state": {},
+        "refs": {},
+        "nodeState": {}
+    });
+
+    assert_eq!(
+        resolve_action_place_order_string(
+            &node,
+            &context,
+            &step,
+            "marketSlug",
+            "marketSlug",
+            &["market_slug", "marketSlug", "wsMarketSlug"],
+        )
+        .as_deref(),
+        Some("btc-updown-5m-1772729700")
+    );
+    assert_eq!(
+        resolve_action_place_order_string(
+            &node,
+            &context,
+            &step,
+            "tokenId",
+            "tokenId",
+            &["triggered_token_id", "tokenId"],
+        )
+        .as_deref(),
+        Some("tok-down")
+    );
+    assert_eq!(
+        resolve_action_place_order_string(
+            &node,
+            &context,
+            &step,
+            "outcomeLabel",
+            "outcomeLabel",
+            &["triggered_outcome_label", "outcomeLabel"],
+        )
+        .as_deref(),
+        Some("Down")
+    );
+}
+
+#[test]
+fn stale_place_order_retry_detects_old_step_market() {
+    let node = test_node(json!({}));
+    let step = test_step(json!({
+        "market_slug": "btc-updown-5m-1772729700",
+        "triggered_token_id": "tok-up",
+        "triggered_outcome_label": "Up",
+    }));
+    let context = json!({
+        "flowContext": {
+            "marketSlug": "btc-updown-5m-1772730000"
+        },
+        "vars": {},
+        "state": {},
+        "refs": {},
+        "nodeState": {}
+    });
+
+    assert_eq!(
+        resolve_action_place_order_stale_market_retry(&node, &context, &step),
+        Some(ActionPlaceOrderStaleMarketRetry {
+            stale_market_slug: "btc-updown-5m-1772729700".to_string(),
+            current_market_slug: "btc-updown-5m-1772730000".to_string(),
+        })
+    );
+}
+
+#[test]
+fn stale_place_order_retry_ignores_explicit_market_config() {
+    let node = test_node(json!({ "marketSlug": "btc-updown-5m-fixed" }));
+    let step = test_step(json!({
+        "market_slug": "btc-updown-5m-1772729700",
+    }));
+    let context = json!({
+        "flowContext": {
+            "marketSlug": "btc-updown-5m-1772730000"
+        },
+        "vars": {},
+        "state": {},
+        "refs": {},
+        "nodeState": {}
+    });
+
+    assert_eq!(
+        resolve_action_place_order_stale_market_retry(&node, &context, &step),
+        None
+    );
+}
+
+#[test]
+fn stale_place_order_retry_ignores_matching_market() {
+    let node = test_node(json!({}));
+    let step = test_step(json!({
+        "market_slug": "btc-updown-5m-1772729700",
+    }));
+    let context = json!({
+        "flowContext": {
+            "marketSlug": "btc-updown-5m-1772729700"
+        },
+        "vars": {},
+        "state": {},
+        "refs": {},
+        "nodeState": {}
+    });
+
+    assert_eq!(
+        resolve_action_place_order_stale_market_retry(&node, &context, &step),
+        None
+    );
+}
+
+#[test]
+fn place_order_existing_order_id_prefers_node_local_ref_over_shared_ref() {
+    let node = test_node(json!({ "refKey": "preset_place_order" }));
+    let context = json!({
+        "flowContext": {},
+        "vars": {},
+        "state": {},
+        "refs": {
+            "action_1": 202,
+            "preset_place_order": 101
+        },
+        "nodeState": {}
+    });
+
+    assert_eq!(
+        resolve_action_place_order_existing_order_id(&node, &context),
+        Some(202)
+    );
+}
+
+#[test]
+fn place_order_existing_order_id_falls_back_to_shared_ref_when_node_local_missing() {
+    let node = test_node(json!({ "refKey": "preset_place_order" }));
+    let context = json!({
+        "flowContext": {},
+        "vars": {},
+        "state": {},
+        "refs": {
+            "preset_place_order": 101
+        },
+        "nodeState": {}
+    });
+
+    assert_eq!(
+        resolve_action_place_order_existing_order_id(&node, &context),
+        Some(101)
+    );
+}
+
+#[test]
 fn place_order_resolves_max_price_from_node_config_cent_only() {
     let ctx = json!({});
     let step = test_step(json!({}));
@@ -544,6 +712,84 @@ fn desired_price_above_builder_max_price_is_blocked() {
 
     assert!(!trade_builder_price_exceeds_max_price(&order, 0.90));
     assert!(trade_builder_price_exceeds_max_price(&order, 0.91));
+}
+
+#[test]
+fn resolve_max_price_ref_uses_best_ask_for_buy() {
+    let order = test_builder_order("buy", None);
+
+    assert_eq!(
+        trade_builder_resolve_max_price_reference(&order, Some(0.62), 0.67),
+        (0.62, "best_ask")
+    );
+}
+
+#[test]
+fn resolve_max_price_ref_falls_back_when_best_ask_none() {
+    let order = test_builder_order("buy", None);
+
+    assert_eq!(
+        trade_builder_resolve_max_price_reference(&order, None, 0.67),
+        (0.67, "desired_price_fallback")
+    );
+}
+
+#[test]
+fn resolve_max_price_ref_falls_back_when_best_ask_invalid() {
+    let order = test_builder_order("buy", None);
+
+    assert_eq!(
+        trade_builder_resolve_max_price_reference(&order, Some(f64::NAN), 0.67),
+        (0.67, "desired_price_fallback")
+    );
+    assert_eq!(
+        trade_builder_resolve_max_price_reference(&order, Some(0.0), 0.67),
+        (0.67, "desired_price_fallback")
+    );
+    assert_eq!(
+        trade_builder_resolve_max_price_reference(&order, Some(1.01), 0.67),
+        (0.67, "desired_price_fallback")
+    );
+}
+
+#[test]
+fn resolve_max_price_ref_uses_desired_price_for_sell() {
+    let order = test_builder_order("sell", None);
+
+    assert_eq!(
+        trade_builder_resolve_max_price_reference(&order, Some(0.62), 0.67),
+        (0.67, "desired_price")
+    );
+}
+
+#[test]
+fn best_ask_below_max_price_passes_guard() {
+    let mut order = test_builder_order("buy", None);
+    order.max_price = Some(0.63);
+    let (reference_price, reference_source) =
+        trade_builder_resolve_max_price_reference(&order, Some(0.62), 0.67);
+
+    assert_eq!(reference_price, 0.62);
+    assert_eq!(reference_source, "best_ask");
+    assert!(!trade_builder_price_exceeds_max_price(
+        &order,
+        reference_price
+    ));
+}
+
+#[test]
+fn best_ask_above_max_price_blocks_guard() {
+    let mut order = test_builder_order("buy", None);
+    order.max_price = Some(0.63);
+    let (reference_price, reference_source) =
+        trade_builder_resolve_max_price_reference(&order, Some(0.64), 0.65);
+
+    assert_eq!(reference_price, 0.64);
+    assert_eq!(reference_source, "best_ask");
+    assert!(trade_builder_price_exceeds_max_price(
+        &order,
+        reference_price
+    ));
 }
 
 #[test]

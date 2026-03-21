@@ -9,6 +9,65 @@ struct DueCycleWindowBoundaryTarget {
 const FLOW_NODE_STATE_CYCLE_WINDOW_LAST_EVAL_PREFIX: &str = "cycle_window_last_eval_";
 
 #[derive(Debug, Clone)]
+struct DueWindowEndSellTarget {
+    run_index: usize,
+    node_index: usize,
+    window_end_at: DateTime<Utc>,
+}
+
+fn cycle_window_end_sell_state_key(node_spec: &WsOpenPositionPriceNodeSpec) -> String {
+    format!(
+        "{}{}",
+        FLOW_NODE_STATE_CYCLE_WINDOW_END_SELL_MARKER_PREFIX, node_spec.token_id
+    )
+}
+
+fn cycle_window_end_sell_due_target(
+    run_spec: &WsOpenPositionPriceRunSpec,
+    run_index: usize,
+    node_spec: &WsOpenPositionPriceNodeSpec,
+    node_index: usize,
+    now: DateTime<Utc>,
+) -> Option<DueWindowEndSellTarget> {
+    if !node_spec.auto_sell_on_window_end {
+        return None;
+    }
+    let (_, window_end_at) = cycle_window_bounds(node_spec)?;
+    if now < window_end_at {
+        return None;
+    }
+    // Check trigger fired (buy happened)
+    if !flow_node_state_truthy(&run_spec.context, &node_spec.node_key, FLOW_NODE_STATE_ONCE_FIRED)
+    {
+        return None;
+    }
+    // Check market slug matches
+    if let Some(fired_slug) = flow_node_state_string(
+        &run_spec.context,
+        &node_spec.node_key,
+        FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG,
+    ) {
+        if node_spec
+            .market_slug
+            .as_deref()
+            .map_or(true, |s| s != fired_slug)
+        {
+            return None;
+        }
+    }
+    // Idempotency: check if already processed
+    let sell_state_key = cycle_window_end_sell_state_key(node_spec);
+    if flow_node_state_truthy(&run_spec.context, &node_spec.node_key, &sell_state_key) {
+        return None;
+    }
+    Some(DueWindowEndSellTarget {
+        run_index,
+        node_index,
+        window_end_at,
+    })
+}
+
+#[derive(Debug, Clone)]
 struct CycleWindowEvalDiagnostics {
     window_mode: String,
     cycle_window_secs: i64,
@@ -26,12 +85,18 @@ fn cycle_window_boundary_state_key(node_spec: &WsOpenPositionPriceNodeSpec) -> S
 }
 
 fn cycle_window_boundary_marker(node_spec: &WsOpenPositionPriceNodeSpec) -> Option<String> {
-    Some(format!(
-        "{}:{}:{}",
-        node_spec.cycle_window_mode.as_deref()?,
-        node_spec.market_slug.as_deref()?,
-        node_spec.cycle_window_secs?
-    ))
+    let mode = node_spec.cycle_window_mode.as_deref()?;
+    let slug = node_spec.market_slug.as_deref()?;
+    if mode == "custom_range" {
+        Some(format!(
+            "custom_range:{}:{}:{}",
+            slug,
+            node_spec.cycle_window_start_sec?,
+            node_spec.cycle_window_end_sec?
+        ))
+    } else {
+        Some(format!("{}:{}:{}", mode, slug, node_spec.cycle_window_secs?))
+    }
 }
 
 fn cycle_window_last_eval_state_key(token_id: &str) -> String {
@@ -50,22 +115,31 @@ fn cycle_window_bounds(
     }
     let market_slug = node_spec.market_slug.as_deref()?;
     let cycle_window_mode = node_spec.cycle_window_mode.as_deref()?;
-    let cycle_window_secs = node_spec.cycle_window_secs?;
     let start_at = MarketCycleId(market_slug.to_string()).start_time()?;
     let scope_def = find_updown_scope_by_slug(market_slug)?;
     let duration_secs = updown_scope_window_seconds(scope_def);
     let end_at = start_at + ChronoDuration::seconds(duration_secs);
-    let effective_window_secs = cycle_window_secs.clamp(1, duration_secs);
 
     match cycle_window_mode {
-        "first" => Some((
-            start_at,
-            start_at + ChronoDuration::seconds(effective_window_secs),
-        )),
-        "last" => Some((
-            end_at - ChronoDuration::seconds(effective_window_secs),
-            end_at,
-        )),
+        "first" => {
+            let effective = node_spec.cycle_window_secs?.clamp(1, duration_secs);
+            Some((start_at, start_at + ChronoDuration::seconds(effective)))
+        }
+        "last" => {
+            let effective = node_spec.cycle_window_secs?.clamp(1, duration_secs);
+            Some((end_at - ChronoDuration::seconds(effective), end_at))
+        }
+        "custom_range" => {
+            let s = node_spec.cycle_window_start_sec?;
+            let e = node_spec.cycle_window_end_sec?;
+            if s >= e || e > duration_secs {
+                return None;
+            }
+            Some((
+                start_at + ChronoDuration::seconds(s),
+                start_at + ChronoDuration::seconds(e),
+            ))
+        }
         _ => None,
     }
 }
@@ -76,9 +150,16 @@ fn cycle_window_eval_diagnostics(
     evaluated_at: DateTime<Utc>,
 ) -> Option<CycleWindowEvalDiagnostics> {
     let (window_open_at, window_end_at) = cycle_window_bounds(node_spec)?;
+    let effective_secs = if node_spec.cycle_window_mode.as_deref() == Some("custom_range") {
+        let s = node_spec.cycle_window_start_sec.unwrap_or(0);
+        let e = node_spec.cycle_window_end_sec.unwrap_or(0);
+        e - s
+    } else {
+        node_spec.cycle_window_secs?
+    };
     Some(CycleWindowEvalDiagnostics {
         window_mode: window_mode.to_string(),
-        cycle_window_secs: node_spec.cycle_window_secs?,
+        cycle_window_secs: effective_secs,
         window_open_at,
         window_end_at,
         evaluated_at,
@@ -268,6 +349,24 @@ async fn trade_flow_next_trigger_market_price_timer_delay() -> Option<Duration> 
                 let delay = Duration::from_millis(delay_ms);
                 next_delay = Some(next_delay.map_or(delay, |current| current.min(delay)));
             }
+
+            // Window-end auto-sell: schedule timer for window_end_at
+            if node_spec.auto_sell_on_window_end {
+                if cycle_window_end_sell_due_target(run_spec, 0, node_spec, 0, now).is_some() {
+                    return Some(Duration::from_millis(0));
+                }
+                if let Some((_, window_end_at)) = cycle_window_bounds(node_spec) {
+                    if now < window_end_at {
+                        let delay_ms = window_end_at
+                            .signed_duration_since(now)
+                            .num_milliseconds()
+                            .max(0) as u64;
+                        let delay = Duration::from_millis(delay_ms);
+                        next_delay =
+                            Some(next_delay.map_or(delay, |current| current.min(delay)));
+                    }
+                }
+            }
         }
     }
 
@@ -403,6 +502,7 @@ async fn enqueue_cycle_window_prevalidated_step(
     evaluation_mode: &str,
     window_mode: &str,
     diagnostics: Option<&CycleWindowEvalDiagnostics>,
+    price_to_beat_trigger_gate: Option<&Value>,
 ) -> Result<bool> {
     let queued_at = Utc::now();
     let queued_at_rfc3339 = queued_at.to_rfc3339();
@@ -446,23 +546,33 @@ async fn enqueue_cycle_window_prevalidated_step(
         "wsLastTradePrice": resolved_price.detail.last_trade_price,
         "wsSnapshotAgeMs": resolved_price.detail.snapshot_age_ms,
         "wsSiteDisplayModeDecision": resolved_price.detail.site_display_mode_decision,
-        "wsAllowFirstTickReplay": window_mode == "last",
+        "wsAllowFirstTickReplay": window_mode == "last" || window_mode == "custom_range",
         "windowBoundaryOpen": true,
         "windowBoundaryMode": window_mode,
         "queuedAt": queued_at_rfc3339
     });
     if let Some(diagnostics) = diagnostics {
-        append_json_object_fields(
-            &mut input_json,
-            &json!({
-                "cycleWindowSecs": diagnostics.cycle_window_secs,
-                "windowOpenAt": diagnostics.window_open_at.to_rfc3339(),
-                "windowEndAt": diagnostics.window_end_at.to_rfc3339(),
-                "boundaryEvaluatedAt": diagnostics.evaluated_at.to_rfc3339(),
-                "boundaryLagMs": diagnostics.boundary_lag_ms,
-                "boundaryResult": "matched",
-            }),
-        );
+        let mut diag_json = json!({
+            "cycleWindowSecs": diagnostics.cycle_window_secs,
+            "windowOpenAt": diagnostics.window_open_at.to_rfc3339(),
+            "windowEndAt": diagnostics.window_end_at.to_rfc3339(),
+            "boundaryEvaluatedAt": diagnostics.evaluated_at.to_rfc3339(),
+            "boundaryLagMs": diagnostics.boundary_lag_ms,
+            "boundaryResult": "matched",
+        });
+        if window_mode == "custom_range" {
+            append_json_object_fields(
+                &mut diag_json,
+                &json!({
+                    "cycleWindowStartSec": node_spec.cycle_window_start_sec,
+                    "cycleWindowEndSec": node_spec.cycle_window_end_sec,
+                }),
+            );
+        }
+        append_json_object_fields(&mut input_json, &diag_json);
+    }
+    if let Some(gate) = price_to_beat_trigger_gate {
+        append_trigger_market_price_ptb_gate(&mut input_json, gate);
     }
     let enqueued = repo
         .enqueue_trade_flow_step(
@@ -499,6 +609,9 @@ async fn enqueue_cycle_window_prevalidated_step(
                 "price_source": input_json.get("wsPriceSource"),
                 "idempotency_key": idempotency_key,
                 });
+                if let Some(gate) = price_to_beat_trigger_gate {
+                    append_trigger_market_price_ptb_gate(&mut payload, gate);
+                }
                 if let Some(diagnostics) = diagnostics {
                     append_json_object_fields(
                         &mut payload,
@@ -530,6 +643,7 @@ async fn process_trade_flow_trigger_market_price_timers(
     let now = Utc::now();
     let mut due_boundaries = Vec::new();
     let mut due_confirmation_token_ids = BTreeSet::new();
+    let mut due_window_end_sells = Vec::new();
     for (run_index, run_spec) in cache_snapshot.run_specs.iter().enumerate() {
         for (node_index, node_spec) in run_spec.nodes.iter().enumerate() {
             if let Some(boundary_target) =
@@ -542,14 +656,23 @@ async fn process_trade_flow_trigger_market_price_timers(
                     due_confirmation_token_ids.insert(node_spec.token_id.clone());
                 }
             }
+            if let Some(sell_target) =
+                cycle_window_end_sell_due_target(run_spec, run_index, node_spec, node_index, now)
+            {
+                due_window_end_sells.push(sell_target);
+            }
         }
     }
-    if due_boundaries.is_empty() && due_confirmation_token_ids.is_empty() {
+    if due_boundaries.is_empty()
+        && due_confirmation_token_ids.is_empty()
+        && due_window_end_sells.is_empty()
+    {
         return Ok(false);
     }
 
     let mut run_specs = cache_snapshot.run_specs;
     let token_targets = cache_snapshot.token_targets;
+    let market_targets = cache_snapshot.market_targets;
     let boundary_token_ids: Vec<String> = due_boundaries
         .iter()
         .filter_map(|target| {
@@ -686,15 +809,30 @@ async fn process_trade_flow_trigger_market_price_timers(
         );
         run_spec.context_dirty = true;
 
-        let allow_first_tick_at_boundary = target.window_mode == "last";
-        let (matched, evaluation_mode) = evaluate_trigger_market_price_condition(
-            None,
-            resolved_price.price,
-            node_spec.trigger_price,
-            &node_spec.trigger_condition,
-            allow_first_tick_at_boundary,
-            node_spec.max_price,
-        );
+        let ptb_config = trigger_market_price_ptb_config_from_spec(&node_spec);
+        let Some(gate_mode) =
+            trigger_market_price_gate_mode(&node_spec.trigger_condition, ptb_config)
+        else {
+            continue;
+        };
+        let allow_first_tick_at_boundary =
+            target.window_mode == "last" || target.window_mode == "custom_range";
+        let (matched, evaluation_mode) = if matches!(
+            gate_mode,
+            TriggerMarketPriceGateMode::StandardOnly
+                | TriggerMarketPriceGateMode::StandardAndPtb
+        ) {
+            evaluate_trigger_market_price_condition(
+                None,
+                resolved_price.price,
+                node_spec.trigger_price,
+                &node_spec.trigger_condition,
+                allow_first_tick_at_boundary,
+                node_spec.max_price,
+            )
+        } else {
+            (true, "ptb_only")
+        };
 
         if !matched {
             let event_type = if node_spec
@@ -758,7 +896,12 @@ async fn process_trade_flow_trigger_market_price_timers(
             run_spec.context_dirty = true;
         }
 
-        if let Some(confirmation_ms) = market_price_confirmation_ms(&node_spec) {
+        if matches!(
+            gate_mode,
+            TriggerMarketPriceGateMode::StandardOnly
+                | TriggerMarketPriceGateMode::StandardAndPtb
+        ) {
+            if let Some(confirmation_ms) = market_price_confirmation_ms(&node_spec) {
             let cpend_at_key = format!("cross_pending_at_{}", node_spec.token_id);
             let cpend_price_key = format!("cross_pending_price_{}", node_spec.token_id);
             let cpend_prev_key = format!("cross_pending_prev_{}", node_spec.token_id);
@@ -809,6 +952,58 @@ async fn process_trade_flow_trigger_market_price_timers(
             .await;
             continue;
         }
+        }
+
+        let mut ptb_gate_output = Value::Null;
+        if matches!(
+            gate_mode,
+            TriggerMarketPriceGateMode::PtbOnly | TriggerMarketPriceGateMode::StandardAndPtb
+        ) {
+            if let Some(ptb_gate) = evaluate_trigger_market_price_ptb_gate_for_spec(&node_spec) {
+                ptb_gate_output = ptb_gate.to_value();
+                if !ptb_gate.passed {
+                    if let Some(diagnostics) = diagnostics.as_ref() {
+                        set_cycle_window_last_eval_state(
+                            &mut run_spec.context,
+                            &node_spec,
+                            diagnostics,
+                            "ptb_gate_blocked",
+                            Some(resolved_price.price),
+                            Some(evaluation_mode),
+                        );
+                        run_spec.context_dirty = true;
+                    }
+                    append_cycle_window_event(
+                        repo,
+                        run_spec,
+                        &node_spec,
+                        "trigger_cycle_window_price_to_beat_gate_blocked",
+                        &{
+                            let mut payload = json!({
+                                "node_key": node_spec.node_key,
+                                "node_type": node_spec.node_type,
+                                "token_id": node_spec.token_id,
+                                "market_slug": node_spec.market_slug,
+                                "window_mode": target.window_mode,
+                                "price": resolved_price.price,
+                                "evaluation_mode": evaluation_mode,
+                                "price_mode": node_spec.price_mode.as_str(),
+                                "price_to_beat_trigger_gate": ptb_gate_output.clone(),
+                            });
+                            if let Some(diagnostics) = diagnostics.as_ref() {
+                                append_json_object_fields(
+                                    &mut payload,
+                                    &cycle_window_eval_payload_fields(diagnostics),
+                                );
+                            }
+                            payload
+                        },
+                    )
+                    .await;
+                    continue;
+                }
+            }
+        }
 
         let _ = enqueue_cycle_window_prevalidated_step(
             repo,
@@ -818,8 +1013,134 @@ async fn process_trade_flow_trigger_market_price_timers(
             evaluation_mode,
             &target.window_mode,
             diagnostics.as_ref(),
+            (!ptb_gate_output.is_null()).then_some(&ptb_gate_output),
         )
         .await?;
+    }
+
+    // Window-end auto-sell processing
+    for target in due_window_end_sells {
+        let Some(node_spec) = run_specs
+            .get(target.run_index)
+            .and_then(|run_spec| run_spec.nodes.get(target.node_index))
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(run_spec) = run_specs.get_mut(target.run_index) else {
+            continue;
+        };
+
+        let sell_state_key = cycle_window_end_sell_state_key(&node_spec);
+        set_flow_node_state(
+            &mut run_spec.context,
+            &node_spec.node_key,
+            &sell_state_key,
+            json!(true),
+        );
+        run_spec.context_dirty = true;
+        touched = true;
+
+        let buy_output = match repo
+            .find_latest_completed_place_order_output(run_spec.run_id)
+            .await
+        {
+            Ok(Some(output)) => output,
+            Ok(None) => {
+                info!(
+                    run_id,
+                    flow_run_id = run_spec.run_id,
+                    node_key = %node_spec.node_key,
+                    token_id = %node_spec.token_id,
+                    "WINDOW_END_AUTO_SELL_SKIP_NO_BUY"
+                );
+                continue;
+            }
+            Err(e) => {
+                warn!(
+                    run_id,
+                    flow_run_id = run_spec.run_id,
+                    error = %e,
+                    "WINDOW_END_AUTO_SELL_QUERY_FAILED"
+                );
+                continue;
+            }
+        };
+
+        let builder_order_id = buy_output
+            .get("builderOrderId")
+            .and_then(|v| v.as_i64())
+            .or_else(|| buy_output.get("builder_order_id").and_then(|v| v.as_i64()));
+
+        let Some(builder_order_id) = builder_order_id else {
+            info!(
+                run_id,
+                flow_run_id = run_spec.run_id,
+                node_key = %node_spec.node_key,
+                "WINDOW_END_AUTO_SELL_SKIP_NO_BUILDER_ORDER"
+            );
+            continue;
+        };
+
+        let sell_input = json!({
+            "side": "sell",
+            "marketSlug": node_spec.market_slug,
+            "tokenId": node_spec.token_id,
+            "sourceTradeId": builder_order_id,
+            "executionMode": "market",
+            "windowEndAutoSell": true,
+        });
+
+        let idempotency_key = format!(
+            "window_end_sell:{}:{}:{}",
+            run_spec.run_id,
+            node_spec.token_id,
+            target.window_end_at.timestamp()
+        );
+
+        let enqueued = repo
+            .enqueue_trade_flow_step(
+                run_spec.run_id,
+                &node_spec.node_key,
+                "action.place_order",
+                1,
+                Some(&sell_input),
+                Utc::now(),
+                None,
+                Some(&idempotency_key),
+            )
+            .await;
+
+        let enqueued_ok = matches!(&enqueued, Ok(Some(_)));
+
+        append_cycle_window_event(
+            repo,
+            run_spec,
+            &node_spec,
+            "trigger_cycle_window_end_auto_sell",
+            &json!({
+                "node_key": node_spec.node_key,
+                "token_id": node_spec.token_id,
+                "market_slug": node_spec.market_slug,
+                "builder_order_id": builder_order_id,
+                "window_end_at": target.window_end_at.to_rfc3339(),
+                "idempotency_key": idempotency_key,
+                "enqueued": enqueued_ok,
+            }),
+        )
+        .await;
+
+        if let Ok(Some(step_id)) = enqueued {
+            info!(
+                run_id,
+                flow_run_id = run_spec.run_id,
+                step_id,
+                node_key = %node_spec.node_key,
+                token_id = %node_spec.token_id,
+                builder_order_id,
+                "WINDOW_END_AUTO_SELL_ENQUEUED"
+            );
+        }
     }
 
     persist_trade_flow_ws_run_specs_contexts(repo, &mut run_specs).await?;
@@ -827,6 +1148,7 @@ async fn process_trade_flow_trigger_market_price_timers(
         let mut cache = TRADE_FLOW_WS_FAST_PATH_CACHE.write().await;
         cache.run_specs = run_specs;
         cache.token_targets = token_targets;
+        cache.market_targets = market_targets;
     }
 
     if !due_confirmation_token_ids.is_empty() {

@@ -90,9 +90,9 @@ impl GammaHttpClient {
             .json()
             .await?;
 
-        Ok(raw.as_array().and_then(|items| {
-            items.iter().find_map(parse_gamma_market_any)
-        }))
+        Ok(raw
+            .as_array()
+            .and_then(|items| items.iter().find_map(parse_gamma_market_any)))
     }
 }
 

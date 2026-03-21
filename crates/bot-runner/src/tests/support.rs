@@ -118,7 +118,7 @@ pub(super) fn test_builder_order(side: &str, parent_order_id: Option<i64>) -> Tr
         fee_rate_bps: 0,
         trigger_latched: false,
         trigger_latched_reason: None,
-            trigger_latched_at: None,
+        trigger_latched_at: None,
         submitted_dynamic_qty: None,
         submitted_dynamic_price: None,
         guard_trigger_price: None,
@@ -131,11 +131,13 @@ pub(super) fn test_builder_order(side: &str, parent_order_id: Option<i64>) -> Tr
         reentry_max_attempts: 0,
         reentry_trigger_node_key: None,
         notify_on_fill: false,
+        notify_on_order_not_filled: false,
         notify_on_trigger_guard_blocked: false,
         notify_on_execution_floor_blocked: false,
         notify_on_tp_hit: false,
         notify_on_sl_hit: false,
         notify_on_max_price_blocked: false,
+        last_guard_notification_reason: None,
     }
 }
 

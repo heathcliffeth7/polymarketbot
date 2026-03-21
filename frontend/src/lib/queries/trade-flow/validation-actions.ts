@@ -1,7 +1,6 @@
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
 import { validateActionPlaceOrderConfig } from './validation-action-place-order';
 import {
-  countValidMarketPriceOutcomeConditions,
   countValidOutcomeConditions,
   hasProvidedValue,
   isRecord,
@@ -14,6 +13,7 @@ import {
   toTrimmedString,
 } from './shared';
 import { pushNodeError, pushNodeWarning, validateAuxiliaryNodeConfig } from './validation-core';
+import { validateTriggerMarketPriceNodeConfig } from './validation-trigger-market-price';
 
 export function validateNodeConfig(
   issues: TradeFlowValidationIssue[],
@@ -27,134 +27,7 @@ export function validateNodeConfig(
   const graphOutcomeLabel = String(graph.context.outcomeLabel ?? '').trim();
   validateAuxiliaryNodeConfig(issues, node, config);
   if (node.type === 'trigger.market_price') {
-    const marketMode = toTrimmedString(config.marketMode).toLowerCase();
-    const autoScope = marketMode === 'auto_scope';
-    const protectionMode = toTrimmedString(config.protectionMode).toLowerCase();
-    const protectionPreset = toTrimmedString(config.protectionPreset).toLowerCase();
-    if (autoScope) {
-      const marketScope = toTrimmedString(config.marketScope).toLowerCase();
-      if (!marketScope) {
-        pushNodeError(
-          issues,
-          node,
-          'missing_market_scope',
-          'trigger.market_price auto_scope requires marketScope.'
-        );
-      } else if (!RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[marketScope]) {
-        pushNodeError(
-          issues,
-          node,
-          'invalid_market_scope',
-          'trigger.market_price marketScope is unsupported.'
-        );
-      }
-      const marketSelection = toTrimmedString(config.marketSelection).toLowerCase();
-      if (marketSelection && marketSelection !== 'latest_by_slug') {
-        pushNodeError(
-          issues,
-          node,
-          'invalid_market_selection',
-          'trigger.market_price marketSelection must be latest_by_slug.'
-        );
-      }
-      if (protectionMode && protectionMode !== 'off' && protectionMode !== 'underlying_confirm') {
-        pushNodeError(
-          issues,
-          node,
-          'invalid_protection_mode',
-          'trigger.market_price protectionMode must be off or underlying_confirm.'
-        );
-      }
-      if (protectionMode === 'underlying_confirm') {
-        if (!marketScope || !RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[marketScope]) {
-          pushNodeError(
-            issues,
-            node,
-            'invalid_protection_scope',
-            'trigger.market_price underlying_confirm requires a supported auto_scope marketScope.'
-          );
-        }
-        if (
-          protectionPreset &&
-          protectionPreset !== 'loose' &&
-          protectionPreset !== 'balanced' &&
-          protectionPreset !== 'strict'
-        ) {
-          pushNodeError(
-            issues,
-            node,
-            'invalid_protection_preset',
-            'trigger.market_price protectionPreset must be loose, balanced, or strict.'
-          );
-        }
-      }
-    } else if (!String(config.marketSlug ?? graphMarketSlug).trim()) {
-      pushNodeError(
-        issues,
-        node,
-        'missing_market_slug',
-        'trigger.market_price requires marketSlug in node config or graph context.'
-      );
-    }
-    if (!autoScope && protectionMode === 'underlying_confirm') {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_protection_mode_scope',
-        'trigger.market_price underlying_confirm is only valid when marketMode is auto_scope.'
-      );
-    }
-
-    if (config.confirmationMs != null && toTrimmedString(config.confirmationMs).length > 0) {
-      const confirmationMs = toFiniteNumber(config.confirmationMs);
-      if (
-        confirmationMs == null ||
-        !Number.isInteger(confirmationMs) ||
-        confirmationMs < 0
-      ) {
-        pushNodeError(
-          issues,
-          node,
-          'invalid_confirmation_ms',
-          'trigger.market_price confirmationMs must be an integer >= 0.'
-        );
-      }
-    }
-
-    const priceMode = toTrimmedString(config.priceMode).toLowerCase();
-    const validPriceModes = ['composite', 'midpoint', 'raw', 'last_trade', 'site_display', 'best_bid', 'best_ask'];
-    if (priceMode && !validPriceModes.includes(priceMode)) {
-      pushNodeError(issues, node, 'invalid_price_mode', 'trigger.market_price priceMode must be composite, midpoint, raw, last_trade, site_display, best_bid, or best_ask.');
-    }
-
-    const repeatMode = toTrimmedString(config.repeatMode).toLowerCase();
-    if (Array.isArray(config.outcomeConditions)) {
-      for (const item of config.outcomeConditions) {
-        if (!isRecord(item)) continue;
-        const triggerCondition = toTrimmedString(item.triggerCondition).toLowerCase();
-        if (
-          (triggerCondition === 'level_above' || triggerCondition === 'level_below') &&
-          repeatMode !== 'once'
-        ) {
-          pushNodeError(
-            issues,
-            node,
-            'invalid_level_trigger_repeat_mode',
-            'trigger.market_price level_above/level_below only support repeatMode=once.'
-          );
-          break;
-        }
-      }
-    }
-
-    if (countValidMarketPriceOutcomeConditions(config) <= 0) {
-      pushNodeError(
-        issues,
-        node,
-        'missing_outcome_conditions',
-        'trigger.market_price requires at least one valid outcome condition.'
-      );
-    }
+    validateTriggerMarketPriceNodeConfig(issues, node, graph);
   }
 
   if (node.type === 'trigger.sell_progress') {

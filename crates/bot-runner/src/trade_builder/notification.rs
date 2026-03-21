@@ -1,3 +1,16 @@
+fn build_guard_notification_reason(scope: &str, reason_code: &str) -> String {
+    format!("{scope}:{reason_code}")
+}
+
+fn should_send_guard_transition_notification(
+    order: &TradeBuilderOrder,
+    candidate_reason: &str,
+    notify_flag: bool,
+) -> bool {
+    notify_flag
+        && order.last_guard_notification_reason.as_deref() != Some(candidate_reason)
+}
+
 async fn build_trade_builder_flow_identity(
     repo: &PostgresRepository,
     order: &TradeBuilderOrder,
@@ -42,7 +55,7 @@ async fn send_trade_builder_notification(
     order: &TradeBuilderOrder,
     notification_type: &str,
     message: &str,
-) {
+) -> bool {
     let flow_identity = build_trade_builder_flow_identity(repo, order).await;
     let message = if let Some((block, _)) = flow_identity.as_ref() {
         format!("{message}{block}")
@@ -50,19 +63,19 @@ async fn send_trade_builder_notification(
         message.to_string()
     };
     let Ok(telegram) = load_user_telegram_config(repo, order.user_id).await else {
-        return;
+        return false;
     };
     let bot_token = telegram.bot_token.trim();
     let chat_id = telegram.chat_id.trim();
     if bot_token.is_empty() || chat_id.is_empty() {
-        return;
+        return false;
     }
 
     let Ok(bot_token) = decrypt_config_string_if_needed("telegram.bot_token", bot_token) else {
-        return;
+        return false;
     };
     if bot_token.is_empty() {
-        return;
+        return false;
     }
 
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
@@ -103,6 +116,7 @@ async fn send_trade_builder_notification(
                 notification_type,
                 "TRADE_BUILDER_NOTIFICATION_SENT"
             );
+            true
         }
         Ok(resp) => {
             warn!(
@@ -111,6 +125,7 @@ async fn send_trade_builder_notification(
                 http_status = resp.status().as_u16(),
                 "TRADE_BUILDER_NOTIFICATION_FAILED"
             );
+            false
         }
         Err(err) => {
             warn!(
@@ -119,8 +134,45 @@ async fn send_trade_builder_notification(
                 error = %err,
                 "TRADE_BUILDER_NOTIFICATION_FAILED"
             );
+            false
         }
     }
+}
+
+async fn maybe_send_guard_transition_notification(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    candidate_reason: &str,
+    notify_flag: bool,
+    notification_type: &str,
+    message: &str,
+) -> Result<bool> {
+    if !should_send_guard_transition_notification(order, candidate_reason, notify_flag) {
+        return Ok(false);
+    }
+    if !send_trade_builder_notification(repo, order, notification_type, message).await {
+        return Ok(false);
+    }
+    repo.update_trade_builder_guard_notification_reason(order.id, Some(candidate_reason))
+        .await?;
+    Ok(true)
+}
+
+fn should_send_order_not_filled_notification(order: &TradeBuilderOrder) -> bool {
+    order.notify_on_order_not_filled && order.filled_qty <= 0.0
+}
+
+async fn maybe_send_order_not_filled_notification(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    reason_code: &str,
+    reason_message: &str,
+) -> bool {
+    if !should_send_order_not_filled_notification(order) {
+        return false;
+    }
+    let message = build_order_not_filled_notification_message(order, reason_code, reason_message);
+    send_trade_builder_notification(repo, order, "order_not_filled", &message).await
 }
 
 fn trade_builder_fill_notification_type(order: &TradeBuilderOrder) -> Option<&'static str> {
@@ -195,14 +247,16 @@ fn build_trigger_guard_waiting_notification_message(
 fn build_max_price_blocked_notification_message(
     order: &TradeBuilderOrder,
     current_price: f64,
-    desired_price: f64,
+    reference_price: f64,
+    reference_source: &str,
 ) -> String {
     format!(
-        "Max Fiyat Korumasi Engelledi\nSebep: Emir fiyati max fiyat limitini asiyor.\nMarket: {}\nOutcome: {}\nGuncel: {:.4}\nEmir Fiyati: {:.4}\nMax: {:.4}",
+        "Max Fiyat Korumasi Engelledi\nSebep: Referans fiyat max fiyat limitini asiyor.\nMarket: {}\nOutcome: {}\nGuncel: {:.4}\nReferans ({}): {:.4}\nMax: {:.4}",
         order.market_slug,
         order.outcome_label,
         current_price,
-        desired_price,
+        reference_source,
+        reference_price,
         order.max_price.unwrap_or(0.0)
     )
 }
@@ -210,20 +264,22 @@ fn build_max_price_blocked_notification_message(
 fn build_max_price_waiting_notification_message(
     order: &TradeBuilderOrder,
     current_price: f64,
-    desired_price: f64,
+    reference_price: f64,
+    reference_source: &str,
 ) -> String {
     format!(
         "Max Fiyat Korumasi Bekleme Modu
-Sebep: Emir fiyati max fiyat limitini asiyor. Kosullar duzelince order yeniden denenecek.
+Sebep: Referans fiyat max fiyat limitini asiyor. Kosullar duzelince order yeniden denenecek.
 Market: {}
 Outcome: {}
 Guncel: {:.4}
-Emir Fiyati: {:.4}
+Referans ({}): {:.4}
 Max: {:.4}",
         order.market_slug,
         order.outcome_label,
         current_price,
-        desired_price,
+        reference_source,
+        reference_price,
         order.max_price.unwrap_or(0.0)
     )
 }
@@ -231,12 +287,18 @@ Max: {:.4}",
 fn build_max_price_blocked_notification(
     order: &TradeBuilderOrder,
     current_price: f64,
-    desired_price: f64,
+    reference_price: f64,
+    reference_source: &str,
 ) -> Option<(&'static str, String)> {
     order.notify_on_max_price_blocked.then(|| {
         (
             "max_price_blocked",
-            build_max_price_blocked_notification_message(order, current_price, desired_price),
+            build_max_price_blocked_notification_message(
+                order,
+                current_price,
+                reference_price,
+                reference_source,
+            ),
         )
     })
 }
@@ -282,5 +344,16 @@ fn build_execution_floor_waiting_notification_message(
         order.outcome_label,
         best_ask.map_or_else(|| "N/A".to_string(), |value| format!("{value:.4}")),
         order.best_ask_floor_price.unwrap_or(0.0)
+    )
+}
+
+fn build_order_not_filled_notification_message(
+    order: &TradeBuilderOrder,
+    reason_code: &str,
+    reason_message: &str,
+) -> String {
+    format!(
+        "Emir Icra Edilemedi\nSebep Kodu: {}\nSebep: {}\nMarket: {}\nOutcome: {}\nSide: {}",
+        reason_code, reason_message, order.market_slug, order.outcome_label, order.side
     )
 }

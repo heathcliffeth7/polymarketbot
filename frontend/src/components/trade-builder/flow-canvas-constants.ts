@@ -49,6 +49,7 @@ export type NodePaletteCategory = 'all' | 'trigger' | 'logic' | 'action';
 
 export interface FlowCanvasGraphChangeOptions {
   allowGraphShrink?: boolean;
+  persistImmediately?: boolean;
 }
 
 export interface FlowCanvasEditorProps {

@@ -311,8 +311,14 @@ async fn reconcile_trade_builder_open_order(
             .await?;
         } else if order.retry_on_max_price_block {
             repo.clear_trade_builder_active_exchange_order(order.id, "canceled").await?;
+            let candidate_reason = build_guard_notification_reason("max_price", "above_max_price");
             let notification_message = order.notify_on_max_price_blocked.then(|| {
-                build_max_price_waiting_notification_message(&order, current_price, desired_price)
+                build_max_price_waiting_notification_message(
+                    &order,
+                    current_price,
+                    desired_price,
+                    "desired_price",
+                )
             });
             transition_trade_builder_order_to_guard_waiting(
                 repo,
@@ -330,6 +336,7 @@ async fn reconcile_trade_builder_open_order(
                 }),
                 remaining_usdc,
                 remaining_qty,
+                Some(candidate_reason.as_str()),
                 order.notify_on_max_price_blocked.then_some("max_price_waiting"),
                 notification_message,
             )
@@ -337,10 +344,24 @@ async fn reconcile_trade_builder_open_order(
         } else {
             repo.clear_trade_builder_active_exchange_order(order.id, "canceled").await?;
             repo.set_trade_builder_order_status(order.id, "canceled", Some("above_max_price")).await?;
+            let candidate_reason = build_guard_notification_reason("max_price", "above_max_price");
             if let Some((notification_type, message)) =
-                build_max_price_blocked_notification(&order, current_price, desired_price)
+                build_max_price_blocked_notification(
+                    &order,
+                    current_price,
+                    desired_price,
+                    "desired_price",
+                )
             {
-                send_trade_builder_notification(repo, &order, notification_type, &message).await;
+                maybe_send_guard_transition_notification(
+                    repo,
+                    &order,
+                    candidate_reason.as_str(),
+                    true,
+                    notification_type,
+                    &message,
+                )
+                .await?;
             }
         }
         return Ok(());

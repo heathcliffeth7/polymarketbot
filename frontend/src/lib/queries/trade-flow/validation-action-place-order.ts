@@ -289,13 +289,13 @@ export function validateActionPlaceOrderConfig(
   const slTriggerPriceMode =
     typeof config.slTriggerPriceMode === 'string' ? config.slTriggerPriceMode : null;
   if (slEnabled === true && slTriggerPriceMode != null) {
-    const validModes = ['best_bid', 'composite', 'last_trade'];
+    const validModes = ['best_bid', 'composite', 'composite_safe', 'composite_fast', 'last_trade'];
     if (!validModes.includes(slTriggerPriceMode)) {
       pushNodeError(
         issues,
         node,
         'invalid_sl_trigger_price_mode',
-        'action.place_order slTriggerPriceMode must be one of: best_bid, composite, last_trade.'
+        'action.place_order slTriggerPriceMode must be one of: best_bid, composite, composite_safe, composite_fast, last_trade.'
       );
     }
   }
@@ -588,6 +588,15 @@ export function validateActionPlaceOrderConfig(
       node,
       'invalid_notify_on_order_placed',
       'action.place_order notifyOnOrderPlaced must be boolean (true/false).'
+    );
+  }
+  const notifyOnOrderNotFilled = toBooleanish(config.notifyOnOrderNotFilled);
+  if (config.notifyOnOrderNotFilled != null && notifyOnOrderNotFilled == null) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_notify_on_order_not_filled',
+      'action.place_order notifyOnOrderNotFilled must be boolean (true/false).'
     );
   }
 

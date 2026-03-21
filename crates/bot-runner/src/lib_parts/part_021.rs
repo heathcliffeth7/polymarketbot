@@ -335,6 +335,8 @@ async fn process_trade_builder_workflow(
                     false,
                     false,
                     false,
+                    None,
+                    false,
                     false,
                     false,
                 )
@@ -481,6 +483,8 @@ async fn ensure_sell_leg_order(
             false,
             false,
             false,
+            false,
+            None,
             false,
             false,
             false,

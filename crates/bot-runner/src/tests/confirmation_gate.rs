@@ -18,19 +18,20 @@ fn test_node_spec(
         trigger_condition: trigger_condition.to_string(),
         trigger_price,
         max_price: None,
+        price_to_beat_trigger_enabled: false,
+        price_to_beat_trigger_min_gap: None,
+        price_to_beat_trigger_max_gap: None,
+        price_to_beat_trigger_unit:
+            crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd,
         protection_mode: TRIGGER_PROTECTION_MODE_OFF.to_string(),
         protection_asset: None,
         confirmation_ms: Some(confirmation_ms),
         cycle_window_mode: None,
         cycle_window_secs: None,
+        cycle_window_start_sec: None,
+        cycle_window_end_sec: None,
+        auto_sell_on_window_end: false,
     }
-}
-
-#[test]
-fn last_cycle_window_disables_resolution_window_guard() {
-    assert!(auto_scope_resolution_window_guard_enabled(None));
-    assert!(auto_scope_resolution_window_guard_enabled(Some("first")));
-    assert!(!auto_scope_resolution_window_guard_enabled(Some("last")));
 }
 
 #[test]
@@ -179,6 +180,52 @@ fn auto_scope_last_first_tick_with_zero_confirmation_enqueues_immediately() {
     assert_eq!(eval_mode, "first_tick_threshold");
     assert_eq!(market_price_confirmation_ms(&node), None);
     assert!(crossed && market_price_confirmation_ms(&node).is_none());
+}
+
+#[test]
+fn standard_level_above_crossed_without_confirmation_enqueues_immediately() {
+    let mut node = test_node_spec("level_above", 0.49, 15_000);
+    node.confirmation_ms = None;
+
+    let (crossed, eval_mode) = evaluate_trigger_market_price_condition(
+        Some(0.44),
+        0.71,
+        node.trigger_price,
+        &node.trigger_condition,
+        false,
+        node.max_price,
+    );
+    assert!(crossed);
+    assert_eq!(eval_mode, "level_threshold_met");
+    assert_eq!(market_price_confirmation_ms(&node), None);
+    assert!(should_enqueue_market_price_without_confirmation(
+        TriggerMarketPriceGateMode::StandardOnly,
+        crossed,
+        market_price_confirmation_ms(&node),
+    ));
+}
+
+#[test]
+fn standard_level_above_crossed_with_zero_confirmation_enqueues_immediately() {
+    let mut node = test_node_spec("level_above", 0.49, 15_000);
+    node.confirmation_ms = Some(0);
+
+    let (crossed, eval_mode) = evaluate_trigger_market_price_condition(
+        Some(0.44),
+        0.71,
+        node.trigger_price,
+        &node.trigger_condition,
+        false,
+        node.max_price,
+    );
+    assert!(crossed);
+    assert_eq!(eval_mode, "level_threshold_met");
+    assert_eq!(market_price_confirmation_ms(&node), None);
+    assert!(should_enqueue_market_price_without_confirmation(
+        TriggerMarketPriceGateMode::StandardOnly,
+        crossed,
+        market_price_confirmation_ms(&node),
+    ));
 }
 
 #[test]

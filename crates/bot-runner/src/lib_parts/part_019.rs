@@ -298,7 +298,8 @@ async fn fetch_trade_flow_market_price(
             )
         })?;
         let resolved =
-            resolve_trigger_price_from_rest(client, token_id, price_mode, trigger_condition).await?;
+            resolve_trigger_price_from_rest(client, token_id, price_mode, trigger_condition)
+                .await?;
         if resolved.detail.source_detail == "rest_midpoint" {
             warn!(
                 %market_slug,
@@ -419,6 +420,34 @@ fn resolve_action_place_order_datetime(
         .map(|parsed| parsed.with_timezone(&Utc))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActionPlaceOrderStaleMarketRetry {
+    stale_market_slug: String,
+    current_market_slug: String,
+}
+
+fn resolve_action_place_order_stale_market_retry(
+    node: &TradeFlowNode,
+    context: &Value,
+    step: &TradeFlowRunStep,
+) -> Option<ActionPlaceOrderStaleMarketRetry> {
+    if node_config_string(node, "marketSlug").is_some() {
+        return None;
+    }
+
+    let stale_market_slug =
+        step_input_string(step, &["market_slug", "marketSlug", "wsMarketSlug"])?;
+    let current_market_slug = flow_context_string(context, "marketSlug")?;
+    if stale_market_slug == current_market_slug {
+        return None;
+    }
+
+    Some(ActionPlaceOrderStaleMarketRetry {
+        stale_market_slug,
+        current_market_slug,
+    })
+}
+
 fn resolve_action_place_order_string(
     node: &TradeFlowNode,
     context: &Value,
@@ -428,8 +457,8 @@ fn resolve_action_place_order_string(
     step_keys: &[&str],
 ) -> Option<String> {
     node_config_string(node, config_key)
-        .or_else(|| flow_context_string(context, context_key))
         .or_else(|| step_input_string(step, step_keys))
+        .or_else(|| flow_context_string(context, context_key))
 }
 
 fn resolve_action_place_order_exit_price(
@@ -545,9 +574,9 @@ fn resolve_action_place_order_existing_order_id(
 ) -> Option<i64> {
     let refs = context.get("refs")?;
     let ref_key = node_config_string(node, "refKey").unwrap_or_else(|| node.key.clone());
-    refs.get(&ref_key)
+    refs.get(&node.key)
         .and_then(value_as_i64)
-        .or_else(|| refs.get(&node.key).and_then(value_as_i64))
+        .or_else(|| refs.get(&ref_key).and_then(value_as_i64))
 }
 
 fn find_upstream_market_price_trigger_key(
@@ -570,7 +599,12 @@ fn find_upstream_market_price_trigger_key(
         if !visited.insert(current) {
             continue;
         }
-        for source_key in incoming_by_target.get(current).into_iter().flatten().copied() {
+        for source_key in incoming_by_target
+            .get(current)
+            .into_iter()
+            .flatten()
+            .copied()
+        {
             let Some(source_node) = flow_node(graph, source_key) else {
                 continue;
             };

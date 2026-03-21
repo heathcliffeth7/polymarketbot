@@ -8,6 +8,19 @@ async fn execute_trigger_market_price(
     node: &TradeFlowNode,
     context: &mut Value,
 ) -> Result<TradeFlowNodeExecution> {
+    const WS_IGNORE_REASON_CONDITION_NOT_MET: &str = "condition_not_met";
+    const WS_IGNORE_REASON_MISSING_CONDITION_TOKEN: &str = "missing_condition_token";
+    const WS_IGNORE_REASON_MISSING_EXPECTED_TOKEN: &str = "missing_expected_token";
+    const WS_IGNORE_REASON_MISSING_TRIGGER_PRICE: &str = "missing_trigger_price";
+    const WS_IGNORE_REASON_MISSING_WS_MARKET_SLUG: &str = "missing_ws_market_slug";
+    const WS_IGNORE_REASON_MISSING_WS_PRICE: &str = "missing_ws_price";
+    const WS_IGNORE_REASON_MISSING_WS_PRICE_FOR_TOKEN: &str = "missing_ws_price_for_token";
+    const WS_IGNORE_REASON_PRICE_TO_BEAT_GATE_BLOCKED: &str = "price_to_beat_gate_blocked";
+    const WS_IGNORE_REASON_SCOPE_MARKET_MISMATCH: &str = "scope_market_mismatch";
+    const WS_IGNORE_REASON_TOKEN_MISMATCH: &str = "token_mismatch";
+    const WS_IGNORE_REASON_UNSUPPORTED_CONDITION: &str = "unsupported_condition";
+    const WS_IGNORE_REASON_UNSUPPORTED_GATE_MODE: &str = "unsupported_gate_mode";
+
     let var_key = node_config_string(node, "varKey").unwrap_or_else(|| node.key.clone());
     let interval_ms = node_config_i64(node, "minIntervalMs")
         .or_else(|| node_config_i64(node, "pollIntervalMs"))
@@ -21,6 +34,7 @@ async fn execute_trigger_market_price(
         node.config.get("priceMode").and_then(|v| v.as_str()),
         WsPriceMode::Composite,
     );
+    let node_ptb_config = trigger_market_price_ptb_config_from_node(node);
     // --- Early WS-sourced detection for auto_scope guard ---
     let ws_sourced = step
         .input_json
@@ -62,9 +76,16 @@ async fn execute_trigger_market_price(
         }
     }
 
-    let mut market_slug = node_config_string(node, "marketSlug")
-        .or_else(|| flow_context_string(context, "marketSlug"))
-        .unwrap_or_default();
+    let mut market_slug = if auto_scope_mode {
+        node_auto_scope_market_slug(context, &node.key)
+            .or_else(|| flow_context_string(context, "marketSlug"))
+            .or_else(|| node_config_string(node, "marketSlug"))
+            .unwrap_or_default()
+    } else {
+        node_config_string(node, "marketSlug")
+            .or_else(|| flow_context_string(context, "marketSlug"))
+            .unwrap_or_default()
+    };
     if auto_scope_mode && !(ws_sourced && ws_market_slug_from_step.is_some()) {
         match sync_trigger_market_auto_scope_context(cfg, node, context).await? {
             Some(selected) => {
@@ -79,6 +100,7 @@ async fn execute_trigger_market_price(
                     "once_scope": if once_scope_market { "market" } else { "run" },
                     "market_mode": "auto_scope",
                     "market_scope": node_config_string(node, "marketScope")
+                        .or_else(|| node_auto_scope_market_scope(node, context))
                         .or_else(|| flow_context_string(context, "marketScope")),
                     "error": "market_not_found"
                 });
@@ -106,7 +128,9 @@ async fn execute_trigger_market_price(
     if market_slug.trim().is_empty() {
         return Err(anyhow::anyhow!("trigger.market_price requires marketSlug"));
     }
-    set_flow_context(context, "marketSlug", json!(market_slug.clone()));
+    if !auto_scope_mode {
+        set_flow_context(context, "marketSlug", json!(market_slug.clone()));
+    }
     let trigger_protection_mode = normalize_trigger_protection_mode(
         node.config.get("protectionMode").and_then(Value::as_str),
     );
@@ -170,8 +194,16 @@ async fn execute_trigger_market_price(
         .and_then(|input| input.get("wsPreviousPrice"))
         .and_then(value_as_f64)
         .map(clamp_probability);
-    let ws_previous_price_present = step.input_json.as_ref().is_some_and(|input| input.get("wsPreviousPrice").is_some());
-    let ws_allow_first_tick_replay = step.input_json.as_ref().and_then(|input| input.get("wsAllowFirstTickReplay")).and_then(Value::as_bool).unwrap_or(false);
+    let ws_previous_price_present = step
+        .input_json
+        .as_ref()
+        .is_some_and(|input| input.get("wsPreviousPrice").is_some());
+    let ws_allow_first_tick_replay = step
+        .input_json
+        .as_ref()
+        .and_then(|input| input.get("wsAllowFirstTickReplay"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     // Prevalidated WS paths (for example cross_confirmed) must bypass strict cross re-check.
     let ws_evaluation_mode_from_step = step
         .input_json
@@ -228,12 +260,18 @@ async fn execute_trigger_market_price(
         .as_ref()
         .and_then(|input| input.get("queuedAt").or_else(|| input.get("queued_at")))
         .and_then(Value::as_str);
+    let ws_price_to_beat_trigger_gate_from_step = step_price_to_beat_trigger_gate(step);
+    let ws_price_to_beat_trigger_gate_passed = ws_price_to_beat_trigger_gate_from_step
+        .as_ref()
+        .and_then(price_to_beat_trigger_gate_passed);
     let mut ws_cross_confirmed_short_circuit_applied = false;
     // ws_market_slug_from_step already computed above
     if let Some(ws_market_slug) = ws_market_slug_from_step.as_deref() {
         if should_accept_ws_market_slug_override(node, &market_slug) {
             market_slug = ws_market_slug.to_string();
-            set_flow_context(context, "marketSlug", json!(market_slug.clone()));
+            if !auto_scope_mode {
+                set_flow_context(context, "marketSlug", json!(market_slug.clone()));
+            }
             sync_trade_flow_market_price_once_scope_state(
                 context,
                 &node.key,
@@ -242,14 +280,14 @@ async fn execute_trigger_market_price(
             );
         }
     }
-    if once_mode
+    let once_already_fired = once_mode
         && trade_flow_market_price_once_fired_for_scope(
             context,
             &node.key,
             once_scope_market,
             Some(market_slug.as_str()),
-        )
-    {
+        );
+    if once_already_fired {
         if !flow_node_state_truthy(context, &node.key, FLOW_NODE_STATE_ONCE_BLOCK_LOGGED) {
             set_flow_node_state(
                 context,
@@ -305,6 +343,8 @@ async fn execute_trigger_market_price(
     let mut triggered_previous_price: Option<f64> = None;
     let mut effective_previous_price: Option<f64> = None;
     let mut triggered_poly_delta_10s_cent: Option<f64> = None;
+    let mut triggered_gate_mode: Option<TriggerMarketPriceGateMode> = None;
+    let mut price_to_beat_trigger_gate_output = Value::Null;
     let mut trigger_evaluation_mode: &'static str = "not_evaluated";
     let mut ws_hard_ignore_reason: Option<String> = None;
     let mut ws_soft_ignore_reason: Option<String> = None;
@@ -314,12 +354,11 @@ async fn execute_trigger_market_price(
         match ws_market_slug_from_step.as_deref() {
             Some(ws_market_slug) if ws_market_slug == market_slug => {}
             Some(ws_market_slug) => {
-                ws_hard_ignore_reason = Some(format!(
-                    "ws_market_slug_mismatch:{ws_market_slug}!={market_slug}"
-                ));
+                let _ = ws_market_slug;
+                ws_hard_ignore_reason = Some(WS_IGNORE_REASON_SCOPE_MARKET_MISMATCH.to_string());
             }
             None => {
-                ws_hard_ignore_reason = Some("ws_market_slug_missing".to_string());
+                ws_hard_ignore_reason = Some(WS_IGNORE_REASON_MISSING_WS_MARKET_SLUG.to_string());
             }
         }
     }
@@ -330,12 +369,38 @@ async fn execute_trigger_market_price(
         ws_evaluation_mode_from_step,
         ws_hard_ignore_reason.as_deref(),
     );
-
-    if should_apply_ws_cross_confirmed_short_circuit(
+    let ws_execution_path = if should_apply_ws_cross_confirmed_short_circuit(
         ws_sourced,
         ws_evaluation_mode_from_step,
         ws_hard_ignore_reason.as_deref(),
     ) {
+        "cross_confirm_short_circuit"
+    } else if outcome_conditions.is_some() {
+        "multi_outcome"
+    } else {
+        "legacy_single_token"
+    };
+    if ws_sourced {
+        log_trigger_ws_execute_begin(
+            step.run_id,
+            run.id,
+            &TriggerWsExecuteBeginLogFields {
+                node_key: node.key.clone(),
+                node_type: node.node_type.clone(),
+                market_slug: market_slug.clone(),
+                ws_market_slug: ws_market_slug_from_step.clone(),
+                ws_token_id: ws_token_id_from_step.clone(),
+                ws_sourced,
+                path: ws_execution_path,
+                once_mode,
+                once_already_fired,
+                ws_hard_ignore_reason: ws_hard_ignore_reason.clone(),
+                ws_first_tick_threshold_override,
+            },
+        );
+    }
+
+    if ws_execution_path == "cross_confirm_short_circuit" {
         let conf_token_id = ws_token_id_from_step.clone().unwrap_or_default();
         let conf_price = ws_price_from_step;
         let conf_prev = ws_previous_price_from_step;
@@ -392,6 +457,7 @@ async fn execute_trigger_market_price(
         current_price = conf_price;
         triggered_previous_price = conf_prev;
         effective_previous_price = conf_prev;
+        triggered_gate_mode = trigger_market_price_gate_mode(&triggered_condition, node_ptb_config);
         trigger_evaluation_mode = "cross_confirmed";
         pass = true;
         ws_cross_confirmed_short_circuit_applied = true;
@@ -449,8 +515,13 @@ async fn execute_trigger_market_price(
                 .trim()
                 .to_string();
             if node_market_mode(node) == "auto_scope" && !cond_outcome_label.is_empty() {
-                cond_token_id = resolve_token_id_for_outcome_label(&cond_outcome_label, context)
-                    .unwrap_or(cond_token_id);
+                cond_token_id = resolve_token_id_for_outcome_label_for_node(
+                    &node.key,
+                    &cond_outcome_label,
+                    context,
+                )
+                .or_else(|| resolve_token_id_for_outcome_label(&cond_outcome_label, context))
+                .unwrap_or(cond_token_id);
             }
             let cond_trigger_condition = cond
                 .get("triggerCondition")
@@ -469,22 +540,43 @@ async fn execute_trigger_market_price(
                 .map(|v| v / 100.0)
                 .or_else(|| cond.get("maxPrice").and_then(value_as_f64))
                 .filter(|v| *v > 0.0 && *v <= 1.0);
-            if cond_token_id.is_empty()
-                || cond_trigger_condition.is_empty()
-                || !is_supported_market_price_trigger_condition(&cond_trigger_condition)
-            {
+            if cond_token_id.is_empty() {
+                ws_soft_ignore_reason
+                    .get_or_insert_with(|| WS_IGNORE_REASON_MISSING_CONDITION_TOKEN.to_string());
                 continue;
             }
-            if market_price_trigger_condition_requires_once(&cond_trigger_condition) && !once_mode {
-                anyhow::bail!(
-                    "trigger.market_price {} requires repeatMode=once",
-                    cond_trigger_condition
-                );
-            }
-            let tp = match cond_trigger_price {
-                Some(v) => v,
-                None => continue,
+            let Some(row_gate_mode) =
+                trigger_market_price_gate_mode(&cond_trigger_condition, node_ptb_config)
+            else {
+                ws_soft_ignore_reason
+                    .get_or_insert_with(|| WS_IGNORE_REASON_UNSUPPORTED_GATE_MODE.to_string());
+                continue;
             };
+            let tp = cond_trigger_price.filter(|value| *value > 0.0 && *value <= 1.0);
+            if matches!(
+                row_gate_mode,
+                TriggerMarketPriceGateMode::StandardOnly
+                    | TriggerMarketPriceGateMode::StandardAndPtb
+            ) {
+                if !is_supported_market_price_trigger_condition(&cond_trigger_condition) {
+                    ws_soft_ignore_reason
+                        .get_or_insert_with(|| WS_IGNORE_REASON_UNSUPPORTED_CONDITION.to_string());
+                    continue;
+                }
+                if market_price_trigger_condition_requires_once(&cond_trigger_condition)
+                    && !once_mode
+                {
+                    anyhow::bail!(
+                        "trigger.market_price {} requires repeatMode=once",
+                        cond_trigger_condition
+                    );
+                }
+                if tp.is_none() {
+                    ws_soft_ignore_reason
+                        .get_or_insert_with(|| WS_IGNORE_REASON_MISSING_TRIGGER_PRICE.to_string());
+                    continue;
+                }
+            }
             let prev_state_key = format!("previous_price_{}", cond_token_id);
             let state_prev =
                 flow_node_state(context, &node.key, &prev_state_key).and_then(value_as_f64);
@@ -505,7 +597,7 @@ async fn execute_trigger_market_price(
             if ws_sourced && step_ws_price.is_none() {
                 if ws_soft_ignore_reason.is_none() {
                     ws_soft_ignore_reason =
-                        Some(format!("ws_price_missing_for_token:{cond_token_id}"));
+                        Some(WS_IGNORE_REASON_MISSING_WS_PRICE_FOR_TOKEN.to_string());
                 }
                 continue;
             }
@@ -518,7 +610,8 @@ async fn execute_trigger_market_price(
                     &market_slug,
                     Some(cond_token_id.as_str()),
                     price_mode,
-                    Some(cond_trigger_condition.as_str()),
+                    trigger_market_price_standard_trigger_enabled(&cond_trigger_condition)
+                        .then_some(cond_trigger_condition.as_str()),
                 )
                 .await
             };
@@ -561,30 +654,127 @@ async fn execute_trigger_market_price(
             let poly_delta_10s_cent =
                 record_trigger_price_sample(context, &node.key, &cond_token_id, cur, Utc::now());
             let allow_first_tick = !once_mode || ws_first_tick_threshold_override;
-            let (pass_this, eval_mode) = evaluate_trigger_market_price_condition(
-                prev,
-                cur,
-                tp,
-                &cond_trigger_condition,
-                allow_first_tick,
-                cond_max_price,
-            );
+            let (pass_this, eval_mode, ptb_gate_output_this) = match row_gate_mode {
+                TriggerMarketPriceGateMode::StandardOnly => {
+                    let (pass_this, eval_mode) = evaluate_trigger_market_price_condition(
+                        prev,
+                        cur,
+                        tp.unwrap_or_default(),
+                        &cond_trigger_condition,
+                        allow_first_tick,
+                        cond_max_price,
+                    );
+                    (pass_this, eval_mode, Value::Null)
+                }
+                TriggerMarketPriceGateMode::StandardAndPtb => {
+                    let (pass_standard, eval_mode) = evaluate_trigger_market_price_condition(
+                        prev,
+                        cur,
+                        tp.unwrap_or_default(),
+                        &cond_trigger_condition,
+                        allow_first_tick,
+                        cond_max_price,
+                    );
+                    if !pass_standard {
+                        (false, eval_mode, Value::Null)
+                    } else if ws_sourced {
+                        let gate_output = ws_price_to_beat_trigger_gate_from_step
+                            .clone()
+                            .unwrap_or(Value::Null);
+                        (
+                            ws_price_to_beat_trigger_gate_passed.unwrap_or(false),
+                            eval_mode,
+                            gate_output,
+                        )
+                    } else {
+                        let ptb_gate = evaluate_trigger_market_price_ptb_gate_for_node(
+                            node,
+                            &market_slug,
+                            &cond_outcome_label,
+                        )
+                        .unwrap_or_else(|| {
+                            crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
+                                passed: false,
+                                reason: "unsupported_outcome_label",
+                                directional_gap: None,
+                                price_to_beat: None,
+                                current_price: None,
+                                min_gap: 0.0,
+                                max_gap: None,
+                            }
+                        });
+                        (ptb_gate.passed, eval_mode, ptb_gate.to_value())
+                    }
+                }
+                TriggerMarketPriceGateMode::PtbOnly => {
+                    if ws_sourced {
+                        let gate_output = ws_price_to_beat_trigger_gate_from_step
+                            .clone()
+                            .unwrap_or(Value::Null);
+                        let matches_token =
+                            ws_token_id_from_step.as_deref() == Some(cond_token_id.as_str());
+                        (
+                            ws_evaluation_mode_from_step == "ptb_only"
+                                && matches_token
+                                && ws_price_to_beat_trigger_gate_passed == Some(true),
+                            "ptb_only",
+                            gate_output,
+                        )
+                    } else {
+                        let ptb_gate = evaluate_trigger_market_price_ptb_gate_for_node(
+                            node,
+                            &market_slug,
+                            &cond_outcome_label,
+                        )
+                        .unwrap_or_else(|| {
+                            crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
+                                passed: false,
+                                reason: "unsupported_outcome_label",
+                                directional_gap: None,
+                                price_to_beat: None,
+                                current_price: None,
+                                min_gap: 0.0,
+                                max_gap: None,
+                            }
+                        });
+                        (ptb_gate.passed, "ptb_only", ptb_gate.to_value())
+                    }
+                }
+            };
             last_eval_mode = eval_mode;
             if ws_sourced && !pass_this && ws_soft_ignore_reason.is_none() {
-                ws_soft_ignore_reason = Some(format!(
-                    "ws_condition_not_met:{cond_token_id}:{cond_trigger_condition}:{tp:.6}"
-                ));
+                ws_soft_ignore_reason = Some(match row_gate_mode {
+                    TriggerMarketPriceGateMode::PtbOnly => {
+                        WS_IGNORE_REASON_PRICE_TO_BEAT_GATE_BLOCKED.to_string()
+                    }
+                    _ => WS_IGNORE_REASON_CONDITION_NOT_MET.to_string(),
+                });
             }
             if pass_this && !pass {
                 pass = true;
                 triggered_token_id = cond_token_id;
                 triggered_outcome_label = cond_outcome_label;
                 triggered_condition = cond_trigger_condition;
-                triggered_trigger_price = Some(tp);
+                triggered_trigger_price = matches!(
+                    row_gate_mode,
+                    TriggerMarketPriceGateMode::StandardOnly
+                        | TriggerMarketPriceGateMode::StandardAndPtb
+                )
+                .then_some(tp.unwrap_or_default());
                 triggered_price = Some(cur);
-                triggered_max_price = cond_max_price;
+                triggered_max_price = matches!(
+                    row_gate_mode,
+                    TriggerMarketPriceGateMode::StandardOnly
+                        | TriggerMarketPriceGateMode::StandardAndPtb
+                )
+                .then_some(cond_max_price)
+                .flatten();
                 current_price = Some(cur);
                 triggered_previous_price = prev;
+                triggered_gate_mode = Some(row_gate_mode);
+                if !ptb_gate_output_this.is_null() {
+                    price_to_beat_trigger_gate_output = ptb_gate_output_this;
+                }
                 trigger_evaluation_mode = eval_mode;
                 triggered_poly_delta_10s_cent = poly_delta_10s_cent;
             }
@@ -595,24 +785,44 @@ async fn execute_trigger_market_price(
     } else {
         // Legacy single-token path
         let token_id = node_config_string(node, "tokenId")
+            .or_else(|| {
+                if auto_scope_mode {
+                    node_auto_scope_resolved_token_id(context, &node.key)
+                } else {
+                    None
+                }
+            })
             .or_else(|| flow_context_string(context, "tokenId"))
             .or_else(|| {
                 if node_market_mode(node) != "auto_scope" {
                     return None;
                 }
                 let outcome = node_config_string(node, "outcomeLabel")
+                    .or_else(|| node_auto_scope_resolved_outcome_label(context, &node.key))
                     .or_else(|| flow_context_string(context, "outcomeLabel"))?;
-                resolve_token_id_for_outcome_label(&outcome, context)
+                resolve_token_id_for_outcome_label_for_node(&node.key, &outcome, context)
+                    .or_else(|| resolve_token_id_for_outcome_label(&outcome, context))
             });
         let legacy_outcome_label = node_config_string(node, "outcomeLabel")
+            .or_else(|| {
+                if auto_scope_mode {
+                    node_auto_scope_resolved_outcome_label(context, &node.key)
+                } else {
+                    None
+                }
+            })
             .or_else(|| flow_context_string(context, "outcomeLabel"))
             .unwrap_or_default();
-        let trigger_condition = node_config_string(node, "triggerCondition");
+        let trigger_condition = node_config_string(node, "triggerCondition").unwrap_or_default();
+        let gate_mode = trigger_market_price_gate_mode(&trigger_condition, node_ptb_config);
+        if ws_sourced && gate_mode.is_none() && ws_soft_ignore_reason.is_none() {
+            ws_soft_ignore_reason = Some(WS_IGNORE_REASON_UNSUPPORTED_GATE_MODE.to_string());
+        }
         let cur_result = if let Some(sp) = ws_price_from_step {
             Ok(Some(sp))
         } else if ws_sourced {
             if ws_soft_ignore_reason.is_none() {
-                ws_soft_ignore_reason = Some("ws_price_missing".to_string());
+                ws_soft_ignore_reason = Some(WS_IGNORE_REASON_MISSING_WS_PRICE.to_string());
             }
             Ok(None)
         } else {
@@ -622,10 +832,11 @@ async fn execute_trigger_market_price(
                 &market_slug,
                 token_id.as_deref(),
                 price_mode,
-                trigger_condition.as_deref(),
+                trigger_market_price_standard_trigger_enabled(&trigger_condition)
+                    .then_some(trigger_condition.as_str()),
             )
-                .await
-                .map(Some)
+            .await
+            .map(Some)
         };
         let cur = match cur_result {
             Ok(price) => price,
@@ -668,7 +879,19 @@ async fn execute_trigger_market_price(
         }
 
         let trigger_price = node_config_f64(node, "triggerPrice")
-            .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
+            .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0))
+            .filter(|value| *value > 0.0 && *value <= 1.0);
+        if ws_sourced
+            && matches!(
+                gate_mode,
+                Some(TriggerMarketPriceGateMode::StandardOnly)
+                    | Some(TriggerMarketPriceGateMode::StandardAndPtb)
+            )
+            && trigger_price.is_none()
+            && ws_soft_ignore_reason.is_none()
+        {
+            ws_soft_ignore_reason = Some(WS_IGNORE_REASON_MISSING_TRIGGER_PRICE.to_string());
+        }
         // PRCE-01: Use per-token key to avoid cross-token price contamination.
         // Returns None when token_id is empty/missing — safe because resolve_ws_previous_price
         // handles None state_previous_price correctly (falls through to ws payload or returns None).
@@ -700,10 +923,10 @@ async fn execute_trigger_market_price(
                 }
                 _ => None,
             };
-        triggered_max_price = legacy_max_price;
         pass = if let Some(cur_price) = cur {
-            match (trigger_condition.as_deref(), trigger_price) {
-                (Some(condition @ ("cross_above" | "level_above")), Some(tp)) => {
+            match gate_mode {
+                Some(TriggerMarketPriceGateMode::StandardOnly) => {
+                    let condition = trigger_condition.as_str();
                     if market_price_trigger_condition_requires_once(condition) && !once_mode {
                         anyhow::bail!(
                             "trigger.market_price {} requires repeatMode=once",
@@ -713,7 +936,7 @@ async fn execute_trigger_market_price(
                     let (matched, eval_mode) = evaluate_trigger_market_price_condition(
                         previous_price,
                         cur_price,
-                        tp,
+                        trigger_price.unwrap_or_default(),
                         condition,
                         allow_first_tick,
                         legacy_max_price,
@@ -721,7 +944,8 @@ async fn execute_trigger_market_price(
                     trigger_evaluation_mode = eval_mode;
                     matched
                 }
-                (Some(condition @ ("cross_below" | "level_below")), Some(tp)) => {
+                Some(TriggerMarketPriceGateMode::StandardAndPtb) => {
+                    let condition = trigger_condition.as_str();
                     if market_price_trigger_condition_requires_once(condition) && !once_mode {
                         anyhow::bail!(
                             "trigger.market_price {} requires repeatMode=once",
@@ -731,15 +955,70 @@ async fn execute_trigger_market_price(
                     let (matched, eval_mode) = evaluate_trigger_market_price_condition(
                         previous_price,
                         cur_price,
-                        tp,
+                        trigger_price.unwrap_or_default(),
                         condition,
                         allow_first_tick,
                         legacy_max_price,
                     );
                     trigger_evaluation_mode = eval_mode;
-                    matched
+                    if !matched {
+                        false
+                    } else if ws_sourced {
+                        if let Some(gate) = ws_price_to_beat_trigger_gate_from_step.as_ref() {
+                            price_to_beat_trigger_gate_output = gate.clone();
+                        }
+                        ws_price_to_beat_trigger_gate_passed.unwrap_or(false)
+                    } else {
+                        let ptb_gate = evaluate_trigger_market_price_ptb_gate_for_node(
+                            node,
+                            &market_slug,
+                            &legacy_outcome_label,
+                        )
+                        .unwrap_or_else(|| {
+                            crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
+                                passed: false,
+                                reason: "unsupported_outcome_label",
+                                directional_gap: None,
+                                price_to_beat: None,
+                                current_price: None,
+                                min_gap: 0.0,
+                                max_gap: None,
+                            }
+                        });
+                        price_to_beat_trigger_gate_output = ptb_gate.to_value();
+                        ptb_gate.passed
+                    }
                 }
-                _ => {
+                Some(TriggerMarketPriceGateMode::PtbOnly) => {
+                    trigger_evaluation_mode = "ptb_only";
+                    if ws_sourced {
+                        if let Some(gate) = ws_price_to_beat_trigger_gate_from_step.as_ref() {
+                            price_to_beat_trigger_gate_output = gate.clone();
+                        }
+                        ws_evaluation_mode_from_step == "ptb_only"
+                            && ws_price_to_beat_trigger_gate_passed == Some(true)
+                    } else {
+                        let ptb_gate = evaluate_trigger_market_price_ptb_gate_for_node(
+                            node,
+                            &market_slug,
+                            &legacy_outcome_label,
+                        )
+                        .unwrap_or_else(|| {
+                            crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
+                                passed: false,
+                                reason: "unsupported_outcome_label",
+                                directional_gap: None,
+                                price_to_beat: None,
+                                current_price: None,
+                                min_gap: 0.0,
+                                max_gap: None,
+                            }
+                        });
+                        price_to_beat_trigger_gate_output = ptb_gate.to_value();
+                        ptb_gate.passed
+                    }
+                }
+                None => {
                     trigger_evaluation_mode = "unsupported_condition";
                     false
                 }
@@ -762,29 +1041,61 @@ async fn execute_trigger_market_price(
             if let Some(expected_token_id) = token_id.as_deref() {
                 if expected_token_id.is_empty() {
                     if ws_hard_ignore_reason.is_none() {
-                        ws_hard_ignore_reason = Some("ws_expected_token_missing".to_string());
+                        ws_hard_ignore_reason =
+                            Some(WS_IGNORE_REASON_MISSING_EXPECTED_TOKEN.to_string());
                     }
                 } else if ws_token_id_from_step.as_deref() != Some(expected_token_id) {
                     if ws_hard_ignore_reason.is_none() {
-                        ws_hard_ignore_reason = Some(format!(
-                            "ws_token_mismatch:{}!={expected_token_id}",
-                            ws_token_id_from_step.as_deref().unwrap_or("missing")
-                        ));
+                        ws_hard_ignore_reason = Some(WS_IGNORE_REASON_TOKEN_MISMATCH.to_string());
                     }
                 }
             }
             if !pass && ws_soft_ignore_reason.is_none() {
-                ws_soft_ignore_reason = Some("ws_condition_not_met".to_string());
+                ws_soft_ignore_reason = Some(match gate_mode {
+                    Some(TriggerMarketPriceGateMode::PtbOnly) => {
+                        WS_IGNORE_REASON_PRICE_TO_BEAT_GATE_BLOCKED.to_string()
+                    }
+                    _ => WS_IGNORE_REASON_CONDITION_NOT_MET.to_string(),
+                });
             }
         }
         triggered_token_id = token_id.unwrap_or_default();
         triggered_outcome_label = legacy_outcome_label;
-        triggered_condition = trigger_condition.unwrap_or_default();
+        triggered_gate_mode = gate_mode;
+        triggered_condition = trigger_condition;
         triggered_trigger_price = trigger_price;
         triggered_price = current_price;
         triggered_previous_price = previous_price;
+        triggered_max_price = matches!(
+            gate_mode,
+            Some(TriggerMarketPriceGateMode::StandardOnly)
+                | Some(TriggerMarketPriceGateMode::StandardAndPtb)
+        )
+        .then_some(legacy_max_price)
+        .flatten();
         if pass {
             triggered_poly_delta_10s_cent = legacy_poly_delta_10s_cent;
+        }
+    }
+
+    if pass
+        && price_to_beat_trigger_gate_output.is_null()
+        && matches!(
+            triggered_gate_mode,
+            Some(TriggerMarketPriceGateMode::StandardAndPtb)
+                | Some(TriggerMarketPriceGateMode::PtbOnly)
+        )
+        && ws_sourced
+    {
+        if let Some(gate) = ws_price_to_beat_trigger_gate_from_step.as_ref() {
+            price_to_beat_trigger_gate_output = gate.clone();
+            if ws_price_to_beat_trigger_gate_passed == Some(false) {
+                pass = false;
+                if ws_soft_ignore_reason.is_none() {
+                    ws_soft_ignore_reason =
+                        Some(WS_IGNORE_REASON_PRICE_TO_BEAT_GATE_BLOCKED.to_string());
+                }
+            }
         }
     }
 
@@ -851,22 +1162,37 @@ async fn execute_trigger_market_price(
         .get("cycleWindowMode")
         .and_then(Value::as_str)
         .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| value == "first" || value == "last");
+        .filter(|value| value == "first" || value == "last" || value == "custom_range");
     let cycle_window_secs = node_config_i64(node, "cycleWindowSecs").filter(|value| *value > 0);
-    let (cycle_window_open_at, cycle_window_end_at) =
-        match (cycle_window_mode.as_deref(), cycle_window_secs) {
-            (Some(mode), Some(window_secs)) => resolve_cycle_window_absolute_bounds(
-                &market_slug,
-                mode,
-                window_secs,
-            )
-            .map_or((None, None), |(open_at, end_at)| (Some(open_at), Some(end_at))),
-            _ => (None, None),
-        };
+    let cycle_window_start_sec = node_config_i64(node, "cycleWindowStartSec").filter(|v| *v >= 0);
+    let cycle_window_end_sec = node_config_i64(node, "cycleWindowEndSec").filter(|v| *v > 0);
+    let (cycle_window_open_at, cycle_window_end_at) = match cycle_window_mode.as_deref() {
+        Some("custom_range") => resolve_cycle_window_absolute_bounds(
+            &market_slug,
+            "custom_range",
+            0,
+            cycle_window_start_sec,
+            cycle_window_end_sec,
+        )
+        .map_or((None, None), |(open_at, end_at)| {
+            (Some(open_at), Some(end_at))
+        }),
+        Some(mode) => match cycle_window_secs {
+            Some(window_secs) => {
+                resolve_cycle_window_absolute_bounds(&market_slug, mode, window_secs, None, None)
+                    .map_or((None, None), |(open_at, end_at)| {
+                        (Some(open_at), Some(end_at))
+                    })
+            }
+            None => (None, None),
+        },
+        _ => (None, None),
+    };
 
     apply_trigger_market_price_context_updates(
         context,
         node,
+        &market_slug,
         &var_key,
         current_price,
         &triggered_token_id,
@@ -1005,16 +1331,46 @@ async fn execute_trigger_market_price(
         }
     }
     Ok(finish_trigger_market_price_execution(
-        run, node, context, &market_slug, price_mode, &triggered_token_id,
-        &triggered_outcome_label, &triggered_condition, triggered_trigger_price,
-        triggered_price, triggered_max_price, &protection_output, triggered_previous_price,
-        ws_previous_price_from_step, effective_previous_price, trigger_evaluation_mode,
-        ws_evaluation_mode_from_step, ws_price_mode_from_step, ws_price_source_from_step,
-        ws_price_source_detail_from_step, ws_best_bid_from_step, ws_best_ask_from_step,
-        ws_last_trade_price_from_step, ws_snapshot_age_ms_from_step,
-        ws_site_display_mode_decision_from_step, ws_cross_confirmed_short_circuit_applied,
-        current_price, pass, &var_key, &outcome_conditions, ws_sourced, ws_ignore_reason.clone(),
-        once_mode, once_scope_market, queued_at_from_step, cycle_window_mode.as_deref(),
-        cycle_window_secs, cycle_window_open_at, cycle_window_end_at, interval_ms,
+        run,
+        node,
+        context,
+        &market_slug,
+        price_mode,
+        &triggered_token_id,
+        &triggered_outcome_label,
+        &triggered_condition,
+        triggered_trigger_price,
+        triggered_price,
+        triggered_max_price,
+        &protection_output,
+        triggered_previous_price,
+        ws_previous_price_from_step,
+        effective_previous_price,
+        trigger_evaluation_mode,
+        ws_evaluation_mode_from_step,
+        ws_price_mode_from_step,
+        ws_price_source_from_step,
+        ws_price_source_detail_from_step,
+        ws_best_bid_from_step,
+        ws_best_ask_from_step,
+        ws_last_trade_price_from_step,
+        ws_snapshot_age_ms_from_step,
+        ws_site_display_mode_decision_from_step,
+        ws_cross_confirmed_short_circuit_applied,
+        current_price,
+        pass,
+        &price_to_beat_trigger_gate_output,
+        &var_key,
+        &outcome_conditions,
+        ws_sourced,
+        ws_ignore_reason.clone(),
+        once_mode,
+        once_scope_market,
+        queued_at_from_step,
+        cycle_window_mode.as_deref(),
+        cycle_window_secs,
+        cycle_window_open_at,
+        cycle_window_end_at,
+        interval_ms,
     ))
 }

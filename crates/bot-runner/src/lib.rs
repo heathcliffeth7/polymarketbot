@@ -18,6 +18,7 @@ include!("trade_flow/cycle_window_timers.rs");
 include!("trade_flow/ws_fast_path.rs");
 include!("trade_flow/overlap_audit.rs");
 include!("lib_parts/part_013.rs");
+include!("trade_flow/triggers/market_price_price_to_beat.rs");
 include!("trade_flow/triggers/market_price_events.rs");
 include!("trade_flow/triggers/market_price.rs");
 include!("lib_parts/part_015.rs");

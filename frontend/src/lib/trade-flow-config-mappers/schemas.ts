@@ -62,6 +62,7 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'Tamamı (kapalı)', value: 'off' },
         { label: 'İlk N saniye (first)', value: 'first' },
         { label: 'Son N saniye (last)', value: 'last' },
+        { label: 'Ozel Aralik (custom_range)', value: 'custom_range' },
       ],
       help: 'Cycle icinde sadece belirli bir zaman penceresinde tetik degerlendirilir. Auto-scope + `last` modunda son pencereye girdiginde ilk gorulen uygun fiyat da tetikleyebilir; fixed markette gercek cross aranir.',
     },
@@ -70,6 +71,24 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       label: 'Pencere Süresi (saniye)',
       input: 'number',
       help: 'Kac saniye boyunca tetik degerlendirilecek. Or: 5m cycle, last 60 -> son 60sn. Auto-scope + `last` modunda son pencereye in-zone giris kabul edilir; fixed markette pencere icinde gercek gecis aranir.',
+    },
+    {
+      key: 'cycleWindowStartSec',
+      label: 'Pencere Baslangic (saniye)',
+      input: 'number',
+      help: 'Cycle baslangicindan itibaren kac saniye sonra pencere acilir. Ornek: 5m cycle, 40 -> cycle basladigindan 40sn sonra. Cycle suresi: 5m=300sn, 15m=900sn.',
+    },
+    {
+      key: 'cycleWindowEndSec',
+      label: 'Pencere Bitis (saniye)',
+      input: 'number',
+      help: 'Cycle baslangicindan itibaren kac saniye sonra pencere kapanir. startSec < endSec olmali. Ornek: 5m cycle, 300 -> cycle sonuna kadar. Cycle suresi: 5m=300sn, 15m=900sn.',
+    },
+    {
+      key: 'autoSellOnWindowEnd',
+      label: 'Pencere Bitince Pozisyonu Kapat',
+      input: 'checkbox',
+      help: 'Aktifken, custom_range penceresi bittiginde acik pozisyon varsa otomatik olarak market emriyle satar. Stop-loss mantigi ile calisir.',
     },
     {
       key: 'repeatMode',
@@ -92,6 +111,34 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
     },
     { key: 'minIntervalMs', label: 'Kontrol Aralığı (ms)', input: 'number', help: 'Varsayılan: 10000 (10sn). Minimum: 250ms.' },
     { key: 'confirmationMs', label: 'Onay Süresi (ms)', input: 'number', help: 'Cross sonrası fiyatın eşikte kalması gereken süre. Boş = onay kapalı, 0 = anında tetik.' },
+    {
+      key: 'priceToBeatTriggerEnabled',
+      label: 'Price-to-Beat Gate',
+      input: 'checkbox',
+      help: 'Aktifken tetik price-to-beat farki araligina gore degerlendirilir. Fiyat kosulu bos birakilabilir. Sadece auto_scope.',
+    },
+    {
+      key: 'priceToBeatTriggerUnit',
+      label: 'Fark Birimi',
+      input: 'select',
+      options: [
+        { label: 'USD', value: 'usd' },
+        { label: 'Cent', value: 'cent' },
+      ],
+      help: 'USD: dolar cinsinden. Cent: sent cinsinden. Ornek: cent modunda 1 = $0.01.',
+    },
+    {
+      key: 'priceToBeatTriggerMinGap',
+      label: 'Minimum Fark',
+      input: 'number',
+      help: 'Price-to-beat farki bu degerin altindaysa tetik ateslenmez.',
+    },
+    {
+      key: 'priceToBeatTriggerMaxGap',
+      label: 'Tavan Fark',
+      input: 'number',
+      help: 'Price-to-beat farki bu degerin ustundeyse tetik ateslenmez. Opsiyonel.',
+    },
     {
       key: 'priceMode',
       label: 'Fiyat Kaynağı',
@@ -412,10 +459,12 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       input: 'select',
       options: [
         { label: 'Best Bid', value: 'best_bid' },
-        { label: 'Composite (min)', value: 'composite' },
+        { label: 'Composite (Legacy)', value: 'composite' },
+        { label: 'Composite Safe', value: 'composite_safe' },
+        { label: 'Composite Fast', value: 'composite_fast' },
         { label: 'Last Trade', value: 'last_trade' },
       ],
-      help: 'Stop-loss tetik fiyatinin hangi kaynaktan alinacagini belirler. Tetik fiyati ile fiili satis fiyati farkli olabilir.',
+      help: 'Best Bid: en konservatif. Composite (Legacy): mevcut eski composite davranisi. Composite Safe: divergence + best bid onayi ile daha gec tetikler. Composite Fast: min(best_bid,last_trade) ile daha hizli tetikler. Last Trade: sadece son islemi kullanir.',
     },
     {
       key: 'reenterOnSlHit',
@@ -498,6 +547,12 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       label: 'Emir Bildirimi (Telegram)',
       input: 'checkbox',
       help: 'Emir gercekten doldurulunca Telegram bildirimi gonder.',
+    },
+    {
+      key: 'notifyOnOrderNotFilled',
+      label: 'Expire/Error Bildirimi',
+      input: 'checkbox',
+      help: 'Emir hic fill olmadan expired veya terminal error durumuna duserse Telegram bildirimi gonder.',
     },
     {
       key: 'notifyOnTriggerPriceBlocked',

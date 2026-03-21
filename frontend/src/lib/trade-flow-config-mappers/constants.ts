@@ -1,5 +1,7 @@
 import type { ConditionOperator } from './types';
 
+export const TIMEFRAME_TO_CYCLE_DURATION_SECS: Record<string, number> = { '5m': 300, '15m': 900 };
+
 export const RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME: Record<string, { asset: string; timeframe: string }> = {
   btc_5m_updown: { asset: 'btc', timeframe: '5m' },
   btc_15m_updown: { asset: 'btc', timeframe: '15m' },
@@ -62,7 +64,11 @@ export const NUMERIC_KEYS = new Set([
   'tpPriceCent',
   'slPriceCent',
   'priceToBeatMaxDiff',
+  'priceToBeatTriggerMinGap',
+  'priceToBeatTriggerMaxGap',
   'reentryMaxAttempts',
+  'cycleWindowStartSec',
+  'cycleWindowEndSec',
 ]);
 
 export const BOOLEAN_KEYS = new Set([
@@ -74,10 +80,12 @@ export const BOOLEAN_KEYS = new Set([
   'triggerPriceGuardEnabled',
   'executionFloorGuardEnabled',
   'priceToBeatGuardEnabled',
+  'priceToBeatTriggerEnabled',
   'retryOnTriggerPriceGuardBlock',
   'retryOnExecutionFloorGuardBlock',
   'retryOnPriceToBeatGuardBlock',
   'notifyOnOrderPlaced',
+  'notifyOnOrderNotFilled',
   'notifyOnTriggerPriceBlocked',
   'notifyOnExecutionFloorBlocked',
   'notifyOnPriceToBeatGapBlocked',
@@ -86,6 +94,7 @@ export const BOOLEAN_KEYS = new Set([
   'notifyOnTpHit',
   'notifyOnSlHit',
   'reenterOnSlHit',
+  'autoSellOnWindowEnd',
 ]);
 
 export const CONTEXT_BASE_KEYS = new Set([

@@ -1,6 +1,399 @@
 static TRADE_FLOW_REALTIME_PRICE_TICK_THROTTLE: LazyLock<StdMutex<HashMap<String, i64>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
+#[derive(Debug, Clone, PartialEq)]
+struct TriggerWsConditionNotMetLogFields {
+    node_key: String,
+    node_type: String,
+    outcome_label: String,
+    token_id: String,
+    current_price: f64,
+    previous_price: Option<f64>,
+    trigger_price: f64,
+    max_price: Option<f64>,
+    trigger_condition: String,
+    evaluation_mode: String,
+    gate_mode: String,
+    price_mode: String,
+    price_source: String,
+    price_source_detail: String,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+    last_trade_price: Option<f64>,
+    snapshot_age_ms: Option<i64>,
+    dirty_token_id: Option<String>,
+    ws_reevaluation_reason: String,
+    resolved_market_slug: Option<String>,
+    once_mode: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TriggerWsTargetLogFields {
+    node_key: String,
+    node_type: String,
+    outcome_label: String,
+    token_id: String,
+    dirty_token_id: Option<String>,
+    ws_reevaluation_reason: String,
+    resolved_market_slug: Option<String>,
+    price_mode: String,
+    trigger_condition: String,
+    trigger_price: f64,
+    max_price: Option<f64>,
+    once_mode: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TriggerWsCacheNodeLogFields {
+    node_key: String,
+    node_type: String,
+    outcome_label: Option<String>,
+    token_id: Option<String>,
+    resolved_market_slug: Option<String>,
+    auto_scope: bool,
+    price_mode: Option<String>,
+    trigger_condition: Option<String>,
+    trigger_price: Option<f64>,
+    max_price: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TriggerWsExecuteBeginLogFields {
+    node_key: String,
+    node_type: String,
+    market_slug: String,
+    ws_market_slug: Option<String>,
+    ws_token_id: Option<String>,
+    ws_sourced: bool,
+    path: &'static str,
+    once_mode: bool,
+    once_already_fired: bool,
+    ws_hard_ignore_reason: Option<String>,
+    ws_first_tick_threshold_override: bool,
+}
+
+fn log_trigger_ws_cache_node_skipped(
+    run_id: i64,
+    flow_run_id: i64,
+    reason: &str,
+    fields: &TriggerWsCacheNodeLogFields,
+) {
+    debug!(
+        run_id,
+        flow_run_id,
+        reason,
+        node_key = %fields.node_key,
+        node_type = %fields.node_type,
+        outcome_label = ?fields.outcome_label,
+        token_id = ?fields.token_id,
+        resolved_market_slug = ?fields.resolved_market_slug,
+        auto_scope = fields.auto_scope,
+        price_mode = ?fields.price_mode,
+        trigger_condition = ?fields.trigger_condition,
+        trigger_price = ?fields.trigger_price,
+        max_price = ?fields.max_price,
+        "TRIGGER_WS_CACHE_NODE_SKIPPED"
+    );
+}
+
+fn log_trigger_ws_cache_node_indexed(
+    run_id: i64,
+    flow_run_id: i64,
+    fields: &TriggerWsCacheNodeLogFields,
+) {
+    debug!(
+        run_id,
+        flow_run_id,
+        node_key = %fields.node_key,
+        node_type = %fields.node_type,
+        outcome_label = ?fields.outcome_label,
+        token_id = ?fields.token_id,
+        resolved_market_slug = ?fields.resolved_market_slug,
+        auto_scope = fields.auto_scope,
+        price_mode = ?fields.price_mode,
+        trigger_condition = ?fields.trigger_condition,
+        trigger_price = ?fields.trigger_price,
+        max_price = ?fields.max_price,
+        "TRIGGER_WS_CACHE_NODE_INDEXED"
+    );
+}
+
+fn build_trigger_ws_cache_node_log_fields_from_node(
+    node: &TradeFlowNode,
+    context: &Value,
+    outcome_label: Option<&str>,
+) -> TriggerWsCacheNodeLogFields {
+    TriggerWsCacheNodeLogFields {
+        node_key: node.key.clone(),
+        node_type: node.node_type.clone(),
+        outcome_label: outcome_label
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        token_id: None,
+        resolved_market_slug: node_auto_scope_market_slug(context, &node.key)
+            .or_else(|| flow_context_string(context, "marketSlug"))
+            .or_else(|| node_config_string(node, "marketSlug")),
+        auto_scope: node_market_mode(node) == "auto_scope",
+        price_mode: node
+            .config
+            .get("priceMode")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        trigger_condition: node_config_string(node, "triggerCondition"),
+        trigger_price: node_config_f64(node, "triggerPrice")
+            .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0)),
+        max_price: node_config_f64(node, "maxPrice")
+            .or_else(|| node_config_f64(node, "maxPriceCent").map(|v| v / 100.0)),
+    }
+}
+
+fn build_trigger_ws_cache_node_log_fields_from_spec(
+    spec: &WsOpenPositionPriceNodeSpec,
+) -> TriggerWsCacheNodeLogFields {
+    TriggerWsCacheNodeLogFields {
+        node_key: spec.node_key.clone(),
+        node_type: spec.node_type.clone(),
+        outcome_label: (!spec.outcome_label.is_empty()).then_some(spec.outcome_label.clone()),
+        token_id: Some(spec.token_id.clone()),
+        resolved_market_slug: spec.market_slug.clone(),
+        auto_scope: spec.auto_scope,
+        price_mode: Some(spec.price_mode.as_str().to_string()),
+        trigger_condition: Some(spec.trigger_condition.clone()),
+        trigger_price: Some(spec.trigger_price),
+        max_price: spec.max_price,
+    }
+}
+
+fn log_trigger_ws_dirty_token_unmapped(run_id: i64, dirty_token_id: &str) {
+    debug!(run_id, dirty_token_id, "TRIGGER_WS_DIRTY_TOKEN_UNMAPPED");
+}
+
+fn log_trigger_ws_execute_begin(
+    run_id: i64,
+    flow_run_id: i64,
+    fields: &TriggerWsExecuteBeginLogFields,
+) {
+    debug!(
+        run_id,
+        flow_run_id,
+        node_key = %fields.node_key,
+        node_type = %fields.node_type,
+        market_slug = %fields.market_slug,
+        ws_market_slug = ?fields.ws_market_slug,
+        ws_token_id = ?fields.ws_token_id,
+        ws_sourced = fields.ws_sourced,
+        path = fields.path,
+        once_mode = fields.once_mode,
+        once_already_fired = fields.once_already_fired,
+        ws_hard_ignore_reason = ?fields.ws_hard_ignore_reason,
+        ws_first_tick_threshold_override = fields.ws_first_tick_threshold_override,
+        "TRIGGER_WS_EXEC_BEGIN"
+    );
+}
+
+fn build_trigger_ws_target_log_fields(
+    node_spec: &WsOpenPositionPriceNodeSpec,
+    dirty_token_id: Option<&str>,
+    ws_reevaluation_reason: &str,
+    resolved_market_slug: Option<&str>,
+) -> TriggerWsTargetLogFields {
+    TriggerWsTargetLogFields {
+        node_key: node_spec.node_key.clone(),
+        node_type: node_spec.node_type.clone(),
+        outcome_label: node_spec.outcome_label.clone(),
+        token_id: node_spec.token_id.clone(),
+        dirty_token_id: dirty_token_id.map(str::to_string),
+        ws_reevaluation_reason: ws_reevaluation_reason.to_string(),
+        resolved_market_slug: resolved_market_slug.map(str::to_string),
+        price_mode: node_spec.price_mode.as_str().to_string(),
+        trigger_condition: node_spec.trigger_condition.clone(),
+        trigger_price: node_spec.trigger_price,
+        max_price: node_spec.max_price,
+        once_mode: node_spec.once_mode,
+    }
+}
+
+fn log_trigger_ws_target_selected(
+    run_id: i64,
+    flow_run_id: i64,
+    fields: &TriggerWsTargetLogFields,
+) {
+    debug!(
+        run_id,
+        flow_run_id,
+        node_key = %fields.node_key,
+        node_type = %fields.node_type,
+        outcome_label = %fields.outcome_label,
+        token_id = %fields.token_id,
+        dirty_token_id = ?fields.dirty_token_id,
+        ws_reevaluation_reason = %fields.ws_reevaluation_reason,
+        resolved_market_slug = ?fields.resolved_market_slug,
+        price_mode = %fields.price_mode,
+        trigger_condition = %fields.trigger_condition,
+        trigger_price = fields.trigger_price,
+        max_price = ?fields.max_price,
+        once_mode = fields.once_mode,
+        "TRIGGER_WS_TARGET_SELECTED"
+    );
+}
+
+fn log_trigger_ws_target_started(run_id: i64, flow_run_id: i64, fields: &TriggerWsTargetLogFields) {
+    debug!(
+        run_id,
+        flow_run_id,
+        node_key = %fields.node_key,
+        node_type = %fields.node_type,
+        outcome_label = %fields.outcome_label,
+        token_id = %fields.token_id,
+        dirty_token_id = ?fields.dirty_token_id,
+        ws_reevaluation_reason = %fields.ws_reevaluation_reason,
+        resolved_market_slug = ?fields.resolved_market_slug,
+        price_mode = %fields.price_mode,
+        trigger_condition = %fields.trigger_condition,
+        trigger_price = fields.trigger_price,
+        max_price = ?fields.max_price,
+        once_mode = fields.once_mode,
+        "TRIGGER_WS_TARGET_EVALUATION_STARTED"
+    );
+}
+
+fn log_trigger_ws_target_skipped(
+    run_id: i64,
+    flow_run_id: i64,
+    reason: &str,
+    fields: &TriggerWsTargetLogFields,
+) {
+    debug!(
+        run_id,
+        flow_run_id,
+        reason,
+        node_key = %fields.node_key,
+        node_type = %fields.node_type,
+        outcome_label = %fields.outcome_label,
+        token_id = %fields.token_id,
+        dirty_token_id = ?fields.dirty_token_id,
+        ws_reevaluation_reason = %fields.ws_reevaluation_reason,
+        resolved_market_slug = ?fields.resolved_market_slug,
+        price_mode = %fields.price_mode,
+        trigger_condition = %fields.trigger_condition,
+        trigger_price = fields.trigger_price,
+        max_price = ?fields.max_price,
+        once_mode = fields.once_mode,
+        "TRIGGER_WS_TARGET_SKIPPED"
+    );
+}
+
+fn log_trigger_ws_target_dropped(
+    run_id: i64,
+    flow_run_id: Option<i64>,
+    reason: &str,
+    fields: &TriggerWsTargetLogFields,
+) {
+    debug!(
+        run_id,
+        flow_run_id = ?flow_run_id,
+        reason,
+        node_key = %fields.node_key,
+        node_type = %fields.node_type,
+        outcome_label = %fields.outcome_label,
+        token_id = %fields.token_id,
+        dirty_token_id = ?fields.dirty_token_id,
+        ws_reevaluation_reason = %fields.ws_reevaluation_reason,
+        resolved_market_slug = ?fields.resolved_market_slug,
+        price_mode = %fields.price_mode,
+        trigger_condition = %fields.trigger_condition,
+        trigger_price = fields.trigger_price,
+        max_price = ?fields.max_price,
+        once_mode = fields.once_mode,
+        "TRIGGER_WS_TARGET_DROPPED"
+    );
+}
+
+fn trigger_market_price_gate_mode_label(gate_mode: TriggerMarketPriceGateMode) -> &'static str {
+    match gate_mode {
+        TriggerMarketPriceGateMode::StandardOnly => "standard_only",
+        TriggerMarketPriceGateMode::StandardAndPtb => "standard_and_ptb",
+        TriggerMarketPriceGateMode::PtbOnly => "ptb_only",
+    }
+}
+
+fn build_trigger_ws_condition_not_met_log_fields(
+    node_spec: &WsOpenPositionPriceNodeSpec,
+    current_price: f64,
+    previous_price: Option<f64>,
+    evaluation_mode: &str,
+    gate_mode: TriggerMarketPriceGateMode,
+    price_source: &str,
+    price_source_detail: &str,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+    last_trade_price: Option<f64>,
+    snapshot_age_ms: Option<i64>,
+    dirty_token_id: Option<&str>,
+    ws_reevaluation_reason: &str,
+    resolved_market_slug: Option<&str>,
+) -> TriggerWsConditionNotMetLogFields {
+    TriggerWsConditionNotMetLogFields {
+        node_key: node_spec.node_key.clone(),
+        node_type: node_spec.node_type.clone(),
+        outcome_label: node_spec.outcome_label.clone(),
+        token_id: node_spec.token_id.clone(),
+        current_price,
+        previous_price,
+        trigger_price: node_spec.trigger_price,
+        max_price: node_spec.max_price,
+        trigger_condition: node_spec.trigger_condition.clone(),
+        evaluation_mode: evaluation_mode.to_string(),
+        gate_mode: trigger_market_price_gate_mode_label(gate_mode).to_string(),
+        price_mode: node_spec.price_mode.as_str().to_string(),
+        price_source: price_source.to_string(),
+        price_source_detail: price_source_detail.to_string(),
+        best_bid,
+        best_ask,
+        last_trade_price,
+        snapshot_age_ms,
+        dirty_token_id: dirty_token_id.map(str::to_string),
+        ws_reevaluation_reason: ws_reevaluation_reason.to_string(),
+        resolved_market_slug: resolved_market_slug.map(str::to_string),
+        once_mode: node_spec.once_mode,
+    }
+}
+
+fn log_trigger_ws_condition_not_met(
+    run_id: i64,
+    flow_run_id: i64,
+    fields: TriggerWsConditionNotMetLogFields,
+) {
+    debug!(
+        run_id,
+        flow_run_id,
+        node_key = %fields.node_key,
+        node_type = %fields.node_type,
+        outcome_label = %fields.outcome_label,
+        token_id = %fields.token_id,
+        current_price = fields.current_price,
+        previous_price = ?fields.previous_price,
+        trigger_price = fields.trigger_price,
+        max_price = ?fields.max_price,
+        trigger_condition = %fields.trigger_condition,
+        evaluation_mode = %fields.evaluation_mode,
+        gate_mode = %fields.gate_mode,
+        price_mode = %fields.price_mode,
+        price_source = %fields.price_source,
+        price_source_detail = %fields.price_source_detail,
+        best_bid = ?fields.best_bid,
+        best_ask = ?fields.best_ask,
+        last_trade_price = ?fields.last_trade_price,
+        snapshot_age_ms = ?fields.snapshot_age_ms,
+        dirty_token_id = ?fields.dirty_token_id,
+        ws_reevaluation_reason = %fields.ws_reevaluation_reason,
+        resolved_market_slug = ?fields.resolved_market_slug,
+        once_mode = fields.once_mode,
+        "TRIGGER_WS_CONDITION_NOT_MET"
+    );
+}
+
 fn should_emit_trade_flow_realtime_price_tick(throttle_key: &str, now_ms: i64) -> bool {
     let mut guard = TRADE_FLOW_REALTIME_PRICE_TICK_THROTTLE
         .lock()
@@ -380,6 +773,7 @@ async fn record_trigger_once_fired_event(
 fn apply_trigger_market_price_context_updates(
     context: &mut Value,
     node: &TradeFlowNode,
+    market_slug: &str,
     var_key: &str,
     current_price: Option<f64>,
     triggered_token_id: &str,
@@ -426,7 +820,11 @@ fn apply_trigger_market_price_context_updates(
         );
     }
     if let Some(trigger_price) = triggered_trigger_price {
-        set_flow_var(context, &format!("{var_key}_trigger_price"), json!(trigger_price));
+        set_flow_var(
+            context,
+            &format!("{var_key}_trigger_price"),
+            json!(trigger_price),
+        );
     }
     if let Some(tp) = triggered_price {
         set_flow_var(context, &format!("{var_key}_triggered_price"), json!(tp));
@@ -435,6 +833,15 @@ fn apply_trigger_market_price_context_updates(
         set_flow_var(context, &format!("{var_key}_max_price"), json!(max_price));
     }
     if pass {
+        if node_market_mode(node) == "auto_scope" {
+            promote_trigger_node_auto_scope_context_to_flow_context(
+                context,
+                &node.key,
+                market_slug,
+            );
+        } else {
+            set_flow_context(context, "marketSlug", json!(market_slug));
+        }
         if let Some(max_price) = triggered_max_price {
             set_flow_context(context, "maxPrice", json!(max_price));
         } else {
@@ -496,6 +903,7 @@ fn build_trigger_market_price_output(
     ws_cross_confirmed_short_circuit_applied: bool,
     current_price: Option<f64>,
     pass: bool,
+    price_to_beat_trigger_gate: &Value,
     var_key: &str,
     outcome_conditions: &Option<Vec<Value>>,
     ws_sourced: bool,
@@ -508,7 +916,7 @@ fn build_trigger_market_price_output(
     cycle_window_open_at: Option<DateTime<Utc>>,
     cycle_window_end_at: Option<DateTime<Utc>>,
 ) -> Value {
-    json!({
+    let mut output = json!({
         "run_id": run.id,
         "node_key": node.key,
         "market_slug": market_slug,
@@ -555,7 +963,11 @@ fn build_trigger_market_price_output(
             once_scope_market,
             Some(market_slug)
         )
-    })
+    });
+    if !price_to_beat_trigger_gate.is_null() {
+        append_trigger_market_price_ptb_gate(&mut output, price_to_beat_trigger_gate);
+    }
+    output
 }
 
 fn finish_trigger_market_price_execution(
@@ -587,6 +999,7 @@ fn finish_trigger_market_price_execution(
     ws_cross_confirmed_short_circuit_applied: bool,
     current_price: Option<f64>,
     pass: bool,
+    price_to_beat_trigger_gate: &Value,
     var_key: &str,
     outcome_conditions: &Option<Vec<Value>>,
     ws_sourced: bool,
@@ -644,6 +1057,7 @@ fn finish_trigger_market_price_execution(
         ws_cross_confirmed_short_circuit_applied,
         current_price,
         pass,
+        price_to_beat_trigger_gate,
         var_key,
         outcome_conditions,
         ws_sourced,

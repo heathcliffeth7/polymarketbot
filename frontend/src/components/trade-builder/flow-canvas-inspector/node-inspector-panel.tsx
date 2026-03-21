@@ -60,6 +60,8 @@ export function NodeInspectorPanel({
   const triggerMarketMode = (form.fields.marketMode ?? '').trim().toLowerCase();
   const triggerRepeatMode = (form.fields.repeatMode ?? '').trim().toLowerCase();
   const triggerCycleWindowMode = (form.fields.cycleWindowMode ?? '').trim().toLowerCase();
+  const triggerPriceToBeatEnabled =
+    (form.fields.priceToBeatTriggerEnabled ?? '').toString().trim().toLowerCase() === 'true';
   const placeOrderMaxTriggersRaw = Number(form.fields.maxTriggers ?? '');
   const placeOrderMaxTriggers =
     Number.isFinite(placeOrderMaxTriggersRaw) && placeOrderMaxTriggersRaw > 0
@@ -257,6 +259,22 @@ export function NodeInspectorPanel({
         return triggerMarketMode === 'auto_scope' &&
           (triggerCycleWindowMode === 'first' || triggerCycleWindowMode === 'last');
       }
+      if (field.key === 'cycleWindowStartSec' || field.key === 'cycleWindowEndSec') {
+        return triggerMarketMode === 'auto_scope' && triggerCycleWindowMode === 'custom_range';
+      }
+      if (field.key === 'autoSellOnWindowEnd') {
+        return triggerMarketMode === 'auto_scope' && triggerCycleWindowMode === 'custom_range';
+      }
+      if (field.key === 'priceToBeatTriggerEnabled') {
+        return triggerMarketMode === 'auto_scope';
+      }
+      if (
+        field.key === 'priceToBeatTriggerUnit' ||
+        field.key === 'priceToBeatTriggerMinGap' ||
+        field.key === 'priceToBeatTriggerMaxGap'
+      ) {
+        return triggerMarketMode === 'auto_scope' && triggerPriceToBeatEnabled;
+      }
     }
     return true;
   });
@@ -417,7 +435,21 @@ export function NodeInspectorPanel({
                   <input
                     type="checkbox"
                     checked={(form.fields[field.key] ?? '').toString().trim().toLowerCase() === 'true'}
-                    onChange={(e) => actions.onUpdateField(field.key, e.target.checked ? 'true' : 'false')}
+                    onChange={(e) => {
+                      actions.onUpdateField(field.key, e.target.checked ? 'true' : 'false');
+                      if (
+                        field.key === 'priceToBeatTriggerEnabled' &&
+                        e.target.checked &&
+                        !['usd', 'cent'].includes(
+                          (form.fields.priceToBeatTriggerUnit ?? '')
+                            .toString()
+                            .trim()
+                            .toLowerCase()
+                        )
+                      ) {
+                        actions.onUpdateField('priceToBeatTriggerUnit', 'usd');
+                      }
+                    }}
                     className="h-4 w-4 rounded border-slate-300"
                   />
                 ) : field.input === 'select' ? (

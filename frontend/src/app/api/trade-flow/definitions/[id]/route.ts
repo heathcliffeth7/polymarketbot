@@ -11,6 +11,11 @@ import {
   normalizeTradeFlowGraph,
   updateTradeFlowDefinitionDraft,
 } from '@/lib/queries/trade-flow';
+import {
+  FLOW_DUPLICATE_NAME_MESSAGE,
+  FLOW_INVALID_NAME_MESSAGE,
+  validateTradeFlowDefinitionName,
+} from '@/lib/queries/trade-flow/name-policy';
 
 export const dynamic = 'force-dynamic';
 
@@ -95,8 +100,7 @@ export async function PATCH(
     } = {};
 
     if (body?.name !== undefined) {
-      const name = String(body.name || '').trim();
-      if (!name) return NextResponse.json({ error: 'name cannot be empty' }, { status: 400 });
+      const name = validateTradeFlowDefinitionName(String(body.name || ''));
       updates.name = name;
     }
 
@@ -128,8 +132,14 @@ export async function PATCH(
     if (err instanceof Error && err.message === 'Flow definition not found') {
       return NextResponse.json({ error: err.message }, { status: 404 });
     }
-    if (err instanceof Error && err.message === 'Flow name is already in use') {
+    if (err instanceof Error && err.message === FLOW_DUPLICATE_NAME_MESSAGE) {
       return NextResponse.json({ error: err.message }, { status: 409 });
+    }
+    if (
+      err instanceof Error &&
+      (err.message === 'Flow name is required' || err.message === FLOW_INVALID_NAME_MESSAGE)
+    ) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
     }
     console.error('Trade flow definition patch error:', err);
     return NextResponse.json(

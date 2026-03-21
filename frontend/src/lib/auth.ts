@@ -1,7 +1,7 @@
 import { SignJWT, jwtVerify } from 'jose';
 import { cookies } from 'next/headers';
 
-const SECRET = new TextEncoder().encode(process.env.AUTH_SECRET || 'fallback-secret');
+const AUTH_SECRET_MIN_LENGTH = 32;
 const COOKIE_NAME = 'polybot-session';
 const TRUE_ENV_VALUES = new Set(['1', 'true', 'yes', 'on']);
 const FALSE_ENV_VALUES = new Set(['0', 'false', 'no', 'off']);
@@ -17,6 +17,14 @@ interface SessionPayload {
   username: string;
 }
 
+function getSecret(): Uint8Array {
+  const raw = (process.env.AUTH_SECRET || '').trim();
+  if (!raw || raw.includes('CHANGE_ME') || raw.length < AUTH_SECRET_MIN_LENGTH) {
+    throw new Error(`AUTH_SECRET must be set to a strong value with at least ${AUTH_SECRET_MIN_LENGTH} characters`);
+  }
+  return new TextEncoder().encode(raw);
+}
+
 export async function createSession(user: SessionUser): Promise<string> {
   return new SignJWT({
     authenticated: true,
@@ -26,12 +34,12 @@ export async function createSession(user: SessionUser): Promise<string> {
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime('24h')
-    .sign(SECRET);
+    .sign(getSecret());
 }
 
 export async function verifySession(token: string): Promise<SessionUser | null> {
   try {
-    const { payload } = await jwtVerify(token, SECRET);
+    const { payload } = await jwtVerify(token, getSecret());
     const userId = Number(payload.userId);
     const username = String(payload.username ?? '').trim();
     if (!Number.isFinite(userId) || userId <= 0 || !username) {

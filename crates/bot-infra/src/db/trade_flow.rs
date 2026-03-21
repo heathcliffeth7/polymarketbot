@@ -522,6 +522,21 @@ impl PostgresRepository {
         Ok(())
     }
 
+    pub async fn find_latest_completed_place_order_output(
+        &self,
+        run_id: i64,
+    ) -> Result<Option<Value>> {
+        let row = sqlx::query(
+            "SELECT output_json FROM trade_flow_run_steps \
+             WHERE run_id = $1 AND node_type = 'action.place_order' AND status = 'completed' \
+             ORDER BY ended_at DESC NULLS LAST LIMIT 1",
+        )
+        .bind(run_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row.and_then(|r| r.try_get::<Option<Value>, _>("output_json").ok().flatten()))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_trade_flow_dual_dca_job(
         &self,

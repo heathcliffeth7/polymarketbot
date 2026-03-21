@@ -14,3 +14,4 @@ mod telegram;
 mod trade_flow_edge_conditions;
 mod trigger_drawdown_ws;
 mod trigger_price_modes;
+mod ws_fast_path_selection;

@@ -95,6 +95,34 @@ async fn process_trade_flow_ws_fast_path(
     process_trade_flow_ready_steps(repo, run_id, client, ws, flow_runtime_caches).await
 }
 
+async fn is_near_any_auto_scope_boundary(window_secs: i64) -> bool {
+    let cache = TRADE_FLOW_WS_FAST_PATH_CACHE.read().await;
+    let now = Utc::now();
+    for run_spec in &cache.run_specs {
+        for node_spec in &run_spec.nodes {
+            if !node_spec.auto_scope {
+                continue;
+            }
+            let Some(slug) = node_spec.market_slug.as_deref() else {
+                continue;
+            };
+            let Some(scope_def) = find_updown_scope_by_slug(slug) else {
+                continue;
+            };
+            let window = updown_scope_window_seconds(scope_def);
+            let Some(start) = MarketCycleId(slug.to_string()).start_time() else {
+                continue;
+            };
+            let end = start + ChronoDuration::seconds(window);
+            let secs_to_end = end.signed_duration_since(now).num_seconds();
+            if secs_to_end.abs() <= window_secs {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 async fn process_trade_flow_ready_steps(
     repo: &PostgresRepository,
     run_id: i64,
@@ -103,6 +131,11 @@ async fn process_trade_flow_ready_steps(
     flow_runtime_caches: &mut FlowRuntimeCaches,
 ) -> Result<()> {
     let policy = DefaultRiskPolicy;
+    let max_passes: u8 = if is_near_any_auto_scope_boundary(10).await {
+        2
+    } else {
+        8
+    };
     let mut claim_pass = 0u8;
     loop {
         claim_pass += 1;
@@ -170,8 +203,18 @@ async fn process_trade_flow_ready_steps(
                     .await;
             }
         }
-        if claim_pass >= 8 {
-            warn!(run_id, claim_pass, "TRADE_FLOW_STEP_PROCESS_MAX_PASSES_REACHED");
+        if claim_pass >= max_passes {
+            if max_passes < 8 {
+                debug!(
+                    run_id,
+                    claim_pass, max_passes, "TRADE_FLOW_STEP_PROCESS_BOUNDARY_THROTTLED"
+                );
+            } else {
+                warn!(
+                    run_id,
+                    claim_pass, "TRADE_FLOW_STEP_PROCESS_MAX_PASSES_REACHED"
+                );
+            }
             break;
         }
     }
@@ -227,12 +270,17 @@ fn allow_first_tick_threshold_for_ws_node(
         return false;
     }
     // auto_scope market rotation may replay the first in-zone tick only for the
-    // explicit `last` window behavior. `first` mode still requires a real cross.
+    // explicit `last` or `custom_range` window behavior. `first` mode still requires a real cross.
     if node_spec.auto_scope {
-        return matches!(node_spec.cycle_window_mode.as_deref(), Some("last"))
-            && previous_price.is_none();
+        return matches!(
+            node_spec.cycle_window_mode.as_deref(),
+            Some("last") | Some("custom_range")
+        ) && previous_price.is_none();
     }
-    if matches!(node_spec.cycle_window_mode.as_deref(), Some("last")) {
+    if matches!(
+        node_spec.cycle_window_mode.as_deref(),
+        Some("last") | Some("custom_range")
+    ) {
         return false;
     }
     !node_spec.once_mode || previous_price.is_none()
@@ -242,7 +290,10 @@ fn is_trade_flow_market_price_once_node(node: &TradeFlowNode) -> bool {
     node.node_type == "trigger.market_price" && node_repeat_mode(node) == "once"
 }
 
-fn current_updown_scope_window_start(scope_def: UpdownScopeDef, now: DateTime<Utc>) -> DateTime<Utc> {
+fn current_updown_scope_window_start(
+    scope_def: UpdownScopeDef,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
     let window_secs = updown_scope_window_seconds(scope_def);
     let now_ts = now.timestamp();
     let base_ts = now_ts - now_ts.rem_euclid(window_secs);
@@ -297,25 +348,6 @@ fn is_auto_scope_market_expired(slug: &str, buffer_secs: i64) -> bool {
     now >= ts + duration + buffer_secs
 }
 
-/// Check if an auto-scope market is in its resolution window (last `grace_secs`).
-/// During resolution, prices converge to 0/1 and should not trigger cross conditions.
-fn is_auto_scope_market_in_resolution_window(slug: &str, grace_secs: i64) -> bool {
-    let parts: Vec<&str> = slug.rsplit('-').collect();
-    let ts: i64 = match parts.first().and_then(|s| s.parse().ok()) {
-        Some(v) => v,
-        None => return false,
-    };
-    let duration = if slug.contains("-5m-") {
-        300i64
-    } else if slug.contains("-15m-") {
-        900i64
-    } else {
-        return false;
-    };
-    let now = Utc::now().timestamp();
-    now >= ts + duration - grace_secs
-}
-
 /// Cycle window focus: returns true if current time is OUTSIDE the configured sub-window.
 /// - mode "first": active window is [start_ts, start_ts + window_secs)
 /// - mode "last":  active window is [end_ts - window_secs, end_ts)
@@ -338,30 +370,53 @@ fn resolve_cycle_window_absolute_bounds(
     market_slug: &str,
     mode: &str,
     window_secs: i64,
+    start_sec: Option<i64>,
+    end_sec: Option<i64>,
 ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let (start, end, duration) = resolve_updown_market_cycle_bounds(market_slug)?;
-    let effective = window_secs.clamp(1, duration);
     match mode {
-        "first" => Some((start, start + ChronoDuration::seconds(effective))),
-        "last" => Some((end - ChronoDuration::seconds(effective), end)),
+        "first" => {
+            let effective = window_secs.clamp(1, duration);
+            Some((start, start + ChronoDuration::seconds(effective)))
+        }
+        "last" => {
+            let effective = window_secs.clamp(1, duration);
+            Some((end - ChronoDuration::seconds(effective), end))
+        }
+        "custom_range" => {
+            let s = start_sec?;
+            let e = end_sec?;
+            if s >= e || e > duration {
+                return None;
+            }
+            Some((
+                start + ChronoDuration::seconds(s),
+                start + ChronoDuration::seconds(e),
+            ))
+        }
         _ => None,
     }
 }
 
-fn is_outside_cycle_window_focus(slug: &str, mode: &str, window_secs: i64) -> bool {
+fn is_outside_cycle_window_focus(
+    slug: &str,
+    mode: &str,
+    window_secs: i64,
+    start_sec: Option<i64>,
+    end_sec: Option<i64>,
+) -> bool {
     let Some((cycle_start, cycle_end, duration)) = resolve_updown_market_cycle_bounds(slug) else {
         return false;
     };
     let now = Utc::now();
-    // Outside the market cycle implies outside any focused sub-window.
     if now < cycle_start || now >= cycle_end {
         return true;
     }
-    if window_secs >= duration {
+    if mode != "custom_range" && window_secs >= duration {
         return false;
     }
     let Some((window_open, window_end)) =
-        resolve_cycle_window_absolute_bounds(slug, mode, window_secs)
+        resolve_cycle_window_absolute_bounds(slug, mode, window_secs, start_sec, end_sec)
     else {
         return false;
     };
@@ -372,20 +427,34 @@ fn should_skip_for_cycle_window(
     market_slug: Option<&str>,
     cycle_window_mode: Option<&str>,
     cycle_window_secs: Option<i64>,
+    cycle_window_start_sec: Option<i64>,
+    cycle_window_end_sec: Option<i64>,
 ) -> bool {
     let Some(cycle_window_mode) = cycle_window_mode else {
         return false;
     };
-    match (market_slug, cycle_window_secs) {
-        (Some(slug), Some(window_secs)) => {
-            is_outside_cycle_window_focus(slug, cycle_window_mode, window_secs)
+    let Some(slug) = market_slug else {
+        return true;
+    };
+    if cycle_window_mode == "custom_range" {
+        match (cycle_window_start_sec, cycle_window_end_sec) {
+            (Some(_), Some(_)) => is_outside_cycle_window_focus(
+                slug,
+                cycle_window_mode,
+                0,
+                cycle_window_start_sec,
+                cycle_window_end_sec,
+            ),
+            _ => true,
         }
-        _ => true,
+    } else {
+        match cycle_window_secs {
+            Some(window_secs) => {
+                is_outside_cycle_window_focus(slug, cycle_window_mode, window_secs, None, None)
+            }
+            _ => true,
+        }
     }
-}
-
-fn auto_scope_resolution_window_guard_enabled(cycle_window_mode: Option<&str>) -> bool {
-    !matches!(cycle_window_mode, Some("last"))
 }
 
 fn trade_flow_publish_marker(version: &TradeFlowVersionRuntime) -> String {
@@ -400,16 +469,22 @@ fn is_fixed_once_market_price_node(node: &TradeFlowNode) -> bool {
     is_trade_flow_market_price_once_node(node) && node_market_mode(node) == "fixed"
 }
 
-fn clear_trade_flow_market_price_publish_reset_state(
-    context: &mut Value,
-    node_key: &str,
-) -> bool {
-    const EXACT_KEYS: [&str; 8] = [
+fn clear_trade_flow_market_price_publish_reset_state(context: &mut Value, node_key: &str) -> bool {
+    const EXACT_KEYS: [&str; 17] = [
         FLOW_NODE_STATE_ONCE_FIRED,
         FLOW_NODE_STATE_ONCE_FIRED_AT,
         FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG,
         FLOW_NODE_STATE_ONCE_BLOCK_LOGGED,
         FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SLUG,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SCOPE,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_ASSET,
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_TIMEFRAME,
+        FLOW_NODE_STATE_AUTO_SCOPE_YES_TOKEN_ID,
+        FLOW_NODE_STATE_AUTO_SCOPE_NO_TOKEN_ID,
+        FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_TOKEN_ID,
+        FLOW_NODE_STATE_AUTO_SCOPE_RESOLVED_OUTCOME_LABEL,
+        FLOW_NODE_STATE_AUTO_SCOPE_SELECTION_REASON,
         "last_price",
         "last_ws_market_slug",
         "previous_price",
@@ -481,11 +556,17 @@ fn sync_trade_flow_once_state_for_publish(
             && !is_trade_flow_market_price_once_scope_market(node)
             && flow_node_state_truthy(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED)
         {
-            let current_market_slug = flow_context_string(context, "marketSlug").or_else(|| {
-                flow_node_state_string(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG)
-            });
-            if let Some(current_market_slug) =
-                current_market_slug.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+            let current_market_slug =
+                node_auto_scope_market_slug(context, &node.key).or_else(|| {
+                    flow_node_state_string(
+                        context,
+                        &node.key,
+                        FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG,
+                    )
+                });
+            if let Some(current_market_slug) = current_market_slug
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
             {
                 set_flow_node_state(
                     context,
@@ -496,11 +577,7 @@ fn sync_trade_flow_once_state_for_publish(
                 remove_flow_node_state(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED);
                 remove_flow_node_state(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED_AT);
                 remove_flow_node_state(context, &node.key, FLOW_NODE_STATE_ONCE_BLOCK_LOGGED);
-                remove_flow_node_state(
-                    context,
-                    &node.key,
-                    FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG,
-                );
+                remove_flow_node_state(context, &node.key, FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG);
                 reset_nodes.push(node.key.clone());
             }
             continue;
@@ -560,6 +637,18 @@ fn resolve_token_id_for_outcome_label(outcome_label: &str, context: &Value) -> O
     }
 }
 
+fn resolve_token_id_for_outcome_label_for_node(
+    node_key: &str,
+    outcome_label: &str,
+    context: &Value,
+) -> Option<String> {
+    match normalized_binary_outcome_label(outcome_label) {
+        Some("yes") => node_auto_scope_yes_token_id(context, node_key),
+        Some("no") => node_auto_scope_no_token_id(context, node_key),
+        _ => None,
+    }
+}
+
 fn normalize_trigger_protection_mode(raw: Option<&str>) -> &'static str {
     match raw
         .map(str::trim)
@@ -601,10 +690,12 @@ fn resolve_auto_scope_underlying_asset(
     market_slug: Option<&str>,
 ) -> Option<String> {
     node_config_string(node, "marketScope")
+        .or_else(|| node_auto_scope_market_scope(node, context))
         .or_else(|| flow_context_string(context, "marketScope"))
         .as_deref()
         .and_then(find_updown_scope_by_scope)
         .map(|scope| scope.asset.to_string())
+        .or_else(|| node_auto_scope_market_asset(context, &node.key))
         .or_else(|| flow_context_string(context, "marketAsset"))
         .or_else(|| {
             market_slug
@@ -927,6 +1018,7 @@ async fn sync_trigger_market_auto_scope_context(
     }
 
     let market_scope = node_config_string(node, "marketScope")
+        .or_else(|| node_auto_scope_market_scope(node, context))
         .or_else(|| flow_context_string(context, "marketScope"))
         .ok_or_else(|| anyhow::anyhow!("trigger.market_price auto_scope requires marketScope"))?;
     let scope_def = find_updown_scope_by_scope(&market_scope).ok_or_else(|| {
@@ -940,7 +1032,7 @@ async fn sync_trigger_market_auto_scope_context(
         )
     })?;
     let market_selection = node_market_selection(node);
-    let current_market_slug = flow_context_string(context, "marketSlug");
+    let current_market_slug = node_auto_scope_market_slug(context, &node.key);
     let now = Utc::now();
     let force_refresh = should_force_auto_scope_market_cache_refresh(
         node,
@@ -975,32 +1067,19 @@ async fn sync_trigger_market_auto_scope_context(
     };
     let selected = select_market_from_candidates(markets, None, &market_selection, true);
     let Some(selected) = selected else {
+        clear_trigger_node_auto_scope_context(context, &node.key);
         return Ok(None);
     };
 
-    set_flow_context(context, "marketSlug", json!(selected.slug));
-    set_flow_context(context, "marketScope", json!(scope_def.scope));
-    set_flow_context(context, "marketAsset", json!(scope_def.asset));
-    set_flow_context(context, "marketTimeframe", json!(scope_def.timeframe));
-    set_flow_context(context, "yesTokenId", json!(selected.yes_token_id));
-    set_flow_context(context, "noTokenId", json!(selected.no_token_id));
-    if let Some(preferred_outcome) = node_config_string(node, "outcomeLabel")
-        .or_else(|| flow_context_string(context, "outcomeLabel"))
-        .and_then(|value| normalized_binary_outcome_label(&value).map(str::to_string))
-    {
-        let token_id = if preferred_outcome == "no" {
-            selected.no_token_id.clone()
-        } else {
-            selected.yes_token_id.clone()
-        };
-        let outcome_label = if preferred_outcome == "no" {
-            "No"
-        } else {
-            "Yes"
-        };
-        set_flow_context(context, "outcomeLabel", json!(outcome_label));
-        set_flow_context(context, "tokenId", json!(token_id));
-    }
+    set_trigger_node_auto_scope_context(
+        context,
+        &node.key,
+        scope_def.scope,
+        scope_def.asset,
+        scope_def.timeframe,
+        &selected,
+        node_config_string(node, "outcomeLabel").as_deref(),
+    );
 
     Ok(Some(selected))
 }

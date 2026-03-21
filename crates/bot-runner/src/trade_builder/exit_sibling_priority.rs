@@ -204,7 +204,10 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
         }
 
         if trade_builder_is_stop_loss_child(sibling)
-            && sibling.sl_trigger_price_mode.as_deref() == Some("composite")
+            && matches!(
+                sibling.sl_trigger_price_mode.as_deref(),
+                Some("composite" | "composite_safe")
+            )
         {
             let bid_unconfirmed = match (sibling.trigger_price, runtime_price.best_bid) {
                 (Some(trigger_price), Some(best_bid)) => best_bid > trigger_price,

@@ -205,12 +205,23 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     fields.onceScope = resolveTriggerMarketOnceScope(cfg, marketMode, fields.repeatMode as 'once' | 'loop');
 
     const cycleWindowModeRaw = toStringValue(cfg.cycleWindowMode).trim().toLowerCase();
-    if (cycleWindowModeRaw === 'first' || cycleWindowModeRaw === 'last') {
+    if (cycleWindowModeRaw === 'first' || cycleWindowModeRaw === 'last' || cycleWindowModeRaw === 'custom_range') {
       fields.cycleWindowMode = cycleWindowModeRaw;
     } else {
       fields.cycleWindowMode = 'off';
     }
     fields.cycleWindowSecs = toStringValue(cfg.cycleWindowSecs);
+    fields.cycleWindowStartSec = toStringValue(cfg.cycleWindowStartSec);
+    fields.cycleWindowEndSec = toStringValue(cfg.cycleWindowEndSec);
+    if (cycleWindowModeRaw === 'custom_range') {
+      fields.autoSellOnWindowEnd = cfg.autoSellOnWindowEnd === true ? 'true' : 'false';
+    }
+    if (
+      (fields.priceToBeatTriggerEnabled ?? '').trim().toLowerCase() === 'true' &&
+      !['usd', 'cent'].includes((fields.priceToBeatTriggerUnit ?? '').trim().toLowerCase())
+    ) {
+      fields.priceToBeatTriggerUnit = 'usd';
+    }
 
   }
 
@@ -233,7 +244,16 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
           maxPriceCent: toCentStringValue(item.maxPriceCent, item.maxPrice),
         });
       }
-    } else if (toStringValue(cfg.tokenId).trim() && toStringValue(cfg.triggerCondition).trim()) {
+    } else if (
+      toStringValue(cfg.tokenId).trim() &&
+      (
+        toStringValue(cfg.triggerCondition).trim() ||
+        (
+          nodeType === 'trigger.market_price' &&
+          cfg.priceToBeatTriggerEnabled === true
+        )
+      )
+    ) {
       outcomeConditionRows.push({
         id: createId('oc'),
         tokenId: toStringValue(cfg.tokenId),
@@ -624,9 +644,60 @@ export function buildNodeConfigFromForm(
           delete config.cycleWindowMode;
           delete config.cycleWindowSecs;
         }
+        delete config.cycleWindowStartSec;
+        delete config.cycleWindowEndSec;
+        delete config.autoSellOnWindowEnd;
+      } else if (cycleWindowModeRaw2 === 'custom_range') {
+        config.cycleWindowMode = 'custom_range';
+        const startSec = Number(toStringValue(config.cycleWindowStartSec).trim());
+        const endSec = Number(toStringValue(config.cycleWindowEndSec).trim());
+        if (Number.isInteger(startSec) && startSec >= 0 &&
+            Number.isInteger(endSec) && endSec > startSec) {
+          config.cycleWindowStartSec = startSec;
+          config.cycleWindowEndSec = endSec;
+        } else {
+          delete config.cycleWindowMode;
+          delete config.cycleWindowStartSec;
+          delete config.cycleWindowEndSec;
+        }
+        delete config.cycleWindowSecs;
+        if (config.autoSellOnWindowEnd !== true) {
+          delete config.autoSellOnWindowEnd;
+        }
       } else {
         delete config.cycleWindowMode;
         delete config.cycleWindowSecs;
+        delete config.cycleWindowStartSec;
+        delete config.cycleWindowEndSec;
+        delete config.autoSellOnWindowEnd;
+      }
+      if (config.priceToBeatTriggerEnabled === true) {
+        const ptbUnitRaw = toStringValue(config.priceToBeatTriggerUnit).trim().toLowerCase();
+        config.priceToBeatTriggerUnit =
+          ptbUnitRaw === 'cent' || ptbUnitRaw === 'usd' ? ptbUnitRaw : 'usd';
+        const minGap = Number(toStringValue(config.priceToBeatTriggerMinGap).trim());
+        if (Number.isFinite(minGap) && minGap > 0) {
+          config.priceToBeatTriggerMinGap = minGap;
+        } else {
+          delete config.priceToBeatTriggerMinGap;
+        }
+        const maxGapRaw = toStringValue(config.priceToBeatTriggerMaxGap).trim();
+        const maxGap = Number(maxGapRaw);
+        if (
+          maxGapRaw &&
+          Number.isFinite(maxGap) &&
+          maxGap > 0 &&
+          Number.isFinite(minGap) &&
+          maxGap >= minGap
+        ) {
+          config.priceToBeatTriggerMaxGap = maxGap;
+        } else {
+          delete config.priceToBeatTriggerMaxGap;
+        }
+      } else {
+        delete config.priceToBeatTriggerUnit;
+        delete config.priceToBeatTriggerMinGap;
+        delete config.priceToBeatTriggerMaxGap;
       }
     } else {
       delete config.marketScope;
@@ -635,6 +706,13 @@ export function buildNodeConfigFromForm(
       delete config.protectionPreset;
       delete config.cycleWindowMode;
       delete config.cycleWindowSecs;
+      delete config.cycleWindowStartSec;
+      delete config.cycleWindowEndSec;
+      delete config.autoSellOnWindowEnd;
+      delete config.priceToBeatTriggerEnabled;
+      delete config.priceToBeatTriggerUnit;
+      delete config.priceToBeatTriggerMinGap;
+      delete config.priceToBeatTriggerMaxGap;
     }
 
     if (config.repeatMode !== 'once') {
@@ -708,36 +786,50 @@ export function buildNodeConfigFromForm(
   }
 
   if ((nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') && form.outcomeConditionRows.length > 0) {
+    const ptbTriggerEnabled = nodeType === 'trigger.market_price' && config.priceToBeatTriggerEnabled === true;
     const conditions = form.outcomeConditionRows
       .filter((row) => {
         const tokenId = row.tokenId.trim();
         const outcomeLabel = row.outcomeLabel.trim();
         const triggerCondition = row.triggerCondition.trim();
-        const triggerPriceCent = Number(row.triggerPriceCent.trim());
+        const triggerPriceCentRaw = row.triggerPriceCent.trim();
+        const triggerPriceCent = Number(triggerPriceCentRaw);
         const maxPriceCentRaw = row.maxPriceCent.trim();
         const maxPriceCent = maxPriceCentRaw ? Number(maxPriceCentRaw) : null;
         const hasValidMaxPriceCent =
           !maxPriceCentRaw ||
           (Number.isFinite(maxPriceCent) && (maxPriceCent as number) > 0 && (maxPriceCent as number) <= 100);
         if (!tokenId || !outcomeLabel) return false;
+        if (nodeType === 'trigger.market_price') {
+          const isPtbOnly = ptbTriggerEnabled && !triggerCondition && !triggerPriceCentRaw;
+          if (isPtbOnly) return true;
+          const isSupportedTriggerCondition =
+            ['cross_above', 'cross_below', 'level_above', 'level_below'].includes(triggerCondition);
+          if (!isSupportedTriggerCondition) return false;
+          return Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100 && hasValidMaxPriceCent;
+        }
         const isSupportedTriggerCondition =
-          nodeType === 'trigger.market_price'
-            ? ['cross_above', 'cross_below', 'level_above', 'level_below'].includes(triggerCondition)
-            : triggerCondition === 'cross_above' || triggerCondition === 'cross_below';
+          triggerCondition === 'cross_above' || triggerCondition === 'cross_below';
         if (!isSupportedTriggerCondition) return false;
         return Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100 && hasValidMaxPriceCent;
       })
       .map((row) => {
-        const priceCent = Number(row.triggerPriceCent.trim());
+        const triggerCondition = row.triggerCondition.trim();
+        const priceCentRaw = row.triggerPriceCent.trim();
+        const priceCent = Number(priceCentRaw);
         const maxPriceCentRaw = row.maxPriceCent.trim();
         const maxPriceCent = maxPriceCentRaw ? Number(maxPriceCentRaw) : null;
         const condition: Record<string, unknown> = {
           tokenId: row.tokenId.trim(),
           outcomeLabel: row.outcomeLabel.trim(),
-          triggerCondition: row.triggerCondition.trim(),
-          triggerPriceCent: Number.isFinite(priceCent) ? priceCent : 0,
         };
+        const isPtbOnly = nodeType === 'trigger.market_price' && ptbTriggerEnabled && !triggerCondition && !priceCentRaw;
+        if (!isPtbOnly) {
+          condition.triggerCondition = triggerCondition;
+          condition.triggerPriceCent = Number.isFinite(priceCent) ? priceCent : 0;
+        }
         if (
+          !isPtbOnly &&
           maxPriceCentRaw &&
           Number.isFinite(maxPriceCent) &&
           (maxPriceCent as number) > 0 &&

@@ -671,12 +671,14 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
     let mut loop_count: u64 = 0;
     let housekeeping_interval = Duration::from_millis(FLOW_HOUSEKEEPING_INTERVAL_MS);
     let fast_path_debounce = Duration::from_millis(FLOW_WS_FAST_PATH_DEBOUNCE_MS);
+    const FLOW_HOUSEKEEPING_SLOW_THRESHOLD_MS: u128 = 500;
     let mut next_housekeeping_at = Instant::now();
     let mut next_boundary_refresh_retry_at: Option<Instant> = None;
     loop {
         let now = Instant::now();
         if now >= next_housekeeping_at {
             loop_count += 1;
+            let housekeeping_started = Instant::now();
             flow_runtime_caches.prune_stale();
             if loop_count % 20 == 1 {
                 info!(run_id, loop_count, "FLOW_LOOP_TICK_PRE_FLOWS");
@@ -697,42 +699,29 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
             if loop_count % 20 == 1 {
                 info!(run_id, loop_count, "FLOW_LOOP_TICK_POST_FLOWS");
             }
-            let boundary_delay = trade_flow_next_auto_scope_boundary_refresh_delay().await;
-            let mut boundary_cfg_cache: HashMap<i64, AppConfig> = HashMap::new();
-            tokio::join!(
-                async {
-                    if let Some(delay) = boundary_delay {
-                        tokio::time::sleep(delay).await;
-                        if trade_flow_ws_fast_path_cache_requires_refresh_now().await {
-                            if let Err(e) = refresh_trade_flow_ws_fast_path_for_boundary(
-                                repo, run_id, &ws, &mut boundary_cfg_cache,
-                            )
-                            .await
-                            {
-                                warn!(run_id, error = %e, "TRADE_FLOW_BOUNDARY_REFRESH_FAILED");
-                            }
-                        }
-                    }
-                },
-                async {
-                    if let Err(e) =
-                        process_trade_builder_orders(repo, run_id, cfg, &client, &ws).await
-                    {
-                        warn!(run_id, error = %e, "TRADE_BUILDER_PROCESS_FAILED");
-                    }
-                    if let Err(e) =
-                        process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await
-                    {
-                        warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
-                    }
-                    if let Err(e) =
-                        dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws)
-                            .await
-                    {
-                        warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
-                    }
-                }
-            );
+            if let Err(e) = process_trade_builder_orders(repo, run_id, cfg, &client, &ws).await {
+                warn!(run_id, error = %e, "TRADE_BUILDER_PROCESS_FAILED");
+            }
+            if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await {
+                warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
+            }
+            if let Err(e) =
+                dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await
+            {
+                warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
+            }
+            let housekeeping_elapsed_ms = housekeeping_started.elapsed().as_millis();
+            if housekeeping_elapsed_ms >= FLOW_HOUSEKEEPING_SLOW_THRESHOLD_MS {
+                warn!(
+                    run_id,
+                    loop_count, housekeeping_elapsed_ms, "FLOW_HOUSEKEEPING_SLOW"
+                );
+            } else if loop_count % 20 == 1 {
+                info!(
+                    run_id,
+                    loop_count, housekeeping_elapsed_ms, "FLOW_HOUSEKEEPING_ELAPSED"
+                );
+            }
             next_housekeeping_at = Instant::now() + housekeeping_interval;
             continue;
         }

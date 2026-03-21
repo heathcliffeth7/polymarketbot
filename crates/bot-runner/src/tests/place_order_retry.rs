@@ -105,6 +105,13 @@ fn fatal_exchange_rejection_catches_invalid_signature() {
 }
 
 #[test]
+fn fatal_exchange_rejection_catches_orderbook_not_exist() {
+    assert!(trade_builder_error_is_fatal_exchange_rejection(
+        r#"HTTP status 400 Bad Request for POST /order | body: {"error":"the orderbook 2551505791077205524 does not exist"}"#
+    ));
+}
+
+#[test]
 fn fatal_exchange_rejection_does_not_catch_balance() {
     assert!(!trade_builder_error_is_fatal_exchange_rejection(
         "not enough balance / allowance"

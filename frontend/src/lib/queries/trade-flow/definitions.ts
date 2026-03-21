@@ -18,6 +18,11 @@ import { DEFAULT_GRAPH, type Queryable, type TradeFlowListFilters, type TradeFlo
 import { cancelFlowResources, recordCancellationEvents } from './cancel-resources';
 import { normalizeTradeFlowGraph } from './graph';
 import { migrateLegacyWorkflowsToFlows } from './legacy';
+import {
+  FLOW_DUPLICATE_NAME_MESSAGE,
+  isTradeFlowNameUniqueViolation,
+  validateTradeFlowDefinitionName,
+} from './name-policy';
 import { rotatePublishedFlowRunOnPublish } from './publish-runtime';
 import { validateTradeFlowGraphWithRuntimeConfig } from './validation';
 
@@ -66,7 +71,6 @@ function mapEventRow(row: Record<string, unknown>): TradeFlowEvent {
 
 const FLOW_STOP_REASON = 'flow_stopped_by_user';
 const FLOW_DELETE_REASON = 'definition_deleted';
-const FLOW_DUPLICATE_NAME_MESSAGE = 'Flow name is already in use';
 
 function formatTelemetryDuration(startedAt: number, endedAt: number): string {
   if (startedAt <= 0 || endedAt <= 0 || endedAt < startedAt) return 'na';
@@ -243,10 +247,7 @@ async function syncVersionGraph(queryable: Queryable, versionId: number, graph: 
 export async function createTradeFlowDefinition(
   input: CreateTradeFlowDefinitionInput
 ): Promise<TradeFlowDefinitionDetail> {
-  const name = input.name.trim();
-  if (!name) {
-    throw new Error('Flow name is required');
-  }
+  const name = validateTradeFlowDefinitionName(input.name);
 
   const graph = normalizeTradeFlowGraph(input.graphJson);
 
@@ -309,6 +310,9 @@ export async function createTradeFlowDefinition(
     return (await fetchDefinitionDetailById(client, input.userId, Number(definition.id))) as TradeFlowDefinitionDetail;
   } catch (err) {
     await client.query('ROLLBACK');
+    if (isTradeFlowNameUniqueViolation(err)) {
+      throw new Error(FLOW_DUPLICATE_NAME_MESSAGE);
+    }
     throw err;
   } finally {
     client.release();
@@ -404,8 +408,7 @@ export async function updateTradeFlowDefinitionDraft(
     let idx = 3;
 
     if (updates.name !== undefined) {
-      const nextName = updates.name.trim();
-      if (!nextName) throw new Error('Flow name cannot be empty');
+      const nextName = validateTradeFlowDefinitionName(updates.name);
       await ensureUniqueActiveDefinitionName(client, userId, nextName, definitionId);
       fields.push(`name = $${idx++}`);
       params.push(nextName);
@@ -452,6 +455,9 @@ export async function updateTradeFlowDefinitionDraft(
       } catch (rollbackErr) {
         console.error('Trade flow draft rollback error:', rollbackErr);
       }
+    }
+    if (isTradeFlowNameUniqueViolation(err)) {
+      throw new Error(FLOW_DUPLICATE_NAME_MESSAGE);
     }
     if (telemetryEnabled) {
       const tError = performance.now();

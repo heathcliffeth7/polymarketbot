@@ -61,6 +61,16 @@ require_non_placeholder() {
   fi
 }
 
+require_min_length() {
+  local key="$1"
+  local minimum="$2"
+  local value
+  value="$(sudo sed -n "s/^${key}=//p" "$ENV_FILE" | tail -n1)"
+  if (( ${#value} < minimum )); then
+    fail "$key in $ENV_FILE must be at least $minimum characters"
+  fi
+}
+
 install_bot_systemctl_sudoers() {
   local bot_service_name="$1"
   local tmp_file
@@ -173,6 +183,7 @@ step "Validate required env values"
 require_non_placeholder "DATABASE_URL"
 require_non_placeholder "AUTH_SECRET"
 require_non_placeholder "CONFIG_ENCRYPTION_KEY"
+require_min_length "AUTH_SECRET" 32
 ok "Required env values look valid"
 
 if pgrep -f "$FRONTEND_DIR/node_modules/.bin/next dev --webpack" >/dev/null 2>&1; then

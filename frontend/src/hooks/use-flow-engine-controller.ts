@@ -1095,7 +1095,10 @@ export function useFlowEngineController({
   };
 
   const updateGraphFromCanvas = useCallback(
-    (nextGraph: TradeFlowGraph, options?: { allowGraphShrink?: boolean }) => {
+    (
+      nextGraph: TradeFlowGraph,
+      options?: { allowGraphShrink?: boolean; persistImmediately?: boolean }
+    ) => {
       const definitionId = selectedDefinitionIdRef.current;
       const graphOwnerDefinitionId = graphOwnerDefinitionIdRef.current;
       if (!definitionId || graphOwnerDefinitionId !== definitionId || isSwitchingDefinition) {
@@ -1130,18 +1133,19 @@ export function useFlowEngineController({
       if (!definitionId) return;
 
       clearScheduledAutosave();
-      autosaveTimeoutRef.current = window.setTimeout(() => {
-        autosaveTimeoutRef.current = null;
-        if (
-          selectedDefinitionIdRef.current !== definitionId ||
-          graphOwnerDefinitionIdRef.current !== definitionId ||
-          isSwitchingDefinition
-        ) {
-          return;
-        }
-        closeStream();
-        void (async () => {
-          await new Promise((r) => setTimeout(r, 50));
+      const persistDraft = (delayMs: number, errorMessage: string) => {
+        const runPersist = async () => {
+          if (delayMs > 0) {
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
+          if (
+            selectedDefinitionIdRef.current !== definitionId ||
+            graphOwnerDefinitionIdRef.current !== definitionId ||
+            isSwitchingDefinition
+          ) {
+            return;
+          }
+          closeStream();
           await queueDraftSave(
             definitionId,
             {
@@ -1149,20 +1153,32 @@ export function useFlowEngineController({
               syncNormalizedTables: false,
             },
             {
-              errorMessage: 'Autosave basarisiz.',
+              errorMessage,
               revision,
               surfaceError: true,
             }
-          ).catch((err) => {
-            if (
-              selectedDefinitionIdRef.current !== definitionId ||
-              canvasAutoSaveRevisionRef.current !== revision
-            ) {
-              return;
-            }
-            console.warn('[auto-save] PATCH failed:', err);
-          });
-        })();
+          );
+        };
+
+        void runPersist().catch((err) => {
+          if (
+            selectedDefinitionIdRef.current !== definitionId ||
+            canvasAutoSaveRevisionRef.current !== revision
+          ) {
+            return;
+          }
+          console.warn('[auto-save] PATCH failed:', err);
+        });
+      };
+
+      if (options?.persistImmediately) {
+        persistDraft(0, 'Node degisikligi kaydedilemedi.');
+        return;
+      }
+
+      autosaveTimeoutRef.current = window.setTimeout(() => {
+        autosaveTimeoutRef.current = null;
+        persistDraft(50, 'Autosave basarisiz.');
       }, 200);
     },
     [

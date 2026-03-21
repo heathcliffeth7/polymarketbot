@@ -266,6 +266,7 @@ fn trade_builder_error_is_fatal_exchange_rejection(error_text: &str) -> bool {
         || normalized.contains("market not found")
         || normalized.contains("market closed")
         || normalized.contains("market resolved")
+        || (normalized.contains("orderbook") && normalized.contains("does not exist"))
 }
 
 fn trade_builder_is_terminal_status(status: &str) -> bool {
@@ -386,6 +387,20 @@ fn trade_builder_price_exceeds_max_price(order: &TradeBuilderOrder, desired_pric
         .max_price
         .map(|max_price| desired_price.is_finite() && desired_price > max_price)
         .unwrap_or(false)
+}
+
+fn trade_builder_resolve_max_price_reference(
+    order: &TradeBuilderOrder,
+    best_ask: Option<f64>,
+    desired_price: f64,
+) -> (f64, &'static str) {
+    if order.side != "buy" {
+        return (desired_price, "desired_price");
+    }
+    match best_ask.filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0) {
+        Some(best_ask) => (best_ask, "best_ask"),
+        None => (desired_price, "desired_price_fallback"),
+    }
 }
 
 fn trade_builder_price_below_guard_trigger(order: &TradeBuilderOrder, current_price: f64) -> bool {
@@ -512,6 +527,16 @@ fn sl_trigger_eval_price_for_mode(
     match mode {
         "best_bid" => runtime_price.best_bid.map(clamp_probability),
         "last_trade" => runtime_price.last_trade_price.map(clamp_probability),
+        "composite_fast" => Some(
+            match (runtime_price.best_bid, runtime_price.last_trade_price) {
+                (Some(best_bid), Some(last_trade_price)) => {
+                    clamp_probability(best_bid.min(last_trade_price))
+                }
+                (Some(best_bid), None) => clamp_probability(best_bid),
+                (None, Some(last_trade_price)) => clamp_probability(last_trade_price),
+                _ => runtime_price.price,
+            },
+        ),
         _ => Some(fast_trigger_eval_price(runtime_price, Some("cross_below"))),
     }
 }

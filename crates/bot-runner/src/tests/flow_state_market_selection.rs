@@ -260,6 +260,15 @@ fn publish_marker_change_resets_fixed_once_trigger_publish_state() {
                 "once_fired_at": "2026-02-28T00:00:00Z",
                 "once_fired_market_slug": "tur-gal-iba-2026-03-14",
                 "once_blocked_logged": true,
+                "auto_scope_market_slug": "btc-updown-5m-1772296200",
+                "auto_scope_market_scope": "btc_5m_updown",
+                "auto_scope_market_asset": "btc",
+                "auto_scope_market_timeframe": "5m",
+                "auto_scope_yes_token_id": "yes-token",
+                "auto_scope_no_token_id": "no-token",
+                "auto_scope_resolved_token_id": "yes-token",
+                "auto_scope_resolved_outcome_label": "Yes",
+                "auto_scope_selection_reason": "in_window",
                 "last_price": 0.62,
                 "last_ws_market_slug": "tur-gal-iba-2026-03-14",
                 "previous_price": 0.62,
@@ -290,6 +299,19 @@ fn publish_marker_change_resets_fixed_once_trigger_publish_state() {
         "trigger_once",
         FLOW_NODE_STATE_ONCE_FIRED
     ));
+    for cleared_key in [
+        "auto_scope_market_slug",
+        "auto_scope_market_scope",
+        "auto_scope_market_asset",
+        "auto_scope_market_timeframe",
+        "auto_scope_yes_token_id",
+        "auto_scope_no_token_id",
+        "auto_scope_resolved_token_id",
+        "auto_scope_resolved_outcome_label",
+        "auto_scope_selection_reason",
+    ] {
+        assert!(flow_node_state(&context, "trigger_once", cleared_key).is_none());
+    }
     assert!(flow_node_state(&context, "trigger_once", "last_price").is_none());
     assert!(flow_node_state(&context, "trigger_once", "last_ws_market_slug").is_none());
     assert!(flow_node_state(&context, "trigger_once", "previous_price").is_none());

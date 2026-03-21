@@ -27,6 +27,13 @@ async fn expire_trade_builder_order_for_stale_market(
         }),
     )
     .await?;
+    maybe_send_order_not_filled_notification(
+        repo,
+        order,
+        "stale_market_cycle",
+        "Market cycle degisti, emir icra edilemeden expire oldu.",
+    )
+    .await;
     Ok(())
 }
 

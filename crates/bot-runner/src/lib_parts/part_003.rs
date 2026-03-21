@@ -89,11 +89,18 @@ struct WsOpenPositionPriceNodeSpec {
     trigger_condition: String,
     trigger_price: f64,
     max_price: Option<f64>,
+    price_to_beat_trigger_enabled: bool,
+    price_to_beat_trigger_min_gap: Option<f64>,
+    price_to_beat_trigger_max_gap: Option<f64>,
+    price_to_beat_trigger_unit: crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit,
     protection_mode: String,
     protection_asset: Option<String>,
     confirmation_ms: Option<i64>,
     cycle_window_mode: Option<String>,
     cycle_window_secs: Option<i64>,
+    cycle_window_start_sec: Option<i64>,
+    cycle_window_end_sec: Option<i64>,
+    auto_sell_on_window_end: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +117,7 @@ struct WsOpenPositionPriceRunSpec {
 struct TradeFlowWsFastPathCache {
     run_specs: Vec<WsOpenPositionPriceRunSpec>,
     token_targets: HashMap<String, Vec<(usize, usize)>>,
+    market_targets: HashMap<String, Vec<(usize, usize)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -377,6 +385,13 @@ impl UnderlyingReferenceService {
             anyhow::anyhow!("failed to resolve cycle-open candle for {reference_symbol}")
         })
     }
+}
+
+async fn fetch_underlying_reference_current_price(asset: &str) -> Result<f64> {
+    Ok(UNDERLYING_REFERENCE_SERVICE
+        .current_tick(asset)
+        .await?
+        .price)
 }
 
 impl UnderlyingProtectionEvaluation {
