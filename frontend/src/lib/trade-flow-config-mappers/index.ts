@@ -6,4 +6,11 @@ export * from './expressions';
 export * from './node-config';
 export * from './edge-config';
 export * from './context';
-export { isRecord, safeJsonStringify } from './utils';
+export * from './cycle-window';
+export {
+  isRecord,
+  isSupportedMarketPriceTriggerCondition,
+  isSupportedOpenPositionTriggerCondition,
+  safeJsonStringify,
+  validateOutcomeConditionRow,
+} from './utils';

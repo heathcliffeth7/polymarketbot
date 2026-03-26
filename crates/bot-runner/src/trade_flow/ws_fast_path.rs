@@ -75,6 +75,12 @@ fn auto_scope_rotation_lag_ms(rotation: &AutoScopeMarketRotation) -> Option<i64>
     })
 }
 
+const FLOW_NODE_STATE_CYCLE_WINDOW_CONFIG_SNAPSHOT_PREFIX: &str = "cycle_window_config_snapshot_";
+
+fn cycle_window_config_snapshot_state_key(token_id: &str) -> String {
+    format!("{FLOW_NODE_STATE_CYCLE_WINDOW_CONFIG_SNAPSHOT_PREFIX}{token_id}")
+}
+
 fn build_chainlink_seed_rejected_too_old_payload(
     market_slug: &str,
     asset: &str,
@@ -1020,6 +1026,7 @@ async fn build_trade_flow_ws_fast_path_cache(
     definitions: &[TradeFlowDefinitionRuntime],
     user_cfg_cache: &mut HashMap<i64, AppConfig>,
 ) -> Result<TradeFlowWsFastPathCache> {
+    crate::trade_flow::guards::chainlink_price::ensure_chainlink_price_stream_started();
     let mut run_specs: Vec<WsOpenPositionPriceRunSpec> = Vec::new();
     let mut token_targets: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     let mut market_targets: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
@@ -1050,6 +1057,7 @@ async fn build_trade_flow_ws_fast_path_cache(
         let mut context = normalize_trade_flow_context(run.context_json.clone(), &graph.context);
         let mut nodes = Vec::new();
         let mut auto_scope_selected_by_node: HashMap<String, SelectedLiveMarket> = HashMap::new();
+        let mut cycle_window_snapshot_recorded = false;
         for node in &graph.nodes {
             if node_market_mode(node) == "auto_scope"
                 && matches!(
@@ -1113,8 +1121,49 @@ async fn build_trade_flow_ws_fast_path_cache(
                 log_trigger_ws_cache_node_indexed(
                     run_id,
                     run.id,
-                    &build_trigger_ws_cache_node_log_fields_from_spec(spec),
+                    &build_trigger_ws_cache_node_log_fields_from_spec(
+                        spec,
+                        version.id,
+                        Some(version.version_no),
+                    ),
                 );
+                if spec.cycle_window_mode.is_some()
+                    && !flow_node_state_truthy(&context, &spec.node_key, &cycle_window_config_snapshot_state_key(&spec.token_id))
+                {
+                    if let Err(err) = repo
+                        .append_trade_flow_event(
+                            Some(run.id),
+                            run.definition_id,
+                            Some(run.version_id),
+                            "trigger_cycle_window_config_snapshot",
+                            &json!({
+                                "node_key": spec.node_key,
+                                "node_type": spec.node_type,
+                                "market_slug": spec.market_slug,
+                                "token_id": spec.token_id,
+                                "outcome_label": spec.outcome_label,
+                                "version_id": version.id,
+                                "version_no": version.version_no,
+                                "cycle_window_mode": spec.cycle_window_mode,
+                                "cycle_window_secs": spec.cycle_window_secs,
+                                "cycle_window_start_sec": spec.cycle_window_start_sec,
+                                "cycle_window_end_sec": spec.cycle_window_end_sec,
+                                "auto_sell_on_window_end": spec.auto_sell_on_window_end,
+                            }),
+                        )
+                        .await
+                    {
+                        warn!(
+                            run_id,
+                            flow_run_id = run.id,
+                            node_key = %spec.node_key,
+                            error = %err,
+                            "TRIGGER_CYCLE_WINDOW_CONFIG_SNAPSHOT_EVENT_FAILED"
+                        );
+                    }
+                    set_flow_node_state(&mut context, &spec.node_key, &cycle_window_config_snapshot_state_key(&spec.token_id), json!(true));
+                    cycle_window_snapshot_recorded = true;
+                }
             }
             nodes.extend(spec_result.specs);
         }
@@ -1227,7 +1276,7 @@ async fn build_trade_flow_ws_fast_path_cache(
             if let Some(expected_market_start) = rotation.expected_market_start.as_ref() {
                 if let Some(scope) = crate::find_updown_scope_by_slug(&rotation.new_market_slug) {
                     if matches!(scope.timeframe, "5m" | "15m") {
-                        match crate::trade_flow::guards::chainlink_price::get_chainlink_price_near_timestamp(
+                        match crate::trade_flow::guards::chainlink_price::get_chainlink_price_start_tick(
                             &scope.asset,
                             expected_market_start.timestamp_millis(),
                         ) {
@@ -1324,9 +1373,10 @@ async fn build_trade_flow_ws_fast_path_cache(
             run_id: run.id,
             definition_id: run.definition_id,
             version_id: run.version_id,
+            version_no: version.version_no,
             context,
             nodes,
-            context_dirty: slug_changed || !rotations.is_empty(),
+            context_dirty: slug_changed || !rotations.is_empty() || cycle_window_snapshot_recorded,
         });
     }
 

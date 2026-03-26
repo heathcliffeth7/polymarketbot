@@ -8,6 +8,7 @@ import {
   type PrimitiveValueType,
 } from '@/lib/trade-flow-config-mappers';
 import type {
+  TradeFlowCustomRangeSnapshot,
   TradeFlowDefinition,
   TradeFlowDefinitionDetail,
   TradeFlowGraph,
@@ -226,6 +227,33 @@ function renderGraphSummaryLine(label: string, summary: ReturnType<typeof summar
   );
 }
 
+function renderCustomRangeSummary(
+  label: string,
+  snapshots: TradeFlowCustomRangeSnapshot[],
+  versionLabel?: string | null
+) {
+  return (
+    <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-2">
+      <p className="text-[11px] font-medium text-zinc-300">
+        {label}
+        {versionLabel ? <span className="ml-1 text-zinc-500">{versionLabel}</span> : null}
+      </p>
+      {snapshots.length === 0 ? (
+        <p className="mt-1 text-[11px] text-zinc-500">custom_range yok</p>
+      ) : (
+        <div className="mt-1 space-y-1">
+          {snapshots.map((snapshot) => (
+            <p key={`${label}-${snapshot.nodeKey}`} className="text-[11px] text-zinc-400">
+              {snapshot.nodeKey}: {snapshot.startSec}-{snapshot.endSec}
+              {snapshot.autoSellOnWindowEnd ? ' • auto-sell' : ''}
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function FlowSummaryBar({ graph, validation, detail, autoSaveError }: FlowSummaryBarProps) {
   const autoClaimEnabled =
     graph.context?.autoClaimEnabled === true || graph.context?.autoClaimEnabled === 'true';
@@ -282,6 +310,20 @@ export function FlowSummaryBar({ graph, validation, detail, autoSaveError }: Flo
           detail?.publishedVersion ? `v${detail.publishedVersion.version_no}` : null
         )}
       </div>
+      {detail && (
+        <div className="mt-3 grid gap-2 md:grid-cols-2">
+          {renderCustomRangeSummary(
+            'Draft custom_range',
+            detail.draftCustomRangeSnapshots,
+            detail.draftVersion ? `v${detail.draftVersion.version_no}` : null
+          )}
+          {renderCustomRangeSummary(
+            'Published custom_range',
+            detail.publishedCustomRangeSnapshots,
+            detail.publishedVersion ? `v${detail.publishedVersion.version_no}` : null
+          )}
+        </div>
+      )}
       {validation && (
         <div className="mt-3 space-y-2 rounded-md border border-zinc-800 bg-zinc-900/70 p-2">
           <p className="text-xs text-zinc-300">Dogrulama sonucu: {validation.valid ? 'Gecerli' : 'Hata iceriyor'}</p>

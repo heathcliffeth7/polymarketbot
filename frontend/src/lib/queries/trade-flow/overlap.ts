@@ -32,28 +32,21 @@ function groupMarketOverlap(rows: OverlapRow[]): TradeFlowOverlapGroup | null {
     return null;
   }
 
-  const definitionIds = new Set(rows.map((row) => row.definition_id));
-  const nodesByRun = new Map<number, Set<string>>();
-  for (const row of rows) {
-    if (row.run_id == null) continue;
-    const nodes = nodesByRun.get(row.run_id) ?? new Set<string>();
-    if (row.node_key) {
-      nodes.add(row.node_key);
-    }
-    nodesByRun.set(row.run_id, nodes);
-  }
-
-  const crossFlow = definitionIds.size > 1;
-  const intraFlow = Array.from(nodesByRun.values()).some((nodes) => nodes.size > 1);
-  if (!crossFlow && !intraFlow) {
+  const runIds = new Set(rows.map((row) => row.run_id).filter((value) => value != null));
+  if (runIds.size > 1) {
     return null;
   }
 
-  let overlapType: TradeFlowOverlapGroup['overlap_type'] = 'cross_flow';
-  if (crossFlow && intraFlow) {
-    overlapType = 'both';
-  } else if (intraFlow) {
-    overlapType = 'intra_flow';
+  const nodeKeys = new Set<string>();
+  for (const row of rows) {
+    if (row.node_key) {
+      nodeKeys.add(row.node_key);
+    }
+  }
+
+  const intraFlow = nodeKeys.size > 1;
+  if (!intraFlow) {
+    return null;
   }
 
   const peers: TradeFlowOverlapPeer[] = rows.map((row) => ({
@@ -70,9 +63,9 @@ function groupMarketOverlap(rows: OverlapRow[]): TradeFlowOverlapGroup | null {
 
   return {
     market_slug: rows[0].market_slug,
-    overlap_type: overlapType,
-    cross_flow: crossFlow,
-    intra_flow: intraFlow,
+    overlap_type: 'intra_flow',
+    cross_flow: false,
+    intra_flow: true,
     peers,
   };
 }
@@ -105,9 +98,13 @@ export async function getTradeFlowOverlapSummary(
   const rows = res.rows.map((row) => mapOverlapRow(row as Record<string, unknown>));
   const rowsByMarket = new Map<string, OverlapRow[]>();
   for (const row of rows) {
-    const marketRows = rowsByMarket.get(row.market_slug) ?? [];
+    if (row.run_id == null) {
+      continue;
+    }
+    const groupKey = `${row.market_slug}::${row.run_id}`;
+    const marketRows = rowsByMarket.get(groupKey) ?? [];
     marketRows.push(row);
-    rowsByMarket.set(row.market_slug, marketRows);
+    rowsByMarket.set(groupKey, marketRows);
   }
 
   return Array.from(rowsByMarket.values())

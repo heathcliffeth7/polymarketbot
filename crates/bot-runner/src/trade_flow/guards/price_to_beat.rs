@@ -13,16 +13,16 @@ mod notification;
 mod tests;
 
 #[cfg(test)]
-use self::current_price::{
-    map_current_price_error, resolve_current_price_result, CURRENT_PRICE_SOURCE_COINBASE_FALLBACK,
-};
+use self::current_price::{map_current_price_error, resolve_current_price_result};
 use self::current_price::{resolve_price_to_beat_current_price, CURRENT_PRICE_SOURCE_CHAINLINK};
 use self::notification::{
     build_price_to_beat_guard_blocked_notification_message,
+    build_price_to_beat_guard_recovered_notification_message,
     build_price_to_beat_guard_waiting_notification_message,
 };
 
 const PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY: &str = "lastGuardNotificationSeed";
+const PRICE_TO_BEAT_GUARD_NOTIFICATION_STATE_KEY: &str = "priceToBeatGuardNotificationState";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PriceToBeatDiffUnit {
@@ -64,6 +64,7 @@ pub(crate) struct PriceToBeatGuardEvaluation {
     pub(crate) timeframe: Option<String>,
     pub(crate) asset: Option<String>,
     pub(crate) price_to_beat: Option<f64>,
+    pub(crate) price_to_beat_status: Option<String>,
     pub(crate) price_to_beat_source: Option<String>,
     pub(crate) price_to_beat_source_latency_ms: Option<i64>,
     pub(crate) current_price: Option<f64>,
@@ -88,6 +89,7 @@ impl PriceToBeatGuardEvaluation {
             "timeframe": self.timeframe,
             "asset": self.asset,
             "price_to_beat": self.price_to_beat,
+            "price_to_beat_status": self.price_to_beat_status,
             "price_to_beat_source": self.price_to_beat_source,
             "price_to_beat_source_latency_ms": self.price_to_beat_source_latency_ms,
             "current_price": self.current_price,
@@ -105,6 +107,76 @@ fn clear_price_to_beat_guard_waiting_context(context: &mut Value) {
     crate::set_flow_context(context, "priceToBeatGuardWaiting", Value::Null);
     // Legacy key cleanup
     crate::set_flow_context(context, "priceToBeatGuardWaitingReason", Value::Null);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PriceToBeatGuardNotificationPhase {
+    BlockedNotified,
+    PassedNotified,
+}
+
+impl PriceToBeatGuardNotificationPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BlockedNotified => "blocked_notified",
+            Self::PassedNotified => "passed_notified",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "blocked_notified" => Some(Self::BlockedNotified),
+            "passed_notified" => Some(Self::PassedNotified),
+            _ => None,
+        }
+    }
+}
+
+fn price_to_beat_guard_notification_identity(
+    node_key: &str,
+    market_slug: &str,
+    token_id: &str,
+) -> String {
+    format!("{node_key}:{market_slug}:{token_id}")
+}
+
+fn price_to_beat_guard_notification_phase(
+    context: &Value,
+    node_key: &str,
+    market_slug: &str,
+    token_id: &str,
+) -> Option<PriceToBeatGuardNotificationPhase> {
+    let state = crate::flow_context_value(context, PRICE_TO_BEAT_GUARD_NOTIFICATION_STATE_KEY)?;
+    let identity = price_to_beat_guard_notification_identity(node_key, market_slug, token_id);
+    let entry = state.get(&identity)?;
+    let phase = entry.get("phase")?.as_str()?;
+    PriceToBeatGuardNotificationPhase::parse(phase)
+}
+
+fn set_price_to_beat_guard_notification_phase(
+    context: &mut Value,
+    node_key: &str,
+    market_slug: &str,
+    token_id: &str,
+    phase: PriceToBeatGuardNotificationPhase,
+    reason_code: &str,
+) {
+    let identity = price_to_beat_guard_notification_identity(node_key, market_slug, token_id);
+    let mut state = crate::flow_context_value(context, PRICE_TO_BEAT_GUARD_NOTIFICATION_STATE_KEY)
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    state.insert(
+        identity,
+        json!({
+            "phase": phase.as_str(),
+            "reasonCode": reason_code,
+        }),
+    );
+    crate::set_flow_context(
+        context,
+        PRICE_TO_BEAT_GUARD_NOTIFICATION_STATE_KEY,
+        Value::Object(state),
+    );
 }
 
 fn price_to_beat_guard_notification_seed_reason(
@@ -233,6 +305,7 @@ pub(crate) struct PriceToBeatTriggerGateResult {
     pub(crate) reason: &'static str,
     pub(crate) directional_gap: Option<f64>,
     pub(crate) price_to_beat: Option<f64>,
+    pub(crate) price_to_beat_status: Option<String>,
     pub(crate) current_price: Option<f64>,
     pub(crate) min_gap: f64,
     pub(crate) max_gap: Option<f64>,
@@ -245,6 +318,7 @@ impl PriceToBeatTriggerGateResult {
             "reason": self.reason,
             "directional_gap": self.directional_gap,
             "price_to_beat": self.price_to_beat,
+            "price_to_beat_status": self.price_to_beat_status,
             "current_price": self.current_price,
             "min_gap": self.min_gap,
             "max_gap": self.max_gap,
@@ -267,6 +341,7 @@ pub(crate) fn evaluate_price_to_beat_trigger_gate(
             reason: "price_to_beat_pending",
             directional_gap: None,
             price_to_beat: None,
+            price_to_beat_status: None,
             current_price: None,
             min_gap: min_gap_usd,
             max_gap: max_gap_usd,
@@ -280,6 +355,7 @@ pub(crate) fn evaluate_price_to_beat_trigger_gate(
                 reason: "chainlink_unavailable",
                 directional_gap: None,
                 price_to_beat: Some(snapshot.price_to_beat),
+                price_to_beat_status: Some(snapshot.status().to_string()),
                 current_price: None,
                 min_gap: min_gap_usd,
                 max_gap: max_gap_usd,
@@ -297,6 +373,7 @@ pub(crate) fn evaluate_price_to_beat_trigger_gate(
             reason: "unsupported_outcome_label",
             directional_gap: None,
             price_to_beat: Some(snapshot.price_to_beat),
+            price_to_beat_status: Some(snapshot.status().to_string()),
             current_price: Some(current_price),
             min_gap: min_gap_usd,
             max_gap: max_gap_usd,
@@ -323,6 +400,7 @@ pub(crate) fn evaluate_price_to_beat_trigger_gate(
         reason,
         directional_gap: Some(directional.directional_gap),
         price_to_beat: Some(snapshot.price_to_beat),
+        price_to_beat_status: Some(snapshot.status().to_string()),
         current_price: Some(current_price),
         min_gap: min_gap_usd,
         max_gap: max_gap_usd,
@@ -372,7 +450,54 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
             .await;
     let evaluation_output = evaluation.to_value();
     crate::set_flow_context(context, "priceToBeatGuard", evaluation_output.clone());
+    let should_notify =
+        crate::node_config_bool(node, "notifyOnPriceToBeatGapBlocked").unwrap_or(true);
+    let notification_phase =
+        price_to_beat_guard_notification_phase(context, &node.key, market_slug, token_id);
     if evaluation.passed {
+        let waiting_state = price_to_beat_guard_waiting_state(context);
+        let recovered_from_reason_code = waiting_state
+            .as_ref()
+            .and_then(|prev| (prev.market_slug == market_slug).then(|| prev.reason_code.as_str()));
+        if let Some(recovered_from_reason_code) = recovered_from_reason_code {
+            repo.append_trade_flow_event(
+                Some(run.id),
+                run.definition_id,
+                Some(run.version_id),
+                "price_to_beat_guard_recovered",
+                &json!({
+                    "node_key": node.key,
+                    "node_type": node.node_type,
+                    "market_slug": market_slug,
+                    "token_id": token_id,
+                    "outcome_label": outcome_label,
+                    "side": side,
+                    "execution_mode": execution_mode,
+                    "recovered_from_reason_code": recovered_from_reason_code,
+                    "price_to_beat_guard": evaluation_output.clone(),
+                }),
+            )
+            .await?;
+
+            if should_notify
+                && notification_phase == Some(PriceToBeatGuardNotificationPhase::BlockedNotified)
+            {
+                let message = build_price_to_beat_guard_recovered_notification_message(
+                    &evaluation,
+                    recovered_from_reason_code,
+                );
+                if send_price_to_beat_guard_notification(repo, run.user_id, &message).await {
+                    set_price_to_beat_guard_notification_phase(
+                        context,
+                        &node.key,
+                        market_slug,
+                        token_id,
+                        PriceToBeatGuardNotificationPhase::PassedNotified,
+                        recovered_from_reason_code,
+                    );
+                }
+            }
+        }
         clear_price_to_beat_guard_waiting_context(context);
         return Ok(None);
     }
@@ -395,28 +520,17 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
     )
     .await?;
 
-    let should_notify =
-        crate::node_config_bool(node, "notifyOnPriceToBeatGapBlocked").unwrap_or(true);
     let candidate_reason =
         crate::build_guard_notification_reason("price_to_beat", &evaluation.reason_code);
     if retry_on_guard_block {
-        let _entered_waiting = match price_to_beat_guard_waiting_state(context) {
+        let entered_waiting = match price_to_beat_guard_waiting_state(context) {
             Some(prev) => {
                 prev.market_slug != market_slug || prev.reason_code != evaluation.reason_code
             }
             None => true,
         };
         set_price_to_beat_guard_waiting_state(context, market_slug, &evaluation.reason_code);
-        if should_notify
-            && price_to_beat_guard_notification_seed_reason(
-                context,
-                &node.key,
-                market_slug,
-                token_id,
-            )
-            .as_deref()
-                != Some(candidate_reason.as_str())
-        {
+        if entered_waiting && notification_phase.is_none() && should_notify {
             let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
             if send_price_to_beat_guard_notification(repo, run.user_id, &message).await {
                 set_price_to_beat_guard_notification_seed(
@@ -426,7 +540,24 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
                     token_id,
                     &candidate_reason,
                 );
+                set_price_to_beat_guard_notification_phase(
+                    context,
+                    &node.key,
+                    market_slug,
+                    token_id,
+                    PriceToBeatGuardNotificationPhase::BlockedNotified,
+                    &evaluation.reason_code,
+                );
             }
+        } else if entered_waiting {
+            set_price_to_beat_guard_notification_phase(
+                context,
+                &node.key,
+                market_slug,
+                token_id,
+                PriceToBeatGuardNotificationPhase::BlockedNotified,
+                &evaluation.reason_code,
+            );
         }
         let repeat_at = crate::Utc::now()
             + ChronoDuration::milliseconds(crate::PRICE_TO_BEAT_GUARD_RETRY_DELAY_MS);
@@ -449,11 +580,7 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
             repeat_idempotency_key: None,
         }));
     }
-    if should_notify
-        && price_to_beat_guard_notification_seed_reason(context, &node.key, market_slug, token_id)
-            .as_deref()
-            != Some(candidate_reason.as_str())
-    {
+    if should_notify && notification_phase.is_none() {
         let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
         if send_price_to_beat_guard_notification(repo, run.user_id, &message).await {
             set_price_to_beat_guard_notification_seed(
@@ -462,6 +589,14 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
                 market_slug,
                 token_id,
                 &candidate_reason,
+            );
+            set_price_to_beat_guard_notification_phase(
+                context,
+                &node.key,
+                market_slug,
+                token_id,
+                PriceToBeatGuardNotificationPhase::BlockedNotified,
+                &evaluation.reason_code,
             );
         }
     }
@@ -510,6 +645,7 @@ async fn evaluate_price_to_beat_guard(
             None,
             None,
             None,
+            None,
         );
     };
     if !matches!(scope.timeframe, "5m" | "15m") {
@@ -523,6 +659,7 @@ async fn evaluate_price_to_beat_guard(
             Some(format!("unsupported timeframe: {}", scope.timeframe)),
             Some(scope.timeframe.to_string()),
             Some(scope.asset.to_string()),
+            None,
             None,
             None,
             None,
@@ -547,6 +684,7 @@ async fn evaluate_price_to_beat_guard(
                 None,
                 None,
                 None,
+                None,
             );
         }
         PriceToBeatLookup::Unavailable(detail) => {
@@ -560,6 +698,7 @@ async fn evaluate_price_to_beat_guard(
                 Some(detail),
                 Some(scope.timeframe.to_string()),
                 Some(scope.asset.to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -589,6 +728,7 @@ async fn evaluate_price_to_beat_guard(
                 Some(scope.timeframe.to_string()),
                 Some(scope.asset.to_string()),
                 Some(snapshot.price_to_beat),
+                Some(snapshot.status().to_string()),
                 Some(snapshot.source.as_str().to_string()),
                 snapshot.source_latency_ms,
                 None,
@@ -618,6 +758,7 @@ async fn evaluate_price_to_beat_guard(
                 Some(scope.timeframe.to_string()),
                 Some(scope.asset.to_string()),
                 Some(snapshot.price_to_beat),
+                Some(snapshot.status().to_string()),
                 Some(snapshot.source.as_str().to_string()),
                 snapshot.source_latency_ms,
                 Some(current_price),
@@ -625,6 +766,8 @@ async fn evaluate_price_to_beat_guard(
         }
     };
     let passed = directional.passed;
+    let snapshot_status = snapshot.status().to_string();
+    let snapshot_source = snapshot.source.as_str().to_string();
     PriceToBeatGuardEvaluation {
         passed,
         reason_code: if passed {
@@ -649,7 +792,8 @@ async fn evaluate_price_to_beat_guard(
         timeframe: Some(snapshot.timeframe),
         asset: Some(snapshot.asset),
         price_to_beat: Some(snapshot.price_to_beat),
-        price_to_beat_source: Some(snapshot.source.as_str().to_string()),
+        price_to_beat_status: Some(snapshot_status),
+        price_to_beat_source: Some(snapshot_source),
         price_to_beat_source_latency_ms: snapshot.source_latency_ms,
         current_price: Some(current_price),
         current_price_source,
@@ -672,6 +816,7 @@ fn blocked_price_to_beat_guard_evaluation(
     timeframe: Option<String>,
     asset: Option<String>,
     price_to_beat: Option<f64>,
+    price_to_beat_status: Option<String>,
     price_to_beat_source: Option<String>,
     price_to_beat_source_latency_ms: Option<i64>,
     current_price: Option<f64>,
@@ -687,6 +832,7 @@ fn blocked_price_to_beat_guard_evaluation(
         timeframe,
         asset,
         price_to_beat,
+        price_to_beat_status,
         price_to_beat_source,
         price_to_beat_source_latency_ms,
         current_price,

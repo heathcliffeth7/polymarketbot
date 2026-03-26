@@ -4,6 +4,8 @@ import {
   hasUpstreamAutoScopeMarketTrigger,
   hasUpstreamTriggerWithTriggerPrice,
   hasUpstreamBuyPlaceOrderNode,
+  isGenericPlaceOrderPresetConfig,
+  resolveUpstreamFixedTriggerMarket,
 } from './graph';
 import {
   isRecord,
@@ -12,7 +14,90 @@ import {
   toBooleanish,
   toFiniteNumber,
 } from './shared';
+import { validateActionPlaceOrderExecutionFloorConfig } from './validation-action-place-order-execution-floor';
 import { pushNodeError } from './validation-core';
+
+interface ParsedExitLadderRule {
+  priceCent: number;
+  sizePct: number;
+}
+
+function parseExitLadderRules(raw: unknown): {
+  isArray: boolean;
+  validRules: ParsedExitLadderRule[];
+  invalidItem: boolean;
+} {
+  if (!Array.isArray(raw)) {
+    return { isArray: false, validRules: [], invalidItem: false };
+  }
+
+  const validRules: ParsedExitLadderRule[] = [];
+  let invalidItem = false;
+  for (const item of raw) {
+    if (!isRecord(item)) {
+      invalidItem = true;
+      continue;
+    }
+    const resolvedPrice = resolveConfiguredBinaryPrice(item.priceCent, item.price);
+    const sizePct = toFiniteNumber(item.sizePct);
+    if (
+      !resolvedPrice.provided ||
+      resolvedPrice.value == null ||
+      sizePct == null ||
+      sizePct <= 0 ||
+      sizePct > 100
+    ) {
+      invalidItem = true;
+      continue;
+    }
+    validRules.push({ priceCent: resolvedPrice.value * 100, sizePct });
+  }
+
+  if (raw.length > 0 && validRules.length === 0) {
+    invalidItem = true;
+  }
+
+  return { isArray: true, validRules, invalidItem };
+}
+
+function parseTimeExitRules(raw: unknown): {
+  isArray: boolean;
+  validRules: Array<{ elapsedMinutes: number; remainingPct: number }>;
+  invalidItem: boolean;
+} {
+  if (!Array.isArray(raw)) {
+    return { isArray: false, validRules: [], invalidItem: false };
+  }
+
+  const validRules: Array<{ elapsedMinutes: number; remainingPct: number }> = [];
+  let invalidItem = false;
+  for (const item of raw) {
+    if (!isRecord(item)) {
+      invalidItem = true;
+      continue;
+    }
+    const elapsedMinutes = toFiniteNumber(item.elapsedMinutes);
+    const remainingPct = toFiniteNumber(item.remainingPct);
+    if (
+      elapsedMinutes == null ||
+      !Number.isInteger(elapsedMinutes) ||
+      elapsedMinutes <= 0 ||
+      remainingPct == null ||
+      remainingPct <= 0 ||
+      remainingPct > 100
+    ) {
+      invalidItem = true;
+      continue;
+    }
+    validRules.push({ elapsedMinutes, remainingPct });
+  }
+
+  if (raw.length > 0 && validRules.length === 0) {
+    invalidItem = true;
+  }
+
+  return { isArray: true, validRules, invalidItem };
+}
 
 export function validateActionPlaceOrderConfig(
   issues: TradeFlowValidationIssue[],
@@ -25,6 +110,24 @@ export function validateActionPlaceOrderConfig(
   const graphTokenId = String(graph.context.tokenId ?? '').trim();
   const hasResolveMarketNode = graph.nodes.some((candidate) => candidate.type === 'action.resolve_market');
   const hasUpstreamMarketPriceAutoScope = hasUpstreamAutoScopeMarketTrigger(node.key, graph);
+  const isGenericPresetPlaceOrder = isGenericPlaceOrderPresetConfig(config);
+  if (isGenericPresetPlaceOrder) {
+    const upstreamFixedMarket = resolveUpstreamFixedTriggerMarket(node.key, graph);
+    const hasUniqueUpstreamFixedOutcome =
+      upstreamFixedMarket.kind === 'single' &&
+      upstreamFixedMarket.marketSlug != null &&
+      upstreamFixedMarket.outcomeKind === 'single' &&
+      upstreamFixedMarket.tokenId != null &&
+      upstreamFixedMarket.outcomeLabel != null;
+    if (!hasUniqueUpstreamFixedOutcome && !hasUpstreamMarketPriceAutoScope) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_unique_upstream_fixed_trigger_seed',
+        'Preset action.place_order requires either exactly one upstream fixed trigger.market_price outcome or an upstream auto_scope trigger.market_price runtime binding to resolve market/token/outcome.'
+      );
+    }
+  }
 
   const sourceTradeId = toFiniteNumber(config.sourceTradeId);
   const side = String(config.side ?? '').trim().toLowerCase();
@@ -223,6 +326,13 @@ export function validateActionPlaceOrderConfig(
   const slEnabled = toBooleanish(config.slEnabled);
   const tpPrice = resolveConfiguredBinaryPrice(config.tpPriceCent, config.tpPrice);
   const slPrice = resolveConfiguredBinaryPrice(config.slPriceCent, config.slPrice);
+  const parsedTpRules = parseExitLadderRules(config.tpRules);
+  const parsedSlRules = parseExitLadderRules(config.slRules);
+  const parsedTimeExitRules = parseTimeExitRules(config.timeExitRules);
+  const hasTpRules = parsedTpRules.validRules.length > 0;
+  const hasSlRules = parsedSlRules.validRules.length > 0;
+  const effectiveTpEnabled = tpEnabled === true || hasTpRules;
+  const effectiveSlEnabled = slEnabled === true || hasSlRules;
 
   if (config.tpEnabled != null && tpEnabled == null) {
     pushNodeError(
@@ -256,14 +366,146 @@ export function validateActionPlaceOrderConfig(
       'action.place_order slEnabled is only valid for side=buy.'
     );
   }
-  if (tpEnabled === true && !tpPrice.provided) {
+  if (parsedTpRules.isArray && side !== 'buy') {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_tp_rules_side',
+      'action.place_order tpRules is only valid for side=buy.'
+    );
+  }
+  if (parsedSlRules.isArray && side !== 'buy') {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_sl_rules_side',
+      'action.place_order slRules is only valid for side=buy.'
+    );
+  }
+  if (parsedTimeExitRules.isArray && side !== 'buy') {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_time_exit_rules_side',
+      'action.place_order timeExitRules is only valid for side=buy.'
+    );
+  }
+  if (parsedTpRules.isArray && parsedTpRules.validRules.length > 5) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_tp_rules_length',
+      'action.place_order tpRules cannot contain more than 5 entries.'
+    );
+  }
+  if (parsedSlRules.isArray && parsedSlRules.validRules.length > 5) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_sl_rules_length',
+      'action.place_order slRules cannot contain more than 5 entries.'
+    );
+  }
+  if (parsedTimeExitRules.isArray && parsedTimeExitRules.validRules.length > 5) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_time_exit_rules_length',
+      'action.place_order timeExitRules cannot contain more than 5 entries.'
+    );
+  }
+  if (parsedTpRules.invalidItem) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_tp_rules',
+      'action.place_order tpRules entries must provide priceCent in (0, 100] and sizePct in (0, 100].'
+    );
+  }
+  if (parsedSlRules.invalidItem) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_sl_rules',
+      'action.place_order slRules entries must provide priceCent in (0, 100] and sizePct in (0, 100].'
+    );
+  }
+  if (parsedTimeExitRules.invalidItem) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_time_exit_rules',
+      'action.place_order timeExitRules entries must provide integer elapsedMinutes > 0 and remainingPct in (0, 100].'
+    );
+  }
+  if (hasTpRules) {
+    const tpRulesSum = parsedTpRules.validRules.reduce((sum, item) => sum + item.sizePct, 0);
+    if (Math.abs(tpRulesSum - 100) > 0.000001) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_tp_rules_sum',
+        'action.place_order tpRules total sizePct must equal 100.'
+      );
+    }
+    for (let index = 1; index < parsedTpRules.validRules.length; index += 1) {
+      if (parsedTpRules.validRules[index - 1].priceCent >= parsedTpRules.validRules[index].priceCent) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_tp_rules_order',
+          'action.place_order tpRules priceCent values must be strictly increasing.'
+        );
+        break;
+      }
+    }
+  }
+  if (hasSlRules) {
+    const slRulesSum = parsedSlRules.validRules.reduce((sum, item) => sum + item.sizePct, 0);
+    if (Math.abs(slRulesSum - 100) > 0.000001) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_sl_rules_sum',
+        'action.place_order slRules total sizePct must equal 100.'
+      );
+    }
+    for (let index = 1; index < parsedSlRules.validRules.length; index += 1) {
+      if (parsedSlRules.validRules[index - 1].priceCent <= parsedSlRules.validRules[index].priceCent) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_sl_rules_order',
+          'action.place_order slRules priceCent values must be strictly decreasing.'
+        );
+        break;
+      }
+    }
+  }
+  if (parsedTimeExitRules.validRules.length > 0) {
+    for (let index = 1; index < parsedTimeExitRules.validRules.length; index += 1) {
+      if (
+        parsedTimeExitRules.validRules[index - 1].elapsedMinutes >=
+        parsedTimeExitRules.validRules[index].elapsedMinutes
+      ) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_time_exit_rules_order',
+          'action.place_order timeExitRules elapsedMinutes values must be strictly increasing.'
+        );
+        break;
+      }
+    }
+  }
+  if (tpEnabled === true && !tpPrice.provided && !hasTpRules) {
     pushNodeError(
       issues,
       node,
       'missing_tp_price',
       'action.place_order tpEnabled requires tpPriceCent (or legacy tpPrice).'
     );
-  } else if (tpPrice.provided && tpPrice.value == null) {
+  } else if (!hasTpRules && tpPrice.provided && tpPrice.value == null) {
     pushNodeError(
       issues,
       node,
@@ -271,14 +513,14 @@ export function validateActionPlaceOrderConfig(
       'action.place_order tpPriceCent must be in (0, 100] or legacy tpPrice must be in (0, 1].'
     );
   }
-  if (slEnabled === true && !slPrice.provided) {
+  if (slEnabled === true && !slPrice.provided && !hasSlRules) {
     pushNodeError(
       issues,
       node,
       'missing_sl_price',
       'action.place_order slEnabled requires slPriceCent (or legacy slPrice).'
     );
-  } else if (slPrice.provided && slPrice.value == null) {
+  } else if (!hasSlRules && slPrice.provided && slPrice.value == null) {
     pushNodeError(
       issues,
       node,
@@ -288,7 +530,7 @@ export function validateActionPlaceOrderConfig(
   }
   const slTriggerPriceMode =
     typeof config.slTriggerPriceMode === 'string' ? config.slTriggerPriceMode : null;
-  if (slEnabled === true && slTriggerPriceMode != null) {
+  if (effectiveSlEnabled && slTriggerPriceMode != null) {
     const validModes = ['best_bid', 'composite', 'composite_safe', 'composite_fast', 'last_trade'];
     if (!validModes.includes(slTriggerPriceMode)) {
       pushNodeError(
@@ -320,6 +562,30 @@ export function validateActionPlaceOrderConfig(
       'action.place_order reentryMaxAttempts must be an integer in [1, 10].'
     );
   }
+  const reentryMinPriceCent = toFiniteNumber(config.reentryMinPriceCent);
+  if (
+    config.reentryMinPriceCent != null &&
+    (reentryMinPriceCent == null || reentryMinPriceCent <= 0 || reentryMinPriceCent > 100)
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_reentry_min_price_cent',
+      'action.place_order reentryMinPriceCent must be in (0, 100].'
+    );
+  }
+  const reentryMaxPriceCent = toFiniteNumber(config.reentryMaxPriceCent);
+  if (
+    config.reentryMaxPriceCent != null &&
+    (reentryMaxPriceCent == null || reentryMaxPriceCent <= 0 || reentryMaxPriceCent > 100)
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_reentry_max_price_cent',
+      'action.place_order reentryMaxPriceCent must be in (0, 100].'
+    );
+  }
   if (reenterOnSlHit === true && side !== 'buy') {
     pushNodeError(
       issues,
@@ -328,7 +594,7 @@ export function validateActionPlaceOrderConfig(
       'action.place_order reenterOnSlHit is only valid for side=buy.'
     );
   }
-  if (reenterOnSlHit === true && slEnabled !== true) {
+  if (reenterOnSlHit === true && !effectiveSlEnabled) {
     pushNodeError(
       issues,
       node,
@@ -350,6 +616,22 @@ export function validateActionPlaceOrderConfig(
       node,
       'invalid_reentry_kind',
       'action.place_order reenterOnSlHit only supports immediate buy nodes.'
+    );
+  }
+  if (config.reentryMinPriceCent != null && reenterOnSlHit !== true) {
+    pushNodeError(
+      issues,
+      node,
+      'reentry_min_price_requires_reentry',
+      'action.place_order reentryMinPriceCent requires reenterOnSlHit=true.'
+    );
+  }
+  if (config.reentryMaxPriceCent != null && reenterOnSlHit !== true) {
+    pushNodeError(
+      issues,
+      node,
+      'reentry_max_price_requires_reentry',
+      'action.place_order reentryMaxPriceCent requires reenterOnSlHit=true.'
     );
   }
   if (reenterOnSlHit === true) {
@@ -382,10 +664,22 @@ export function validateActionPlaceOrderConfig(
         );
       }
     }
+    if (
+      reentryMinPriceCent != null &&
+      reentryMaxPriceCent != null &&
+      reentryMinPriceCent >= reentryMaxPriceCent
+    ) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_reentry_price_band',
+        'action.place_order reentryMinPriceCent must be lower than reentryMaxPriceCent.'
+      );
+    }
   }
   if (
-    tpEnabled === true &&
-    slEnabled === true &&
+    effectiveTpEnabled &&
+    effectiveSlEnabled &&
     tpPrice.value != null &&
     slPrice.value != null &&
     slPrice.value >= tpPrice.value
@@ -445,60 +739,20 @@ export function validateActionPlaceOrderConfig(
       'action.place_order retryOnTriggerPriceGuardBlock must be boolean (true/false).'
     );
   }
-  if (retryOnTriggerPriceGuardBlock === true && triggerPriceGuardEnabled !== true) {
-    pushNodeError(
-      issues,
-      node,
-      'retry_on_trigger_guard_block_requires_guard',
-      'retryOnTriggerPriceGuardBlock requires triggerPriceGuardEnabled=true.'
-    );
-  }
-
-  const executionFloorGuardEnabled = toBooleanish(config.executionFloorGuardEnabled);
-  if (config.executionFloorGuardEnabled != null && executionFloorGuardEnabled == null) {
-    pushNodeError(
-      issues,
-      node,
-      'invalid_execution_floor_guard_enabled',
-      'action.place_order executionFloorGuardEnabled must be boolean (true/false).'
-    );
-  }
-  if (executionFloorGuardEnabled === true && side !== 'buy') {
-    pushNodeError(
-      issues,
-      node,
-      'invalid_execution_floor_guard_side',
-      'action.place_order executionFloorGuardEnabled is only valid for side=buy.'
-    );
-  }
-  if (executionFloorGuardEnabled === true && !hasUpstreamTriggerWithTriggerPrice(node.key, graph)) {
-    pushNodeError(
-      issues,
-      node,
-      'missing_upstream_execution_floor_trigger_price',
-      'executionFloorGuardEnabled requires an upstream trigger with configured triggerPrice.'
-    );
-  }
-  const retryOnExecutionFloorGuardBlock = toBooleanish(config.retryOnExecutionFloorGuardBlock);
   if (
-    config.retryOnExecutionFloorGuardBlock != null &&
-    retryOnExecutionFloorGuardBlock == null
+    retryOnTriggerPriceGuardBlock === true &&
+    triggerPriceGuardEnabled !== true &&
+    !(reenterOnSlHit === true && reentryMinPriceCent != null)
   ) {
     pushNodeError(
       issues,
       node,
-      'invalid_retry_on_execution_floor_guard_block',
-      'action.place_order retryOnExecutionFloorGuardBlock must be boolean (true/false).'
+      'retry_on_trigger_guard_block_requires_guard',
+      'retryOnTriggerPriceGuardBlock requires triggerPriceGuardEnabled=true or reentryMinPriceCent with reenterOnSlHit=true.'
     );
   }
-  if (retryOnExecutionFloorGuardBlock === true && executionFloorGuardEnabled !== true) {
-    pushNodeError(
-      issues,
-      node,
-      'retry_on_execution_floor_guard_block_requires_guard',
-      'retryOnExecutionFloorGuardBlock requires executionFloorGuardEnabled=true.'
-    );
-  }
+
+  validateActionPlaceOrderExecutionFloorConfig(issues, node, graph, side, config);
 
   const priceToBeatGuardEnabled = toBooleanish(config.priceToBeatGuardEnabled);
   if (config.priceToBeatGuardEnabled != null && priceToBeatGuardEnabled == null) {
@@ -622,45 +876,14 @@ export function validateActionPlaceOrderConfig(
   }
   if (
     notifyOnTriggerPriceBlocked === true &&
-    triggerPriceGuardEnabled !== true
+    triggerPriceGuardEnabled !== true &&
+    !(reenterOnSlHit === true && reentryMinPriceCent != null)
   ) {
     pushNodeError(
       issues,
       node,
       'notify_on_trigger_price_blocked_requires_guard',
-      'notifyOnTriggerPriceBlocked requires triggerPriceGuardEnabled=true.'
-    );
-  }
-
-  const notifyOnExecutionFloorBlocked = toBooleanish(config.notifyOnExecutionFloorBlocked);
-  if (
-    config.notifyOnExecutionFloorBlocked != null &&
-    notifyOnExecutionFloorBlocked == null
-  ) {
-    pushNodeError(
-      issues,
-      node,
-      'invalid_notify_on_execution_floor_blocked',
-      'action.place_order notifyOnExecutionFloorBlocked must be boolean (true/false).'
-    );
-  }
-  if (notifyOnExecutionFloorBlocked === true && side !== 'buy') {
-    pushNodeError(
-      issues,
-      node,
-      'invalid_notify_on_execution_floor_blocked_side',
-      'action.place_order notifyOnExecutionFloorBlocked is only valid for side=buy.'
-    );
-  }
-  if (
-    notifyOnExecutionFloorBlocked === true &&
-    executionFloorGuardEnabled !== true
-  ) {
-    pushNodeError(
-      issues,
-      node,
-      'notify_on_execution_floor_blocked_requires_guard',
-      'notifyOnExecutionFloorBlocked requires executionFloorGuardEnabled=true.'
+      'notifyOnTriggerPriceBlocked requires triggerPriceGuardEnabled=true or reentryMinPriceCent with reenterOnSlHit=true.'
     );
   }
 
@@ -705,20 +928,28 @@ export function validateActionPlaceOrderConfig(
       'action.place_order retryOnMaxPriceBlock is only valid for side=buy.'
     );
   }
-  if (notifyOnMaxPriceBlocked === true && maxPriceCent == null) {
+  if (
+    notifyOnMaxPriceBlocked === true &&
+    maxPriceCent == null &&
+    !(reenterOnSlHit === true && reentryMaxPriceCent != null)
+  ) {
     pushNodeError(
       issues,
       node,
       'notify_on_max_price_blocked_requires_max_price',
-      'notifyOnMaxPriceBlocked requires maxPriceCent to be set.'
+      'notifyOnMaxPriceBlocked requires maxPriceCent or reentryMaxPriceCent to be set.'
     );
   }
-  if (retryOnMaxPriceBlock === true && maxPriceCent == null) {
+  if (
+    retryOnMaxPriceBlock === true &&
+    maxPriceCent == null &&
+    !(reenterOnSlHit === true && reentryMaxPriceCent != null)
+  ) {
     pushNodeError(
       issues,
       node,
       'retry_on_max_price_block_requires_max_price',
-      'retryOnMaxPriceBlock requires maxPriceCent to be set.'
+      'retryOnMaxPriceBlock requires maxPriceCent or reentryMaxPriceCent to be set.'
     );
   }
 

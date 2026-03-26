@@ -1099,5 +1099,5 @@ async fn handle_tick_trigger(
         "TICK_TRIGGER_FIRED"
     );
 
-    spawn_armed_order_immediate_processing(repo, run_id, ws, order.id, order.user_id);
+    spawn_armed_order_immediate_processing(repo, run_id, ws, order.id, order.user_id, None);
 }

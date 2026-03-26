@@ -67,6 +67,9 @@ export const NUMERIC_KEYS = new Set([
   'priceToBeatTriggerMinGap',
   'priceToBeatTriggerMaxGap',
   'reentryMaxAttempts',
+  'reentryMinPriceCent',
+  'reentryMaxPriceCent',
+  'executionFloorPriceCent',
   'cycleWindowStartSec',
   'cycleWindowEndSec',
 ]);

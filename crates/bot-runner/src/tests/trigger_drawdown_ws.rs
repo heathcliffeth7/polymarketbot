@@ -840,6 +840,7 @@ fn cycle_window_boundary_due_target_only_fires_once_per_market_window() {
         run_id: 77,
         definition_id: 88,
         version_id: 99,
+        version_no: 1,
         context: json!({
             "flowContext": {},
             "vars": {},

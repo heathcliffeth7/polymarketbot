@@ -1,4 +1,4 @@
-use super::chainlink_price::{get_chainlink_price_near_timestamp, ChainlinkPriceTimestampSnapshot};
+use super::chainlink_price::{get_chainlink_price_start_tick, ChainlinkPriceTimestampSnapshot};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use parking_lot::Mutex;
@@ -33,14 +33,14 @@ const PROMOTION_MAX_ATTEMPTS: usize = 12;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PriceToBeatSource {
     Polymarket,
-    ChainlinkCarryover,
+    ChainlinkRtdsStartTick,
 }
 
 impl PriceToBeatSource {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Polymarket => "polymarket",
-            Self::ChainlinkCarryover => "chainlink_carryover",
+            Self::ChainlinkRtdsStartTick => "chainlink_rtds_start_tick",
         }
     }
 }
@@ -74,8 +74,19 @@ impl PolymarketPriceToBeatSnapshot {
         self.source == PriceToBeatSource::Polymarket && self.verified
     }
 
-    fn is_guard_ready(&self) -> bool {
-        self.source == PriceToBeatSource::ChainlinkCarryover || self.is_verified_polymarket()
+    fn is_lookup_ready(&self) -> bool {
+        matches!(
+            self.source,
+            PriceToBeatSource::Polymarket | PriceToBeatSource::ChainlinkRtdsStartTick
+        )
+    }
+
+    pub(crate) fn status(&self) -> &'static str {
+        match (self.source, self.verified) {
+            (PriceToBeatSource::Polymarket, true) => "polymarket_verified",
+            (PriceToBeatSource::Polymarket, false) => "polymarket_provisional",
+            (PriceToBeatSource::ChainlinkRtdsStartTick, _) => "rtds_live",
+        }
     }
 }
 
@@ -177,7 +188,7 @@ impl PolymarketPriceToBeatService {
     ) -> bool {
         let mut cache = self.cache.lock();
         if let Some(snapshot) = cache.get(market_slug) {
-            if snapshot.is_guard_ready() || snapshot.is_verified_polymarket() {
+            if snapshot.is_lookup_ready() {
                 return false;
             }
         }
@@ -188,7 +199,7 @@ impl PolymarketPriceToBeatService {
                 asset: asset.to_ascii_lowercase(),
                 timeframe: timeframe.to_string(),
                 price_to_beat: price,
-                source: PriceToBeatSource::ChainlinkCarryover,
+                source: PriceToBeatSource::ChainlinkRtdsStartTick,
                 verified: true,
                 source_latency_ms,
                 fetched_at: Utc::now(),
@@ -206,7 +217,7 @@ impl PolymarketPriceToBeatService {
         F: FnOnce(&PriceToBeatQuerySpec) -> Result<ChainlinkPriceTimestampSnapshot>,
     {
         if let Some(snapshot) = self.current_snapshot(market_slug) {
-            if snapshot.is_guard_ready() {
+            if snapshot.is_lookup_ready() {
                 return Ok(Some(snapshot));
             }
         }
@@ -233,7 +244,9 @@ impl PolymarketPriceToBeatService {
                 "PRICE_TO_BEAT_SEEDED_FROM_CHAINLINK_ON_DEMAND"
             );
         }
-        Ok(self.current_snapshot(market_slug).filter(PolymarketPriceToBeatSnapshot::is_guard_ready))
+        Ok(self
+            .current_snapshot(market_slug)
+            .filter(PolymarketPriceToBeatSnapshot::is_lookup_ready))
     }
 
     fn begin_promotion(&self, market_slug: &str) -> bool {
@@ -249,7 +262,7 @@ impl PolymarketPriceToBeatService {
     #[allow(dead_code)]
     async fn fetch_snapshot(&self, market_slug: &str) -> Result<PolymarketPriceToBeatSnapshot> {
         if let Some(snapshot) = self.current_snapshot(market_slug) {
-            if snapshot.is_guard_ready() {
+            if snapshot.is_lookup_ready() {
                 return Ok(snapshot);
             }
         }
@@ -348,7 +361,23 @@ impl PolymarketPriceToBeatService {
             .and_then(CryptoPriceApiResponse::sanitized_open_price)
         {
             let snapshot = build_polymarket_snapshot(&spec, price_to_beat, false);
-            self.store_provisional_polymarket_snapshot(market_slug, snapshot.clone());
+            if let Some(previous_snapshot) =
+                self.store_provisional_polymarket_snapshot(market_slug, snapshot.clone())
+            {
+                let mismatch = (previous_snapshot.price_to_beat - snapshot.price_to_beat).abs();
+                if mismatch > 0.0 || previous_snapshot.source != snapshot.source {
+                    tracing::warn!(
+                        market_slug = %spec.market_slug,
+                        previous_price_to_beat = previous_snapshot.price_to_beat,
+                        previous_source = previous_snapshot.source.as_str(),
+                        previous_status = previous_snapshot.status(),
+                        provisional_price_to_beat = snapshot.price_to_beat,
+                        provisional_status = snapshot.status(),
+                        mismatch,
+                        "PRICE_TO_BEAT_PROVISIONAL_CACHE_OVERWRITE"
+                    );
+                }
+            }
             tracing::info!(
                 market_slug = %spec.market_slug,
                 previous_market_slug = %previous_spec.market_slug,
@@ -386,7 +415,7 @@ impl PolymarketPriceToBeatService {
             price_to_beat = snapshot.price_to_beat,
             "PRICE_TO_BEAT_HTML_FALLBACK_PROVISIONAL_CAPTURED"
         );
-        self.store_provisional_polymarket_snapshot(market_slug, snapshot.clone());
+        let _ = self.store_provisional_polymarket_snapshot(market_slug, snapshot.clone());
         Ok(snapshot)
     }
 
@@ -402,16 +431,16 @@ impl PolymarketPriceToBeatService {
         &self,
         market_slug: &str,
         snapshot: PolymarketPriceToBeatSnapshot,
-    ) {
+    ) -> Option<PolymarketPriceToBeatSnapshot> {
         let mut cache = self.cache.lock();
         if cache
             .get(market_slug)
-            .map(PolymarketPriceToBeatSnapshot::is_guard_ready)
+            .map(PolymarketPriceToBeatSnapshot::is_verified_polymarket)
             .unwrap_or(false)
         {
-            return;
+            return None;
         }
-        cache.insert(market_slug.to_string(), snapshot);
+        cache.insert(market_slug.to_string(), snapshot)
     }
 
     async fn fetch_crypto_price_window_from_api(
@@ -460,9 +489,13 @@ impl PolymarketPriceToBeatService {
                 .await
             {
                 Ok(snapshot) => {
-                    if snapshot.is_guard_ready() {
+                    if snapshot.is_verified_polymarket() {
                         if attempt > 0 {
-                            tracing::info!(market_slug, attempt, "PRICE_TO_BEAT_QUERY_RETRY_SUCCEEDED");
+                            tracing::info!(
+                                market_slug,
+                                attempt,
+                                "PRICE_TO_BEAT_QUERY_RETRY_SUCCEEDED"
+                            );
                         }
                         return Ok(snapshot);
                     }
@@ -537,11 +570,12 @@ impl PolymarketPriceToBeatService {
                         .await
                     {
                         Ok(snapshot) => {
-                            if snapshot.is_guard_ready() {
+                            if snapshot.is_verified_polymarket() {
                                 tracing::info!(
                                     market_slug = %market_slug,
                                     attempt,
                                     source = snapshot.source.as_str(),
+                                    status = snapshot.status(),
                                     verified = snapshot.verified,
                                     "PRICE_TO_BEAT_BACKGROUND_FETCH_SUCCEEDED"
                                 );
@@ -622,12 +656,18 @@ impl PolymarketPriceToBeatService {
         F: FnOnce(&PriceToBeatQuerySpec) -> Result<ChainlinkPriceTimestampSnapshot>,
     {
         if let Some(snapshot) = self.current_snapshot(market_slug) {
-            if snapshot.is_guard_ready() {
+            if snapshot.is_lookup_ready() {
+                if !snapshot.is_verified_polymarket() {
+                    self.ensure_background_fetch(market_slug);
+                }
                 return PriceToBeatLookup::Ready(snapshot);
             }
         }
         match self.try_seed_snapshot_from_chainlink_with(market_slug, resolve_chainlink_seed) {
             Ok(Some(snapshot)) => {
+                if !snapshot.is_verified_polymarket() {
+                    self.ensure_background_fetch(market_slug);
+                }
                 return PriceToBeatLookup::Ready(snapshot);
             }
             Ok(None) => {}
@@ -640,7 +680,10 @@ impl PolymarketPriceToBeatService {
             }
         }
         if let Some(snapshot) = self.current_snapshot(market_slug) {
-            if snapshot.is_guard_ready() {
+            if snapshot.is_lookup_ready() {
+                if !snapshot.is_verified_polymarket() {
+                    self.ensure_background_fetch(market_slug);
+                }
                 return PriceToBeatLookup::Ready(snapshot);
             }
             self.ensure_background_fetch(market_slug);
@@ -666,17 +709,14 @@ pub(crate) async fn fetch_polymarket_price_to_beat(
 pub(crate) fn get_price_to_beat_cached(market_slug: &str) -> Option<PolymarketPriceToBeatSnapshot> {
     POLYMARKET_PRICE_TO_BEAT_SERVICE
         .current_snapshot(market_slug)
-        .filter(PolymarketPriceToBeatSnapshot::is_guard_ready)
+        .filter(PolymarketPriceToBeatSnapshot::is_lookup_ready)
 }
 
 pub(crate) fn try_price_to_beat_cached_or_spawn(market_slug: &str) -> PriceToBeatLookup {
     let lookup = POLYMARKET_PRICE_TO_BEAT_SERVICE.try_cached_or_spawn_with(market_slug, |spec| {
-        get_chainlink_price_near_timestamp(&spec.asset, spec.start_at.timestamp_millis())
+        get_chainlink_price_start_tick(&spec.asset, spec.start_at.timestamp_millis())
     });
-    if matches!(
-        &lookup,
-        PriceToBeatLookup::Ready(snapshot) if snapshot.source == PriceToBeatSource::ChainlinkCarryover
-    ) {
+    if matches!(&lookup, PriceToBeatLookup::Ready(snapshot) if !snapshot.is_verified_polymarket()) {
         schedule_price_to_beat_promotion(market_slug);
     }
     lookup
@@ -723,11 +763,12 @@ pub(crate) fn schedule_price_to_beat_promotion(market_slug: &str) {
                 .await
             {
                 Ok(snapshot) => {
-                    if snapshot.is_guard_ready() {
+                    if snapshot.is_verified_polymarket() {
                         tracing::info!(
                             market_slug,
                             price_to_beat = snapshot.price_to_beat,
                             source = snapshot.source.as_str(),
+                            status = snapshot.status(),
                             verified = snapshot.verified,
                             "PRICE_TO_BEAT_UPGRADED_TO_POLYMARKET"
                         );
@@ -740,10 +781,13 @@ pub(crate) fn schedule_price_to_beat_promotion(market_slug: &str) {
                             attempt,
                             max_attempts = PROMOTION_MAX_ATTEMPTS,
                             price_to_beat = snapshot.price_to_beat,
+                            status = snapshot.status(),
                             "PRICE_TO_BEAT_VERIFICATION_RETRYING"
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(PROMOTION_RETRY_DELAY_MS))
-                            .await;
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            PROMOTION_RETRY_DELAY_MS,
+                        ))
+                        .await;
                     }
                 }
                 Err(err)
@@ -929,17 +973,15 @@ fn build_polymarket_snapshot(
 fn build_previous_price_to_beat_query_spec(
     spec: &PriceToBeatQuerySpec,
 ) -> Result<PriceToBeatQuerySpec> {
-    let scope = crate::find_updown_scope_by_asset_timeframe(
-        spec.asset.as_str(),
-        spec.timeframe.as_str(),
-    )
-    .ok_or_else(|| {
-        anyhow!(
-            "unsupported asset/timeframe for previous price to beat query: {}/{}",
-            spec.asset,
-            spec.timeframe
-        )
-    })?;
+    let scope =
+        crate::find_updown_scope_by_asset_timeframe(spec.asset.as_str(), spec.timeframe.as_str())
+            .ok_or_else(|| {
+            anyhow!(
+                "unsupported asset/timeframe for previous price to beat query: {}/{}",
+                spec.asset,
+                spec.timeframe
+            )
+        })?;
     let window = spec.end_at - spec.start_at;
     let start_at = spec.start_at - window;
     let market_slug = format!("{}{}", scope.slug_prefix, start_at.timestamp());
@@ -1080,7 +1122,6 @@ mod tests {
             fetched_at: Utc::now(),
         }
     }
-
     #[test]
     fn build_query_spec_for_five_minute_market() {
         let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
@@ -1096,7 +1137,6 @@ mod tests {
             "2026-03-11T12:40:00Z"
         );
     }
-
     #[test]
     fn build_query_spec_for_fifteen_minute_market() {
         let spec = build_price_to_beat_query_spec("btc-updown-15m-1773232200").expect("spec");
@@ -1112,7 +1152,6 @@ mod tests {
             "2026-03-11T12:45:00Z"
         );
     }
-
     #[test]
     fn parses_open_price_for_five_minute_market() {
         let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
@@ -1123,7 +1162,6 @@ mod tests {
         let open_price = parse_open_price_from_html(&html, &spec).expect("price");
         assert_eq!(open_price, 69_279.93484689768);
     }
-
     #[test]
     fn parses_open_price_for_fifteen_minute_market() {
         let spec = build_price_to_beat_query_spec("btc-updown-15m-1773232200").expect("spec");
@@ -1134,7 +1172,6 @@ mod tests {
         let open_price = parse_open_price_from_html(&html, &spec).expect("price");
         assert_eq!(open_price, 69_421.75585678649);
     }
-
     #[test]
     fn query_not_found_error_prefix_matches_actual_error() {
         let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
@@ -1145,7 +1182,6 @@ mod tests {
             "error message does not start with expected prefix: {err}",
         );
     }
-
     #[test]
     fn build_event_request_url_leaves_base_url_unchanged_without_cache_buster() {
         assert_eq!(
@@ -1153,7 +1189,6 @@ mod tests {
             "https://polymarket.com/event/foo"
         );
     }
-
     #[test]
     fn build_event_request_url_appends_cache_buster_query() {
         assert_eq!(
@@ -1161,7 +1196,6 @@ mod tests {
             "https://polymarket.com/event/foo?ptb_ts=123"
         );
     }
-
     #[test]
     fn build_event_request_url_respects_existing_query_string() {
         assert_eq!(
@@ -1225,8 +1259,7 @@ mod tests {
     #[test]
     fn parses_null_open_price_from_crypto_price_api_response_as_pending() {
         let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
-        let response_body =
-            r#"{"openPrice":null,"closePrice":null,"completed":false,"incomplete":true,"cached":false}"#;
+        let response_body = r#"{"openPrice":null,"closePrice":null,"completed":false,"incomplete":true,"cached":false}"#;
 
         let response = parse_crypto_price_api_response(response_body, &spec).expect("pending");
 
@@ -1237,8 +1270,7 @@ mod tests {
     #[test]
     fn parses_verified_close_price_from_crypto_price_api_response() {
         let spec = build_price_to_beat_query_spec("btc-updown-5m-1773232500").expect("spec");
-        let response_body =
-            r#"{"openPrice":69279.93484689768,"closePrice":69282.125,"completed":true,"incomplete":false,"cached":true}"#;
+        let response_body = r#"{"openPrice":69279.93484689768,"closePrice":69282.125,"completed":true,"incomplete":false,"cached":true}"#;
 
         let response = parse_crypto_price_api_response(response_body, &spec).expect("response");
 
@@ -1269,7 +1301,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_snapshot_inserts_chainlink_carryover_when_cache_is_empty() {
+    fn seed_snapshot_inserts_chainlink_rtds_start_tick_when_cache_is_empty() {
         let service = PolymarketPriceToBeatService::new();
 
         let seeded =
@@ -1279,7 +1311,7 @@ mod tests {
         let snapshot = service
             .current_snapshot("btc-updown-5m-1773232500")
             .expect("snapshot");
-        assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
+        assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkRtdsStartTick);
         assert!(snapshot.verified);
         assert_eq!(snapshot.price_to_beat, 69_200.0);
         assert_eq!(snapshot.source_latency_ms, Some(450));
@@ -1306,7 +1338,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_snapshot_overwrites_unverified_polymarket_value() {
+    fn seed_snapshot_does_not_overwrite_provisional_polymarket_value() {
         let service = PolymarketPriceToBeatService::new();
         service.cache.lock().insert(
             "btc-updown-5m-1773232500".to_string(),
@@ -1325,14 +1357,14 @@ mod tests {
         let seeded =
             service.seed_snapshot("btc-updown-5m-1773232500", "btc", "5m", 69_200.0, Some(450));
 
-        assert!(seeded);
+        assert!(!seeded);
         let snapshot = service
             .current_snapshot("btc-updown-5m-1773232500")
             .expect("snapshot");
-        assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
-        assert!(snapshot.verified);
-        assert_eq!(snapshot.price_to_beat, 69_200.0);
-        assert_eq!(snapshot.source_latency_ms, Some(450));
+        assert_eq!(snapshot.source, PriceToBeatSource::Polymarket);
+        assert!(!snapshot.verified);
+        assert_eq!(snapshot.price_to_beat, 69_100.0);
+        assert_eq!(snapshot.source_latency_ms, None);
     }
 
     #[tokio::test]
@@ -1340,7 +1372,7 @@ mod tests {
         let service = PolymarketPriceToBeatService::new();
         service.cache.lock().insert(
             "btc-updown-5m-1773232500".to_string(),
-            test_snapshot(PriceToBeatSource::ChainlinkCarryover),
+            test_snapshot(PriceToBeatSource::ChainlinkRtdsStartTick),
         );
 
         let snapshot = service
@@ -1348,30 +1380,30 @@ mod tests {
             .await
             .expect("seeded snapshot");
 
-        assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
+        assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkRtdsStartTick);
         assert_eq!(snapshot.price_to_beat, 69_279.93484689768);
     }
 
-    #[test]
-    fn try_cached_or_spawn_returns_ready_for_seeded_snapshot() {
+    #[tokio::test]
+    async fn try_cached_or_spawn_returns_ready_for_seeded_snapshot() {
         let service = Box::leak(Box::new(PolymarketPriceToBeatService::new()));
         service.cache.lock().insert(
             "btc-updown-5m-1773232500".to_string(),
-            test_snapshot(PriceToBeatSource::ChainlinkCarryover),
+            test_snapshot(PriceToBeatSource::ChainlinkRtdsStartTick),
         );
 
         let lookup = service.try_cached_or_spawn("btc-updown-5m-1773232500");
 
         match lookup {
             PriceToBeatLookup::Ready(snapshot) => {
-                assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
+                assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkRtdsStartTick);
             }
             other => panic!("expected ready lookup, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn try_cached_or_spawn_returns_pending_for_provisional_snapshot() {
+    async fn try_cached_or_spawn_returns_ready_for_provisional_snapshot() {
         let service = Box::leak(Box::new(PolymarketPriceToBeatService::new()));
         service.cache.lock().insert(
             "btc-updown-5m-1773232500".to_string(),
@@ -1389,11 +1421,11 @@ mod tests {
 
         let lookup = service.try_cached_or_spawn("btc-updown-5m-1773232500");
 
-        assert!(matches!(lookup, PriceToBeatLookup::Pending));
+        assert!(matches!(lookup, PriceToBeatLookup::Ready(_)));
     }
 
-    #[test]
-    fn try_cached_or_spawn_with_returns_ready_when_chainlink_seed_is_available() {
+    #[tokio::test]
+    async fn try_cached_or_spawn_with_returns_ready_when_chainlink_seed_is_available() {
         let service = Box::leak(Box::new(PolymarketPriceToBeatService::new()));
 
         let lookup = service.try_cached_or_spawn_with("btc-updown-5m-1773232500", |_| {
@@ -1405,15 +1437,15 @@ mod tests {
 
         match lookup {
             PriceToBeatLookup::Ready(snapshot) => {
-                assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
+                assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkRtdsStartTick);
                 assert_eq!(snapshot.price_to_beat, 69_200.0);
             }
             other => panic!("expected ready lookup, got {other:?}"),
         }
     }
 
-    #[test]
-    fn try_cached_or_spawn_with_promotes_provisional_snapshot_from_chainlink_seed() {
+    #[tokio::test]
+    async fn try_cached_or_spawn_with_promotes_provisional_snapshot_from_chainlink_seed() {
         let service = Box::leak(Box::new(PolymarketPriceToBeatService::new()));
         service.cache.lock().insert(
             "btc-updown-5m-1773232500".to_string(),
@@ -1438,8 +1470,8 @@ mod tests {
 
         match lookup {
             PriceToBeatLookup::Ready(snapshot) => {
-                assert_eq!(snapshot.source, PriceToBeatSource::ChainlinkCarryover);
-                assert_eq!(snapshot.price_to_beat, 69_200.0);
+                assert_eq!(snapshot.source, PriceToBeatSource::Polymarket);
+                assert_eq!(snapshot.price_to_beat, 69_100.0);
             }
             other => panic!("expected ready lookup, got {other:?}"),
         }

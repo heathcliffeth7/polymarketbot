@@ -43,6 +43,7 @@ import {
   createTemplateGraph,
   formatFlowOperationError,
   getTemplateCreatedMessage,
+  isFlowDefinitionBusyMessage,
   resolveFlowContextInput,
 } from './flow-engine-controller-helpers';
 import { useDraftSaveQueue } from './flow-engine-draft-save-queue';
@@ -872,7 +873,9 @@ export function useFlowEngineController({
     }
     if (saveStatus === 'error' || autoSaveError) {
       setError(
-        'Autosave/PATCH hatasi duzelmeden publish edilemez. Draft Kaydet veya Taslagi Sunucudan Yukle kullan.'
+        isFlowDefinitionBusyMessage(autoSaveError)
+          ? 'Ayni flow uzerinde baska bir islem calisiyor. Birkac saniye bekleyip tekrar dene. Sorun surerse Draft Kaydet veya Taslagi Sunucudan Yukle kullan.'
+          : 'Autosave/PATCH hatasi duzelmeden publish edilemez. Draft Kaydet veya Taslagi Sunucudan Yukle kullan.'
       );
       return;
     }

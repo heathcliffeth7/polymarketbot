@@ -178,6 +178,37 @@ async fn try_immediate_submit_single_builder_order(
     order_id: i64,
     path: &'static str,
 ) -> Result<()> {
+    let policy = DefaultRiskPolicy;
+    let limits = to_risk_limits(cfg);
+    let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
+    try_process_trade_builder_order_by_id(
+        repo,
+        run_id,
+        cfg,
+        &limits,
+        &policy,
+        &gamma,
+        ws,
+        client.as_ref(),
+        order_id,
+        path,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn try_process_trade_builder_order_by_id(
+    repo: &PostgresRepository,
+    run_id: i64,
+    cfg: &AppConfig,
+    limits: &RiskLimits,
+    policy: &impl RiskPolicy,
+    gamma: &GammaHttpClient,
+    ws: &ClobWsClient,
+    client: &dyn OrderExecutor,
+    order_id: i64,
+    path: &'static str,
+) -> Result<()> {
     let Some(order) = repo.get_trade_builder_order(order_id).await? else {
         return Ok(());
     };
@@ -195,21 +226,10 @@ async fn try_immediate_submit_single_builder_order(
         );
         return Ok(());
     };
-    let policy = DefaultRiskPolicy;
-    let limits = to_risk_limits(cfg);
-    let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
     let processing_started = Instant::now();
-    let result = process_trade_builder_order(
-        repo,
-        run_id,
-        cfg,
-        &limits,
-        &policy,
-        client.as_ref(),
-        &gamma,
-        ws,
-        &order,
-    )
+    let result = Box::pin(process_trade_builder_order(
+        repo, run_id, cfg, limits, policy, client, gamma, ws, &order,
+    ))
     .await;
     let latest_status = repo
         .get_trade_builder_order(order_id)
@@ -380,10 +400,44 @@ async fn process_trade_builder_order(
         )
         .await?;
     }
-    let tp_preempted =
+    let sl_preemption =
         maybe_preempt_trade_builder_take_profit_for_stop_loss(repo, &mut order, &runtime_price)
             .await?;
-    if tp_preempted && order.active_exchange_order_id.is_none() {
+    if sl_preemption.tp_preempted {
+        let mut ready_sl_futures = sl_preemption
+            .ready_sl_order_ids
+            .iter()
+            .copied()
+            .map(|sl_order_id| async move {
+                let result = try_process_trade_builder_order_by_id(
+                    repo,
+                    run_id,
+                    cfg,
+                    limits,
+                    policy,
+                    gamma,
+                    ws,
+                    client,
+                    sl_order_id,
+                    "tp_preempted_sl",
+                )
+                .await;
+                (sl_order_id, result)
+            })
+            .collect::<FuturesUnordered<_>>();
+        while let Some((sl_order_id, result)) = ready_sl_futures.next().await {
+            if let Err(err) = result {
+                warn!(
+                    run_id,
+                    builder_order_id = sl_order_id,
+                    preempted_by_order_id = order.id,
+                    error = %err,
+                    "TP_PREEMPTED_SL_IMMEDIATE_SUBMIT_FAILED"
+                );
+            }
+        }
+    }
+    if sl_preemption.tp_preempted && order.active_exchange_order_id.is_none() {
         repo.set_trade_builder_last_seen_price(order.id, persisted_last_seen_price)
             .await?;
         order.last_seen_price = Some(persisted_last_seen_price);
@@ -400,6 +454,7 @@ async fn process_trade_builder_order(
             &order,
             exchange_order_id,
             execution_price,
+            runtime_price.best_ask,
         )
         .await?;
         repo.set_trade_builder_last_seen_price(order.id, persisted_last_seen_price)
@@ -668,6 +723,17 @@ async fn process_trade_builder_order(
         );
     }
     maybe_latch_trade_builder_stop_loss(repo, &mut order, trigger_eval_price).await?;
+    if order.active_exchange_order_id.is_none() {
+        let _ = maybe_dispatch_trade_builder_parallel_exit_batch(
+            repo,
+            run_id,
+            ws,
+            &order,
+            &runtime_price,
+            "housekeeping",
+        )
+        .await?;
+    }
     let fee_rate_bps = resolve_trade_builder_order_fee_rate_bps(repo, client, &mut order).await?;
 
     let size_basis = normalize_trade_builder_size_basis(&order.size_basis);
@@ -787,8 +853,11 @@ mod eligibility_window_tests {
             origin_flow_node_key: None,
             tp_enabled: false,
             tp_price: None,
+            tp_rules_json: Vec::new(),
             sl_enabled: false,
             sl_price: None,
+            sl_rules_json: Vec::new(),
+            time_exit_rules_json: Vec::new(),
             filled_qty: 0.0,
             fee_rate_bps: 0,
             trigger_latched: false,
@@ -813,6 +882,9 @@ mod eligibility_window_tests {
             notify_on_sl_hit: false,
             notify_on_max_price_blocked: false,
             last_guard_notification_reason: None,
+            exit_ladder_kind: None,
+            exit_ladder_index: None,
+            exit_ladder_size_pct: None,
         }
     }
 
@@ -869,3 +941,4 @@ mod eligibility_window_tests {
         );
     }
 }
+use futures_util::stream::{FuturesUnordered, StreamExt};

@@ -1,3 +1,4 @@
+use super::support::*;
 use super::*;
 
 fn test_ws_fast_path_node(
@@ -50,6 +51,7 @@ fn select_ws_fast_path_targets_expands_market_price_siblings_for_dirty_token() {
             run_id: 1,
             definition_id: 2,
             version_id: 3,
+            version_no: 4,
             context: json!({}),
             nodes: vec![
                 test_ws_fast_path_node(
@@ -97,6 +99,7 @@ fn select_ws_fast_path_targets_full_refresh_returns_all_nodes() {
             run_id: 1,
             definition_id: 2,
             version_id: 3,
+            version_no: 4,
             context: json!({}),
             nodes: vec![
                 test_ws_fast_path_node(
@@ -245,6 +248,59 @@ fn build_open_position_ws_price_node_specs_reports_missing_condition_token() {
 }
 
 #[test]
+fn cycle_window_end_auto_sell_builder_order_id_requires_matching_market_slug() {
+    let matching = json!({
+        "builder_order_id": 42,
+        "market_slug": "eth-updown-5m-1"
+    });
+    let camel_case = json!({
+        "builderOrderId": 77,
+        "marketSlug": "eth-updown-5m-1"
+    });
+
+    assert_eq!(
+        cycle_window_end_auto_sell_builder_order_id(&matching, Some("eth-updown-5m-1")),
+        Some(42)
+    );
+    assert_eq!(
+        cycle_window_end_auto_sell_builder_order_id(&camel_case, Some("eth-updown-5m-1")),
+        Some(77)
+    );
+    assert_eq!(
+        cycle_window_end_auto_sell_builder_order_id(&matching, Some("eth-updown-5m-2")),
+        None
+    );
+}
+
+#[test]
+fn build_cycle_window_end_auto_sell_input_uses_parent_trade_id_and_builder_id() {
+    let node_spec = test_ws_fast_path_node(
+        "trigger_up",
+        "trigger.market_price",
+        Some("eth-updown-5m-1"),
+        "tok-up",
+    );
+    let mut parent_order = test_builder_order("buy", None);
+    parent_order.id = 55;
+    parent_order.trade_id = 77;
+    parent_order.market_slug = "eth-updown-5m-1".to_string();
+    parent_order.token_id = "tok-up".to_string();
+    parent_order.outcome_label = "Up".to_string();
+
+    let input = build_cycle_window_end_auto_sell_input(&node_spec, &parent_order);
+
+    assert_eq!(input.get("sourceTradeId").and_then(Value::as_i64), Some(77));
+    assert_eq!(
+        input.get("parentBuilderOrderId").and_then(Value::as_i64),
+        Some(55)
+    );
+    assert_eq!(
+        input.get("windowEndAutoSell").and_then(Value::as_bool),
+        Some(true)
+    );
+}
+
+#[test]
 fn build_open_position_ws_price_node_specs_reports_missing_token_for_auto_scope_outcome() {
     let node = test_market_price_flow_node(json!({
         "repeatMode": "once",
@@ -357,11 +413,15 @@ fn chainlink_seed_rejected_too_old_payload_includes_structured_fields() {
         Some(216_937)
     );
     assert_eq!(
-        payload.get("candidate_timestamp_ms").and_then(Value::as_i64),
+        payload
+            .get("candidate_timestamp_ms")
+            .and_then(Value::as_i64),
         Some(1_774_012_890_000)
     );
     assert_eq!(
-        payload.get("candidate_received_at_ms").and_then(Value::as_i64),
+        payload
+            .get("candidate_received_at_ms")
+            .and_then(Value::as_i64),
         Some(1_774_013_106_847)
     );
 }

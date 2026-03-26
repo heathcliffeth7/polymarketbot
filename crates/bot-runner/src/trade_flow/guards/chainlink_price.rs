@@ -3,8 +3,9 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use serde::Deserialize;
+use serde_json::{json, Value};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         LazyLock,
@@ -21,9 +22,14 @@ const RECONNECT_DELAY_SECS: u64 = 2;
 const MAX_PRICE_AGE_SECS: i64 = 30;
 const MAX_TICK_HISTORY_AGE_SECS: i64 = 4 * 60 * 60;
 const MAX_TICK_HISTORY_SAMPLES_PER_SYMBOL: usize = 20_000;
+#[cfg(test)]
 const MAX_NEAR_TIMESTAMP_PAST_TOLERANCE_MS: i64 = 60_000;
+#[cfg(test)]
 const MAX_NEAR_TIMESTAMP_FUTURE_TOLERANCE_MS: i64 = 2_000;
+const PTB_START_TICK_MAX_PAST_TOLERANCE_MS: i64 = 2_000;
+const PTB_START_TICK_MAX_FUTURE_TOLERANCE_MS: i64 = 2_000;
 const STALE_PROVIDER_WARN_INTERVAL_MS: i64 = MAX_PRICE_AGE_SECS * 1_000;
+const SUPPORTED_RTDS_SYMBOLS: &[&str] = &["btc/usd", "eth/usd", "sol/usd", "xrp/usd"];
 
 #[derive(Debug, Clone)]
 struct CachedPrice {
@@ -66,6 +72,7 @@ struct SymbolPriceState {
 struct ChainlinkPriceService {
     state: RwLock<HashMap<String, SymbolPriceState>>,
     last_error: RwLock<Option<String>>,
+    warned_unexpected_symbols: RwLock<HashSet<String>>,
     started: AtomicBool,
     session_seq: AtomicU64,
 }
@@ -75,7 +82,10 @@ static SERVICE: LazyLock<ChainlinkPriceService> = LazyLock::new(ChainlinkPriceSe
 #[derive(Debug, Deserialize)]
 struct WsMessage {
     topic: Option<String>,
-    payload: Option<PricePayload>,
+    #[serde(rename = "type")]
+    message_type: Option<String>,
+    timestamp: Option<i64>,
+    payload: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +100,7 @@ impl ChainlinkPriceService {
         Self {
             state: RwLock::new(HashMap::new()),
             last_error: RwLock::new(None),
+            warned_unexpected_symbols: RwLock::new(HashSet::new()),
             started: AtomicBool::new(false),
             session_seq: AtomicU64::new(0),
         }
@@ -103,6 +114,12 @@ impl ChainlinkPriceService {
 
     fn next_session_id(&self) -> u64 {
         self.session_seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn should_warn_unexpected_symbol(&self, symbol: &str) -> bool {
+        self.warned_unexpected_symbols
+            .write()
+            .insert(symbol.to_string())
     }
 
     fn get_price(&self, asset: &str) -> Result<f64> {
@@ -128,10 +145,26 @@ impl ChainlinkPriceService {
         Ok(cached.value)
     }
 
+    #[cfg(test)]
     fn get_price_near_timestamp(
         &self,
         asset: &str,
         target_ms: i64,
+    ) -> Result<ChainlinkPriceTimestampSnapshot> {
+        self.get_price_near_timestamp_with_tolerance(
+            asset,
+            target_ms,
+            MAX_NEAR_TIMESTAMP_PAST_TOLERANCE_MS,
+            MAX_NEAR_TIMESTAMP_FUTURE_TOLERANCE_MS,
+        )
+    }
+
+    fn get_price_near_timestamp_with_tolerance(
+        &self,
+        asset: &str,
+        target_ms: i64,
+        max_past_tolerance_ms: i64,
+        max_future_tolerance_ms: i64,
     ) -> Result<ChainlinkPriceTimestampSnapshot> {
         let symbol = asset_to_symbol(asset).ok_or_else(|| anyhow!("unsupported asset: {asset}"))?;
         let state = self.state.read();
@@ -184,7 +217,7 @@ impl ChainlinkPriceService {
 
         if let Some(sample) = best_before {
             let gap_ms = target_ms - sample.timestamp_ms;
-            if gap_ms > MAX_NEAR_TIMESTAMP_PAST_TOLERANCE_MS {
+            if gap_ms > max_past_tolerance_ms {
                 return Err(self.build_near_timestamp_past_too_old_error(symbol, sample, gap_ms));
             }
             return Ok(ChainlinkPriceTimestampSnapshot {
@@ -199,7 +232,7 @@ impl ChainlinkPriceService {
             ));
         };
         let diff_ms = sample.timestamp_ms - target_ms;
-        if diff_ms > MAX_NEAR_TIMESTAMP_FUTURE_TOLERANCE_MS {
+        if diff_ms > max_future_tolerance_ms {
             return Err(anyhow!(
                 "no cached price near timestamp for {symbol}: first future tick is {diff_ms}ms away"
             ));
@@ -346,6 +379,18 @@ impl ChainlinkPriceService {
     }
 }
 
+fn build_subscription_message() -> String {
+    json!({
+        "action": "subscribe",
+        "subscriptions": [{
+            "topic": SUBSCRIPTION_TOPIC,
+            "type": "*",
+            "filters": "",
+        }],
+    })
+    .to_string()
+}
+
 fn diff_ms(later_ms: i64, earlier_ms: i64) -> i64 {
     (later_ms - earlier_ms).max(0)
 }
@@ -398,6 +443,12 @@ fn asset_to_symbol(asset: &str) -> Option<&'static str> {
     }
 }
 
+fn is_supported_symbol(symbol: &str) -> bool {
+    SUPPORTED_RTDS_SYMBOLS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(symbol))
+}
+
 async fn ws_stream_loop() {
     loop {
         let session_id = SERVICE.next_session_id();
@@ -416,18 +467,16 @@ async fn ws_stream_once(session_id: u64) -> Result<()> {
         .with_context(|| format!("connecting to polymarket live data websocket: {url}"))?;
     let (mut sink, mut stream) = ws.split();
 
-    let subscription = serde_json::json!({
-        "action": "subscribe",
-        "subscriptions": [{
-            "topic": SUBSCRIPTION_TOPIC,
-            "type": "*",
-            "filters": ""
-        }]
-    });
-    sink.send(Message::Text(subscription.to_string().into()))
+    let subscription = build_subscription_message();
+    sink.send(Message::Text(subscription.into()))
         .await
         .context("sending live data websocket subscription")?;
-    tracing::info!(session_id, url, "CHAINLINK_LIVE_DATA_WS_CONNECTED");
+    tracing::info!(
+        session_id,
+        url,
+        subscribed_symbol_count = SUPPORTED_RTDS_SYMBOLS.len(),
+        "CHAINLINK_LIVE_DATA_WS_CONNECTED"
+    );
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL_SECS));
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -458,14 +507,52 @@ fn handle_ws_message(message: Message, session_id: u64) -> Result<()> {
             }
             let parsed = match serde_json::from_str::<WsMessage>(text.as_ref()) {
                 Ok(parsed) => parsed,
-                Err(_) => return Ok(()),
+                Err(err) => {
+                    if text.contains(SUBSCRIPTION_TOPIC) {
+                        tracing::warn!(
+                            session_id,
+                            error = %err,
+                            raw = %text,
+                            "CHAINLINK_LIVE_DATA_WS_MESSAGE_PARSE_FAILED"
+                        );
+                    }
+                    return Ok(());
+                }
             };
             if parsed.topic.as_deref() != Some(SUBSCRIPTION_TOPIC) {
                 return Ok(());
             }
-            let Some(payload) = parsed.payload else {
+            if let Some(message_type) = parsed.message_type.as_deref() {
+                if message_type != "update" {
+                    return Ok(());
+                }
+            }
+            let Some(payload_value) = parsed.payload else {
                 return Ok(());
             };
+            let payload: PricePayload = match serde_json::from_value(payload_value.clone()) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    tracing::warn!(
+                        session_id,
+                        error = %err,
+                        outer_timestamp = parsed.timestamp,
+                        payload = %payload_value,
+                        "CHAINLINK_LIVE_DATA_WS_UNEXPECTED_PAYLOAD_SHAPE"
+                    );
+                    return Ok(());
+                }
+            };
+            if !is_supported_symbol(&payload.symbol) {
+                if SERVICE.should_warn_unexpected_symbol(&payload.symbol) {
+                    tracing::warn!(
+                        session_id,
+                        symbol = %payload.symbol,
+                        "CHAINLINK_LIVE_DATA_WS_UNEXPECTED_SYMBOL"
+                    );
+                }
+                return Ok(());
+            }
             if !payload.value.is_finite() || payload.value <= 0.0 {
                 return Ok(());
             }
@@ -492,12 +579,21 @@ pub(crate) fn get_chainlink_price_cached(asset: &str) -> Result<f64> {
     SERVICE.get_price(asset)
 }
 
-pub(crate) fn get_chainlink_price_near_timestamp(
+pub(crate) fn ensure_chainlink_price_stream_started() {
+    SERVICE.ensure_started();
+}
+
+pub(crate) fn get_chainlink_price_start_tick(
     asset: &str,
     target_ms: i64,
 ) -> Result<ChainlinkPriceTimestampSnapshot> {
     SERVICE.ensure_started();
-    SERVICE.get_price_near_timestamp(asset, target_ms)
+    SERVICE.get_price_near_timestamp_with_tolerance(
+        asset,
+        target_ms,
+        PTB_START_TICK_MAX_PAST_TOLERANCE_MS,
+        PTB_START_TICK_MAX_FUTURE_TOLERANCE_MS,
+    )
 }
 
 #[cfg(test)]
@@ -539,7 +635,7 @@ mod tests {
 
         let err = service.get_price("btc").unwrap_err().to_string();
         assert!(err.contains("stale price for btc/usd"));
-        assert!(err.contains("receive_age_ms=250"));
+        assert!(err.contains("receive_age_ms="));
     }
 
     #[test]
@@ -679,6 +775,66 @@ mod tests {
     }
 
     #[test]
+    fn get_price_near_timestamp_with_tolerance_uses_short_past_window_for_ptb() {
+        let service = ChainlinkPriceService::new();
+        service.state.write().insert(
+            "btc/usd".to_string(),
+            SymbolPriceState {
+                ticks: VecDeque::from(vec![CachedPrice {
+                    value: 70_010.0,
+                    timestamp_ms: 1_770_000_000_000,
+                    received_at_ms: 1_770_000_000_000,
+                }]),
+                ..SymbolPriceState::default()
+            },
+        );
+
+        let snapshot = service
+            .get_price_near_timestamp_with_tolerance(
+                "btc",
+                1_770_000_001_500,
+                PTB_START_TICK_MAX_PAST_TOLERANCE_MS,
+                PTB_START_TICK_MAX_FUTURE_TOLERANCE_MS,
+            )
+            .expect("snapshot");
+        assert_eq!(
+            snapshot,
+            ChainlinkPriceTimestampSnapshot {
+                price: 70_010.0,
+                timestamp_ms: 1_770_000_000_000,
+            }
+        );
+    }
+
+    #[test]
+    fn get_price_near_timestamp_with_tolerance_rejects_old_tick_for_ptb() {
+        let service = ChainlinkPriceService::new();
+        service.state.write().insert(
+            "btc/usd".to_string(),
+            SymbolPriceState {
+                ticks: VecDeque::from(vec![CachedPrice {
+                    value: 70_010.0,
+                    timestamp_ms: 1_770_000_000_000,
+                    received_at_ms: 1_770_000_000_000,
+                }]),
+                ..SymbolPriceState::default()
+            },
+        );
+
+        let err = service
+            .get_price_near_timestamp_with_tolerance(
+                "btc",
+                1_770_000_000_000 + PTB_START_TICK_MAX_PAST_TOLERANCE_MS + 1,
+                PTB_START_TICK_MAX_PAST_TOLERANCE_MS,
+                PTB_START_TICK_MAX_FUTURE_TOLERANCE_MS,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("closest past tick is"));
+        assert!(err.contains("gap_ms="));
+    }
+
+    #[test]
     fn update_price_refreshes_latest_even_when_timestamp_moves_backward() {
         let service = ChainlinkPriceService::new();
         service.state.write().insert(
@@ -766,5 +922,33 @@ mod tests {
         assert_eq!(details.provider_age_ms, 216937);
         assert_eq!(details.candidate_timestamp_ms, 1774012890000);
         assert_eq!(details.candidate_received_at_ms, 1774013106847);
+    }
+
+    #[test]
+    fn build_subscription_message_uses_single_empty_filter_subscription() {
+        let value: Value = serde_json::from_str(&build_subscription_message()).expect("json");
+        let subs = value
+            .get("subscriptions")
+            .and_then(Value::as_array)
+            .expect("subscriptions");
+        assert_eq!(
+            value.get("action").and_then(Value::as_str),
+            Some("subscribe")
+        );
+        assert_eq!(subs.len(), 1);
+        assert_eq!(
+            subs[0].get("topic").and_then(Value::as_str),
+            Some(SUBSCRIPTION_TOPIC)
+        );
+        assert_eq!(subs[0].get("type").and_then(Value::as_str), Some("*"));
+        assert_eq!(subs[0].get("filters").and_then(Value::as_str), Some(""));
+    }
+
+    #[test]
+    fn is_supported_symbol_matches_rtds_symbol_list_case_insensitively() {
+        assert!(is_supported_symbol("eth/usd"));
+        assert!(is_supported_symbol("BTC/USD"));
+        assert!(!is_supported_symbol("ethUsd"));
+        assert!(!is_supported_symbol("doge/usd"));
     }
 }

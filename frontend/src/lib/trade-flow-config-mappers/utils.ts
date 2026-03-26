@@ -1,5 +1,28 @@
 import type { KeyValueDraft, PrimitiveValueType } from './types';
 
+type SupportedOpenPositionTriggerCondition = 'cross_above' | 'cross_below';
+type SupportedMarketPriceTriggerCondition =
+  | SupportedOpenPositionTriggerCondition
+  | 'level_above'
+  | 'level_below';
+
+interface OutcomeConditionValidationInput {
+  nodeType: string;
+  tokenId: unknown;
+  outcomeLabel: unknown;
+  triggerCondition: unknown;
+  triggerPriceCent: unknown;
+  maxPriceCent?: unknown;
+  priceToBeatTriggerEnabled?: boolean;
+}
+
+export interface OutcomeConditionValidationResult {
+  isValid: boolean;
+  isPtbOnly: boolean;
+  requiresOnceRepeatMode: boolean;
+  triggerCondition: string;
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -33,6 +56,82 @@ export function toCentStringValue(centValue: unknown, legacyDecimalValue?: unkno
   }
 
   return '';
+}
+
+export function isSupportedOpenPositionTriggerCondition(
+  value: unknown
+): value is SupportedOpenPositionTriggerCondition {
+  return value === 'cross_above' || value === 'cross_below';
+}
+
+export function isSupportedMarketPriceTriggerCondition(
+  value: unknown
+): value is SupportedMarketPriceTriggerCondition {
+  return (
+    value === 'cross_above' ||
+    value === 'cross_below' ||
+    value === 'level_above' ||
+    value === 'level_below'
+  );
+}
+
+export function validateOutcomeConditionRow(
+  input: OutcomeConditionValidationInput
+): OutcomeConditionValidationResult {
+  const tokenId = toStringValue(input.tokenId).trim();
+  const outcomeLabel = toStringValue(input.outcomeLabel).trim();
+  const triggerCondition = toStringValue(input.triggerCondition).trim();
+  const triggerPriceCentRaw = toStringValue(input.triggerPriceCent).trim();
+  const triggerPriceCent = Number(triggerPriceCentRaw);
+  const maxPriceCentRaw = toStringValue(input.maxPriceCent).trim();
+  const maxPriceCent = maxPriceCentRaw ? Number(maxPriceCentRaw) : null;
+  const hasValidMaxPriceCent =
+    !maxPriceCentRaw ||
+    (Number.isFinite(maxPriceCent) && (maxPriceCent as number) > 0 && (maxPriceCent as number) <= 100);
+  const invalidResult: OutcomeConditionValidationResult = {
+    isValid: false,
+    isPtbOnly: false,
+    requiresOnceRepeatMode: false,
+    triggerCondition,
+  };
+
+  if (!tokenId || !outcomeLabel || !hasValidMaxPriceCent) {
+    return invalidResult;
+  }
+
+  if (input.nodeType === 'trigger.market_price') {
+    const isPtbOnly =
+      input.priceToBeatTriggerEnabled === true && !triggerCondition && !triggerPriceCentRaw;
+    if (isPtbOnly) {
+      return {
+        isValid: true,
+        isPtbOnly: true,
+        requiresOnceRepeatMode: false,
+        triggerCondition,
+      };
+    }
+    if (!isSupportedMarketPriceTriggerCondition(triggerCondition)) {
+      return invalidResult;
+    }
+    return {
+      isValid:
+        Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100,
+      isPtbOnly: false,
+      requiresOnceRepeatMode:
+        triggerCondition === 'level_above' || triggerCondition === 'level_below',
+      triggerCondition,
+    };
+  }
+
+  if (!isSupportedOpenPositionTriggerCondition(triggerCondition)) {
+    return invalidResult;
+  }
+  return {
+    isValid: Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100,
+    isPtbOnly: false,
+    requiresOnceRepeatMode: false,
+    triggerCondition,
+  };
 }
 
 export function toTriggerMarketOnceScopeVersion(value: unknown): number {

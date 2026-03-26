@@ -58,12 +58,17 @@ const GENERIC_OPEN_POSITION_OUTCOME_LABELS = new Set([
   '0',
 ]);
 
-interface OpenPositionOutcomeLabelCacheEntry {
-  expiresAt: number;
-  byTokenId: Map<string, string>;
+interface MarketOutcomeInfo {
+  label: string;
+  legSide: 'yes' | 'no';
 }
 
-const openPositionOutcomeLabelCache = new Map<string, OpenPositionOutcomeLabelCacheEntry>();
+interface OpenPositionOutcomeCacheEntry {
+  expiresAt: number;
+  byTokenId: Map<string, MarketOutcomeInfo>;
+}
+
+const openPositionOutcomeCache = new Map<string, OpenPositionOutcomeCacheEntry>();
 
 const DEFAULT_GRAPH: TradeFlowGraph = {
   context: {},
@@ -344,38 +349,57 @@ function isGenericOpenPositionOutcomeLabel(label: string): boolean {
 }
 
 async function getMarketOutcomeLabelMapCached(slug: string): Promise<Map<string, string>> {
+  const byTokenId = await getMarketOutcomeInfoMapCached(slug);
+  const byTokenLabel = new Map<string, string>();
+  for (const [tokenKey, info] of byTokenId.entries()) {
+    byTokenLabel.set(tokenKey, info.label);
+  }
+  return byTokenLabel;
+}
+
+async function getMarketOutcomeInfoMapCached(slug: string): Promise<Map<string, MarketOutcomeInfo>> {
   const normalizedSlug = normalizeOpenPositionSlug(slug);
-  if (!normalizedSlug) return new Map<string, string>();
+  if (!normalizedSlug) return new Map<string, MarketOutcomeInfo>();
 
   const now = Date.now();
-  const cached = openPositionOutcomeLabelCache.get(normalizedSlug);
+  const cached = openPositionOutcomeCache.get(normalizedSlug);
   if (cached && cached.expiresAt > now) {
     return cached.byTokenId;
   }
 
   try {
     const outcomes = await getMarketOutcomesBySlug(slug);
-    const byTokenId = new Map<string, string>();
+    const byTokenId = new Map<string, MarketOutcomeInfo>();
     for (const outcome of outcomes) {
       const tokenKey = normalizeOpenPositionTokenId(outcome.token_id);
       const label = String(outcome.label || '').trim();
       if (!tokenKey || !label) continue;
-      byTokenId.set(tokenKey, label);
+      byTokenId.set(tokenKey, { label, legSide: outcome.legSide });
     }
-    openPositionOutcomeLabelCache.set(normalizedSlug, {
+    openPositionOutcomeCache.set(normalizedSlug, {
       expiresAt: now + OPEN_POSITION_OUTCOME_LABEL_CACHE_TTL_MS,
       byTokenId,
     });
     return byTokenId;
   } catch (err) {
     console.warn('Open position outcome label resolve error:', slug, err);
-    const empty = new Map<string, string>();
-    openPositionOutcomeLabelCache.set(normalizedSlug, {
+    const empty = new Map<string, MarketOutcomeInfo>();
+    openPositionOutcomeCache.set(normalizedSlug, {
       expiresAt: now + OPEN_POSITION_OUTCOME_LABEL_ERROR_CACHE_TTL_MS,
       byTokenId: empty,
     });
     return empty;
   }
+}
+
+async function resolveMarketOutcomeLegSideCached(
+  slug: string,
+  tokenId: string
+): Promise<'yes' | 'no' | null> {
+  const normalizedTokenId = normalizeOpenPositionTokenId(tokenId);
+  if (!normalizedTokenId) return null;
+  const byTokenId = await getMarketOutcomeInfoMapCached(slug);
+  return byTokenId.get(normalizedTokenId)?.legSide ?? null;
 }
 
 async function buildOpenPositionOutcomeLabelIndex(
@@ -629,8 +653,10 @@ export {
   openPositionOutcomeLabelIndexKey,
   isGenericOpenPositionOutcomeLabel,
   getMarketOutcomeLabelMapCached,
+  getMarketOutcomeInfoMapCached,
   buildOpenPositionOutcomeLabelIndex,
   resolveOpenPositionOutcomeLabel,
+  resolveMarketOutcomeLegSideCached,
   loadOpenTradeMatchCandidates,
   matchOpenTradePosition,
   fetchPolymarketOpenPositions,

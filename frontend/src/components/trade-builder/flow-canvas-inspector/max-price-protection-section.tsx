@@ -20,7 +20,7 @@ export function MaxPriceProtectionSection({
       <Label className="text-[11px] font-medium text-slate-600">Max Fiyat Korumasi</Label>
       {!hasConfiguredMaxPrice && (
         <p className="text-[10px] leading-relaxed text-slate-400 italic">
-          Tavan fiyat tanimlanmadan bu koruma aktif edilemez.
+          Tavan fiyat veya re-entry max fiyat tanimlanmadan bu koruma aktif edilemez.
         </p>
       )}
       <div className="flex items-center justify-between gap-2">
@@ -34,7 +34,7 @@ export function MaxPriceProtectionSection({
         />
       </div>
       <p className="text-[10px] leading-relaxed text-slate-400 italic">
-        Max price guard emri engelleyince bildirim gonder.
+        Max price veya re-entry max guard emri engelleyince bildirim gonder.
       </p>
       <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2">
         <Label className="text-[11px] font-medium text-slate-600">Iyilesince Tekrar Dene</Label>

@@ -211,10 +211,22 @@ fn build_trade_builder_fill_notification(
 
     Some((
         notification_type,
-        format!(
-            "{title}\nSebep: {}\nMarket: {}\nFiyat: {:.4}\nMiktar: {:.2}\nOutcome: {}",
-            reason, order.market_slug, execution_price, filled_qty, order.outcome_label
-        ),
+        if order.side == "buy" && order.parent_order_id.is_none() {
+            format!(
+                "{title}\nSebep: {}\nMarket: {}\nFiyat: {:.4}\nNotional USDC: {:.2}\nAdet: {:.2}\nOutcome: {}",
+                reason,
+                order.market_slug,
+                execution_price,
+                order.size_usdc,
+                filled_qty,
+                order.outcome_label
+            )
+        } else {
+            format!(
+                "{title}\nSebep: {}\nMarket: {}\nFiyat: {:.4}\nMiktar: {:.2}\nOutcome: {}",
+                reason, order.market_slug, execution_price, filled_qty, order.outcome_label
+            )
+        },
     ))
 }
 

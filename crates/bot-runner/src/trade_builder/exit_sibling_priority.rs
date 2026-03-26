@@ -54,38 +54,6 @@ async fn maybe_resize_trade_builder_pending_exit_order(
     Ok(true)
 }
 
-async fn sync_trade_builder_pending_sibling_exit_qty(
-    repo: &PostgresRepository,
-    order: &TradeBuilderOrder,
-    next_remaining_qty: f64,
-    reason: &str,
-) -> Result<Vec<i64>> {
-    let Some(parent_order_id) = order.parent_order_id else {
-        return Ok(Vec::new());
-    };
-    let siblings = repo
-        .list_trade_builder_child_orders_by_parent(parent_order_id, Some(order.id))
-        .await?;
-    let mut resized_sibling_ids = Vec::new();
-    for sibling in siblings {
-        if !trade_builder_is_child_exit_sell(&sibling) {
-            continue;
-        }
-        if maybe_resize_trade_builder_pending_exit_order(
-            repo,
-            &sibling,
-            next_remaining_qty,
-            order.id,
-            reason,
-        )
-        .await?
-        {
-            resized_sibling_ids.push(sibling.id);
-        }
-    }
-    Ok(resized_sibling_ids)
-}
-
 async fn request_trade_builder_oco_cancel_for_siblings(
     repo: &PostgresRepository,
     order: &TradeBuilderOrder,
@@ -151,17 +119,60 @@ async fn request_trade_builder_oco_cancel_for_siblings(
     Ok(sibling_order_ids)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TradeBuilderStopLossPreemptionDecision {
+    current_price: f64,
+    ready_for_inline_submit: bool,
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+struct TradeBuilderStopLossPreemption {
+    tp_preempted: bool,
+    ready_sl_order_ids: Vec<i64>,
+}
+
+fn evaluate_trade_builder_preempted_stop_loss(
+    sibling: &TradeBuilderOrder,
+    runtime_price: &TradeBuilderRuntimePrice,
+) -> Option<TradeBuilderStopLossPreemptionDecision> {
+    if !trade_builder_is_stop_loss_child(sibling)
+        || trade_builder_is_terminal_status(&sibling.status)
+    {
+        return None;
+    }
+
+    if let Some(mode) = sibling.sl_trigger_price_mode.as_deref() {
+        sl_trigger_eval_price_for_mode(mode, runtime_price)?;
+    }
+
+    let current_price = trade_builder_trigger_eval_price_for_order(sibling, runtime_price);
+    let evaluation =
+        evaluate_trade_builder_order_trigger(sibling, sibling.last_seen_price, current_price);
+    if !evaluation.should_trigger
+        || should_skip_trade_builder_composite_sl_bid_confirmation(sibling, runtime_price)
+    {
+        return None;
+    }
+
+    Some(TradeBuilderStopLossPreemptionDecision {
+        current_price,
+        ready_for_inline_submit: sibling.active_exchange_order_id.is_none()
+            && sibling.status != "canceled_requested",
+    })
+}
+
 async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
     repo: &PostgresRepository,
     order: &mut TradeBuilderOrder,
     runtime_price: &TradeBuilderRuntimePrice,
-) -> Result<bool> {
+) -> Result<TradeBuilderStopLossPreemption> {
+    let mut preemption = TradeBuilderStopLossPreemption::default();
     if !trade_builder_is_take_profit_child(order) {
-        return Ok(false);
+        return Ok(preemption);
     }
 
     let Some(parent_order_id) = order.parent_order_id else {
-        return Ok(false);
+        return Ok(preemption);
     };
     let siblings = repo
         .list_trade_builder_child_orders_by_parent(parent_order_id, Some(order.id))
@@ -170,57 +181,36 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
     let mut stop_loss_sibling_ids = Vec::new();
     let mut stop_loss_current_price = None;
 
-    for sibling in siblings.iter().filter(|sibling| {
-        trade_builder_is_stop_loss_child(sibling)
-            && !trade_builder_is_terminal_status(&sibling.status)
-    }) {
-        if let Some(mode) = sibling.sl_trigger_price_mode.as_deref() {
-            if sl_trigger_eval_price_for_mode(mode, runtime_price).is_none() {
-                repo.append_trade_builder_order_event(
-                    sibling.id,
-                    "selected_trigger_source_missing",
-                    &json!({
-                        "sl_trigger_price_mode": mode,
-                        "best_bid": runtime_price.best_bid,
-                        "last_trade_price": runtime_price.last_trade_price,
-                        "context": "tp_preemption_check",
-                        "status": &sibling.status,
-                    }),
-                )
-                .await?;
-                continue;
+    for sibling in siblings
+        .iter()
+        .filter(|sibling| trade_builder_is_stop_loss_child(sibling))
+    {
+        let Some(decision) = evaluate_trade_builder_preempted_stop_loss(sibling, runtime_price)
+        else {
+            if let Some(mode) = sibling.sl_trigger_price_mode.as_deref() {
+                if sl_trigger_eval_price_for_mode(mode, runtime_price).is_none() {
+                    repo.append_trade_builder_order_event(
+                        sibling.id,
+                        "selected_trigger_source_missing",
+                        &json!({
+                            "sl_trigger_price_mode": mode,
+                            "best_bid": runtime_price.best_bid,
+                            "last_trade_price": runtime_price.last_trade_price,
+                            "context": "tp_preemption_check",
+                            "status": &sibling.status,
+                        }),
+                    )
+                    .await?;
+                }
             }
-        }
-
-        let sibling_current_price =
-            trade_builder_trigger_eval_price_for_order(sibling, runtime_price);
-        let evaluation = evaluate_trade_builder_order_trigger(
-            sibling,
-            sibling.last_seen_price,
-            sibling_current_price,
-        );
-        if !evaluation.should_trigger {
             continue;
-        }
-
-        if trade_builder_is_stop_loss_child(sibling)
-            && matches!(
-                sibling.sl_trigger_price_mode.as_deref(),
-                Some("composite" | "composite_safe")
-            )
-        {
-            let bid_unconfirmed = match (sibling.trigger_price, runtime_price.best_bid) {
-                (Some(trigger_price), Some(best_bid)) => best_bid > trigger_price,
-                (Some(_), None) => true,
-                _ => false,
-            };
-            if bid_unconfirmed {
-                continue;
-            }
-        }
+        };
 
         stop_loss_sibling_ids.push(sibling.id);
-        stop_loss_current_price.get_or_insert(sibling_current_price);
+        stop_loss_current_price.get_or_insert(decision.current_price);
+        if decision.ready_for_inline_submit {
+            preemption.ready_sl_order_ids.push(sibling.id);
+        }
         if !trade_builder_stop_loss_latched(sibling) {
             repo.set_trade_builder_order_trigger_latched(sibling.id, true, Some("stop_loss"))
                 .await?;
@@ -231,8 +221,11 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
                     "reason": "stop_loss",
                     "priority_source": "tp_guard",
                     "trigger_price": sibling.trigger_price,
-                    "current_price": sibling_current_price,
+                    "current_price": decision.current_price,
                     "sl_trigger_price_mode": &sibling.sl_trigger_price_mode,
+                    "family": trade_builder_exit_family(sibling),
+                    "exit_mode": trade_builder_exit_mode(sibling),
+                    "sibling_policy": trade_builder_exit_sibling_policy(sibling),
                     "best_bid": runtime_price.best_bid,
                     "last_trade_price": runtime_price.last_trade_price,
                     "status_before": &sibling.status
@@ -250,20 +243,55 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
             )
             .await?;
         }
+        let event_type = if trade_builder_is_hard_exit_child(sibling) {
+            "sl_became_sole_exit"
+        } else {
+            "sl_staged_exit_ready"
+        };
         repo.append_trade_builder_order_event(
             sibling.id,
-            "sl_became_sole_exit",
+            event_type,
             &json!({
                 "preempted_tp_order_id": order.id,
-                "current_price": sibling_current_price,
-                "remaining_qty": remaining_qty
+                "current_price": decision.current_price,
+                "remaining_qty": remaining_qty,
+                "family": trade_builder_exit_family(sibling),
+                "exit_mode": trade_builder_exit_mode(sibling),
+                "sibling_policy": trade_builder_exit_sibling_policy(sibling),
             }),
         )
         .await?;
     }
 
     if stop_loss_sibling_ids.is_empty() {
-        return Ok(false);
+        return Ok(preemption);
+    }
+
+    let hard_stop_loss_sibling_ids = siblings
+        .iter()
+        .filter(|sibling| {
+            stop_loss_sibling_ids.contains(&sibling.id) && trade_builder_is_hard_exit_child(sibling)
+        })
+        .map(|sibling| sibling.id)
+        .collect::<Vec<_>>();
+    if hard_stop_loss_sibling_ids.is_empty() {
+        repo.append_trade_builder_order_event(
+            order.id,
+            "tp_deferred_by_staged_sl",
+            &json!({
+                "stop_loss_sibling_ids": stop_loss_sibling_ids,
+                "current_price": stop_loss_current_price
+                    .unwrap_or_else(|| trade_builder_trigger_eval_price_for_order(order, runtime_price)),
+                "status_before": &order.status,
+                "remaining_qty": remaining_qty,
+                "family": trade_builder_exit_family(order),
+                "exit_mode": trade_builder_exit_mode(order),
+                "sibling_policy": trade_builder_exit_sibling_policy(order),
+            }),
+        )
+        .await?;
+        preemption.tp_preempted = true;
+        return Ok(preemption);
     }
 
     for sibling in siblings.iter().filter(|sibling| {
@@ -330,7 +358,8 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
     order.status = status_after.to_string();
     order.last_error = Some("sl_priority_preempted".to_string());
 
-    Ok(true)
+    preemption.tp_preempted = true;
+    Ok(preemption)
 }
 
 async fn maybe_latch_trade_builder_stop_loss(
@@ -354,10 +383,16 @@ async fn maybe_latch_trade_builder_stop_loss(
             "trigger_price": order.trigger_price,
             "current_price": current_price,
             "sl_trigger_price_mode": &order.sl_trigger_price_mode,
+            "family": trade_builder_exit_family(order),
+            "exit_mode": trade_builder_exit_mode(order),
+            "sibling_policy": trade_builder_exit_sibling_policy(order),
             "status_before": &order.status
         }),
     )
     .await?;
+    if !trade_builder_is_hard_exit_child(order) {
+        return Ok(());
+    }
     let sibling_order_ids =
         request_trade_builder_oco_cancel_for_siblings(repo, order, "stop_loss_latched").await?;
     if !sibling_order_ids.is_empty() {
@@ -367,7 +402,10 @@ async fn maybe_latch_trade_builder_stop_loss(
             &json!({
                 "sibling_order_ids": sibling_order_ids,
                 "current_price": current_price,
-                "trigger_price": order.trigger_price
+                "trigger_price": order.trigger_price,
+                "family": trade_builder_exit_family(order),
+                "exit_mode": trade_builder_exit_mode(order),
+                "sibling_policy": trade_builder_exit_sibling_policy(order),
             }),
         )
         .await?;

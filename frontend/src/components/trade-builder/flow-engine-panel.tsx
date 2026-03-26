@@ -170,8 +170,8 @@ export function FlowEnginePanel({
               <p className="font-medium">Autosave / Draft Sync Uyarisi</p>
               <p className="mt-1">{state.autoSaveError}</p>
               <p className="mt-1 text-xs text-amber-200">
-                Publish gecici olarak kilitlendi. `Draft Kaydet` ile tekrar dene veya `Taslagi
-                Sunucudan Yukle` ile server draft&apos;ina don.
+                Publish gecici olarak kilitlendi. Once biraz bekleyip `Draft Kaydet` ile tekrar dene.
+                Sorun surerse `Taslagi Sunucudan Yukle` ile server draft&apos;ina don.
               </p>
             </div>
           )}

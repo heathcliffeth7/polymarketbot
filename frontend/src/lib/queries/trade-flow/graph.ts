@@ -1,10 +1,248 @@
 import type { TradeFlowEdge, TradeFlowGraph, TradeFlowNode } from '@/lib/types';
 import { DEFAULT_GRAPH, isRecord, toTrimmedString } from './shared';
+import { normalizeTriggerMarketPriceCycleWindowConfig } from '@/lib/trade-flow-config-mappers/cycle-window';
+
+export interface FixedTriggerMarketResolution {
+  kind: 'none' | 'single' | 'multiple';
+  marketSlug: string | null;
+  outcomeKind: 'none' | 'single' | 'multiple';
+  tokenId: string | null;
+  outcomeLabel: string | null;
+  distinctMarketSlugs: string[];
+  distinctOutcomeLabels: string[];
+}
+
+function isQuickPresetBuySellPlaceOrderConfig(config: Record<string, unknown>): boolean {
+  const presetKindRaw = toTrimmedString(config.presetKind).toLowerCase();
+  const refKeyRaw = toTrimmedString(config.refKey).toLowerCase();
+  return (
+    presetKindRaw === 'sell_current_position' ||
+    presetKindRaw === 'buy_current_position' ||
+    refKeyRaw === 'preset_sell_current_position' ||
+    refKeyRaw === 'preset_buy_current_position'
+  );
+}
+
+export function isGenericPlaceOrderPresetConfig(config: Record<string, unknown>): boolean {
+  if (isQuickPresetBuySellPlaceOrderConfig(config)) {
+    return false;
+  }
+
+  const presetKindRaw = toTrimmedString(config.presetKind).toLowerCase();
+  const refKeyRaw = toTrimmedString(config.refKey).toLowerCase();
+  return presetKindRaw === 'place_order' || refKeyRaw === 'preset_place_order';
+}
+
+function normalizePlaceOrderPresetRefKey(
+  nodeKey: string,
+  config: Record<string, unknown>,
+  knownNodeKeys?: ReadonlySet<string>
+): Record<string, unknown> {
+  const refKeyRaw = toTrimmedString(config.refKey);
+  if (isQuickPresetBuySellPlaceOrderConfig(config)) {
+    return config;
+  }
+
+  if (!isGenericPlaceOrderPresetConfig(config)) {
+    return config;
+  }
+
+  if (!refKeyRaw || refKeyRaw.toLowerCase() === 'preset_place_order') {
+    return {
+      ...config,
+      refKey: nodeKey,
+    };
+  }
+
+  if (knownNodeKeys && refKeyRaw !== nodeKey && knownNodeKeys.has(refKeyRaw)) {
+    return {
+      ...config,
+      refKey: nodeKey,
+    };
+  }
+
+  return config;
+}
+
+interface FixedTriggerSeed {
+  marketSlug: string;
+  outcomeKind: FixedTriggerMarketResolution['outcomeKind'];
+  tokenId: string | null;
+  outcomeLabel: string | null;
+}
+
+function extractFixedTriggerSeed(node: TradeFlowNode): FixedTriggerSeed | null {
+  if (node.type !== 'trigger.market_price') {
+    return null;
+  }
+
+  const config = isRecord(node.config) ? node.config : {};
+  const marketMode = toTrimmedString(config.marketMode).toLowerCase();
+  const marketSlug = toTrimmedString(config.marketSlug);
+  if (marketMode === 'auto_scope' || !marketSlug) {
+    return null;
+  }
+
+  const outcomeConditions = Array.isArray(config.outcomeConditions)
+    ? config.outcomeConditions.filter((row): row is Record<string, unknown> => isRecord(row))
+    : [];
+  if (outcomeConditions.length > 1) {
+    return {
+      marketSlug,
+      outcomeKind: 'multiple',
+      tokenId: null,
+      outcomeLabel: null,
+    };
+  }
+
+  if (outcomeConditions.length === 1) {
+    const tokenId = toTrimmedString(outcomeConditions[0].tokenId);
+    const outcomeLabel = toTrimmedString(outcomeConditions[0].outcomeLabel);
+    if (tokenId && outcomeLabel) {
+      return {
+        marketSlug,
+        outcomeKind: 'single',
+        tokenId,
+        outcomeLabel,
+      };
+    }
+    return {
+      marketSlug,
+      outcomeKind: 'multiple',
+      tokenId: null,
+      outcomeLabel: null,
+    };
+  }
+
+  const tokenId = toTrimmedString(config.tokenId);
+  const outcomeLabel = toTrimmedString(config.outcomeLabel);
+  if (tokenId && outcomeLabel) {
+    return {
+      marketSlug,
+      outcomeKind: 'single',
+      tokenId,
+      outcomeLabel,
+    };
+  }
+
+  return {
+    marketSlug,
+    outcomeKind: 'none',
+    tokenId: null,
+    outcomeLabel: null,
+  };
+}
+
+export function resolveUpstreamFixedTriggerMarket(
+  nodeKey: string,
+  graph: TradeFlowGraph
+): FixedTriggerMarketResolution {
+  const nodeMap = new Map(graph.nodes.map((node) => [node.key, node]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const incoming = incomingByTarget.get(edge.target) ?? [];
+    incoming.push(edge.source);
+    incomingByTarget.set(edge.target, incoming);
+  }
+
+  const visited = new Set<string>();
+  const distinctMarketSlugs = new Set<string>();
+  const distinctOutcomePairs = new Set<string>();
+  const queue = [nodeKey];
+  let hasUnresolvedOutcome = false;
+
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    for (const sourceKey of incomingByTarget.get(current) ?? []) {
+      const sourceNode = nodeMap.get(sourceKey);
+      if (!sourceNode) continue;
+
+      const seed = extractFixedTriggerSeed(sourceNode);
+      if (seed) {
+        distinctMarketSlugs.add(seed.marketSlug);
+        if (
+          seed.outcomeKind === 'single' &&
+          seed.tokenId &&
+          seed.outcomeLabel
+        ) {
+          distinctOutcomePairs.add(`${seed.tokenId}::${seed.outcomeLabel}`);
+        } else {
+          hasUnresolvedOutcome = true;
+        }
+      }
+
+      queue.push(sourceKey);
+    }
+  }
+
+  const resolvedMarketSlugs = Array.from(distinctMarketSlugs).sort();
+  const distinctOutcomeLabels = Array.from(distinctOutcomePairs)
+    .map((pair) => pair.split('::')[1] ?? '')
+    .filter((label) => label.length > 0)
+    .sort();
+
+  if (resolvedMarketSlugs.length === 0) {
+    return {
+      kind: 'none',
+      marketSlug: null,
+      outcomeKind: 'none',
+      tokenId: null,
+      outcomeLabel: null,
+      distinctMarketSlugs: resolvedMarketSlugs,
+      distinctOutcomeLabels,
+    };
+  }
+
+  if (resolvedMarketSlugs.length > 1) {
+    return {
+      kind: 'multiple',
+      marketSlug: null,
+      outcomeKind: 'multiple',
+      tokenId: null,
+      outcomeLabel: null,
+      distinctMarketSlugs: resolvedMarketSlugs,
+      distinctOutcomeLabels,
+    };
+  }
+
+  if (!hasUnresolvedOutcome && distinctOutcomePairs.size === 1) {
+    const [pair] = Array.from(distinctOutcomePairs);
+    const [tokenId, outcomeLabel] = pair.split('::');
+    return {
+      kind: 'single',
+      marketSlug: resolvedMarketSlugs[0],
+      outcomeKind: 'single',
+      tokenId: tokenId || null,
+      outcomeLabel: outcomeLabel || null,
+      distinctMarketSlugs: resolvedMarketSlugs,
+      distinctOutcomeLabels,
+    };
+  }
+
+  return {
+    kind: 'single',
+    marketSlug: resolvedMarketSlugs[0],
+    outcomeKind:
+      hasUnresolvedOutcome || distinctOutcomePairs.size > 1 ? 'multiple' : 'none',
+    tokenId: null,
+    outcomeLabel: null,
+    distinctMarketSlugs: resolvedMarketSlugs,
+    distinctOutcomeLabels,
+  };
+}
 
 function normalizeNodeConfig(
+  nodeKey: string,
   nodeType: string,
   config: Record<string, unknown>
 ): Record<string, unknown> {
+  if (nodeType === 'action.place_order') {
+    return normalizePlaceOrderPresetRefKey(nodeKey, config);
+  }
+
   if (nodeType !== 'trigger.market_price') {
     return config;
   }
@@ -20,9 +258,74 @@ function normalizeNodeConfig(
     'best_ask',
   ]);
   return {
-    ...config,
+    ...normalizeTriggerMarketPriceCycleWindowConfig(config),
     priceMode: validPriceModes.has(priceModeRaw) ? priceModeRaw : 'composite',
   };
+}
+
+function normalizePresetPlaceOrderNodes(graph: TradeFlowGraph): TradeFlowGraph {
+  const knownNodeKeys = new Set(graph.nodes.map((node) => node.key));
+  let changed = false;
+
+  const nodes = graph.nodes.map((node) => {
+    if (node.type !== 'action.place_order' || !isRecord(node.config)) {
+      return node;
+    }
+
+    let nextConfig = normalizePlaceOrderPresetRefKey(node.key, node.config, knownNodeKeys);
+    if (isGenericPlaceOrderPresetConfig(nextConfig)) {
+      const resolution = resolveUpstreamFixedTriggerMarket(node.key, graph);
+      if (resolution.kind === 'single' && resolution.marketSlug) {
+        if (toTrimmedString(nextConfig.marketSlug) !== resolution.marketSlug) {
+          nextConfig = { ...nextConfig, marketSlug: resolution.marketSlug };
+        }
+
+        if (
+          resolution.outcomeKind === 'single' &&
+          resolution.tokenId &&
+          resolution.outcomeLabel
+        ) {
+          if (
+            toTrimmedString(nextConfig.tokenId) !== resolution.tokenId ||
+            toTrimmedString(nextConfig.outcomeLabel) !== resolution.outcomeLabel
+          ) {
+            nextConfig = {
+              ...nextConfig,
+              tokenId: resolution.tokenId,
+              outcomeLabel: resolution.outcomeLabel,
+            };
+          }
+        } else if ('tokenId' in nextConfig || 'outcomeLabel' in nextConfig) {
+          nextConfig = { ...nextConfig };
+          delete nextConfig.tokenId;
+          delete nextConfig.outcomeLabel;
+        }
+      } else if (hasUpstreamAutoScopeMarketTrigger(node.key, graph)) {
+        if (
+          'marketSlug' in nextConfig ||
+          'tokenId' in nextConfig ||
+          'outcomeLabel' in nextConfig
+        ) {
+          nextConfig = { ...nextConfig };
+          delete nextConfig.marketSlug;
+          delete nextConfig.tokenId;
+          delete nextConfig.outcomeLabel;
+        }
+      }
+    }
+
+    if (nextConfig === node.config) {
+      return node;
+    }
+
+    changed = true;
+    return {
+      ...node,
+      config: nextConfig,
+    };
+  });
+
+  return changed ? { ...graph, nodes } : graph;
 }
 
 function toNode(raw: unknown, idx: number): TradeFlowNode | null {
@@ -39,7 +342,7 @@ function toNode(raw: unknown, idx: number): TradeFlowNode | null {
     type: typeRaw,
     positionX: Number.isFinite(positionX) ? positionX : idx * 220,
     positionY: Number.isFinite(positionY) ? positionY : 80,
-    config: normalizeNodeConfig(typeRaw, isRecord(raw.config) ? raw.config : {}),
+    config: normalizeNodeConfig(keyRaw, typeRaw, isRecord(raw.config) ? raw.config : {}),
   };
 }
 
@@ -73,11 +376,13 @@ export function normalizeTradeFlowGraph(graphJson: unknown): TradeFlowGraph {
     .map((row, idx) => toEdge(row, idx))
     .filter((row): row is TradeFlowEdge => !!row);
 
-  return {
+  const graph = {
     context: contextRaw,
     nodes,
     edges,
   };
+
+  return normalizePresetPlaceOrderNodes(graph);
 }
 
 function detectCycles(nodes: TradeFlowNode[], edges: TradeFlowEdge[]): boolean {

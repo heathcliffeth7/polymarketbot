@@ -51,10 +51,16 @@ struct TriggerWsCacheNodeLogFields {
     token_id: Option<String>,
     resolved_market_slug: Option<String>,
     auto_scope: bool,
+    version_id: Option<i64>,
+    version_no: Option<i32>,
     price_mode: Option<String>,
     trigger_condition: Option<String>,
     trigger_price: Option<f64>,
     max_price: Option<f64>,
+    cycle_window_mode: Option<String>,
+    cycle_window_secs: Option<i64>,
+    cycle_window_start_sec: Option<i64>,
+    cycle_window_end_sec: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,10 +94,16 @@ fn log_trigger_ws_cache_node_skipped(
         token_id = ?fields.token_id,
         resolved_market_slug = ?fields.resolved_market_slug,
         auto_scope = fields.auto_scope,
+        version_id = ?fields.version_id,
+        version_no = ?fields.version_no,
         price_mode = ?fields.price_mode,
         trigger_condition = ?fields.trigger_condition,
         trigger_price = ?fields.trigger_price,
         max_price = ?fields.max_price,
+        cycle_window_mode = ?fields.cycle_window_mode,
+        cycle_window_secs = ?fields.cycle_window_secs,
+        cycle_window_start_sec = ?fields.cycle_window_start_sec,
+        cycle_window_end_sec = ?fields.cycle_window_end_sec,
         "TRIGGER_WS_CACHE_NODE_SKIPPED"
     );
 }
@@ -110,10 +122,16 @@ fn log_trigger_ws_cache_node_indexed(
         token_id = ?fields.token_id,
         resolved_market_slug = ?fields.resolved_market_slug,
         auto_scope = fields.auto_scope,
+        version_id = ?fields.version_id,
+        version_no = ?fields.version_no,
         price_mode = ?fields.price_mode,
         trigger_condition = ?fields.trigger_condition,
         trigger_price = ?fields.trigger_price,
         max_price = ?fields.max_price,
+        cycle_window_mode = ?fields.cycle_window_mode,
+        cycle_window_secs = ?fields.cycle_window_secs,
+        cycle_window_start_sec = ?fields.cycle_window_start_sec,
+        cycle_window_end_sec = ?fields.cycle_window_end_sec,
         "TRIGGER_WS_CACHE_NODE_INDEXED"
     );
 }
@@ -135,6 +153,8 @@ fn build_trigger_ws_cache_node_log_fields_from_node(
             .or_else(|| flow_context_string(context, "marketSlug"))
             .or_else(|| node_config_string(node, "marketSlug")),
         auto_scope: node_market_mode(node) == "auto_scope",
+        version_id: None,
+        version_no: None,
         price_mode: node
             .config
             .get("priceMode")
@@ -145,11 +165,17 @@ fn build_trigger_ws_cache_node_log_fields_from_node(
             .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0)),
         max_price: node_config_f64(node, "maxPrice")
             .or_else(|| node_config_f64(node, "maxPriceCent").map(|v| v / 100.0)),
+        cycle_window_mode: node_config_string(node, "cycleWindowMode"),
+        cycle_window_secs: node_config_i64(node, "cycleWindowSecs"),
+        cycle_window_start_sec: node_config_i64(node, "cycleWindowStartSec"),
+        cycle_window_end_sec: node_config_i64(node, "cycleWindowEndSec"),
     }
 }
 
 fn build_trigger_ws_cache_node_log_fields_from_spec(
     spec: &WsOpenPositionPriceNodeSpec,
+    version_id: i64,
+    version_no: Option<i32>,
 ) -> TriggerWsCacheNodeLogFields {
     TriggerWsCacheNodeLogFields {
         node_key: spec.node_key.clone(),
@@ -158,10 +184,16 @@ fn build_trigger_ws_cache_node_log_fields_from_spec(
         token_id: Some(spec.token_id.clone()),
         resolved_market_slug: spec.market_slug.clone(),
         auto_scope: spec.auto_scope,
+        version_id: Some(version_id),
+        version_no,
         price_mode: Some(spec.price_mode.as_str().to_string()),
         trigger_condition: Some(spec.trigger_condition.clone()),
         trigger_price: Some(spec.trigger_price),
         max_price: spec.max_price,
+        cycle_window_mode: spec.cycle_window_mode.clone(),
+        cycle_window_secs: spec.cycle_window_secs,
+        cycle_window_start_sec: spec.cycle_window_start_sec,
+        cycle_window_end_sec: spec.cycle_window_end_sec,
     }
 }
 
@@ -911,8 +943,12 @@ fn build_trigger_market_price_output(
     once_mode: bool,
     once_scope_market: bool,
     queued_at_from_step: Option<&str>,
+    version_id: i64,
+    version_no: Option<i32>,
     cycle_window_mode: Option<&str>,
     cycle_window_secs: Option<i64>,
+    cycle_window_start_sec: Option<i64>,
+    cycle_window_end_sec: Option<i64>,
     cycle_window_open_at: Option<DateTime<Utc>>,
     cycle_window_end_at: Option<DateTime<Utc>>,
 ) -> Value {
@@ -953,17 +989,26 @@ fn build_trigger_market_price_output(
         "once_mode": once_mode,
         "once_scope": if once_scope_market { "market" } else { "run" },
         "queued_at": queued_at_from_step,
-        "cycleWindowMode": cycle_window_mode,
-        "cycleWindowSecs": cycle_window_secs,
-        "cycleWindowOpenAt": cycle_window_open_at.map(|value| value.to_rfc3339()),
-        "cycleWindowEndAt": cycle_window_end_at.map(|value| value.to_rfc3339()),
-        "once_fired": trade_flow_market_price_once_fired_for_scope(
-            context,
-            &node.key,
-            once_scope_market,
-            Some(market_slug)
-        )
     });
+    append_json_object_fields(
+        &mut output,
+        &json!({
+            "versionId": version_id,
+            "versionNo": version_no,
+            "cycleWindowMode": cycle_window_mode,
+            "cycleWindowSecs": cycle_window_secs,
+            "cycleWindowStartSec": cycle_window_start_sec,
+            "cycleWindowEndSec": cycle_window_end_sec,
+            "cycleWindowOpenAt": cycle_window_open_at.map(|value| value.to_rfc3339()),
+            "cycleWindowEndAt": cycle_window_end_at.map(|value| value.to_rfc3339()),
+            "once_fired": trade_flow_market_price_once_fired_for_scope(
+                context,
+                &node.key,
+                once_scope_market,
+                Some(market_slug)
+            ),
+        }),
+    );
     if !price_to_beat_trigger_gate.is_null() {
         append_trigger_market_price_ptb_gate(&mut output, price_to_beat_trigger_gate);
     }
@@ -1007,8 +1052,12 @@ fn finish_trigger_market_price_execution(
     once_mode: bool,
     once_scope_market: bool,
     queued_at_from_step: Option<&str>,
+    version_id: i64,
+    version_no: Option<i32>,
     cycle_window_mode: Option<&str>,
     cycle_window_secs: Option<i64>,
+    cycle_window_start_sec: Option<i64>,
+    cycle_window_end_sec: Option<i64>,
     cycle_window_open_at: Option<DateTime<Utc>>,
     cycle_window_end_at: Option<DateTime<Utc>>,
     interval_ms: i64,
@@ -1065,8 +1114,12 @@ fn finish_trigger_market_price_execution(
         once_mode,
         once_scope_market,
         queued_at_from_step,
+        version_id,
+        version_no,
         cycle_window_mode,
         cycle_window_secs,
+        cycle_window_start_sec,
+        cycle_window_end_sec,
         cycle_window_open_at,
         cycle_window_end_at,
     );

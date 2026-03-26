@@ -587,5 +587,10 @@ async fn observe_trade_builder_first_visible_inventory(
 
     repo.insert_trade_builder_inventory_observation_if_absent(&observation_row)
         .await?;
+    let _ = maybe_rebase_trade_builder_parent_position_from_first_visible_inventory(
+        repo,
+        observation.parent_builder_order_id,
+    )
+    .await;
     Ok(())
 }

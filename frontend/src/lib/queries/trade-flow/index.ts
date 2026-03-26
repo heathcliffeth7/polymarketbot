@@ -25,5 +25,13 @@ export {
   getTradeFlowRunEvents,
   getRecentTradeFlowEvents,
 } from './definitions';
+export {
+  FLOW_DEFINITION_BUSY_CODE,
+  FLOW_DEFINITION_BUSY_MESSAGE,
+  FlowDefinitionBusyError,
+  isFlowDefinitionBusyError,
+  isPostgresLockTimeoutError,
+  mapTradeFlowMutationHttpError,
+} from './mutation-errors';
 export { getTradeFlowOverlapSummary } from './overlap';
 export { migrateLegacyWorkflowsToFlows, createFlowFromLegacyWorkflow } from './legacy';

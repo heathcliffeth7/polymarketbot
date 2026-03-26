@@ -8,6 +8,7 @@ import {
 import {
   getTradeFlowDefinitionById,
   hardDeleteTradeFlowDefinition,
+  mapTradeFlowMutationHttpError,
   normalizeTradeFlowGraph,
   updateTradeFlowDefinitionDraft,
 } from '@/lib/queries/trade-flow';
@@ -141,11 +142,18 @@ export async function PATCH(
     ) {
       return NextResponse.json({ error: err.message }, { status: 400 });
     }
+    if (
+      err instanceof Error &&
+      err.message.includes('trigger.market_price custom_range mutated during')
+    ) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    const mapped = mapTradeFlowMutationHttpError(err, 'Failed to update flow definition');
+    if (mapped.status === 423) {
+      return NextResponse.json(mapped.body, { status: mapped.status });
+    }
     console.error('Trade flow definition patch error:', err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Failed to update flow definition' },
-      { status: 500 }
-    );
+    return NextResponse.json(mapped.body, { status: mapped.status });
   }
 }
 
@@ -170,10 +178,11 @@ export async function DELETE(
     if (err instanceof Error && err.message === 'Flow definition not found') {
       return NextResponse.json({ error: err.message }, { status: 404 });
     }
+    const mapped = mapTradeFlowMutationHttpError(err, 'Failed to delete flow definition');
+    if (mapped.status === 423) {
+      return NextResponse.json(mapped.body, { status: mapped.status });
+    }
     console.error('Trade flow definition delete error:', err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Failed to delete flow definition' },
-      { status: 500 }
-    );
+    return NextResponse.json(mapped.body, { status: mapped.status });
   }
 }

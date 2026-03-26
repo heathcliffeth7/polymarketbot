@@ -325,7 +325,7 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
     }
 
     for (order_id, user_id) in orders_to_spawn {
-        spawn_armed_order_immediate_processing(repo, run_id, ws, order_id, user_id);
+        spawn_armed_order_immediate_processing(repo, run_id, ws, order_id, user_id, None);
     }
 
     for (order_id, trigger_price, best_bid, last_trade_price) in composite_bid_entering {
@@ -391,6 +391,7 @@ fn spawn_armed_order_immediate_processing(
     ws: &ClobWsClient,
     order_id: i64,
     user_id: i64,
+    batch_telemetry: Option<TradeBuilderParallelExitBatchMemberTelemetry>,
 ) {
     let repo = repo.clone();
     let ws = ws.clone();
@@ -447,6 +448,27 @@ fn spawn_armed_order_immediate_processing(
                 "ARMED_ORDER_WS_IMMEDIATE_SUBMIT_FAILED"
             );
         }
+        if let Some(batch_telemetry) = batch_telemetry {
+            let latest_status = repo
+                .get_trade_builder_order(order_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|order| order.status);
+            let _ = repo
+                .append_trade_builder_order_event(
+                    order_id,
+                    "parallel_exit_batch_member_result",
+                    &json!({
+                        "parent_order_id": batch_telemetry.parent_order_id,
+                        "batch_owner_order_id": batch_telemetry.batch_owner_order_id,
+                        "batch_path": batch_telemetry.batch_path,
+                        "selected_order_ids": batch_telemetry.selected_order_ids,
+                        "status_after": latest_status,
+                    }),
+                )
+                .await;
+        }
         rearm_builder_order_to_cache_if_armed(&repo, order_id).await;
     });
 }
@@ -493,8 +515,11 @@ mod armed_ws_eval_tests {
             origin_flow_node_key: None,
             tp_enabled: false,
             tp_price: None,
+            tp_rules_json: Vec::new(),
             sl_enabled: false,
             sl_price: None,
+            sl_rules_json: Vec::new(),
+            time_exit_rules_json: Vec::new(),
             filled_qty: 0.0,
             fee_rate_bps: 0,
             trigger_latched: false,
@@ -519,6 +544,9 @@ mod armed_ws_eval_tests {
             notify_on_sl_hit: false,
             notify_on_max_price_blocked: false,
             last_guard_notification_reason: None,
+            exit_ladder_kind: None,
+            exit_ladder_index: None,
+            exit_ladder_size_pct: None,
         }
     }
 

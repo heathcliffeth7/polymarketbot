@@ -382,6 +382,67 @@ fn trade_builder_cap_exit_sell_price(order: &TradeBuilderOrder, desired_price: f
         .unwrap_or(desired_price)
 }
 
+fn trade_builder_is_immediate_notional_buy(order: &TradeBuilderOrder) -> bool {
+    order.side == "buy"
+        && order.kind == "immediate"
+        && normalize_trade_builder_execution_mode(&order.execution_mode) == "market"
+        && normalize_trade_builder_size_basis(&order.size_basis)
+            == TRADE_BUILDER_SIZE_BASIS_NOTIONAL_USDC
+}
+
+fn trade_builder_immediate_buy_notional_anchor_price(
+    order: &TradeBuilderOrder,
+) -> Option<f64> {
+    if !trade_builder_is_immediate_notional_buy(order) {
+        return None;
+    }
+
+    normalize_trade_builder_reference_price(order.trigger_price).map(clamp_probability)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TradeBuilderImmediateBuyExecutionPrice {
+    price: f64,
+    source: &'static str,
+    trigger_reference_price: Option<f64>,
+}
+
+fn trade_builder_immediate_buy_notional_execution_price(
+    order: &TradeBuilderOrder,
+    current_price: f64,
+    best_ask: Option<f64>,
+) -> Option<TradeBuilderImmediateBuyExecutionPrice> {
+    if !trade_builder_is_immediate_notional_buy(order) {
+        return None;
+    }
+
+    let trigger_reference_price = trade_builder_immediate_buy_notional_anchor_price(order);
+    if let Some(best_ask) = best_ask
+        .and_then(|value| normalize_trade_builder_reference_price(Some(value)))
+        .map(clamp_probability)
+    {
+        return Some(TradeBuilderImmediateBuyExecutionPrice {
+            price: best_ask,
+            source: "best_ask",
+            trigger_reference_price,
+        });
+    }
+
+    Some(TradeBuilderImmediateBuyExecutionPrice {
+        price: normalize_trade_builder_reference_price(Some(current_price))
+            .map(clamp_probability)
+            .unwrap_or_else(|| clamp_probability(current_price)),
+        source: "current_price_fallback",
+        trigger_reference_price,
+    })
+}
+
+fn trade_builder_submit_desired_price(order: &TradeBuilderOrder, current_price: f64) -> f64 {
+    let uncapped_desired_price =
+        aggressive_price_for_side(&order.side, current_price, order.min_price_distance_cent);
+    trade_builder_cap_exit_sell_price(order, uncapped_desired_price)
+}
+
 fn trade_builder_price_exceeds_max_price(order: &TradeBuilderOrder, desired_price: f64) -> bool {
     order
         .max_price
@@ -675,6 +736,7 @@ fn select_trade_builder_terminal_fill_qty(
     })
 }
 
+#[cfg(test)]
 fn trade_builder_exit_child_sizing(
     filled_size: f64,
     execution_price: f64,

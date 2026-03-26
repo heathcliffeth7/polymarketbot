@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth';
-import { publishTradeFlowDefinition } from '@/lib/queries/trade-flow';
+import {
+  mapTradeFlowMutationHttpError,
+  publishTradeFlowDefinition,
+} from '@/lib/queries/trade-flow';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,10 +28,17 @@ export async function POST(
     if (err instanceof Error && err.message === 'Flow definition not found') {
       return NextResponse.json({ error: err.message }, { status: 404 });
     }
+    if (
+      err instanceof Error &&
+      err.message.includes('trigger.market_price custom_range mutated during')
+    ) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    const mapped = mapTradeFlowMutationHttpError(err, 'Failed to publish flow');
+    if (mapped.status === 423) {
+      return NextResponse.json(mapped.body, { status: mapped.status });
+    }
     console.error('Trade flow publish error:', err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Failed to publish flow' },
-      { status: 500 }
-    );
+    return NextResponse.json(mapped.body, { status: mapped.status });
   }
 }

@@ -22,6 +22,43 @@ fn cycle_window_end_sell_state_key(node_spec: &WsOpenPositionPriceNodeSpec) -> S
     )
 }
 
+fn cycle_window_end_auto_sell_builder_order_id(
+    output: &Value,
+    expected_market_slug: Option<&str>,
+) -> Option<i64> {
+    let output_market_slug = output
+        .get("market_slug")
+        .and_then(Value::as_str)
+        .or_else(|| output.get("marketSlug").and_then(Value::as_str));
+    if let Some(expected_market_slug) = expected_market_slug {
+        if output_market_slug != Some(expected_market_slug) {
+            return None;
+        }
+    }
+
+    output
+        .get("builderOrderId")
+        .and_then(Value::as_i64)
+        .or_else(|| output.get("builder_order_id").and_then(Value::as_i64))
+}
+
+fn build_cycle_window_end_auto_sell_input(
+    node_spec: &WsOpenPositionPriceNodeSpec,
+    parent_order: &TradeBuilderOrder,
+) -> Value {
+    json!({
+        "side": "sell",
+        "marketSlug": parent_order.market_slug,
+        "tokenId": parent_order.token_id,
+        "outcomeLabel": parent_order.outcome_label,
+        "sourceTradeId": parent_order.trade_id,
+        "parentBuilderOrderId": parent_order.id,
+        "executionMode": "market",
+        "windowEndAutoSell": true,
+        "windowEndTriggerNodeKey": node_spec.node_key,
+    })
+}
+
 fn cycle_window_end_sell_due_target(
     run_spec: &WsOpenPositionPriceRunSpec,
     run_index: usize,
@@ -549,6 +586,8 @@ async fn enqueue_cycle_window_prevalidated_step(
         "wsAllowFirstTickReplay": window_mode == "last" || window_mode == "custom_range",
         "windowBoundaryOpen": true,
         "windowBoundaryMode": window_mode,
+        "versionId": run_spec.version_id,
+        "versionNo": run_spec.version_no,
         "queuedAt": queued_at_rfc3339
     });
     if let Some(diagnostics) = diagnostics {
@@ -607,6 +646,8 @@ async fn enqueue_cycle_window_prevalidated_step(
                 "evaluation_mode": evaluation_mode,
                 "price_mode": node_spec.price_mode.as_str(),
                 "price_source": input_json.get("wsPriceSource"),
+                "version_id": run_spec.version_id,
+                "version_no": run_spec.version_no,
                 "idempotency_key": idempotency_key,
                 });
                 if let Some(gate) = price_to_beat_trigger_gate {
@@ -1031,22 +1072,21 @@ async fn process_trade_flow_trigger_market_price_timers(
             continue;
         };
 
-        let sell_state_key = cycle_window_end_sell_state_key(&node_spec);
-        set_flow_node_state(
-            &mut run_spec.context,
-            &node_spec.node_key,
-            &sell_state_key,
-            json!(true),
-        );
-        run_spec.context_dirty = true;
-        touched = true;
-
         let buy_output = match repo
-            .find_latest_completed_place_order_output(run_spec.run_id)
+            .find_latest_completed_place_order_output_for_node(run_spec.run_id, &node_spec.node_key)
             .await
         {
             Ok(Some(output)) => output,
             Ok(None) => {
+                let sell_state_key = cycle_window_end_sell_state_key(&node_spec);
+                set_flow_node_state(
+                    &mut run_spec.context,
+                    &node_spec.node_key,
+                    &sell_state_key,
+                    json!({ "status": "skipped", "reason": "no_completed_buy_output" }),
+                );
+                run_spec.context_dirty = true;
+                touched = true;
                 info!(
                     run_id,
                     flow_run_id = run_spec.run_id,
@@ -1067,12 +1107,21 @@ async fn process_trade_flow_trigger_market_price_timers(
             }
         };
 
-        let builder_order_id = buy_output
-            .get("builderOrderId")
-            .and_then(|v| v.as_i64())
-            .or_else(|| buy_output.get("builder_order_id").and_then(|v| v.as_i64()));
+        let builder_order_id = cycle_window_end_auto_sell_builder_order_id(
+            &buy_output,
+            node_spec.market_slug.as_deref(),
+        );
 
         let Some(builder_order_id) = builder_order_id else {
+            let sell_state_key = cycle_window_end_sell_state_key(&node_spec);
+            set_flow_node_state(
+                &mut run_spec.context,
+                &node_spec.node_key,
+                &sell_state_key,
+                json!({ "status": "skipped", "reason": "no_matching_builder_order" }),
+            );
+            run_spec.context_dirty = true;
+            touched = true;
             info!(
                 run_id,
                 flow_run_id = run_spec.run_id,
@@ -1082,14 +1131,50 @@ async fn process_trade_flow_trigger_market_price_timers(
             continue;
         };
 
-        let sell_input = json!({
-            "side": "sell",
-            "marketSlug": node_spec.market_slug,
-            "tokenId": node_spec.token_id,
-            "sourceTradeId": builder_order_id,
-            "executionMode": "market",
-            "windowEndAutoSell": true,
-        });
+        let Some(parent_order) = repo.get_trade_builder_order(builder_order_id).await? else {
+            let sell_state_key = cycle_window_end_sell_state_key(&node_spec);
+            set_flow_node_state(
+                &mut run_spec.context,
+                &node_spec.node_key,
+                &sell_state_key,
+                json!({ "status": "skipped", "reason": "missing_parent_builder_order" }),
+            );
+            run_spec.context_dirty = true;
+            touched = true;
+            continue;
+        };
+
+        let resolved_parent_inventory = resolve_trade_builder_parent_exit_inventory(
+            repo,
+            &parent_order,
+            "window_end_auto_sell_due",
+        )
+        .await?;
+        let current_parent_qty = resolved_parent_inventory.map(|(qty, _)| qty);
+        if current_parent_qty.unwrap_or_default() <= TRADE_BUILDER_EXIT_QTY_TOLERANCE {
+            let sell_state_key = cycle_window_end_sell_state_key(&node_spec);
+            set_flow_node_state(
+                &mut run_spec.context,
+                &node_spec.node_key,
+                &sell_state_key,
+                json!({ "status": "skipped", "reason": "already_closed" }),
+            );
+            run_spec.context_dirty = true;
+            touched = true;
+            repo.append_trade_builder_order_event(
+                parent_order.id,
+                "window_end_auto_sell_skipped_closed",
+                &json!({
+                    "node_key": node_spec.node_key,
+                    "window_end_at": target.window_end_at.to_rfc3339(),
+                    "current_parent_qty": current_parent_qty,
+                }),
+            )
+            .await?;
+            continue;
+        }
+
+        let sell_input = build_cycle_window_end_auto_sell_input(&node_spec, &parent_order);
 
         let idempotency_key = format!(
             "window_end_sell:{}:{}:{}",
@@ -1111,7 +1196,18 @@ async fn process_trade_flow_trigger_market_price_timers(
             )
             .await;
 
-        let enqueued_ok = matches!(&enqueued, Ok(Some(_)));
+        let enqueued_ok = matches!(&enqueued, Ok(Some(_)) | Ok(None));
+        if enqueued_ok {
+            let sell_state_key = cycle_window_end_sell_state_key(&node_spec);
+            set_flow_node_state(
+                &mut run_spec.context,
+                &node_spec.node_key,
+                &sell_state_key,
+                json!({ "status": "enqueued", "idempotency_key": idempotency_key }),
+            );
+            run_spec.context_dirty = true;
+            touched = true;
+        }
 
         append_cycle_window_event(
             repo,
@@ -1123,6 +1219,9 @@ async fn process_trade_flow_trigger_market_price_timers(
                 "token_id": node_spec.token_id,
                 "market_slug": node_spec.market_slug,
                 "builder_order_id": builder_order_id,
+                "parent_builder_order_id": parent_order.id,
+                "source_trade_id": parent_order.trade_id,
+                "current_parent_qty": current_parent_qty,
                 "window_end_at": target.window_end_at.to_rfc3339(),
                 "idempotency_key": idempotency_key,
                 "enqueued": enqueued_ok,
@@ -1131,13 +1230,25 @@ async fn process_trade_flow_trigger_market_price_timers(
         .await;
 
         if let Ok(Some(step_id)) = enqueued {
+            repo.append_trade_builder_order_event(
+                parent_order.id,
+                "window_end_auto_sell_enqueued",
+                &json!({
+                    "node_key": node_spec.node_key,
+                    "step_id": step_id,
+                    "window_end_at": target.window_end_at.to_rfc3339(),
+                    "source_trade_id": parent_order.trade_id,
+                    "current_parent_qty": current_parent_qty,
+                }),
+            )
+            .await?;
             info!(
                 run_id,
                 flow_run_id = run_spec.run_id,
                 step_id,
                 node_key = %node_spec.node_key,
                 token_id = %node_spec.token_id,
-                builder_order_id,
+                builder_order_id = parent_order.id,
                 "WINDOW_END_AUTO_SELL_ENQUEUED"
             );
         }

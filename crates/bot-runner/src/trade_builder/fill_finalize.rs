@@ -164,6 +164,233 @@ async fn maybe_schedule_trade_builder_stop_loss_reentry(
     Ok(())
 }
 
+async fn maybe_schedule_trade_builder_time_exit_rules(
+    repo: &PostgresRepository,
+    parent_order: &TradeBuilderOrder,
+    rules: &[TradeBuilderTimeExitRule],
+) -> Result<()> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+
+    let Some(run_id) = parent_order.origin_flow_run_id else {
+        repo.append_trade_builder_order_event(
+            parent_order.id,
+            "time_exit_schedule_skipped",
+            &json!({
+                "reason": "missing_origin_flow_run",
+                "rules": rules,
+            }),
+        )
+        .await?;
+        return Ok(());
+    };
+    let Some(node_key) = parent_order
+        .origin_flow_node_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        repo.append_trade_builder_order_event(
+            parent_order.id,
+            "time_exit_schedule_skipped",
+            &json!({
+                "reason": "missing_origin_flow_node_key",
+                "flow_run_id": run_id,
+                "rules": rules,
+            }),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    for (rule_index, rule) in rules.iter().enumerate() {
+        let available_at = Utc::now() + ChronoDuration::minutes(rule.elapsed_minutes as i64);
+        let idempotency_key = format!("time_exit:{run_id}:{}:{rule_index}", parent_order.id);
+        let input = json!({
+            "internalMode": "time_exit",
+            "parentBuilderOrderId": parent_order.id,
+            "sourceTradeId": parent_order.trade_id,
+            "marketSlug": parent_order.market_slug,
+            "tokenId": parent_order.token_id,
+            "outcomeLabel": parent_order.outcome_label,
+            "remainingPct": rule.remaining_pct,
+            "elapsedMinutes": rule.elapsed_minutes,
+            "ruleIndex": rule_index,
+        });
+        let enqueued = repo
+            .enqueue_trade_flow_step(
+                run_id,
+                node_key,
+                "action.place_order",
+                1,
+                Some(&input),
+                available_at,
+                None,
+                Some(&idempotency_key),
+            )
+            .await?;
+        schedule_enqueued_flow_process_notify(enqueued, available_at);
+        repo.append_trade_builder_order_event(
+            parent_order.id,
+            if enqueued.is_some() {
+                "time_exit_scheduled"
+            } else {
+                "time_exit_duplicate_ignored"
+            },
+            &json!({
+                "flow_run_id": run_id,
+                "node_key": node_key,
+                "rule_index": rule_index,
+                "elapsed_minutes": rule.elapsed_minutes,
+                "remaining_pct": rule.remaining_pct,
+                "available_at": available_at.to_rfc3339(),
+                "idempotency_key": idempotency_key,
+                "step_enqueued": enqueued.is_some(),
+            }),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn create_trade_builder_price_exit_child_order(
+    repo: &PostgresRepository,
+    ws: &ClobWsClient,
+    parent_order: &TradeBuilderOrder,
+    canonical_entry_qty: f64,
+    execution_price: f64,
+    family: &str,
+    rule_index: Option<usize>,
+    rule: &TradeBuilderPriceExitRule,
+    ladder_metadata: Option<(&str, usize, f64)>,
+) -> Result<Option<i64>> {
+    let Some(child_sizing) = trade_builder_ladder_child_qty(canonical_entry_qty, rule.size_pct) else {
+        return Ok(None);
+    };
+    let child_size_usdc = (child_sizing.target_qty * execution_price).max(0.0);
+    let exit_mode = if ladder_metadata.is_some() {
+        TRADE_BUILDER_EXIT_MODE_STAGED
+    } else {
+        TRADE_BUILDER_EXIT_MODE_HARD
+    };
+    let sibling_policy = if ladder_metadata.is_some() {
+        TRADE_BUILDER_EXIT_SIBLING_POLICY_RESIZE_REMAINING
+    } else {
+        TRADE_BUILDER_EXIT_SIBLING_POLICY_CANCEL_ALL
+    };
+    let (trigger_condition, notify_on_hit) = if family == TRADE_BUILDER_EXIT_LADDER_KIND_TP {
+        (Some("cross_above"), parent_order.notify_on_tp_hit)
+    } else {
+        (Some("cross_below"), parent_order.notify_on_sl_hit)
+    };
+    let child_id = repo
+        .create_trade_builder_order_with_exit_ladders(
+            parent_order.trade_id,
+            "conditional",
+            "armed",
+            &parent_order.market_slug,
+            &parent_order.token_id,
+            &parent_order.outcome_label,
+            "sell",
+            "market",
+            trigger_condition,
+            Some(trade_builder_child_rule_price(rule)),
+            None,
+            None,
+            None,
+            TRADE_BUILDER_SIZE_BASIS_SHARES,
+            child_size_usdc,
+            Some(child_sizing.target_qty),
+            Some(child_sizing.remaining_qty),
+            parent_order.min_price_distance_cent,
+            parent_order.expires_at,
+            None,
+            None,
+            1,
+            Some(parent_order.id),
+            false,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            parent_order.fee_rate_bps,
+            None,
+            None,
+            None,
+            if family == TRADE_BUILDER_EXIT_LADDER_KIND_SL {
+                parent_order.sl_trigger_price_mode.as_deref()
+            } else {
+                None
+            },
+            false,
+            0,
+            None,
+            notify_on_hit,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            ladder_metadata.map(|(ladder_family, _, _)| ladder_family),
+            ladder_metadata.map(|(_, index, _)| index as i32),
+            ladder_metadata.map(|(_, _, size_pct)| size_pct),
+        )
+        .await?;
+
+    if let Some(mut child_order) = repo.get_trade_builder_order(child_id).await? {
+        if let Some(snapshot) = ws.get_market_snapshot(&child_order.token_id).await {
+            if let Some(initial_last_seen_price) =
+                trade_builder_last_seen_price_from_market_snapshot(&child_order, &snapshot)
+            {
+                repo.set_trade_builder_last_seen_price(child_id, initial_last_seen_price)
+                    .await?;
+                child_order.last_seen_price = Some(initial_last_seen_price);
+            }
+        }
+        insert_into_armed_builder_order_cache(child_order).await;
+    }
+
+    repo.append_trade_builder_order_event(
+        parent_order.id,
+        if family == TRADE_BUILDER_EXIT_LADDER_KIND_TP {
+            "tp_sell_created"
+        } else {
+            "sl_sell_created"
+        },
+        &json!({
+            "child_order_id": child_id,
+            "initial_status": "armed",
+            "family": family,
+            "exit_mode": exit_mode,
+            "sibling_policy": sibling_policy,
+            "rule_index": rule_index,
+            "trigger_price": trade_builder_child_rule_price(rule),
+            "size_basis": TRADE_BUILDER_SIZE_BASIS_SHARES,
+            "size_pct": rule.size_pct,
+            "target_qty": child_sizing.target_qty,
+            "canonical_entry_qty": canonical_entry_qty,
+            "execution_price": execution_price,
+            "sl_trigger_price_mode": if family == TRADE_BUILDER_EXIT_LADDER_KIND_SL {
+                parent_order.sl_trigger_price_mode.as_deref()
+            } else {
+                None
+            },
+        }),
+    )
+    .await?;
+
+    Ok(Some(child_id))
+}
+
 async fn finalize_builder_fill(
     repo: &PostgresRepository,
     ws: &ClobWsClient,
@@ -255,6 +482,14 @@ async fn finalize_builder_fill(
                 _ => {}
             }
         }
+        let _ = ensure_trade_builder_parent_position_from_parent_fill(
+            repo,
+            order,
+            canonical_entry_qty,
+            execution_price,
+            actual_fill_qty_source,
+        )
+        .await?;
     }
 
     let next_trigger_count = order.triggers_fired + 1;
@@ -290,19 +525,65 @@ async fn finalize_builder_fill(
         send_trade_builder_notification(repo, order, notification_type, &message).await;
     }
 
+    let flow_created_payload = repo.load_trade_builder_order_flow_created_payload(order.id).await?;
+    let is_window_end_auto_sell = flow_created_payload
+        .as_ref()
+        .and_then(|payload| payload.get("internal_mode"))
+        .and_then(Value::as_str)
+        == Some("window_end_auto_sell");
     if should_request_trade_builder_oco_cancel(order, "filled") {
-        request_trade_builder_oco_cancel_for_siblings(repo, order, "child_exit_filled").await?;
+        let canceled_sibling_ids =
+            request_trade_builder_oco_cancel_for_siblings(repo, order, "child_exit_filled").await?;
+        if is_window_end_auto_sell && !canceled_sibling_ids.is_empty() {
+            if let Some(parent_order_id) = order.parent_order_id {
+                repo.append_trade_builder_order_event(
+                    parent_order_id,
+                    "window_end_auto_sell_child_exits_canceled",
+                    &json!({
+                        "window_end_builder_order_id": order.id,
+                        "sibling_order_ids": canceled_sibling_ids,
+                    }),
+                )
+                .await?;
+            }
+        }
     }
-    if order.side == "sell"
-        && order.trigger_condition.as_deref() == Some("cross_below")
-        && order.parent_order_id.is_some()
-    {
-        if let Some(parent_order) = repo
-            .get_trade_builder_order(order.parent_order_id.unwrap_or_default())
+    let parent_order = if order.parent_order_id.is_some() {
+        repo.get_trade_builder_order(order.parent_order_id.unwrap_or_default())
             .await?
+    } else {
+        None
+    };
+    if let Some(parent_order) = parent_order.as_ref() {
+        if trade_builder_is_child_exit_sell(order) {
+            let applied_fill_qty = persisted_fill_qty.or(Some(canonical_entry_qty));
+            let _ = apply_trade_builder_parent_position_child_fill(
+                repo,
+                parent_order,
+                applied_fill_qty,
+                execution_price,
+                actual_fill_qty_source,
+            )
+            .await?;
+        }
+        if trade_builder_order_has_exit_ladders(parent_order)
+            && !should_request_trade_builder_oco_cancel(order, "filled")
         {
             if let Err(err) =
-                maybe_schedule_trade_builder_stop_loss_reentry(repo, &parent_order, order).await
+                trade_builder_sync_parent_exit_children(repo, parent_order, "child_exit_filled")
+                    .await
+            {
+                warn!(
+                    builder_order_id = order.id,
+                    parent_builder_order_id = parent_order.id,
+                    error = %err,
+                    "TRADE_BUILDER_LADDER_SYNC_FAILED"
+                );
+            }
+        }
+        if order.side == "sell" && order.trigger_condition.as_deref() == Some("cross_below") {
+            if let Err(err) =
+                maybe_schedule_trade_builder_stop_loss_reentry(repo, parent_order, order).await
             {
                 warn!(
                     builder_order_id = order.id,
@@ -315,184 +596,102 @@ async fn finalize_builder_fill(
     }
 
     let mut stream_union_needs_refresh = false;
-    if order.side == "buy" && order.tp_enabled {
-        if let Some(tp_price) = order.tp_price {
-            let tp_sizing = trade_builder_exit_child_sizing(canonical_entry_qty, execution_price);
-            let tp_sell_id = repo
-                .create_trade_builder_order(
-                    order.trade_id,
-                    "conditional",
-                    "armed",
-                    &order.market_slug,
-                    &order.token_id,
-                    &order.outcome_label,
-                    "sell",
-                    "market",
-                    Some("cross_above"),
-                    Some(tp_price),
-                    None,
-                    None,
-                    None,
-                    TRADE_BUILDER_SIZE_BASIS_SHARES,
-                    tp_sizing.size_usdc,
-                    Some(tp_sizing.target_qty),
-                    Some(tp_sizing.remaining_qty),
-                    order.min_price_distance_cent,
-                    order.expires_at,
-                    None,
-                    None,
-                    1,
-                    Some(order.id),
-                    false,
-                    None,
-                    false,
-                    None,
-                    order.fee_rate_bps,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    0,
-                    None,
-                    order.notify_on_tp_hit,
-                    false,
-                    false,
-                    false,
-                    false,
-                    false,
-                    false,
-                    None,
-                    false,
-                    false,
-                    false,
-                )
-                .await?;
-            if let Some(mut child_order) = repo.get_trade_builder_order(tp_sell_id).await? {
-                if let Some(snapshot) = ws.get_market_snapshot(&child_order.token_id).await {
-                    if let Some(initial_last_seen_price) =
-                        trade_builder_last_seen_price_from_market_snapshot(&child_order, &snapshot)
-                    {
-                        repo.set_trade_builder_last_seen_price(tp_sell_id, initial_last_seen_price)
-                            .await?;
-                        child_order.last_seen_price = Some(initial_last_seen_price);
-                    }
-                }
-                insert_into_armed_builder_order_cache(child_order).await;
+    if order.side == "buy" {
+        let hard_tp_rule = trade_builder_hard_tp_rule(order);
+        let hard_sl_rule = trade_builder_hard_sl_rule(order);
+        let tp_rules = trade_builder_normalized_tp_rules(order);
+        let sl_rules = trade_builder_normalized_sl_rules(order);
+        let time_exit_rules = trade_builder_normalized_time_exit_rules(order);
+
+        if let Some(rule) = hard_tp_rule.as_ref() {
+            if create_trade_builder_price_exit_child_order(
+                repo,
+                ws,
+                order,
+                canonical_entry_qty,
+                execution_price,
+                TRADE_BUILDER_EXIT_LADDER_KIND_TP,
+                None,
+                rule,
+                None,
+            )
+            .await?
+            .is_some()
+            {
                 stream_union_needs_refresh = true;
             }
-            repo.append_trade_builder_order_event(
-                order.id,
-                "tp_sell_created",
-                &json!({
-                    "child_order_id": tp_sell_id,
-                    "initial_status": "armed",
-                    "tp_price": tp_price,
-                    "tp_execution_mode": "market_ioc",
-                    "size_basis": TRADE_BUILDER_SIZE_BASIS_SHARES,
-                    "target_qty": tp_sizing.target_qty,
-                    "canonical_entry_qty": canonical_entry_qty,
-                    "actual_fill_qty": actual_fill_qty,
-                    "execution_price": execution_price,
-                }),
-            )
-            .await?;
-            info!(
-                builder_order_id = order.id,
-                tp_sell_order_id = tp_sell_id,
-                tp_price,
-                "TRADE_BUILDER_TP_SELL_CREATED"
-            );
         }
-    }
-    if order.side == "buy" && order.sl_enabled {
-        if let Some(sl_price) = order.sl_price {
-            let sl_sizing = trade_builder_exit_child_sizing(canonical_entry_qty, execution_price);
-            let sl_sell_id = repo
-                .create_trade_builder_order(
-                    order.trade_id,
-                    "conditional",
-                    "armed",
-                    &order.market_slug,
-                    &order.token_id,
-                    &order.outcome_label,
-                    "sell",
-                    "market",
-                    Some("cross_below"),
-                    Some(sl_price),
-                    None,
-                    None,
-                    None,
-                    TRADE_BUILDER_SIZE_BASIS_SHARES,
-                    sl_sizing.size_usdc,
-                    Some(sl_sizing.target_qty),
-                    Some(sl_sizing.remaining_qty),
-                    order.min_price_distance_cent,
-                    order.expires_at,
-                    None,
-                    None,
-                    1,
-                    Some(order.id),
-                    false,
-                    None,
-                    false,
-                    None,
-                    order.fee_rate_bps,
-                    None,
-                    None,
-                    None,
-                    order.sl_trigger_price_mode.as_deref(),
-                    false,
-                    0,
-                    None,
-                    order.notify_on_sl_hit,
-                    false,
-                    false,
-                    false,
-                    false,
-                    false,
-                    false,
-                    None,
-                    false,
-                    false,
-                    false,
-                )
-                .await?;
-            if let Some(mut child_order) = repo.get_trade_builder_order(sl_sell_id).await? {
-                if let Some(snapshot) = ws.get_market_snapshot(&child_order.token_id).await {
-                    if let Some(initial_last_seen_price) =
-                        trade_builder_last_seen_price_from_market_snapshot(&child_order, &snapshot)
-                    {
-                        repo.set_trade_builder_last_seen_price(sl_sell_id, initial_last_seen_price)
-                            .await?;
-                        child_order.last_seen_price = Some(initial_last_seen_price);
-                    }
-                }
-                insert_into_armed_builder_order_cache(child_order).await;
+
+        for (rule_index, rule) in tp_rules.iter().enumerate() {
+            if create_trade_builder_price_exit_child_order(
+                repo,
+                ws,
+                order,
+                canonical_entry_qty,
+                execution_price,
+                TRADE_BUILDER_EXIT_LADDER_KIND_TP,
+                Some(rule_index),
+                rule,
+                Some((
+                    TRADE_BUILDER_EXIT_LADDER_KIND_TP,
+                    rule_index,
+                    rule.size_pct,
+                )),
+            )
+            .await?
+            .is_some()
+            {
                 stream_union_needs_refresh = true;
             }
-            repo.append_trade_builder_order_event(
-                order.id,
-                "sl_sell_created",
-                &json!({
-                    "child_order_id": sl_sell_id,
-                    "initial_status": "armed",
-                    "sl_price": sl_price,
-                    "sl_execution_mode": "market_ioc",
-                    "size_basis": TRADE_BUILDER_SIZE_BASIS_SHARES,
-                    "target_qty": sl_sizing.target_qty,
-                    "canonical_entry_qty": canonical_entry_qty,
-                    "actual_fill_qty": actual_fill_qty,
-                    "execution_price": execution_price,
-                    "sl_trigger_price_mode": order.sl_trigger_price_mode,
-                }),
+        }
+
+        if let Some(rule) = hard_sl_rule.as_ref() {
+            if create_trade_builder_price_exit_child_order(
+                repo,
+                ws,
+                order,
+                canonical_entry_qty,
+                execution_price,
+                TRADE_BUILDER_EXIT_LADDER_KIND_SL,
+                None,
+                rule,
+                None,
             )
-            .await?;
-            info!(
+            .await?
+            .is_some()
+            {
+                stream_union_needs_refresh = true;
+            }
+        }
+
+        for (rule_index, rule) in sl_rules.iter().enumerate() {
+            if create_trade_builder_price_exit_child_order(
+                repo,
+                ws,
+                order,
+                canonical_entry_qty,
+                execution_price,
+                TRADE_BUILDER_EXIT_LADDER_KIND_SL,
+                Some(rule_index),
+                rule,
+                Some((
+                    TRADE_BUILDER_EXIT_LADDER_KIND_SL,
+                    rule_index,
+                    rule.size_pct,
+                )),
+            )
+            .await?
+            .is_some()
+            {
+                stream_union_needs_refresh = true;
+            }
+        }
+
+        if let Err(err) = maybe_schedule_trade_builder_time_exit_rules(repo, order, &time_exit_rules).await {
+            warn!(
                 builder_order_id = order.id,
-                sl_sell_order_id = sl_sell_id,
-                sl_price,
-                "TRADE_BUILDER_SL_SELL_CREATED"
+                error = %err,
+                "TRADE_BUILDER_TIME_EXIT_SCHEDULE_FAILED"
             );
         }
     }

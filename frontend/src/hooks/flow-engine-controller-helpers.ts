@@ -1,6 +1,10 @@
 'use client';
 
-import { formatClientRequestError } from '@/lib/http-client';
+import { formatClientRequestError, hasClientRequestErrorCode } from '@/lib/http-client';
+import {
+  FLOW_DEFINITION_BUSY_CODE,
+  FLOW_DEFINITION_BUSY_MESSAGE,
+} from '@/lib/queries/trade-flow/mutation-errors';
 import {
   buildContextFromForm,
   type ContextFormState,
@@ -51,7 +55,14 @@ export function createTemplateGraph(
 }
 
 export function formatFlowOperationError(error: unknown, fallback: string): string {
+  if (hasClientRequestErrorCode(error, FLOW_DEFINITION_BUSY_CODE)) {
+    return FLOW_DEFINITION_BUSY_MESSAGE;
+  }
   return formatClientRequestError(error, fallback);
+}
+
+export function isFlowDefinitionBusyMessage(message: string | null | undefined): boolean {
+  return (message ?? '').trim().startsWith(FLOW_DEFINITION_BUSY_MESSAGE);
 }
 
 export function getTemplateCreatedMessage(kind: TemplateKind): string {

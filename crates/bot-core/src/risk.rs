@@ -169,4 +169,43 @@ mod tests {
         );
         assert!(matches!(res.decision, RiskDecision::Halt));
     }
+
+    #[test]
+    fn blocks_when_market_notional_limit_is_breached() {
+        let res = evaluate_risk(
+            &limits(),
+            &RiskInput {
+                proposed_notional_usdc: 11.0,
+                open_orders: 1,
+                stale_data_ms: 100,
+                daily_realized_pnl_usdc: 0.0,
+                consecutive_losses: 0,
+                manual_kill_switch_active: false,
+            },
+        );
+
+        assert!(matches!(res.decision, RiskDecision::Block));
+        assert_eq!(res.reason, "market_notional_limit_breached");
+    }
+
+    #[test]
+    fn allows_when_market_notional_limit_is_raised() {
+        let mut relaxed_limits = limits();
+        relaxed_limits.max_notional_per_market_usdc = 100.0;
+
+        let res = evaluate_risk(
+            &relaxed_limits,
+            &RiskInput {
+                proposed_notional_usdc: 30.0,
+                open_orders: 1,
+                stale_data_ms: 100,
+                daily_realized_pnl_usdc: 0.0,
+                consecutive_losses: 0,
+                manual_kill_switch_active: false,
+            },
+        );
+
+        assert!(matches!(res.decision, RiskDecision::Allow));
+        assert_eq!(res.reason, "allow");
+    }
 }

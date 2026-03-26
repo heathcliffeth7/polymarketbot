@@ -6,6 +6,8 @@ interface ClientRequestErrorOptions {
   kind: ClientRequestErrorKind;
   endpoint: string;
   status?: number;
+  apiCode?: string;
+  retryable?: boolean;
   cause?: unknown;
 }
 
@@ -13,6 +15,8 @@ export class ClientRequestError extends Error {
   readonly kind: ClientRequestErrorKind;
   readonly endpoint: string;
   readonly status?: number;
+  readonly apiCode?: string;
+  readonly retryable?: boolean;
   readonly cause?: unknown;
 
   constructor(message: string, options: ClientRequestErrorOptions) {
@@ -21,6 +25,8 @@ export class ClientRequestError extends Error {
     this.kind = options.kind;
     this.endpoint = options.endpoint;
     this.status = options.status;
+    this.apiCode = options.apiCode;
+    this.retryable = options.retryable;
     this.cause = options.cause;
   }
 }
@@ -80,13 +86,26 @@ function shouldRetry(error: ClientRequestError, attempt: number, retries: number
   return error.kind === 'network' || error.kind === 'timeout';
 }
 
-async function parseHttpErrorMessage(res: Response): Promise<string> {
+interface ParsedHttpError {
+  message: string;
+  apiCode?: string;
+  retryable?: boolean;
+}
+
+async function parseHttpErrorMessage(res: Response): Promise<ParsedHttpError> {
   const data = await res.json().catch(() => null);
   if (data && typeof data === 'object') {
-    const err = (data as { error?: unknown }).error;
-    if (typeof err === 'string' && err.trim().length > 0) return err.trim();
+    const body = data as { code?: unknown; error?: unknown; retryable?: unknown };
+    const err = body.error;
+    const message =
+      typeof err === 'string' && err.trim().length > 0 ? err.trim() : `HTTP ${res.status}`;
+    return {
+      message,
+      apiCode: typeof body.code === 'string' && body.code.trim().length > 0 ? body.code.trim() : undefined,
+      retryable: typeof body.retryable === 'boolean' ? body.retryable : undefined,
+    };
   }
-  return `HTTP ${res.status}`;
+  return { message: `HTTP ${res.status}` };
 }
 
 export async function requestJson<T>(
@@ -106,11 +125,13 @@ export async function requestJson<T>(
       clearTimeout(timeoutId);
 
       if (!res.ok) {
-        const message = await parseHttpErrorMessage(res);
-        throw new ClientRequestError(message, {
+        const parsedError = await parseHttpErrorMessage(res);
+        throw new ClientRequestError(parsedError.message, {
           kind: 'http',
           endpoint,
           status: res.status,
+          apiCode: parsedError.apiCode,
+          retryable: parsedError.retryable,
         });
       }
 
@@ -137,6 +158,9 @@ export function formatClientRequestError(error: unknown, fallback: string): stri
       return `${fallback} Istek zaman asimina ugradi. Endpoint: ${error.endpoint}`;
     }
     if (error.kind === 'http') {
+      if (error.status === 423) {
+        return error.message;
+      }
       if (error.status != null) return `${error.message} (HTTP ${error.status})`;
       return error.message;
     }
@@ -146,3 +170,6 @@ export function formatClientRequestError(error: unknown, fallback: string): stri
   return fallback;
 }
 
+export function hasClientRequestErrorCode(error: unknown, code: string): boolean {
+  return error instanceof ClientRequestError && error.apiCode === code;
+}

@@ -426,6 +426,78 @@ fn fast_runtime_helpers_split_trigger_and_execution_prices() {
 }
 
 #[test]
+fn immediate_buy_notional_execution_price_prefers_best_ask() {
+    let mut buy_order = test_builder_order("buy", None);
+    buy_order.kind = "immediate".to_string();
+    buy_order.trigger_condition = None;
+    buy_order.trigger_price = Some(0.26);
+    buy_order.size_usdc = 10.0;
+    buy_order.min_price_distance_cent = 1.0;
+
+    let resolution =
+        trade_builder_immediate_buy_notional_execution_price(&buy_order, 0.81, Some(0.79))
+            .expect("live buy execution price");
+    let qty = calc_level_size(buy_order.size_usdc, resolution.price);
+
+    assert_eq!(resolution.price, 0.79);
+    assert_eq!(resolution.source, "best_ask");
+    assert_eq!(resolution.trigger_reference_price, Some(0.26));
+    assert_eq!(qty, 12.66);
+}
+
+#[test]
+fn conditional_buy_submit_price_keeps_runtime_bump_behavior() {
+    let mut buy_order = test_builder_order("buy", None);
+    buy_order.kind = "conditional".to_string();
+    buy_order.trigger_condition = Some("cross_above".to_string());
+    buy_order.trigger_price = Some(0.26);
+    buy_order.size_usdc = 10.0;
+    buy_order.min_price_distance_cent = 1.0;
+
+    let desired_price = trade_builder_submit_desired_price(&buy_order, 0.81);
+
+    assert!((desired_price - 0.82).abs() < 0.000001);
+}
+
+#[test]
+fn immediate_buy_notional_execution_price_falls_back_to_current_price() {
+    let mut buy_order = test_builder_order("buy", None);
+    buy_order.kind = "immediate".to_string();
+    buy_order.trigger_condition = None;
+    buy_order.trigger_price = Some(0.31);
+    buy_order.size_usdc = 10.0;
+    buy_order.remaining_size = Some(10.0);
+    buy_order.working_price = Some(0.31);
+
+    let resolution = trade_builder_immediate_buy_notional_execution_price(&buy_order, 0.98, None)
+        .expect("live buy execution price");
+    let qty = calc_level_size(
+        buy_order.remaining_size.unwrap_or_default(),
+        resolution.price,
+    );
+
+    assert!((resolution.price - 0.98).abs() < 0.000001);
+    assert_eq!(resolution.source, "current_price_fallback");
+    assert_eq!(resolution.trigger_reference_price, Some(0.31));
+    assert!((qty - 10.20).abs() < 0.000001);
+}
+
+#[test]
+fn immediate_buy_execution_price_resolution_ignores_share_basis_orders() {
+    let mut buy_order = test_builder_order("buy", None);
+    buy_order.kind = "immediate".to_string();
+    buy_order.trigger_condition = None;
+    buy_order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    buy_order.target_qty = Some(5.0);
+    buy_order.remaining_qty = Some(5.0);
+
+    assert!(
+        trade_builder_immediate_buy_notional_execution_price(&buy_order, 0.81, Some(0.79))
+            .is_none()
+    );
+}
+
+#[test]
 fn ws_fast_path_scope_only_includes_tp_sl_child_orders() {
     let mut tp_child = test_builder_order("sell", Some(9));
     tp_child.status = "armed".to_string();
@@ -660,6 +732,78 @@ fn composite_safe_matches_legacy_composite_guard_behavior() {
 }
 
 #[test]
+fn preempted_stop_loss_is_ready_for_inline_submit_after_bid_confirmation() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.34,
+        source: "ws_fast_book_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.34),
+        best_ask: Some(0.36),
+        last_trade_price: Some(0.34),
+    };
+
+    let mut order = test_builder_order("sell", Some(9));
+    order.status = "armed".to_string();
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.40);
+    order.last_seen_price = Some(0.61);
+    order.sl_trigger_price_mode = Some("composite_safe".to_string());
+
+    let decision = evaluate_trade_builder_preempted_stop_loss(&order, &runtime_price)
+        .expect("stop loss should be ready once bid confirms below the trigger");
+
+    assert_eq!(decision.current_price, 0.34);
+    assert!(decision.ready_for_inline_submit);
+}
+
+#[test]
+fn preempted_stop_loss_waits_for_composite_bid_confirmation() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.34,
+        source: "ws_fast_book_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.55),
+        best_ask: Some(0.57),
+        last_trade_price: Some(0.34),
+    };
+
+    let mut order = test_builder_order("sell", Some(9));
+    order.status = "armed".to_string();
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.40);
+    order.last_seen_price = Some(0.61);
+    order.sl_trigger_price_mode = Some("composite_safe".to_string());
+
+    assert!(evaluate_trade_builder_preempted_stop_loss(&order, &runtime_price).is_none());
+}
+
+#[test]
+fn preempted_stop_loss_skips_inline_submit_when_live_order_exists() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.34,
+        source: "ws_fast_book_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.34),
+        best_ask: Some(0.36),
+        last_trade_price: Some(0.34),
+    };
+
+    let mut order = test_builder_order("sell", Some(9));
+    order.status = "armed".to_string();
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.40);
+    order.last_seen_price = Some(0.61);
+    order.sl_trigger_price_mode = Some("composite_safe".to_string());
+    order.active_exchange_order_id = Some("live-sl-order".to_string());
+
+    let decision = evaluate_trade_builder_preempted_stop_loss(&order, &runtime_price)
+        .expect("stop loss should still trigger while a live exchange order exists");
+
+    assert_eq!(decision.current_price, 0.34);
+    assert!(!decision.ready_for_inline_submit);
+}
+
+#[test]
 fn composite_fast_does_not_wait_for_bid_confirmation() {
     let runtime_price = TradeBuilderRuntimePrice {
         price: 0.60,
@@ -762,6 +906,166 @@ fn fast_runtime_scope_excludes_parentless_conditional_sell() {
     assert!(trade_builder_uses_fast_runtime_pricing(&child_sell));
     assert!(trade_builder_uses_fast_runtime_pricing(&entry_buy));
     assert!(!trade_builder_uses_fast_runtime_pricing(&workflow_sell));
+}
+
+#[test]
+fn parent_position_seed_qty_prefers_actual_visible_inventory() {
+    let seed = TradeBuilderParentPositionSeed {
+        actual_visible_qty: Some(2.846),
+        expected_visible_qty: Some(2.91),
+        reference_price: Some(0.68),
+        qty_source: Some("available_token_qty".to_string()),
+    };
+
+    let (qty, source) = trade_builder_parent_position_seed_qty(Some(&seed), 2.94);
+
+    assert_eq!(qty, 2.85);
+    assert_eq!(source, "inventory_actual_visible_qty");
+}
+
+#[test]
+fn parent_position_seed_qty_falls_back_to_expected_visible_inventory() {
+    let seed = TradeBuilderParentPositionSeed {
+        actual_visible_qty: None,
+        expected_visible_qty: Some(2.8888),
+        reference_price: Some(0.68),
+        qty_source: Some("available_token_qty".to_string()),
+    };
+
+    let (qty, source) = trade_builder_parent_position_seed_qty(Some(&seed), 2.94);
+
+    assert_eq!(qty, 2.89);
+    assert_eq!(source, "inventory_expected_visible_qty");
+}
+
+#[test]
+fn parent_position_seed_qty_falls_back_to_canonical_fill_qty() {
+    let (qty, source) = trade_builder_parent_position_seed_qty(None, 2.944);
+
+    assert_eq!(qty, 2.94);
+    assert_eq!(source, "canonical_entry_qty");
+}
+
+#[test]
+fn parallel_exit_batch_selects_all_eligible_tp_levels() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.88,
+        source: "ws_fast_book_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.87),
+        best_ask: Some(0.89),
+        last_trade_price: Some(0.88),
+    };
+
+    let mut first_tp = test_builder_order("sell", Some(9));
+    first_tp.id = 11;
+    first_tp.status = "armed".to_string();
+    first_tp.trigger_condition = Some("cross_above".to_string());
+    first_tp.trigger_price = Some(0.80);
+    first_tp.last_seen_price = Some(0.70);
+    first_tp.exit_ladder_kind = Some("tp".to_string());
+    first_tp.exit_ladder_index = Some(0);
+
+    let mut second_tp = first_tp.clone();
+    second_tp.id = 12;
+    second_tp.trigger_price = Some(0.84);
+    second_tp.last_seen_price = Some(0.79);
+    second_tp.exit_ladder_index = Some(1);
+
+    let selection =
+        trade_builder_parallel_exit_batch_selection(&[first_tp, second_tp], &runtime_price);
+
+    assert_eq!(selection.stop_loss_order_ids, Vec::<i64>::new());
+    assert_eq!(selection.take_profit_order_ids, vec![11, 12]);
+    assert_eq!(selection.selected_order_ids, vec![11, 12]);
+    assert_eq!(selection.deferred_order_ids, Vec::<i64>::new());
+}
+
+#[test]
+fn parallel_exit_batch_selects_all_eligible_sl_levels() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.31,
+        source: "ws_fast_book_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.31),
+        best_ask: Some(0.33),
+        last_trade_price: Some(0.31),
+    };
+
+    let mut first_sl = test_builder_order("sell", Some(9));
+    first_sl.id = 21;
+    first_sl.status = "armed".to_string();
+    first_sl.trigger_condition = Some("cross_below".to_string());
+    first_sl.trigger_price = Some(0.40);
+    first_sl.last_seen_price = Some(0.61);
+    first_sl.exit_ladder_kind = Some("sl".to_string());
+    first_sl.exit_ladder_index = Some(0);
+    first_sl.sl_trigger_price_mode = Some("composite_safe".to_string());
+
+    let mut second_sl = first_sl.clone();
+    second_sl.id = 22;
+    second_sl.trigger_price = Some(0.35);
+    second_sl.last_seen_price = Some(0.50);
+    second_sl.exit_ladder_index = Some(1);
+
+    let selection =
+        trade_builder_parallel_exit_batch_selection(&[first_sl, second_sl], &runtime_price);
+
+    assert_eq!(selection.stop_loss_order_ids, vec![21, 22]);
+    assert_eq!(selection.take_profit_order_ids, Vec::<i64>::new());
+    assert_eq!(selection.selected_order_ids, vec![21, 22]);
+    assert_eq!(selection.deferred_order_ids, Vec::<i64>::new());
+}
+
+#[test]
+fn parallel_exit_batch_prefers_stop_loss_when_tp_and_sl_are_both_eligible() {
+    let runtime_price = TradeBuilderRuntimePrice {
+        price: 0.35,
+        source: "ws_fast_book_last_trade",
+        runtime_warning: None,
+        best_bid: Some(0.35),
+        best_ask: Some(0.37),
+        last_trade_price: Some(0.35),
+    };
+
+    let mut tp = test_builder_order("sell", Some(9));
+    tp.id = 31;
+    tp.status = "armed".to_string();
+    tp.trigger_condition = Some("cross_above".to_string());
+    tp.trigger_price = Some(0.30);
+    tp.last_seen_price = Some(0.20);
+    tp.exit_ladder_kind = Some("tp".to_string());
+    tp.exit_ladder_index = Some(0);
+
+    let mut sl = test_builder_order("sell", Some(9));
+    sl.id = 32;
+    sl.status = "armed".to_string();
+    sl.trigger_condition = Some("cross_below".to_string());
+    sl.trigger_price = Some(0.40);
+    sl.last_seen_price = Some(0.60);
+    sl.exit_ladder_kind = Some("sl".to_string());
+    sl.exit_ladder_index = Some(0);
+    sl.sl_trigger_price_mode = Some("composite_safe".to_string());
+
+    let selection = trade_builder_parallel_exit_batch_selection(&[tp, sl], &runtime_price);
+
+    assert_eq!(selection.stop_loss_order_ids, vec![32]);
+    assert_eq!(selection.take_profit_order_ids, vec![31]);
+    assert_eq!(selection.selected_order_ids, vec![32]);
+    assert_eq!(selection.deferred_order_ids, vec![31]);
+}
+
+#[test]
+fn window_end_auto_sell_sizing_uses_full_parent_qty() {
+    let sizing = action_place_order_window_end_auto_sell_sizing_from_parent_qty(0.774, 0.26)
+        .expect("window-end sizing");
+
+    assert_eq!(sizing.size_basis, TRADE_BUILDER_SIZE_BASIS_SHARES);
+    assert_eq!(sizing.target_qty, Some(0.77));
+    assert_eq!(sizing.remaining_qty, Some(0.77));
+    assert_eq!(sizing.resolved_size_mode, "pct");
+    assert_eq!(sizing.resolved_size_pct, Some(100.0));
+    assert!((sizing.size_usdc - 0.2002).abs() < 0.000001);
 }
 
 #[test]

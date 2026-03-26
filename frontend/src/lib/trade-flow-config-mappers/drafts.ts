@@ -1,4 +1,11 @@
-import type { ConditionDraft, DrawdownRuleRow, KeyValueDraft, OutcomeConditionRow } from './types';
+import type {
+  ConditionDraft,
+  DrawdownRuleRow,
+  ExitLadderRuleRow,
+  KeyValueDraft,
+  OutcomeConditionRow,
+  TimeExitRuleRow,
+} from './types';
 import { createId } from './utils';
 
 export function createEmptyConditionDraft(): ConditionDraft {
@@ -33,4 +40,12 @@ export function createEmptyOutcomeConditionRow(): OutcomeConditionRow {
 
 export function createEmptyDrawdownRuleRow(): DrawdownRuleRow {
   return { id: createId('dr'), direction: 'down', lossPct: '', durationValue: '' };
+}
+
+export function createEmptyExitLadderRuleRow(): ExitLadderRuleRow {
+  return { id: createId('er'), priceCent: '', sizePct: '' };
+}
+
+export function createEmptyTimeExitRuleRow(): TimeExitRuleRow {
+  return { id: createId('tr'), elapsedMinutes: '', remainingPct: '' };
 }

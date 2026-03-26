@@ -108,6 +108,7 @@ struct WsOpenPositionPriceRunSpec {
     run_id: i64,
     definition_id: i64,
     version_id: i64,
+    version_no: i32,
     context: Value,
     nodes: Vec<WsOpenPositionPriceNodeSpec>,
     context_dirty: bool,
@@ -387,6 +388,7 @@ impl UnderlyingReferenceService {
     }
 }
 
+#[allow(dead_code)]
 async fn fetch_underlying_reference_current_price(asset: &str) -> Result<f64> {
     Ok(UNDERLYING_REFERENCE_SERVICE
         .current_tick(asset)

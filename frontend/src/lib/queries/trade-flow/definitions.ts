@@ -7,6 +7,7 @@ import {
 } from '@/lib/db';
 import type {
   PaginatedResponse,
+  TradeFlowCustomRangeSnapshot,
   TradeFlowDefinition,
   TradeFlowDefinitionDetail,
   TradeFlowEvent,
@@ -15,9 +16,18 @@ import type {
   TradeFlowVersion,
 } from '@/lib/types';
 import { DEFAULT_GRAPH, type Queryable, type TradeFlowListFilters, type TradeFlowRunFilters, type CreateTradeFlowDefinitionInput, type UpdateTradeFlowDefinitionInput } from './shared';
+import {
+  collectTriggerMarketPriceCustomRangeSnapshots,
+  diffTriggerMarketPriceCustomRangeSnapshots,
+} from '@/lib/trade-flow-config-mappers/cycle-window';
 import { cancelFlowResources, recordCancellationEvents } from './cancel-resources';
 import { normalizeTradeFlowGraph } from './graph';
 import { migrateLegacyWorkflowsToFlows } from './legacy';
+import {
+  acquireTradeFlowDefinitionMutationLock,
+  isFlowDefinitionBusyError,
+  isPostgresLockTimeoutError,
+} from './mutation-errors';
 import {
   FLOW_DUPLICATE_NAME_MESSAGE,
   isTradeFlowNameUniqueViolation,
@@ -51,6 +61,52 @@ function mapVersionRow(row: Record<string, unknown>): TradeFlowVersion {
     published_at: row.published_at == null ? null : String(row.published_at),
     created_at: String(row.created_at),
   };
+}
+
+function buildVersionCustomRangeSnapshots(version: TradeFlowVersion | null): TradeFlowCustomRangeSnapshot[] {
+  if (!version) return [];
+  return collectTriggerMarketPriceCustomRangeSnapshots(version.graph_json);
+}
+
+function formatCustomRangeDiffMessage(
+  diffs: ReturnType<typeof diffTriggerMarketPriceCustomRangeSnapshots>
+): string {
+  return diffs
+    .map((diff) => {
+      const before = diff.before
+        ? `${diff.before.startSec}-${diff.before.endSec}`
+        : 'none';
+      const after = diff.after ? `${diff.after.startSec}-${diff.after.endSec}` : 'none';
+      return `${diff.nodeKey}: ${before} -> ${after}`;
+    })
+    .join(' | ');
+}
+
+function assertCustomRangeIntegrityOrThrow(
+  beforeGraph: unknown,
+  afterGraph: TradeFlowGraph,
+  phase: 'save' | 'publish'
+) {
+  const diffs = diffTriggerMarketPriceCustomRangeSnapshots(
+    collectTriggerMarketPriceCustomRangeSnapshots(beforeGraph),
+    collectTriggerMarketPriceCustomRangeSnapshots(afterGraph)
+  );
+  if (diffs.length === 0) return;
+  throw new Error(
+    `trigger.market_price custom_range mutated during ${phase}: ${formatCustomRangeDiffMessage(diffs)}`
+  );
+}
+
+async function fetchRawVersionGraphJson(
+  queryable: Queryable,
+  versionId: number
+): Promise<unknown | null> {
+  const res = await queryable.query(
+    'SELECT graph_json FROM trade_flow_versions WHERE id = $1 LIMIT 1',
+    [versionId]
+  );
+  if ((res.rowCount ?? 0) === 0) return null;
+  return (res.rows[0] as Record<string, unknown>).graph_json ?? null;
 }
 
 function mapEventRow(row: Record<string, unknown>): TradeFlowEvent {
@@ -136,6 +192,8 @@ async function fetchDefinitionDetailById(
     definition,
     draftVersion,
     publishedVersion,
+    draftCustomRangeSnapshots: buildVersionCustomRangeSnapshots(draftVersion),
+    publishedCustomRangeSnapshots: buildVersionCustomRangeSnapshots(publishedVersion),
   };
 }
 
@@ -250,6 +308,7 @@ export async function createTradeFlowDefinition(
   const name = validateTradeFlowDefinitionName(input.name);
 
   const graph = normalizeTradeFlowGraph(input.graphJson);
+  assertCustomRangeIntegrityOrThrow(input.graphJson, graph, 'save');
 
   const client = await pool.connect();
   try {
@@ -331,6 +390,7 @@ export async function updateTradeFlowDefinitionDraft(
   let tWrite = 0;
   let tCommit = 0;
   let tRead = 0;
+  let lockResult = 'pending';
   let transactionStarted = false;
   let client: PoolClient | null = null;
   try {
@@ -343,6 +403,8 @@ export async function updateTradeFlowDefinitionDraft(
     transactionStarted = true;
     await client.query("SET LOCAL statement_timeout = '15s'");
     await client.query("SET LOCAL lock_timeout = '5s'");
+    await acquireTradeFlowDefinitionMutationLock(client, definitionId);
+    lockResult = 'acquired';
 
     const defRes = await client.query(
       `SELECT *
@@ -391,6 +453,7 @@ export async function updateTradeFlowDefinitionDraft(
 
     if (updates.graphJson !== undefined) {
       const normalizedGraph = normalizeTradeFlowGraph(updates.graphJson);
+      assertCustomRangeIntegrityOrThrow(updates.graphJson, normalizedGraph, 'save');
 
       await client.query(
         `UPDATE trade_flow_versions
@@ -444,7 +507,7 @@ export async function updateTradeFlowDefinitionDraft(
     if (telemetryEnabled) {
       tRead = performance.now();
       console.log(
-        `[draft-save] outcome=ok def=${definitionId} pool=${getPoolTelemetrySnapshot()} connect=${formatTelemetryDuration(t0, tConnect)} lock=${formatTelemetryDuration(tConnect, tLock)} write=${formatTelemetryDuration(tLock, tWrite)} commit=${formatTelemetryDuration(tWrite, tCommit)} read=${formatTelemetryDuration(tCommit, tRead)} total=${formatTelemetryDuration(t0, tRead)}`
+        `[draft-save] outcome=ok def=${definitionId} pool=${getPoolTelemetrySnapshot()} lock_result=${lockResult} connect=${formatTelemetryDuration(t0, tConnect)} lock=${formatTelemetryDuration(tConnect, tLock)} write=${formatTelemetryDuration(tLock, tWrite)} commit=${formatTelemetryDuration(tWrite, tCommit)} read=${formatTelemetryDuration(tCommit, tRead)} total=${formatTelemetryDuration(t0, tRead)}`
       );
     }
     return result;
@@ -459,10 +522,15 @@ export async function updateTradeFlowDefinitionDraft(
     if (isTradeFlowNameUniqueViolation(err)) {
       throw new Error(FLOW_DUPLICATE_NAME_MESSAGE);
     }
+    if (isFlowDefinitionBusyError(err)) {
+      lockResult = 'busy';
+    } else if (isPostgresLockTimeoutError(err)) {
+      lockResult = 'row_timeout';
+    }
     if (telemetryEnabled) {
       const tError = performance.now();
       console.log(
-        `[draft-save] outcome=error def=${definitionId} pool=${getPoolTelemetrySnapshot()} connect=${formatTelemetryDuration(t0, tConnect)} lock=${formatTelemetryDuration(tConnect, tLock)} write=${formatTelemetryDuration(tLock, tWrite)} commit=${formatTelemetryDuration(tWrite, tCommit)} read=${formatTelemetryDuration(tCommit, tRead)} elapsed=${formatTelemetryDuration(t0, tError)} err=${compactTelemetryError(err)}`
+        `[draft-save] outcome=error def=${definitionId} pool=${getPoolTelemetrySnapshot()} lock_result=${lockResult} connect=${formatTelemetryDuration(t0, tConnect)} lock=${formatTelemetryDuration(tConnect, tLock)} write=${formatTelemetryDuration(tLock, tWrite)} commit=${formatTelemetryDuration(tWrite, tCommit)} read=${formatTelemetryDuration(tCommit, tRead)} elapsed=${formatTelemetryDuration(t0, tError)} err=${compactTelemetryError(err)}`
       );
     }
     throw err;
@@ -478,6 +546,8 @@ export async function publishTradeFlowDefinition(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await acquireTradeFlowDefinitionMutationLock(client, definitionId);
 
     const defRes = await client.query(
       `SELECT * FROM trade_flow_definitions WHERE id = $1 AND user_id = $2 LIMIT 1 FOR UPDATE`,
@@ -493,10 +563,12 @@ export async function publishTradeFlowDefinition(
       throw new Error('Draft version not found');
     }
 
+    const rawDraftGraphJson = await fetchRawVersionGraphJson(client, draftVersionId);
     const draftVersion = await fetchVersionById(client, draftVersionId);
     if (!draftVersion) {
       throw new Error('Draft version payload not found');
     }
+    assertCustomRangeIntegrityOrThrow(rawDraftGraphJson, draftVersion.graph_json, 'publish');
 
     const validation = await validateTradeFlowGraphWithRuntimeConfig(draftVersion.graph_json, context);
     if (!validation.valid) {
@@ -601,10 +673,27 @@ export async function hardDeleteTradeFlowDefinition(
   userId: number,
   definitionId: number
 ): Promise<void> {
+  const telemetryEnabled = isFlowTelemetryEnabled();
+  const t0 = telemetryEnabled ? performance.now() : 0;
+  let tLock = 0;
+  let tCancel = 0;
+  let tEventDetach = 0;
+  let tEventDelete = 0;
+  let tStepUnparent = 0;
+  let tRunDelete = 0;
+  let tDefinitionDelete = 0;
+  let tCommit = 0;
+  let lockResult = 'pending';
+  let eventDetachCount = 0;
+  let eventDeleteCount = 0;
+  let runDeleteCount = 0;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     await client.query("SET LOCAL statement_timeout = '45s'");
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await acquireTradeFlowDefinitionMutationLock(client, definitionId);
+    lockResult = 'acquired';
 
     const defRes = await client.query(
       `SELECT * FROM trade_flow_definitions WHERE id = $1 AND user_id = $2 LIMIT 1 FOR UPDATE`,
@@ -613,10 +702,38 @@ export async function hardDeleteTradeFlowDefinition(
     if ((defRes.rowCount ?? 0) === 0) {
       throw new Error('Flow definition not found');
     }
+    if (telemetryEnabled) {
+      tLock = performance.now();
+    }
 
     const eventTimestamp = new Date().toISOString();
     const cancelResult = await cancelFlowResources(client, userId, definitionId, FLOW_DELETE_REASON);
     await recordCancellationEvents(client, definitionId, cancelResult, FLOW_DELETE_REASON, eventTimestamp);
+    if (telemetryEnabled) {
+      tCancel = performance.now();
+    }
+
+    const eventDetachRes = await client.query(
+      `UPDATE trade_flow_events
+       SET version_id = NULL
+       WHERE definition_id = $1
+         AND version_id IS NOT NULL`,
+      [definitionId]
+    );
+    eventDetachCount = eventDetachRes.rowCount ?? 0;
+    if (telemetryEnabled) {
+      tEventDetach = performance.now();
+    }
+
+    const eventDeleteRes = await client.query(
+      `DELETE FROM trade_flow_events
+       WHERE definition_id = $1`,
+      [definitionId]
+    );
+    eventDeleteCount = eventDeleteRes.rowCount ?? 0;
+    if (telemetryEnabled) {
+      tEventDelete = performance.now();
+    }
 
     // Clear self-referencing parent_step_id before cascade delete to avoid O(N²) FK checks
     await client.query(
@@ -625,22 +742,49 @@ export async function hardDeleteTradeFlowDefinition(
          AND parent_step_id IS NOT NULL`,
       [definitionId, userId]
     );
+    if (telemetryEnabled) {
+      tStepUnparent = performance.now();
+    }
 
-    await client.query(
+    const runDeleteRes = await client.query(
       `DELETE FROM trade_flow_runs
        WHERE definition_id = $1 AND user_id = $2`,
       [definitionId, userId]
     );
+    runDeleteCount = runDeleteRes.rowCount ?? 0;
+    if (telemetryEnabled) {
+      tRunDelete = performance.now();
+    }
 
     await client.query(
       `DELETE FROM trade_flow_definitions
        WHERE id = $1 AND user_id = $2`,
       [definitionId, userId]
     );
+    if (telemetryEnabled) {
+      tDefinitionDelete = performance.now();
+    }
 
     await client.query('COMMIT');
+    if (telemetryEnabled) {
+      tCommit = performance.now();
+      console.log(
+        `[flow-delete] outcome=ok def=${definitionId} pool=${getPoolTelemetrySnapshot()} lock_result=${lockResult} lock=${formatTelemetryDuration(t0, tLock)} cancel=${formatTelemetryDuration(tLock, tCancel)} event_detach=${formatTelemetryDuration(tCancel, tEventDetach)} event_delete=${formatTelemetryDuration(tEventDetach, tEventDelete)} step_unparent=${formatTelemetryDuration(tEventDelete, tStepUnparent)} run_delete=${formatTelemetryDuration(tStepUnparent, tRunDelete)} definition_delete=${formatTelemetryDuration(tRunDelete, tDefinitionDelete)} commit=${formatTelemetryDuration(tDefinitionDelete, tCommit)} total=${formatTelemetryDuration(t0, tCommit)} detached_events=${eventDetachCount} deleted_events=${eventDeleteCount} deleted_runs=${runDeleteCount}`
+      );
+    }
   } catch (err) {
     await client.query('ROLLBACK');
+    if (isFlowDefinitionBusyError(err)) {
+      lockResult = 'busy';
+    } else if (isPostgresLockTimeoutError(err)) {
+      lockResult = 'row_timeout';
+    }
+    if (telemetryEnabled) {
+      const tError = performance.now();
+      console.log(
+        `[flow-delete] outcome=error def=${definitionId} pool=${getPoolTelemetrySnapshot()} lock_result=${lockResult} lock=${formatTelemetryDuration(t0, tLock)} cancel=${formatTelemetryDuration(tLock, tCancel)} event_detach=${formatTelemetryDuration(tCancel, tEventDetach)} event_delete=${formatTelemetryDuration(tEventDetach, tEventDelete)} step_unparent=${formatTelemetryDuration(tEventDelete, tStepUnparent)} run_delete=${formatTelemetryDuration(tStepUnparent, tRunDelete)} definition_delete=${formatTelemetryDuration(tRunDelete, tDefinitionDelete)} commit=${formatTelemetryDuration(tDefinitionDelete, tCommit)} elapsed=${formatTelemetryDuration(t0, tError)} detached_events=${eventDetachCount} deleted_events=${eventDeleteCount} deleted_runs=${runDeleteCount} err=${compactTelemetryError(err)}`
+      );
+    }
     throw err;
   } finally {
     client.release();
@@ -654,6 +798,8 @@ export async function stopTradeFlowDefinition(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '5s'");
+    await acquireTradeFlowDefinitionMutationLock(client, definitionId);
 
     const defRes = await client.query(
       `SELECT *
@@ -807,12 +953,19 @@ export async function getTradeFlowRuns(
     params.push(filters.status);
   }
 
-  const where = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
+  const where = whereParts.length
+    ? `WHERE ${whereParts.map((part) => `r.${part}`).join(' AND ')}`
+    : '';
 
   const [countRes, dataRes] = await Promise.all([
-    pool.query(`SELECT COUNT(*)::int AS total FROM trade_flow_runs ${where}`, params),
+    pool.query(`SELECT COUNT(*)::int AS total FROM trade_flow_runs r ${where}`, params),
     pool.query(
-      `SELECT * FROM trade_flow_runs ${where} ORDER BY created_at DESC LIMIT $${idx++} OFFSET $${idx++}`,
+      `SELECT r.*, v.version_no
+       FROM trade_flow_runs r
+       LEFT JOIN trade_flow_versions v ON v.id = r.version_id
+       ${where}
+       ORDER BY r.created_at DESC
+       LIMIT $${idx++} OFFSET $${idx++}`,
       [...params, limit, offset]
     ),
   ]);

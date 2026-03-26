@@ -138,8 +138,11 @@ mod tick_trigger_eval_tests {
             origin_flow_node_key: None,
             tp_enabled: false,
             tp_price: None,
+            tp_rules_json: Vec::new(),
             sl_enabled: false,
             sl_price: None,
+            sl_rules_json: Vec::new(),
+            time_exit_rules_json: Vec::new(),
             filled_qty: 0.0,
             fee_rate_bps: 0,
             trigger_latched: false,
@@ -164,6 +167,9 @@ mod tick_trigger_eval_tests {
             notify_on_sl_hit: false,
             notify_on_max_price_blocked: false,
             last_guard_notification_reason: None,
+            exit_ladder_kind: None,
+            exit_ladder_index: None,
+            exit_ladder_size_pct: None,
         }
     }
 

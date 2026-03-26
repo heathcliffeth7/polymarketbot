@@ -1,4 +1,5 @@
 use super::*;
+use serde::{Deserialize, Serialize};
 
 pub struct LegPositionSnapshot {
     pub leg_side: LegSide,
@@ -27,6 +28,18 @@ pub struct PressureSnapshot {
     pub trigger_reason: Option<String>,
     pub triggered: bool,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TradeBuilderPriceExitRule {
+    pub price: f64,
+    pub size_pct: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TradeBuilderTimeExitRule {
+    pub elapsed_minutes: i32,
+    pub remaining_pct: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -67,8 +80,11 @@ pub struct TradeBuilderOrder {
     pub origin_flow_node_key: Option<String>,
     pub tp_enabled: bool,
     pub tp_price: Option<f64>,
+    pub tp_rules_json: Vec<TradeBuilderPriceExitRule>,
     pub sl_enabled: bool,
     pub sl_price: Option<f64>,
+    pub sl_rules_json: Vec<TradeBuilderPriceExitRule>,
+    pub time_exit_rules_json: Vec<TradeBuilderTimeExitRule>,
     pub filled_qty: f64,
     pub fee_rate_bps: i64,
     pub trigger_latched: bool,
@@ -93,14 +109,9 @@ pub struct TradeBuilderOrder {
     pub notify_on_sl_hit: bool,
     pub notify_on_max_price_blocked: bool,
     pub last_guard_notification_reason: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RunningTradeFlowMarketPeer {
-    pub run_id: i64,
-    pub definition_id: i64,
-    pub definition_name: String,
-    pub source_trade_id: Option<i64>,
+    pub exit_ladder_kind: Option<String>,
+    pub exit_ladder_index: Option<i32>,
+    pub exit_ladder_size_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +147,46 @@ pub struct TradeBuilderInventoryObservationInput {
     pub fee_rate_bps: Option<i64>,
     pub fill_to_inventory_ms: Option<i64>,
     pub payload_json: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderParentPosition {
+    pub parent_builder_order_id: i64,
+    pub user_id: i64,
+    pub source_trade_id: i64,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub baseline_qty: f64,
+    pub current_qty: f64,
+    pub last_fill_qty: Option<f64>,
+    pub last_fill_price: Option<f64>,
+    pub qty_source: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderParentPositionInput {
+    pub parent_builder_order_id: i64,
+    pub user_id: i64,
+    pub source_trade_id: i64,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub baseline_qty: f64,
+    pub current_qty: f64,
+    pub last_fill_qty: Option<f64>,
+    pub last_fill_price: Option<f64>,
+    pub qty_source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderParentPositionSeed {
+    pub actual_visible_qty: Option<f64>,
+    pub expected_visible_qty: Option<f64>,
+    pub reference_price: Option<f64>,
+    pub qty_source: Option<String>,
 }
 
 #[derive(Debug, Clone)]

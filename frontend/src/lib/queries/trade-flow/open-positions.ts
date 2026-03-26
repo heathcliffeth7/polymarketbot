@@ -19,6 +19,7 @@ import {
   normalizeDualDcaAsset,
   normalizeDualDcaTimeframe,
   normalizeOutcomeToLegSide,
+  resolveMarketOutcomeLegSideCached,
   pickNumber,
   pickString,
   resolveOpenPositionOutcomeLabel,
@@ -66,6 +67,9 @@ export async function ensureSourceTradeForOpenPosition(
   }
 
   const { entryPrice, qty, notionalUsdc } = estimateSourceTradeValues(input);
+  const legSide =
+    (await resolveMarketOutcomeLegSideCached(marketSlug, tokenId)) ??
+    normalizeOutcomeToLegSide(outcomeLabel);
 
   const client = await pool.connect();
   try {
@@ -113,7 +117,7 @@ export async function ensureSourceTradeForOpenPosition(
          levels_filled = GREATEST(leg_positions.levels_filled, EXCLUDED.levels_filled),
          last_fill_price = EXCLUDED.last_fill_price,
          updated_at = NOW()`,
-      [tradeId, normalizeOutcomeToLegSide(outcomeLabel), tokenId, qty, entryPrice]
+      [tradeId, legSide, tokenId, qty, entryPrice]
     );
 
     await client.query('COMMIT');

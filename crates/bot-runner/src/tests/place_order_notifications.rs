@@ -12,6 +12,8 @@ fn root_fill_notification_uses_order_filled_type() {
     assert_eq!(notification_type, "order_filled");
     assert!(message.contains("Emir Doldu"));
     assert!(message.contains("Sebep: Emir basariyla dolduruldu."));
+    assert!(message.contains("Notional USDC: 5.00"));
+    assert!(message.contains("Adet: 12.50"));
     assert!(message.contains("Outcome: Up"));
 }
 

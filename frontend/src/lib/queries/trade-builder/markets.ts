@@ -278,23 +278,55 @@ async function tryExtractEventOutcomes(market: Record<string, unknown>): Promise
 function extractEventMarketOutcomes(markets: Array<Record<string, unknown>>): TradeBuilderOutcome[] {
   const out: TradeBuilderOutcome[] = []
   for (const m of markets) {
-    const rawLabel = String(m.groupItemTitle || m.title || '').trim()
-    const label = rawLabel.includes('(') ? rawLabel.slice(0, rawLabel.indexOf('(')).trim() : rawLabel
-    if (!label) continue
     const clobIds = parseStringArray(m.clobTokenIds || m.clob_token_ids)
-    const tokens = Array.isArray(m.tokens) ? (m.tokens as Array<Record<string, unknown>>) : []
-    const yesToken = tokens.find((t) => String(t.outcome || '') === 'Yes')
-    const tokenId = (
-      (yesToken ? String(yesToken.token_id || yesToken.tokenId || yesToken.clobTokenId || '') : '') ||
-      (clobIds.length > 0 ? clobIds[0] : '')
-    ).trim()
-    if (!tokenId) continue
+    const outcomes = parseStringArray(m.outcomes)
     const outcomePrices = parseStringArray(m.outcomePrices)
-    const priceStr = outcomePrices.length > 0 ? outcomePrices[0] : null
-    const price = priceStr ? parseFloat(priceStr) : null
-    out.push({ token_id: tokenId, label, price: Number.isFinite(price as number) ? (price as number) : null })
+    const rawMarketLabel = resolveEventOutcomeLabel(m)
+    const marketLabel = trimOutcomeLabel(rawMarketLabel)
+    if (!marketLabel) continue
+
+    const len = Math.min(clobIds.length, outcomes.length, 2)
+    for (let index = 0; index < len; index += 1) {
+      const tokenId = clobIds[index]?.trim()
+      const outcomeLabel = outcomes[index]?.trim()
+      const legSide = legSideForIndex(index)
+      if (!tokenId || !outcomeLabel || !legSide) continue
+      const priceStr = outcomePrices[index] ?? null
+      const price = priceStr ? parseFloat(priceStr) : null
+      out.push({
+        token_id: tokenId,
+        label: `${marketLabel}: ${outcomeLabel}`,
+        price: Number.isFinite(price as number) ? (price as number) : null,
+        legSide,
+      })
+    }
   }
   return out
+}
+
+function resolveEventOutcomeLabel(market: Record<string, unknown>): string {
+  const groupItemTitle = String(market.groupItemTitle || '').trim()
+  if (groupItemTitle) return groupItemTitle
+
+  const title = String(market.title || '').trim()
+  if (title) return title
+
+  const sportsMarketType = String(market.sportsMarketType || '').trim().toLowerCase()
+  if (sportsMarketType === 'moneyline') return 'Moneyline'
+  if (sportsMarketType === 'first_half_moneyline') return '1H Moneyline'
+
+  return String(market.question || '').trim()
+}
+
+function trimOutcomeLabel(label: string): string {
+  const trimmed = label.trim()
+  return trimmed.includes('(') ? trimmed.slice(0, trimmed.indexOf('(')).trim() : trimmed
+}
+
+function legSideForIndex(index: number): 'yes' | 'no' | null {
+  if (index === 0) return 'yes'
+  if (index === 1) return 'no'
+  return null
 }
 
 function extractOutcomes(market: Record<string, unknown>): TradeBuilderOutcome[] {
@@ -306,13 +338,20 @@ function extractOutcomes(market: Record<string, unknown>): TradeBuilderOutcome[]
 function extractOutcomesFromTokens(market: Record<string, unknown>): TradeBuilderOutcome[] {
   const tokens = Array.isArray(market.tokens) ? (market.tokens as Array<Record<string, unknown>>) : []
   return tokens
-    .map((token) => {
+    .slice(0, 2)
+    .map((token, index) => {
+      const legSide = legSideForIndex(index)
       const tokenId = String(token.token_id || token.tokenId || token.clobTokenId || token.id || '').trim()
       const label = String(token.outcome || token.name || token.title || '').trim()
       const priceValue = token.price ?? token.lastPrice ?? null
       const price = typeof priceValue === 'number' ? priceValue : typeof priceValue === 'string' ? parseFloat(priceValue) : null
-      if (!tokenId || !label) return null
-      return { token_id: tokenId, label, price: Number.isFinite(price as number) ? (price as number) : null }
+      if (!tokenId || !label || !legSide) return null
+      return {
+        token_id: tokenId,
+        label,
+        price: Number.isFinite(price as number) ? (price as number) : null,
+        legSide,
+      }
     })
     .filter((item): item is TradeBuilderOutcome => !!item)
 }
@@ -323,16 +362,25 @@ function extractOutcomesFromArrays(market: Record<string, unknown>): TradeBuilde
 
   const outcomes = parseStringArray(outcomesRaw)
   const tokenIds = parseStringArray(tokenIdsRaw)
+  const outcomePrices = parseStringArray(market.outcomePrices)
 
   if (outcomes.length === 0 || tokenIds.length === 0) return []
 
-  const len = Math.min(outcomes.length, tokenIds.length)
+  const len = Math.min(outcomes.length, tokenIds.length, 2)
   const out: TradeBuilderOutcome[] = []
   for (let i = 0; i < len; i += 1) {
+    const legSide = legSideForIndex(i)
     const tokenId = tokenIds[i]?.trim()
     const label = outcomes[i]?.trim()
-    if (!tokenId || !label) continue
-    out.push({ token_id: tokenId, label, price: null })
+    const priceStr = outcomePrices[i] ?? null
+    const price = priceStr ? parseFloat(priceStr) : null
+    if (!tokenId || !label || !legSide) continue
+    out.push({
+      token_id: tokenId,
+      label,
+      price: Number.isFinite(price as number) ? (price as number) : null,
+      legSide,
+    })
   }
   return out
 }

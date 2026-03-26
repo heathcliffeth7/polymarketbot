@@ -430,6 +430,7 @@ fn resolve_action_place_order_stale_market_retry(
     node: &TradeFlowNode,
     context: &Value,
     step: &TradeFlowRunStep,
+    graph: &TradeFlowGraphRuntime,
 ) -> Option<ActionPlaceOrderStaleMarketRetry> {
     if node_config_string(node, "marketSlug").is_some() {
         return None;
@@ -437,7 +438,9 @@ fn resolve_action_place_order_stale_market_retry(
 
     let stale_market_slug =
         step_input_string(step, &["market_slug", "marketSlug", "wsMarketSlug"])?;
-    let current_market_slug = flow_context_string(context, "marketSlug")?;
+    let current_market_slug = find_upstream_market_price_trigger_key(&node.key, graph)
+        .and_then(|trigger_key| node_auto_scope_market_slug(context, &trigger_key))
+        .or_else(|| flow_context_string(context, "marketSlug"))?;
     if stale_market_slug == current_market_slug {
         return None;
     }
@@ -481,8 +484,11 @@ fn resolve_action_place_order_exit_price(
     let cent = node_config_f64(node, cent_key);
     let raw = node_config_f64(node, raw_key);
     let price = cent.map(|value| value / 100.0).or(raw);
+    if price.is_none() {
+        return Ok(None);
+    }
     anyhow::ensure!(
-        price.is_some() && price.unwrap() > 0.0 && price.unwrap() <= 1.0,
+        price.unwrap() > 0.0 && price.unwrap() <= 1.0,
         "action.place_order {label}Price must be in (0, 1] when {label}Enabled is true"
     );
     Ok(price)
@@ -514,10 +520,57 @@ fn resolve_action_place_order_max_price(
         .map(clamp_probability)
 }
 
-fn resolve_action_place_order_guard_trigger_price(step: &TradeFlowRunStep) -> Option<f64> {
-    step_input_f64(step, &["trigger_price", "triggerPrice"])
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ActionPlaceOrderReentryGuardResolution {
+    generation: i64,
+    band_active: bool,
+    configured_min_price: Option<f64>,
+    configured_max_price: Option<f64>,
+    effective_guard_trigger_price: Option<f64>,
+    effective_max_price: Option<f64>,
+}
+
+fn resolve_action_place_order_reentry_guard_resolution(
+    node: &TradeFlowNode,
+    context: &Value,
+    guard_trigger_price: Option<f64>,
+    max_price: Option<f64>,
+) -> Result<ActionPlaceOrderReentryGuardResolution> {
+    let configured_min_price = node_config_f64(node, "reentryMinPriceCent")
+        .map(|value| value / 100.0)
         .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
-        .map(clamp_probability)
+        .map(clamp_probability);
+    let configured_max_price = node_config_f64(node, "reentryMaxPriceCent")
+        .map(|value| value / 100.0)
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+        .map(clamp_probability);
+    if let (Some(min_price), Some(max_price)) = (configured_min_price, configured_max_price) {
+        anyhow::ensure!(
+            min_price < max_price,
+            "action.place_order reentryMinPriceCent must be lower than reentryMaxPriceCent"
+        );
+    }
+
+    let generation = flow_node_reentry_generation(context, &node.key).max(0);
+    let band_active = generation > 0
+        && (configured_min_price.is_some() || configured_max_price.is_some());
+
+    Ok(ActionPlaceOrderReentryGuardResolution {
+        generation,
+        band_active,
+        configured_min_price,
+        configured_max_price,
+        effective_guard_trigger_price: if generation > 0 {
+            configured_min_price.or(guard_trigger_price)
+        } else {
+            guard_trigger_price
+        },
+        effective_max_price: if generation > 0 {
+            configured_max_price.or(max_price)
+        } else {
+            max_price
+        },
+    })
 }
 
 fn resolve_action_place_order_underlying_protection(
@@ -568,15 +621,89 @@ enum ActionPlaceOrderExistingOrderDecision {
     Ignore(&'static str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionPlaceOrderExistingRefScope {
+    NodeLocal,
+    SharedRef,
+}
+
+impl ActionPlaceOrderExistingRefScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NodeLocal => "node_key",
+            Self::SharedRef => "shared_ref",
+        }
+    }
+}
+
+fn action_place_order_ref_key(node: &TradeFlowNode) -> String {
+    node_config_string(node, "refKey").unwrap_or_else(|| node.key.clone())
+}
+
+fn is_legacy_shared_generic_place_order_ref(node: &TradeFlowNode, ref_key: &str) -> bool {
+    if !ref_key.eq_ignore_ascii_case("preset_place_order") {
+        return false;
+    }
+
+    let preset_kind = node_config_string(node, "presetKind").unwrap_or_default();
+    !preset_kind.eq_ignore_ascii_case("sell_current_position")
+        && !preset_kind.eq_ignore_ascii_case("buy_current_position")
+}
+
+fn should_bind_action_place_order_shared_ref(node: &TradeFlowNode, ref_key: &str) -> bool {
+    ref_key != node.key && !is_legacy_shared_generic_place_order_ref(node, ref_key)
+}
+
+fn clear_action_place_order_ref_bindings(
+    context: &mut Value,
+    node: &TradeFlowNode,
+    ref_key: &str,
+) {
+    if ref_key != node.key {
+        set_flow_ref(context, ref_key, Value::Null);
+    }
+    set_flow_ref(context, &node.key, Value::Null);
+}
+
+fn bind_action_place_order_ref_bindings(
+    context: &mut Value,
+    node: &TradeFlowNode,
+    ref_key: &str,
+    order_id: i64,
+) {
+    if should_bind_action_place_order_shared_ref(node, ref_key) {
+        set_flow_ref(context, ref_key, json!(order_id));
+    } else if ref_key != node.key {
+        set_flow_ref(context, ref_key, Value::Null);
+    }
+    set_flow_ref(context, &node.key, json!(order_id));
+}
+
+fn resolve_action_place_order_existing_order_ref(
+    node: &TradeFlowNode,
+    context: &Value,
+) -> Option<(i64, ActionPlaceOrderExistingRefScope)> {
+    let refs = context.get("refs")?;
+    if let Some(order_id) = refs.get(&node.key).and_then(value_as_i64) {
+        return Some((order_id, ActionPlaceOrderExistingRefScope::NodeLocal));
+    }
+
+    let ref_key = action_place_order_ref_key(node);
+    if is_legacy_shared_generic_place_order_ref(node, &ref_key) {
+        return None;
+    }
+
+    refs.get(&ref_key)
+        .and_then(value_as_i64)
+        .map(|order_id| (order_id, ActionPlaceOrderExistingRefScope::SharedRef))
+}
+
+#[cfg(test)]
 fn resolve_action_place_order_existing_order_id(
     node: &TradeFlowNode,
     context: &Value,
 ) -> Option<i64> {
-    let refs = context.get("refs")?;
-    let ref_key = node_config_string(node, "refKey").unwrap_or_else(|| node.key.clone());
-    refs.get(&node.key)
-        .and_then(value_as_i64)
-        .or_else(|| refs.get(&ref_key).and_then(value_as_i64))
+    resolve_action_place_order_existing_order_ref(node, context).map(|(order_id, _)| order_id)
 }
 
 fn find_upstream_market_price_trigger_key(
@@ -761,4 +888,82 @@ async fn resolve_action_place_order_sell_sizing(
         resolved_size_mode,
         resolved_size_pct,
     })
+}
+
+fn action_place_order_window_end_auto_sell_sizing_from_parent_qty(
+    position_qty: f64,
+    reference_price: f64,
+) -> Option<ActionPlaceOrderSizing> {
+    let target_qty = round_trade_builder_share_qty(position_qty.max(0.0));
+    let reference_price = clamp_probability(reference_price);
+    if target_qty <= 0.0 || reference_price <= 0.0 {
+        return None;
+    }
+
+    Some(ActionPlaceOrderSizing {
+        size_usdc: (target_qty * reference_price).max(0.0),
+        size_basis: TRADE_BUILDER_SIZE_BASIS_SHARES,
+        target_qty: Some(target_qty),
+        remaining_qty: Some(target_qty),
+        resolved_size_mode: "pct",
+        resolved_size_pct: Some(100.0),
+    })
+}
+
+async fn resolve_action_place_order_window_end_auto_sell_sizing(
+    repo: &PostgresRepository,
+    node: &TradeFlowNode,
+    step: &TradeFlowRunStep,
+    parent_builder_order_id: i64,
+    source_trade_id: i64,
+    token_id: &str,
+) -> Result<Option<ActionPlaceOrderSizing>> {
+    let parent_order = repo
+        .get_trade_builder_order(parent_builder_order_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("windowEndAutoSell parentBuilderOrderId not found"))?;
+    anyhow::ensure!(
+        parent_order.trade_id == source_trade_id,
+        "windowEndAutoSell sourceTradeId must match parent builder trade_id"
+    );
+    anyhow::ensure!(
+        parent_order.token_id == token_id,
+        "windowEndAutoSell tokenId must match parent builder token_id"
+    );
+
+    let Some((position_qty, _)) = resolve_trade_builder_parent_exit_inventory(
+        repo,
+        &parent_order,
+        "window_end_auto_sell_sizing",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if position_qty <= TRADE_BUILDER_EXIT_QTY_TOLERANCE {
+        return Ok(None);
+    }
+
+    let parent_position = repo
+        .get_trade_builder_parent_position(parent_builder_order_id)
+        .await?;
+    let legacy_fallback_price = match load_action_place_order_sell_position(
+        repo,
+        source_trade_id,
+        token_id,
+    )
+    .await
+    {
+        Ok((_, fallback_price)) => fallback_price,
+        Err(_) => None,
+    };
+    let reference_price = resolve_action_place_order_reference_price(node, step)
+        .or_else(|| parent_position.as_ref().and_then(|position| position.last_fill_price))
+        .or(parent_order.last_seen_price)
+        .or(legacy_fallback_price)
+        .filter(|value| value.is_finite() && *value > 0.0);
+
+    Ok(reference_price.and_then(|reference_price| {
+        action_place_order_window_end_auto_sell_sizing_from_parent_qty(position_qty, reference_price)
+    }))
 }

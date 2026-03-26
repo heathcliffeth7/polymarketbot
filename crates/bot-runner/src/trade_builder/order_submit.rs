@@ -178,10 +178,19 @@ async fn submit_trade_builder_trigger_order(
     trigger_size_index: usize,
 ) -> Result<()> {
     let size_basis = normalize_trade_builder_size_basis(&order.size_basis);
-    let uncapped_desired_price =
-        aggressive_price_for_side(&order.side, current_price, order.min_price_distance_cent);
-    let desired_price = trade_builder_cap_exit_sell_price(order, uncapped_desired_price);
-    if (desired_price - uncapped_desired_price).abs() >= 0.000001 {
+    let immediate_buy_execution_price =
+        trade_builder_immediate_buy_notional_execution_price(order, current_price, best_ask);
+    let desired_price = immediate_buy_execution_price
+        .map(|resolution| resolution.price)
+        .unwrap_or_else(|| trade_builder_submit_desired_price(order, current_price));
+    let uncapped_desired_price = immediate_buy_execution_price
+        .map(|resolution| resolution.price)
+        .unwrap_or_else(|| {
+            aggressive_price_for_side(&order.side, current_price, order.min_price_distance_cent)
+        });
+    if immediate_buy_execution_price.is_none()
+        && (desired_price - uncapped_desired_price).abs() >= 0.000001
+    {
         repo.append_trade_builder_order_event(
             order.id,
             "exit_price_capped",
@@ -1079,6 +1088,11 @@ async fn submit_trade_builder_trigger_order(
         "current_price": current_price,
         "best_ask": best_ask,
         "execution_price": desired_price,
+        "execution_price_source": immediate_buy_execution_price
+            .map(|resolution| resolution.source)
+            .unwrap_or("runtime_price"),
+        "trigger_reference_price": immediate_buy_execution_price
+            .and_then(|resolution| resolution.trigger_reference_price),
         "execution_mode": normalized_execution_mode,
         "order_type": order_type,
         "size_basis": size_basis,

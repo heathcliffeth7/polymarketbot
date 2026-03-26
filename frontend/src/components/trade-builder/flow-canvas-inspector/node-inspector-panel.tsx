@@ -13,8 +13,12 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   NODE_FIELD_SCHEMAS,
+  createEmptyExitLadderRuleRow,
+  createEmptyTimeExitRuleRow,
+  type ExitLadderRuleRow,
   isPresetBuySellPlaceOrderMarker,
   isPresetPlaceOrderMarker,
+  type TimeExitRuleRow,
 } from '@/lib/trade-flow-config-mappers';
 import {
   NODE_FIELD_HELP_CONTENT,
@@ -23,6 +27,7 @@ import {
 import { normalizeDateTimeInput } from '../flow-canvas-utils';
 import { Settings2, Trash2, Plus, Zap } from 'lucide-react';
 import { EMPTY_SELECT_SENTINEL } from './shared';
+import { ExecutionFloorProtectionSection } from './execution-floor-protection-section';
 import { MaxPriceProtectionSection } from './max-price-protection-section';
 import {
   DrawdownRulesSection,
@@ -32,6 +37,151 @@ import {
   StatePatchSection,
 } from './sections';
 import type { NodeInspectorPanelProps } from './types';
+
+interface ExitLadderSectionProps {
+  title: string;
+  description: string;
+  rows: ExitLadderRuleRow[];
+  addLabel: string;
+  onAdd: () => void;
+  onUpdate: (rowId: string, patch: Partial<ExitLadderRuleRow>) => void;
+  onRemove: (rowId: string) => void;
+}
+
+function ExitLadderSection({
+  title,
+  description,
+  rows,
+  addLabel,
+  onAdd,
+  onUpdate,
+  onRemove,
+}: ExitLadderSectionProps) {
+  return (
+    <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
+      <div className="flex items-center gap-1.5">
+        <Zap className="h-3.5 w-3.5 text-sky-500" />
+        <p className="text-[11px] font-semibold text-slate-700">{title}</p>
+      </div>
+      <p className="text-[10px] leading-relaxed text-slate-400 italic">{description}</p>
+      {rows.length === 0 ? (
+        <p className="text-[10px] text-slate-400 italic">Henüz kademe eklenmedi.</p>
+      ) : (
+        <div className="space-y-2">
+          {rows.map((row, index) => (
+            <div key={row.id} className="space-y-1.5 rounded-md border border-slate-200 bg-white p-2.5">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-medium text-slate-600">Kademe #{index + 1}</p>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 w-6 p-0 text-red-400 hover:text-red-600"
+                  onClick={() => onRemove(row.id)}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-0.5">
+                  <Label className="text-[10px] font-medium text-slate-600">Fiyat (cent)</Label>
+                  <Input
+                    type="number"
+                    value={row.priceCent}
+                    onChange={(e) => onUpdate(row.id, { priceCent: e.target.value })}
+                    placeholder="ör: 72"
+                    className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
+                  />
+                </div>
+                <div className="space-y-0.5">
+                  <Label className="text-[10px] font-medium text-slate-600">Boyut (%)</Label>
+                  <Input
+                    type="number"
+                    value={row.sizePct}
+                    onChange={(e) => onUpdate(row.id, { sizePct: e.target.value })}
+                    placeholder="ör: 35"
+                    className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
+                  />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <Button size="sm" variant="outline" className="h-7 border-slate-300 px-2 text-[11px] text-slate-700" onClick={onAdd}>
+        <Plus className="mr-1 h-3 w-3" />
+        {addLabel}
+      </Button>
+    </div>
+  );
+}
+
+interface TimeExitRulesSectionProps {
+  rows: TimeExitRuleRow[];
+  onAdd: () => void;
+  onUpdate: (rowId: string, patch: Partial<TimeExitRuleRow>) => void;
+  onRemove: (rowId: string) => void;
+}
+
+function TimeExitRulesSection({ rows, onAdd, onUpdate, onRemove }: TimeExitRulesSectionProps) {
+  return (
+    <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
+      <div className="flex items-center gap-1.5">
+        <Settings2 className="h-3.5 w-3.5 text-amber-500" />
+        <p className="text-[11px] font-semibold text-slate-700">Zaman Bazli Cikis</p>
+      </div>
+      <p className="text-[10px] leading-relaxed text-slate-400 italic">
+        Sayaç buy fill anında başlar. Her kural, tetiklendiği andaki kalan pozisyonun belirli bir yüzdesini satar.
+      </p>
+      {rows.length === 0 ? (
+        <p className="text-[10px] text-slate-400 italic">Henüz süre kademesi eklenmedi.</p>
+      ) : (
+        <div className="space-y-2">
+          {rows.map((row, index) => (
+            <div key={row.id} className="space-y-1.5 rounded-md border border-slate-200 bg-white p-2.5">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-medium text-slate-600">Sure #{index + 1}</p>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 w-6 p-0 text-red-400 hover:text-red-600"
+                  onClick={() => onRemove(row.id)}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-0.5">
+                  <Label className="text-[10px] font-medium text-slate-600">Dakika</Label>
+                  <Input
+                    type="number"
+                    value={row.elapsedMinutes}
+                    onChange={(e) => onUpdate(row.id, { elapsedMinutes: e.target.value })}
+                    placeholder="ör: 12"
+                    className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
+                  />
+                </div>
+                <div className="space-y-0.5">
+                  <Label className="text-[10px] font-medium text-slate-600">Kalan (%)</Label>
+                  <Input
+                    type="number"
+                    value={row.remainingPct}
+                    onChange={(e) => onUpdate(row.id, { remainingPct: e.target.value })}
+                    placeholder="ör: 30"
+                    className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
+                  />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <Button size="sm" variant="outline" className="h-7 border-slate-300 px-2 text-[11px] text-slate-700" onClick={onAdd}>
+        <Plus className="mr-1 h-3 w-3" />
+        Sure Kademesi Ekle
+      </Button>
+    </div>
+  );
+}
 
 export function NodeInspectorPanel({
   form,
@@ -104,22 +254,75 @@ export function NodeInspectorPanel({
     nodeTypeDraft === 'action.place_order'
       ? (form.fields.side ?? '').toString().trim().toLowerCase()
       : '';
+  const placeOrderTpEnabled =
+    nodeTypeDraft === 'action.place_order'
+      ? (form.fields.tpEnabled ?? '').toString().trim().toLowerCase() === 'true'
+      : false;
+  const placeOrderSlEnabled =
+    nodeTypeDraft === 'action.place_order'
+      ? (form.fields.slEnabled ?? '').toString().trim().toLowerCase() === 'true'
+      : false;
+  const placeOrderTpRuleRows = form.tpRuleRows || [];
+  const placeOrderSlRuleRows = form.slRuleRows || [];
+  const placeOrderTimeExitRuleRows = form.timeExitRuleRows || [];
+  const showTpLadderSection =
+    nodeTypeDraft === 'action.place_order' &&
+    placeOrderSide === 'buy' &&
+    (placeOrderTpEnabled || placeOrderTpRuleRows.length > 0);
+  const showSlLadderSection =
+    nodeTypeDraft === 'action.place_order' &&
+    placeOrderSide === 'buy' &&
+    (placeOrderSlEnabled || placeOrderSlRuleRows.length > 0);
+  const showTimeExitSection =
+    nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy';
   const placeOrderMaxPriceCentValue =
     nodeTypeDraft === 'action.place_order' ? (form.fields.maxPriceCent ?? '').toString().trim() : '';
+  const placeOrderExecutionFloorPriceCentValue =
+    nodeTypeDraft === 'action.place_order'
+      ? (form.fields.executionFloorPriceCent ?? '').toString().trim()
+      : '';
   const placeOrderMaxPriceUi = form.placeOrderMaxPriceUi;
   const placeOrderMarketSeedUi = form.placeOrderMarketSeedUi;
   const placeOrderHasInheritedMaxPrice = placeOrderMaxPriceUi?.isInheritedValue === true;
   const placeOrderHasAmbiguousUpstreamMaxPrice = nodeTypeDraft === 'action.place_order' && upstreamMaxPriceResolution.kind === 'multiple';
   const placeOrderHasStaleLocalMaxPrice = nodeTypeDraft === 'action.place_order' && !placeOrderHasInheritedMaxPrice && placeOrderMaxPriceCentValue.length > 0 && upstreamMaxPriceResolution.kind === 'single' && upstreamMaxPriceResolution.maxPriceCent != null && upstreamMaxPriceResolution.maxPriceCent !== placeOrderMaxPriceCentValue;
+  const placeOrderReentryChecked =
+    (form.fields.reenterOnSlHit ?? '').toString().trim().toLowerCase() === 'true';
+  const placeOrderReentryMinPriceCentValue =
+    nodeTypeDraft === 'action.place_order'
+      ? (form.fields.reentryMinPriceCent ?? '').toString().trim()
+      : '';
+  const placeOrderReentryMaxPriceCentValue =
+    nodeTypeDraft === 'action.place_order'
+      ? (form.fields.reentryMaxPriceCent ?? '').toString().trim()
+      : '';
   const placeOrderTriggerGuardChecked =
     (form.fields.triggerPriceGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
+  const reentryTriggerGuardActive =
+    nodeTypeDraft === 'action.place_order' &&
+    placeOrderSide === 'buy' &&
+    placeOrderReentryChecked &&
+    placeOrderReentryMinPriceCentValue.length > 0;
+  const triggerGuardProtectionActive =
+    placeOrderTriggerGuardChecked || reentryTriggerGuardActive;
   const triggerGuardRetryChecked =
     (form.fields.retryOnTriggerPriceGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
   const executionFloorGuardChecked =
     (form.fields.executionFloorGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
   const executionFloorRetryChecked =
     (form.fields.retryOnExecutionFloorGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
-  const maxPriceProtectionActive = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && (placeOrderMaxPriceCentValue.length > 0 || (placeOrderMaxPriceUi?.upstreamKind === 'single' && placeOrderMaxPriceUi.upstreamMaxPriceCent != null));
+  const parsedExecutionFloorPriceCent = Number(placeOrderExecutionFloorPriceCentValue);
+  const hasManualExecutionFloorPrice =
+    nodeTypeDraft === 'action.place_order' &&
+    Number.isFinite(parsedExecutionFloorPriceCent) &&
+    parsedExecutionFloorPriceCent > 0 &&
+    parsedExecutionFloorPriceCent <= 100;
+  const reentryMaxPriceProtectionActive =
+    nodeTypeDraft === 'action.place_order' &&
+    placeOrderSide === 'buy' &&
+    placeOrderReentryChecked &&
+    placeOrderReentryMaxPriceCentValue.length > 0;
+  const maxPriceProtectionActive = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && (placeOrderMaxPriceCentValue.length > 0 || (placeOrderMaxPriceUi?.upstreamKind === 'single' && placeOrderMaxPriceUi.upstreamMaxPriceCent != null) || reentryMaxPriceProtectionActive);
   const maxPriceNotifyChecked =
     (form.fields.notifyOnMaxPriceBlocked ?? '').toString().trim().toLowerCase() === 'true';
   const maxPriceRetryChecked =
@@ -137,7 +340,9 @@ export function NodeInspectorPanel({
   const triggerGuardDisabled =
     !upstreamHasTriggerPrice && !placeOrderTriggerGuardChecked;
   const executionFloorGuardDisabled =
-    !upstreamHasTriggerPrice && !executionFloorGuardChecked;
+    !upstreamHasTriggerPrice &&
+    !hasManualExecutionFloorPrice &&
+    !executionFloorGuardChecked;
   const hideAutoScopePlaceOrderOutcomeFields =
     isPresetPlaceOrder && upstreamAutoScope && placeOrderSide === 'buy';
   const supportsOpenPositionPicker =
@@ -152,6 +357,38 @@ export function NodeInspectorPanel({
     : telegramLegacyBotToken
       ? 'legacy_ignored'
       : 'missing';
+  const updateTpRuleRows = (updater: (rows: ExitLadderRuleRow[]) => ExitLadderRuleRow[]) => {
+    actions.onFormChange((prev) =>
+      prev
+        ? {
+            ...prev,
+            fields: { ...prev.fields, tpEnabled: 'true' },
+            tpRuleRows: updater([...(prev.tpRuleRows || [])]),
+          }
+        : prev
+    );
+  };
+  const updateSlRuleRows = (updater: (rows: ExitLadderRuleRow[]) => ExitLadderRuleRow[]) => {
+    actions.onFormChange((prev) =>
+      prev
+        ? {
+            ...prev,
+            fields: { ...prev.fields, slEnabled: 'true' },
+            slRuleRows: updater([...(prev.slRuleRows || [])]),
+          }
+        : prev
+    );
+  };
+  const updateTimeExitRuleRows = (updater: (rows: TimeExitRuleRow[]) => TimeExitRuleRow[]) => {
+    actions.onFormChange((prev) =>
+      prev
+        ? {
+            ...prev,
+            timeExitRuleRows: updater([...(prev.timeExitRuleRows || [])]),
+          }
+        : prev
+    );
+  };
   const visibleNodeSchema = nodeSchema.filter((field) => {
     if (nodeTypeDraft === 'action.place_order') {
       if (field.key === 'sizePct') return placeOrderSizeMode === 'pct';
@@ -200,8 +437,13 @@ export function NodeInspectorPanel({
         const reenterOnSlHit = (form.fields.reenterOnSlHit ?? '').toString().trim().toLowerCase();
         return placeOrderSide === 'buy' && slEnabled === 'true' && reenterOnSlHit === 'true';
       }
+      if (field.key === 'reentryMinPriceCent' || field.key === 'reentryMaxPriceCent') {
+        const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
+        const reenterOnSlHit = (form.fields.reenterOnSlHit ?? '').toString().trim().toLowerCase();
+        return placeOrderSide === 'buy' && slEnabled === 'true' && reenterOnSlHit === 'true';
+      }
       if (field.key === 'notifyOnTriggerPriceBlocked') {
-        return placeOrderSide === 'buy' && placeOrderTriggerGuardChecked;
+        return placeOrderSide === 'buy' && triggerGuardProtectionActive;
       }
       if (field.key === 'notifyOnExecutionFloorBlocked') {
         return placeOrderSide === 'buy' && executionFloorGuardChecked;
@@ -221,6 +463,7 @@ export function NodeInspectorPanel({
         field.key === 'triggerPriceGuardEnabled' ||
         field.key === 'retryOnTriggerPriceGuardBlock' ||
         field.key === 'executionFloorGuardEnabled' ||
+        field.key === 'executionFloorPriceCent' ||
         field.key === 'retryOnExecutionFloorGuardBlock' ||
         field.key === 'priceToBeatGuardEnabled' ||
         field.key === 'priceToBeatMaxDiff' ||
@@ -409,14 +652,27 @@ export function NodeInspectorPanel({
                     nodeTypeDraft === 'trigger.market_price' ||
                     nodeTypeDraft === 'trigger.position_drawdown') ? (
                   <Select
-                    value={(form.fields[field.key] ?? '') || EMPTY_SELECT_SENTINEL}
-                    onValueChange={(v) => {
-                      const label = v === EMPTY_SELECT_SENTINEL ? '' : v;
-                      actions.onUpdateField(field.key, label);
-                      const matched = marketOutcomes.find((o) => o.label === label);
-                      if (matched) {
-                        actions.onUpdateField('tokenId', matched.token_id);
+                    value={(() => {
+                      const selectedTokenId = (form.fields.tokenId ?? '').trim();
+                      if (selectedTokenId && marketOutcomes.some((o) => o.token_id === selectedTokenId)) {
+                        return selectedTokenId;
                       }
+                      const selectedLabel = (form.fields[field.key] ?? '').trim();
+                      return (
+                        marketOutcomes.find((o) => o.label === selectedLabel)?.token_id ||
+                        EMPTY_SELECT_SENTINEL
+                      );
+                    })()}
+                    onValueChange={(v) => {
+                      const tokenId = v === EMPTY_SELECT_SENTINEL ? '' : v;
+                      if (!tokenId) {
+                        actions.onUpdateField('tokenId', '');
+                        actions.onUpdateField(field.key, '');
+                        return;
+                      }
+                      const matched = marketOutcomes.find((o) => o.token_id === tokenId);
+                      actions.onUpdateField('tokenId', tokenId);
+                      actions.onUpdateField(field.key, matched?.label || '');
                     }}
                   >
                     <SelectTrigger className="h-8 w-full border-slate-200 bg-white text-xs text-slate-900" size="sm">
@@ -425,7 +681,7 @@ export function NodeInspectorPanel({
                     <SelectContent>
                       <SelectItem value={EMPTY_SELECT_SENTINEL}>Sec...</SelectItem>
                       {marketOutcomes.map((o) => (
-                        <SelectItem key={o.token_id} value={o.label}>
+                        <SelectItem key={o.token_id} value={o.token_id}>
                           {o.label}{o.price != null ? ` ($${o.price.toFixed(2)})` : ''}
                         </SelectItem>
                       ))}
@@ -570,6 +826,18 @@ export function NodeInspectorPanel({
                 {field.key === 'marketSlug' && placeOrderMarketSeedUi?.upstreamKind === 'multiple' && <p className="text-[10px] leading-relaxed text-amber-600">Birden fazla bagli upstream fixed market bulundu{placeOrderMarketSeedUi.distinctUpstreamMarketSlugs.length > 0 ? ` (${placeOrderMarketSeedUi.distinctUpstreamMarketSlugs.join(', ')})` : ''}. Bu yuzden otomatik doldurma yapilmadi.</p>}
                 {field.key === 'tokenId' && placeOrderMarketSeedUi?.upstreamKind === 'single' && placeOrderMarketSeedUi.upstreamOutcomeKind === 'multiple' && <p className="text-[10px] leading-relaxed text-amber-600">Bagli upstream market bulundu ama outcome belirsiz{placeOrderMarketSeedUi.distinctUpstreamOutcomeLabels.length > 0 ? ` (${placeOrderMarketSeedUi.distinctUpstreamOutcomeLabels.join(', ')})` : ''}. Bu yuzden sadece market slug dolduruldu.</p>}
                 {field.key === 'tokenId' && (placeOrderMarketSeedUi?.isInheritedTokenId || placeOrderMarketSeedUi?.isInheritedOutcomeLabel) && <p className="text-[10px] leading-relaxed text-sky-600">Bagli upstream `trigger.market_price` outcome bilgisinden otomatik dolduruldu. Config&apos;e yazmak icin `Node Guncelle` kullan.</p>}
+                {field.key === 'reentryMinPriceCent' && placeOrderReentryChecked && (
+                  <p className="text-[10px] leading-relaxed text-sky-600">
+                    Bu alt limit yalniz re-entry denemelerinde current price icin uygulanir.
+                    Trigger guard bildirim ve bekleme ayarlari burada da kullanilir.
+                  </p>
+                )}
+                {field.key === 'reentryMaxPriceCent' && placeOrderReentryChecked && (
+                  <p className="text-[10px] leading-relaxed text-sky-600">
+                    Bu tavan yalniz re-entry denemelerinde kullanilir. Max price koruma ayarlari
+                    bu alan icin de gecerlidir.
+                  </p>
+                )}
                 {field.key === 'maxPriceCent' && placeOrderHasInheritedMaxPrice && (
                   <p className="text-[10px] leading-relaxed text-sky-600">
                     Upstream `trigger.market_price` tavanindan otomatik dolduruldu. Config&apos;e
@@ -612,7 +880,13 @@ export function NodeInspectorPanel({
                     <p className="text-[10px] leading-relaxed text-slate-400 italic">
                       Upstream tetik fiyatinin altina dusulurse buy emrini engelle.
                     </p>
-                    {!upstreamHasTriggerPrice && !placeOrderTriggerGuardChecked && (
+                    {reentryTriggerGuardActive && (
+                      <p className="text-[10px] leading-relaxed text-sky-600">
+                        `Re-entry Min Fiyat` ayarli oldugu icin asagidaki bildirim ve bekleme
+                        toggle&apos;lari re-entry alt fiyat korumasi icin de kullanilir.
+                      </p>
+                    )}
+                    {!upstreamHasTriggerPrice && !placeOrderTriggerGuardChecked && !reentryTriggerGuardActive && (
                       <p className="text-[10px] leading-relaxed text-amber-600">
                         Bu koruma yalnizca upstream tetikte `triggerPrice` veya `triggerPriceCent`
                         varsa acilabilir.
@@ -623,7 +897,7 @@ export function NodeInspectorPanel({
                         Mevcut ayar upstream tetik fiyatini artik bulamiyor. Istersen kapatabilirsin.
                       </p>
                     )}
-                    {placeOrderTriggerGuardChecked && (
+                    {triggerGuardProtectionActive && (
                       <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2">
                         <Label className="text-[11px] font-medium text-slate-600">
                           Iyilesince Tekrar Dene
@@ -641,68 +915,21 @@ export function NodeInspectorPanel({
                         />
                       </div>
                     )}
-                    {placeOrderTriggerGuardChecked && (
+                    {triggerGuardProtectionActive && (
                       <p className="text-[10px] leading-relaxed text-slate-400 italic">
                         Guard bloklarsa order iptal olmaz; bekleme moduna alinip kosullar
                         duzelince yeniden denenir.
                       </p>
                     )}
-                    <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2">
-                      <Label className="text-[11px] font-medium text-slate-600">
-                        Execution Floor Korumasi
-                      </Label>
-                      <input
-                        type="checkbox"
-                        checked={executionFloorGuardChecked}
-                        disabled={executionFloorGuardDisabled}
-                        onChange={(e) =>
-                          actions.onUpdateField(
-                            'executionFloorGuardEnabled',
-                            e.target.checked ? 'true' : 'false'
-                          )
-                        }
-                        className="h-4 w-4 rounded border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
-                      />
-                    </div>
-                    <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                      Best ask upstream tetik fiyatinin altindaysa buy emrini tamamen iptal et.
-                      Best ask bulunamazsa da bloklar.
-                    </p>
-                    {!upstreamHasTriggerPrice && !executionFloorGuardChecked && (
-                      <p className="text-[10px] leading-relaxed text-amber-600">
-                        Bu koruma yalnizca upstream tetikte `triggerPrice` veya `triggerPriceCent`
-                        varsa acilabilir.
-                      </p>
-                    )}
-                    {!upstreamHasTriggerPrice && executionFloorGuardChecked && (
-                      <p className="text-[10px] leading-relaxed text-amber-600">
-                        Mevcut ayar upstream tetik fiyatini artik bulamiyor. Istersen kapatabilirsin.
-                      </p>
-                    )}
-                    {executionFloorGuardChecked && (
-                      <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2">
-                        <Label className="text-[11px] font-medium text-slate-600">
-                          Iyilesince Tekrar Dene
-                        </Label>
-                        <input
-                          type="checkbox"
-                          checked={executionFloorRetryChecked}
-                          onChange={(e) =>
-                            actions.onUpdateField(
-                              'retryOnExecutionFloorGuardBlock',
-                              e.target.checked ? 'true' : 'false'
-                            )
-                          }
-                          className="h-4 w-4 rounded border-slate-300"
-                        />
-                      </div>
-                    )}
-                    {executionFloorGuardChecked && (
-                      <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                        Floor korumasi bloklarsa order beklemeye alinip market duzelince yeniden
-                        denenir.
-                      </p>
-                    )}
+                    <ExecutionFloorProtectionSection
+                      checked={executionFloorGuardChecked}
+                      retryChecked={executionFloorRetryChecked}
+                      disabled={executionFloorGuardDisabled}
+                      hasUpstreamTriggerPrice={upstreamHasTriggerPrice}
+                      hasConfiguredFloorPrice={hasManualExecutionFloorPrice}
+                      floorPriceCent={placeOrderExecutionFloorPriceCentValue}
+                      onUpdateField={actions.onUpdateField}
+                    />
                     <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2">
                       <Label className="text-[11px] font-medium text-slate-600">
                         Price to Beat Korumasi
@@ -931,6 +1158,59 @@ export function NodeInspectorPanel({
 
             {nodeTypeDraft === 'trigger.position_drawdown' && (
               <DrawdownRulesSection rows={form.drawdownRuleRows || []} actions={actions} />
+            )}
+
+            {showTpLadderSection && (
+              <ExitLadderSection
+                title="Take Profit Kademeleri"
+                description="Fiyat seviyeleri strict artar; boyut yüzdeleri orijinal buy fill üzerinden düşünülür."
+                rows={placeOrderTpRuleRows}
+                addLabel="TP Kademesi Ekle"
+                onAdd={() => updateTpRuleRows((rows) => [...rows, createEmptyExitLadderRuleRow()])}
+                onUpdate={(rowId, patch) =>
+                  updateTpRuleRows((rows) =>
+                    rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row))
+                  )
+                }
+                onRemove={(rowId) =>
+                  updateTpRuleRows((rows) => rows.filter((row) => row.id !== rowId))
+                }
+              />
+            )}
+
+            {showSlLadderSection && (
+              <ExitLadderSection
+                title="Stop Loss Kademeleri"
+                description="Fiyat seviyeleri strict azalır; node seviyesindeki SL trigger mode tum kademelere ortak uygulanir."
+                rows={placeOrderSlRuleRows}
+                addLabel="SL Kademesi Ekle"
+                onAdd={() => updateSlRuleRows((rows) => [...rows, createEmptyExitLadderRuleRow()])}
+                onUpdate={(rowId, patch) =>
+                  updateSlRuleRows((rows) =>
+                    rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row))
+                  )
+                }
+                onRemove={(rowId) =>
+                  updateSlRuleRows((rows) => rows.filter((row) => row.id !== rowId))
+                }
+              />
+            )}
+
+            {showTimeExitSection && (
+              <TimeExitRulesSection
+                rows={placeOrderTimeExitRuleRows}
+                onAdd={() =>
+                  updateTimeExitRuleRows((rows) => [...rows, createEmptyTimeExitRuleRow()])
+                }
+                onUpdate={(rowId, patch) =>
+                  updateTimeExitRuleRows((rows) =>
+                    rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row))
+                  )
+                }
+                onRemove={(rowId) =>
+                  updateTimeExitRuleRows((rows) => rows.filter((row) => row.id !== rowId))
+                }
+              />
             )}
 
             {(nodeTypeDraft === 'trigger.open_positions' ||

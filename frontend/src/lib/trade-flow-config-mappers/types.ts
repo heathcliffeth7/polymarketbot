@@ -33,6 +33,18 @@ export interface DrawdownRuleRow {
   durationValue: string;
 }
 
+export interface ExitLadderRuleRow {
+  id: string;
+  priceCent: string;
+  sizePct: string;
+}
+
+export interface TimeExitRuleRow {
+  id: string;
+  elapsedMinutes: string;
+  remainingPct: string;
+}
+
 export interface PlaceOrderMaxPriceUiState {
   isInheritedValue: boolean;
   upstreamKind: 'none' | 'single' | 'multiple';
@@ -58,6 +70,9 @@ export interface NodeConfigFormState {
   triggerSizeRows: string[];
   outcomeConditionRows: OutcomeConditionRow[];
   drawdownRuleRows: DrawdownRuleRow[];
+  tpRuleRows: ExitLadderRuleRow[];
+  slRuleRows: ExitLadderRuleRow[];
+  timeExitRuleRows: TimeExitRuleRow[];
   expressionRows: ConditionDraft[];
   expressionJoin: ExpressionJoin;
   expressionSupported: boolean;

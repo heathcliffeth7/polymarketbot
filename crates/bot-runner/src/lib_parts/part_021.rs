@@ -655,8 +655,8 @@ fn should_request_trade_builder_oco_cancel(
     order: &TradeBuilderOrder,
     normalized_status: &str,
 ) -> bool {
-    order.parent_order_id.is_some()
-        && order.side == "sell"
+    trade_builder_is_child_exit_sell(order)
+        && order.exit_ladder_kind.is_none()
         && matches!(normalized_status, "open" | "partially_filled" | "filled")
 }
 

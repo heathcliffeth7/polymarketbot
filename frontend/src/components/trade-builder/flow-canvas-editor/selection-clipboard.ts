@@ -36,6 +36,51 @@ interface FlowCanvasPasteOptions {
   offsetStep?: number;
 }
 
+function toTrimmedString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function isQuickPresetBuySellPlaceOrderConfig(config: Record<string, unknown>): boolean {
+  const presetKindRaw = toTrimmedString(config.presetKind).toLowerCase();
+  const refKeyRaw = toTrimmedString(config.refKey).toLowerCase();
+  return (
+    presetKindRaw === 'sell_current_position' ||
+    presetKindRaw === 'buy_current_position' ||
+    refKeyRaw === 'preset_sell_current_position' ||
+    refKeyRaw === 'preset_buy_current_position'
+  );
+}
+
+function isGenericPlaceOrderPresetConfig(config: Record<string, unknown>): boolean {
+  if (isQuickPresetBuySellPlaceOrderConfig(config)) {
+    return false;
+  }
+
+  const presetKindRaw = toTrimmedString(config.presetKind).toLowerCase();
+  const refKeyRaw = toTrimmedString(config.refKey).toLowerCase();
+  return presetKindRaw === 'place_order' || refKeyRaw === 'preset_place_order';
+}
+
+function normalizePastedPlaceOrderPresetRefKey(
+  node: FlowNode,
+  nextNodeId: string,
+  knownNodeIds: ReadonlySet<string>
+): void {
+  if (node.data.nodeType !== 'action.place_order') return;
+  const config = node.data.config;
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return;
+  if (!isGenericPlaceOrderPresetConfig(config)) return;
+
+  const refKeyRaw = toTrimmedString(config.refKey);
+  if (
+    !refKeyRaw ||
+    refKeyRaw.toLowerCase() === 'preset_place_order' ||
+    (refKeyRaw !== nextNodeId && knownNodeIds.has(refKeyRaw))
+  ) {
+    config.refKey = nextNodeId;
+  }
+}
+
 function cloneClipboardNode(node: FlowNode): FlowNode {
   const cloned = structuredClone(node) as MutableFlowNode;
   const nextData = { ...cloned.data };
@@ -146,6 +191,10 @@ export function pasteSelectionClipboard(
   const sourceCenter = clipboardCenter(clipboard.nodes);
   const anchor = options.anchor;
   const nodeIdMap = new Map<string, string>();
+  const knownNodeIds = new Set([
+    ...existingNodes.map((node) => node.id),
+    ...clipboard.nodes.map((node) => node.id),
+  ]);
   const existingNodeIds = new Set(existingNodes.map((node) => node.id));
 
   const pastedNodes = clipboard.nodes.map((node) => {
@@ -155,6 +204,7 @@ export function pasteSelectionClipboard(
 
     const nextNode = cloneClipboardNode(node);
     nextNode.id = newId;
+    normalizePastedPlaceOrderPresetRefKey(nextNode, newId, knownNodeIds);
     if (anchor && sourceCenter) {
       let deltaX = anchor.x - sourceCenter.x;
       let deltaY = anchor.y - sourceCenter.y;

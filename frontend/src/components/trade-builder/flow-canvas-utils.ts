@@ -258,13 +258,13 @@ export function buildPlaceOrderPresetConfig(
     sizePct: 100,
     minPriceDistanceCent: 1,
     maxTriggers: 1,
-    refKey:
-      kind === 'sell_current_position'
-        ? 'preset_sell_current_position'
-        : kind === 'buy_current_position'
-          ? 'preset_buy_current_position'
-          : 'preset_place_order',
   };
+
+  if (kind === 'sell_current_position') {
+    config.refKey = 'preset_sell_current_position';
+  } else if (kind === 'buy_current_position') {
+    config.refKey = 'preset_buy_current_position';
+  }
 
   if (seed.sourceTradeId != null && seed.sourceTradeId > 0) {
     config.sourceTradeId = seed.sourceTradeId;

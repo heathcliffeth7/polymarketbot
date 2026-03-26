@@ -248,6 +248,13 @@ fn stale_place_order_retry_detects_old_step_market() {
         "triggered_token_id": "tok-up",
         "triggered_outcome_label": "Up",
     }));
+    let graph = runtime_graph(
+        vec![
+            ("trigger_1", "trigger.market_price"),
+            ("action_1", "action.place_order"),
+        ],
+        vec![("trigger_1", "action_1")],
+    );
     let context = json!({
         "flowContext": {
             "marketSlug": "btc-updown-5m-1772730000"
@@ -259,7 +266,7 @@ fn stale_place_order_retry_detects_old_step_market() {
     });
 
     assert_eq!(
-        resolve_action_place_order_stale_market_retry(&node, &context, &step),
+        resolve_action_place_order_stale_market_retry(&node, &context, &step, &graph),
         Some(ActionPlaceOrderStaleMarketRetry {
             stale_market_slug: "btc-updown-5m-1772729700".to_string(),
             current_market_slug: "btc-updown-5m-1772730000".to_string(),
@@ -273,6 +280,13 @@ fn stale_place_order_retry_ignores_explicit_market_config() {
     let step = test_step(json!({
         "market_slug": "btc-updown-5m-1772729700",
     }));
+    let graph = runtime_graph(
+        vec![
+            ("trigger_1", "trigger.market_price"),
+            ("action_1", "action.place_order"),
+        ],
+        vec![("trigger_1", "action_1")],
+    );
     let context = json!({
         "flowContext": {
             "marketSlug": "btc-updown-5m-1772730000"
@@ -284,7 +298,7 @@ fn stale_place_order_retry_ignores_explicit_market_config() {
     });
 
     assert_eq!(
-        resolve_action_place_order_stale_market_retry(&node, &context, &step),
+        resolve_action_place_order_stale_market_retry(&node, &context, &step, &graph),
         None
     );
 }
@@ -295,6 +309,13 @@ fn stale_place_order_retry_ignores_matching_market() {
     let step = test_step(json!({
         "market_slug": "btc-updown-5m-1772729700",
     }));
+    let graph = runtime_graph(
+        vec![
+            ("trigger_1", "trigger.market_price"),
+            ("action_1", "action.place_order"),
+        ],
+        vec![("trigger_1", "action_1")],
+    );
     let context = json!({
         "flowContext": {
             "marketSlug": "btc-updown-5m-1772729700"
@@ -306,7 +327,42 @@ fn stale_place_order_retry_ignores_matching_market() {
     });
 
     assert_eq!(
-        resolve_action_place_order_stale_market_retry(&node, &context, &step),
+        resolve_action_place_order_stale_market_retry(&node, &context, &step, &graph),
+        None
+    );
+}
+
+#[test]
+fn stale_place_order_retry_prefers_upstream_trigger_market_slug_over_global_flow_context() {
+    let node = test_node(json!({}));
+    let step = test_step(json!({
+        "market_slug": "btc-updown-5m-1772730000",
+    }));
+    let graph = runtime_graph(
+        vec![
+            ("trigger_1", "trigger.market_price"),
+            ("action_1", "action.place_order"),
+        ],
+        vec![("trigger_1", "action_1")],
+    );
+    let mut context = json!({
+        "flowContext": {
+            "marketSlug": "btc-updown-5m-1772729700"
+        },
+        "vars": {},
+        "state": {},
+        "refs": {},
+        "nodeState": {}
+    });
+    set_flow_node_state(
+        &mut context,
+        "trigger_1",
+        FLOW_NODE_STATE_AUTO_SCOPE_MARKET_SLUG,
+        json!("btc-updown-5m-1772730000"),
+    );
+
+    assert_eq!(
+        resolve_action_place_order_stale_market_retry(&node, &context, &step, &graph),
         None
     );
 }
@@ -332,14 +388,61 @@ fn place_order_existing_order_id_prefers_node_local_ref_over_shared_ref() {
 }
 
 #[test]
-fn place_order_existing_order_id_falls_back_to_shared_ref_when_node_local_missing() {
-    let node = test_node(json!({ "refKey": "preset_place_order" }));
+fn place_order_existing_order_id_ignores_legacy_shared_preset_ref_when_node_local_missing() {
+    let node = test_node(json!({
+        "refKey": "preset_place_order",
+        "presetKind": "place_order"
+    }));
     let context = json!({
         "flowContext": {},
         "vars": {},
         "state": {},
         "refs": {
             "preset_place_order": 101
+        },
+        "nodeState": {}
+    });
+
+    assert_eq!(
+        resolve_action_place_order_existing_order_id(&node, &context),
+        None
+    );
+}
+
+#[test]
+fn place_order_existing_order_id_falls_back_to_quick_preset_shared_ref() {
+    let node = test_node(json!({
+        "refKey": "preset_buy_current_position",
+        "presetKind": "buy_current_position"
+    }));
+    let context = json!({
+        "flowContext": {},
+        "vars": {},
+        "state": {},
+        "refs": {
+            "preset_buy_current_position": 101
+        },
+        "nodeState": {}
+    });
+
+    assert_eq!(
+        resolve_action_place_order_existing_order_id(&node, &context),
+        Some(101)
+    );
+}
+
+#[test]
+fn place_order_existing_order_id_falls_back_to_custom_shared_ref() {
+    let node = test_node(json!({
+        "refKey": "team_shared_buy",
+        "presetKind": "place_order"
+    }));
+    let context = json!({
+        "flowContext": {},
+        "vars": {},
+        "state": {},
+        "refs": {
+            "team_shared_buy": 101
         },
         "nodeState": {}
     });
@@ -477,6 +580,84 @@ fn place_order_max_price_invalid_values_filtered() {
 }
 
 #[test]
+fn place_order_reentry_guard_resolution_ignores_reentry_band_on_first_entry() {
+    let node = test_node(json!({
+        "reentryMinPriceCent": 75,
+        "reentryMaxPriceCent": 89
+    }));
+
+    let resolved = resolve_action_place_order_reentry_guard_resolution(
+        &node,
+        &json!({}),
+        Some(0.80),
+        Some(0.90),
+    )
+    .expect("reentry resolution");
+
+    assert_eq!(resolved.generation, 0);
+    assert!(!resolved.band_active);
+    assert_eq!(resolved.effective_guard_trigger_price, Some(0.80));
+    assert_eq!(resolved.effective_max_price, Some(0.90));
+}
+
+#[test]
+fn place_order_reentry_guard_resolution_uses_reentry_band_for_reentries() {
+    let node = test_node(json!({
+        "reentryMinPriceCent": 75,
+        "reentryMaxPriceCent": 89
+    }));
+    let context = json!({
+        "nodeState": {
+            "action_1": {
+                "reentry_generation": 2
+            }
+        }
+    });
+
+    let resolved = resolve_action_place_order_reentry_guard_resolution(
+        &node,
+        &context,
+        Some(0.80),
+        Some(0.90),
+    )
+    .expect("reentry resolution");
+
+    assert_eq!(resolved.generation, 2);
+    assert!(resolved.band_active);
+    assert_eq!(resolved.configured_min_price, Some(0.75));
+    assert_eq!(resolved.configured_max_price, Some(0.89));
+    assert_eq!(resolved.effective_guard_trigger_price, Some(0.75));
+    assert_eq!(resolved.effective_max_price, Some(0.89));
+}
+
+#[test]
+fn place_order_reentry_guard_resolution_rejects_inverted_band() {
+    let node = test_node(json!({
+        "reentryMinPriceCent": 90,
+        "reentryMaxPriceCent": 85
+    }));
+    let context = json!({
+        "nodeState": {
+            "action_1": {
+                "reentry_generation": 1
+            }
+        }
+    });
+
+    let error = resolve_action_place_order_reentry_guard_resolution(
+        &node,
+        &context,
+        Some(0.80),
+        Some(0.90),
+    )
+    .expect_err("inverted band should fail");
+
+    assert!(error
+        .to_string()
+        .contains("reentryMinPriceCent must be lower than reentryMaxPriceCent"));
+}
+
+#[test]
 fn place_order_inherits_trigger_max_price_via_step_input() {
     let trigger_output = json!({
         "market_slug": "btc-updown-5m-1",
@@ -514,6 +695,36 @@ fn place_order_resolves_guard_trigger_price_from_step_input() {
     }));
     assert_eq!(
         resolve_action_place_order_guard_trigger_price(&step),
+        Some(0.77)
+    );
+}
+
+#[test]
+fn place_order_resolves_execution_floor_price_from_manual_override_before_step_input() {
+    let node = test_node(json!({
+        "executionFloorPriceCent": 82
+    }));
+    let step = test_step(json!({
+        "trigger_price": 0.77,
+        "triggerPrice": 0.76
+    }));
+
+    assert_eq!(
+        resolve_action_place_order_execution_floor_price(&node, &step),
+        Some(0.82)
+    );
+}
+
+#[test]
+fn place_order_resolves_execution_floor_price_from_step_input_when_override_missing() {
+    let node = test_node(json!({}));
+    let step = test_step(json!({
+        "trigger_price": 0.77,
+        "triggerPrice": 0.76
+    }));
+
+    assert_eq!(
+        resolve_action_place_order_execution_floor_price(&node, &step),
         Some(0.77)
     );
 }
@@ -658,8 +869,29 @@ fn place_order_exit_price_rejects_sell_side() {
 }
 
 #[test]
+fn place_order_exit_price_allows_rule_only_tp_and_sl() {
+    let node = test_node(json!({
+        "tpRules": [{ "sizePct": 50, "priceCent": 77 }],
+        "slRules": [{ "sizePct": 50, "priceCent": 50 }]
+    }));
+
+    assert_eq!(
+        resolve_action_place_order_exit_price(&node, "buy", true, "tpPriceCent", "tpPrice", "tp")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        resolve_action_place_order_exit_price(&node, "buy", true, "slPriceCent", "slPrice", "sl")
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn oco_cancel_only_applies_to_child_sell_orders_with_live_status() {
     let sell_child = test_builder_order("sell", Some(9));
+    let mut staged_sell_child = test_builder_order("sell", Some(9));
+    staged_sell_child.exit_ladder_kind = Some("sl".to_string());
     let buy_parent = test_builder_order("buy", None);
     let sell_without_parent = test_builder_order("sell", None);
 
@@ -670,6 +902,10 @@ fn oco_cancel_only_applies_to_child_sell_orders_with_live_status() {
     ));
     assert!(should_request_trade_builder_oco_cancel(
         &sell_child,
+        "filled"
+    ));
+    assert!(!should_request_trade_builder_oco_cancel(
+        &staged_sell_child,
         "filled"
     ));
     assert!(!should_request_trade_builder_oco_cancel(

@@ -1,6 +1,11 @@
 import { BOOLEAN_KEYS, NUMERIC_KEYS, RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME } from './constants';
 import { buildObjectFromKeyValueDrafts, buildExpression, nestedExprGroupToJsonLogic, objectToRows, parseExpressionDraft, parseNumberArrayToStringRows } from './expressions';
-import { createEmptyDrawdownRuleRow, createEmptyKeyValueDraft } from './drafts';
+import {
+  createEmptyDrawdownRuleRow,
+  createEmptyExitLadderRuleRow,
+  createEmptyKeyValueDraft,
+  createEmptyTimeExitRuleRow,
+} from './drafts';
 import { NODE_FIELD_SCHEMAS } from './schemas';
 import {
   isPresetBuySellPlaceOrderMarker,
@@ -9,14 +14,35 @@ import {
   resolveTriggerMarketOnceScope,
   toResolveMarketScope,
 } from './presets';
+import {
+  normalizeTriggerMarketPriceCycleWindowConfig,
+  readTriggerMarketPriceCycleWindowFields,
+} from './cycle-window';
 import { TRIGGER_MARKET_ONCE_SCOPE_VERSION } from './constants';
-import type { DrawdownRuleRow, NodeConfigFormState, OutcomeConditionRow } from './types';
-import { createId, isRecord, safeJsonStringify, toCentStringValue, toDateTimeLocalString, toStringValue } from './utils';
+import type {
+  DrawdownRuleRow,
+  ExitLadderRuleRow,
+  NodeConfigFormState,
+  OutcomeConditionRow,
+  TimeExitRuleRow,
+} from './types';
+import {
+  createId,
+  isRecord,
+  safeJsonStringify,
+  toCentStringValue,
+  toDateTimeLocalString,
+  toStringValue,
+  validateOutcomeConditionRow,
+} from './utils';
 
 export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeConfigFormState {
   const cfg = isRecord(config) ? config : {};
   const fields: Record<string, string> = {};
   let triggerSizeRows: string[] = [];
+  const tpRuleRows: ExitLadderRuleRow[] = [];
+  const slRuleRows: ExitLadderRuleRow[] = [];
+  const timeExitRuleRows: TimeExitRuleRow[] = [];
   for (const field of NODE_FIELD_SCHEMAS[nodeType] || []) {
     fields[field.key] =
       field.input === 'datetime-local'
@@ -62,6 +88,44 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
     if (!fields.sizePct.trim()) {
       fields.sizePct = toStringValue(cfg.sizePercent);
+    }
+    if (Array.isArray(cfg.tpRules)) {
+      for (const item of cfg.tpRules as Record<string, unknown>[]) {
+        if (!isRecord(item)) continue;
+        tpRuleRows.push({
+          ...createEmptyExitLadderRuleRow(),
+          priceCent: toCentStringValue(item.priceCent, item.price),
+          sizePct: toStringValue(item.sizePct),
+        });
+      }
+    }
+    if (tpRuleRows.length > 0) {
+      fields.tpEnabled = 'true';
+    }
+
+    if (Array.isArray(cfg.slRules)) {
+      for (const item of cfg.slRules as Record<string, unknown>[]) {
+        if (!isRecord(item)) continue;
+        slRuleRows.push({
+          ...createEmptyExitLadderRuleRow(),
+          priceCent: toCentStringValue(item.priceCent, item.price),
+          sizePct: toStringValue(item.sizePct),
+        });
+      }
+    }
+    if (slRuleRows.length > 0) {
+      fields.slEnabled = 'true';
+    }
+
+    if (Array.isArray(cfg.timeExitRules)) {
+      for (const item of cfg.timeExitRules as Record<string, unknown>[]) {
+        if (!isRecord(item)) continue;
+        timeExitRuleRows.push({
+          ...createEmptyTimeExitRuleRow(),
+          elapsedMinutes: toStringValue(item.elapsedMinutes),
+          remainingPct: toStringValue(item.remainingPct),
+        });
+      }
     }
     fields.presetKind = toStringValue(fields.presetKind || cfg.presetKind);
     const existingMode = String(fields.sizeMode ?? '').trim().toLowerCase();
@@ -204,17 +268,13 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     fields.repeatMode = repeatModeRaw === 'once' ? 'once' : 'loop';
     fields.onceScope = resolveTriggerMarketOnceScope(cfg, marketMode, fields.repeatMode as 'once' | 'loop');
 
-    const cycleWindowModeRaw = toStringValue(cfg.cycleWindowMode).trim().toLowerCase();
-    if (cycleWindowModeRaw === 'first' || cycleWindowModeRaw === 'last' || cycleWindowModeRaw === 'custom_range') {
-      fields.cycleWindowMode = cycleWindowModeRaw;
-    } else {
-      fields.cycleWindowMode = 'off';
-    }
-    fields.cycleWindowSecs = toStringValue(cfg.cycleWindowSecs);
-    fields.cycleWindowStartSec = toStringValue(cfg.cycleWindowStartSec);
-    fields.cycleWindowEndSec = toStringValue(cfg.cycleWindowEndSec);
-    if (cycleWindowModeRaw === 'custom_range') {
-      fields.autoSellOnWindowEnd = cfg.autoSellOnWindowEnd === true ? 'true' : 'false';
+    const cycleWindowFields = readTriggerMarketPriceCycleWindowFields(cfg);
+    fields.cycleWindowMode = cycleWindowFields.cycleWindowMode;
+    fields.cycleWindowSecs = cycleWindowFields.cycleWindowSecs;
+    fields.cycleWindowStartSec = cycleWindowFields.cycleWindowStartSec;
+    fields.cycleWindowEndSec = cycleWindowFields.cycleWindowEndSec;
+    if (cycleWindowFields.autoSellOnWindowEnd != null) {
+      fields.autoSellOnWindowEnd = cycleWindowFields.autoSellOnWindowEnd;
     }
     if (
       (fields.priceToBeatTriggerEnabled ?? '').trim().toLowerCase() === 'true' &&
@@ -240,7 +300,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
           tokenId: toStringValue(item.tokenId),
           outcomeLabel: toStringValue(item.outcomeLabel),
           triggerCondition: toStringValue(item.triggerCondition),
-          triggerPriceCent: toStringValue(item.triggerPriceCent),
+          triggerPriceCent: toCentStringValue(item.triggerPriceCent, item.triggerPrice),
           maxPriceCent: toCentStringValue(item.maxPriceCent, item.maxPrice),
         });
       }
@@ -259,7 +319,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
         tokenId: toStringValue(cfg.tokenId),
         outcomeLabel: toStringValue(cfg.outcomeLabel),
         triggerCondition: toStringValue(cfg.triggerCondition),
-        triggerPriceCent: toStringValue(cfg.triggerPriceCent),
+        triggerPriceCent: toCentStringValue(cfg.triggerPriceCent, cfg.triggerPrice),
         maxPriceCent: toCentStringValue(cfg.maxPriceCent, cfg.maxPrice),
       });
     }
@@ -316,6 +376,9 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     triggerSizeRows,
     outcomeConditionRows,
     drawdownRuleRows,
+    tpRuleRows,
+    slRuleRows,
+    timeExitRuleRows,
     expressionRows: expression.rows,
     expressionJoin: expression.join,
     expressionSupported: expression.supported,
@@ -422,22 +485,53 @@ export function buildNodeConfigFromForm(
 
     const sideRaw = toStringValue(config.side).trim().toLowerCase();
     const isBuySide = sideRaw === 'buy';
-    const tpEnabled = config.tpEnabled === true;
-    const slEnabled = config.slEnabled === true;
+    const tpRules = (form.tpRuleRows || [])
+      .map((row) => {
+        const priceCent = Number(row.priceCent.trim());
+        const sizePct = Number(row.sizePct.trim());
+        if (!Number.isFinite(priceCent) || priceCent <= 0 || priceCent > 100) return null;
+        if (!Number.isFinite(sizePct) || sizePct <= 0 || sizePct > 100) return null;
+        return { priceCent, sizePct };
+      })
+      .filter((item): item is { priceCent: number; sizePct: number } => item != null);
+    const slRules = (form.slRuleRows || [])
+      .map((row) => {
+        const priceCent = Number(row.priceCent.trim());
+        const sizePct = Number(row.sizePct.trim());
+        if (!Number.isFinite(priceCent) || priceCent <= 0 || priceCent > 100) return null;
+        if (!Number.isFinite(sizePct) || sizePct <= 0 || sizePct > 100) return null;
+        return { priceCent, sizePct };
+      })
+      .filter((item): item is { priceCent: number; sizePct: number } => item != null);
+    const timeExitRules = (form.timeExitRuleRows || [])
+      .map((row) => {
+        const elapsedMinutes = Number(row.elapsedMinutes.trim());
+        const remainingPct = Number(row.remainingPct.trim());
+        if (!Number.isFinite(elapsedMinutes) || elapsedMinutes <= 0 || !Number.isInteger(elapsedMinutes)) return null;
+        if (!Number.isFinite(remainingPct) || remainingPct <= 0 || remainingPct > 100) return null;
+        return { elapsedMinutes, remainingPct };
+      })
+      .filter((item): item is { elapsedMinutes: number; remainingPct: number } => item != null);
+    const tpEnabled = config.tpEnabled === true || tpRules.length > 0;
+    const slEnabled = config.slEnabled === true || slRules.length > 0;
     if (!isBuySide) {
       delete config.tpEnabled;
       delete config.tpPriceCent;
       delete config.tpPrice;
+      delete config.tpRules;
       delete config.slEnabled;
       delete config.slPriceCent;
       delete config.slPrice;
+      delete config.slRules;
       delete config.slTriggerPriceMode;
+      delete config.timeExitRules;
       delete config.notifyOnTriggerPriceBlocked;
       delete config.notifyOnExecutionFloorBlocked;
       delete config.notifyOnMaxPriceBlocked;
       delete config.retryOnMaxPriceBlock;
       delete config.retryOnTriggerPriceGuardBlock;
       delete config.retryOnExecutionFloorGuardBlock;
+      delete config.executionFloorPriceCent;
       delete config.retryOnPriceToBeatGuardBlock;
       delete config.priceToBeatGuardEnabled;
       delete config.priceToBeatMaxDiff;
@@ -447,6 +541,8 @@ export function buildNodeConfigFromForm(
       delete config.notifyOnSlHit;
       delete config.reenterOnSlHit;
       delete config.reentryMaxAttempts;
+      delete config.reentryMinPriceCent;
+      delete config.reentryMaxPriceCent;
     } else {
       if (config.triggerPriceGuardEnabled !== true) {
         delete config.notifyOnTriggerPriceBlocked;
@@ -455,6 +551,7 @@ export function buildNodeConfigFromForm(
       if (config.executionFloorGuardEnabled !== true) {
         delete config.notifyOnExecutionFloorBlocked;
         delete config.retryOnExecutionFloorGuardBlock;
+        delete config.executionFloorPriceCent;
       }
       if (config.priceToBeatGuardEnabled !== true) {
         delete config.priceToBeatMaxDiff;
@@ -470,23 +567,43 @@ export function buildNodeConfigFromForm(
         delete config.notifyOnMaxPriceBlocked;
         delete config.retryOnMaxPriceBlock;
       }
+      if (tpRules.length > 0) {
+        config.tpRules = tpRules;
+      } else {
+        delete config.tpRules;
+      }
       if (!tpEnabled) {
         delete config.tpEnabled;
         delete config.tpPriceCent;
         delete config.tpPrice;
         delete config.notifyOnTpHit;
       }
+      if (slRules.length > 0) {
+        config.slRules = slRules;
+      } else {
+        delete config.slRules;
+      }
       if (!slEnabled) {
         delete config.slEnabled;
         delete config.slPriceCent;
         delete config.slPrice;
+        delete config.slRules;
         delete config.slTriggerPriceMode;
         delete config.notifyOnSlHit;
         delete config.reenterOnSlHit;
         delete config.reentryMaxAttempts;
+        delete config.reentryMinPriceCent;
+        delete config.reentryMaxPriceCent;
+      }
+      if (timeExitRules.length > 0) {
+        config.timeExitRules = timeExitRules;
+      } else {
+        delete config.timeExitRules;
       }
       if (config.reenterOnSlHit !== true) {
         delete config.reentryMaxAttempts;
+        delete config.reentryMinPriceCent;
+        delete config.reentryMaxPriceCent;
       }
     }
   }
@@ -634,42 +751,19 @@ export function buildNodeConfigFromForm(
       // auto_scope resolves market slug at runtime.
       delete config.marketSlug;
       // Cycle window focus
-      const cycleWindowModeRaw2 = toStringValue(config.cycleWindowMode).trim().toLowerCase();
-      if (cycleWindowModeRaw2 === 'first' || cycleWindowModeRaw2 === 'last') {
-        config.cycleWindowMode = cycleWindowModeRaw2;
-        const cwSecsRaw = Number(toStringValue(config.cycleWindowSecs).trim());
-        if (Number.isInteger(cwSecsRaw) && cwSecsRaw > 0) {
-          config.cycleWindowSecs = cwSecsRaw;
+      const normalizedCycleWindowConfig = normalizeTriggerMarketPriceCycleWindowConfig(config);
+      for (const key of [
+        'cycleWindowMode',
+        'cycleWindowSecs',
+        'cycleWindowStartSec',
+        'cycleWindowEndSec',
+        'autoSellOnWindowEnd',
+      ] as const) {
+        if (key in normalizedCycleWindowConfig) {
+          config[key] = normalizedCycleWindowConfig[key];
         } else {
-          delete config.cycleWindowMode;
-          delete config.cycleWindowSecs;
+          delete config[key];
         }
-        delete config.cycleWindowStartSec;
-        delete config.cycleWindowEndSec;
-        delete config.autoSellOnWindowEnd;
-      } else if (cycleWindowModeRaw2 === 'custom_range') {
-        config.cycleWindowMode = 'custom_range';
-        const startSec = Number(toStringValue(config.cycleWindowStartSec).trim());
-        const endSec = Number(toStringValue(config.cycleWindowEndSec).trim());
-        if (Number.isInteger(startSec) && startSec >= 0 &&
-            Number.isInteger(endSec) && endSec > startSec) {
-          config.cycleWindowStartSec = startSec;
-          config.cycleWindowEndSec = endSec;
-        } else {
-          delete config.cycleWindowMode;
-          delete config.cycleWindowStartSec;
-          delete config.cycleWindowEndSec;
-        }
-        delete config.cycleWindowSecs;
-        if (config.autoSellOnWindowEnd !== true) {
-          delete config.autoSellOnWindowEnd;
-        }
-      } else {
-        delete config.cycleWindowMode;
-        delete config.cycleWindowSecs;
-        delete config.cycleWindowStartSec;
-        delete config.cycleWindowEndSec;
-        delete config.autoSellOnWindowEnd;
       }
       if (config.priceToBeatTriggerEnabled === true) {
         const ptbUnitRaw = toStringValue(config.priceToBeatTriggerUnit).trim().toLowerCase();
@@ -788,32 +882,20 @@ export function buildNodeConfigFromForm(
   if ((nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') && form.outcomeConditionRows.length > 0) {
     const ptbTriggerEnabled = nodeType === 'trigger.market_price' && config.priceToBeatTriggerEnabled === true;
     const conditions = form.outcomeConditionRows
-      .filter((row) => {
-        const tokenId = row.tokenId.trim();
-        const outcomeLabel = row.outcomeLabel.trim();
-        const triggerCondition = row.triggerCondition.trim();
-        const triggerPriceCentRaw = row.triggerPriceCent.trim();
-        const triggerPriceCent = Number(triggerPriceCentRaw);
-        const maxPriceCentRaw = row.maxPriceCent.trim();
-        const maxPriceCent = maxPriceCentRaw ? Number(maxPriceCentRaw) : null;
-        const hasValidMaxPriceCent =
-          !maxPriceCentRaw ||
-          (Number.isFinite(maxPriceCent) && (maxPriceCent as number) > 0 && (maxPriceCent as number) <= 100);
-        if (!tokenId || !outcomeLabel) return false;
-        if (nodeType === 'trigger.market_price') {
-          const isPtbOnly = ptbTriggerEnabled && !triggerCondition && !triggerPriceCentRaw;
-          if (isPtbOnly) return true;
-          const isSupportedTriggerCondition =
-            ['cross_above', 'cross_below', 'level_above', 'level_below'].includes(triggerCondition);
-          if (!isSupportedTriggerCondition) return false;
-          return Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100 && hasValidMaxPriceCent;
-        }
-        const isSupportedTriggerCondition =
-          triggerCondition === 'cross_above' || triggerCondition === 'cross_below';
-        if (!isSupportedTriggerCondition) return false;
-        return Number.isFinite(triggerPriceCent) && triggerPriceCent > 0 && triggerPriceCent <= 100 && hasValidMaxPriceCent;
-      })
-      .map((row) => {
+      .map((row) => ({
+        row,
+        validation: validateOutcomeConditionRow({
+          nodeType,
+          tokenId: row.tokenId,
+          outcomeLabel: row.outcomeLabel,
+          triggerCondition: row.triggerCondition,
+          triggerPriceCent: row.triggerPriceCent,
+          maxPriceCent: row.maxPriceCent,
+          priceToBeatTriggerEnabled: ptbTriggerEnabled,
+        }),
+      }))
+      .filter(({ validation }) => validation.isValid)
+      .map(({ row, validation }) => {
         const triggerCondition = row.triggerCondition.trim();
         const priceCentRaw = row.triggerPriceCent.trim();
         const priceCent = Number(priceCentRaw);
@@ -823,13 +905,12 @@ export function buildNodeConfigFromForm(
           tokenId: row.tokenId.trim(),
           outcomeLabel: row.outcomeLabel.trim(),
         };
-        const isPtbOnly = nodeType === 'trigger.market_price' && ptbTriggerEnabled && !triggerCondition && !priceCentRaw;
-        if (!isPtbOnly) {
+        if (!validation.isPtbOnly) {
           condition.triggerCondition = triggerCondition;
           condition.triggerPriceCent = Number.isFinite(priceCent) ? priceCent : 0;
         }
         if (
-          !isPtbOnly &&
+          !validation.isPtbOnly &&
           maxPriceCentRaw &&
           Number.isFinite(maxPriceCent) &&
           (maxPriceCent as number) > 0 &&

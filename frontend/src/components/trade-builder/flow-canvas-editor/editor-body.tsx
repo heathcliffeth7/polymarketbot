@@ -23,6 +23,7 @@ import {
   isPresetPlaceOrderMarker,
   parseEdgeConditionToForm,
   parseNodeConfigToForm,
+  validateOutcomeConditionRow,
   type ConditionDraft,
   type DrawdownRuleRow,
   type EdgeConditionFormState,
@@ -657,29 +658,34 @@ export function FlowCanvasEditorBody({
       delete parsedConfig.botToken;
     }
     if (outcomeRequired) {
+      const ptbTriggerEnabled =
+        nextType === 'trigger.market_price' && parsedConfig.priceToBeatTriggerEnabled === true;
       const outcomeConditions = Array.isArray(parsedConfig.outcomeConditions)
         ? parsedConfig.outcomeConditions.filter((item): item is Record<string, unknown> => isRecord(item))
         : [];
-      const validOutcomeConditions = outcomeConditions.filter((item) => {
-        const tokenId = toTrimmedStringValue(item.tokenId);
-        const outcomeLabel = toTrimmedStringValue(item.outcomeLabel);
-        const triggerCondition = toTrimmedStringValue(item.triggerCondition);
-        const triggerPriceCent = toFiniteNumberValue(item.triggerPriceCent);
-        const maxPriceCentRaw = toTrimmedStringValue(item.maxPriceCent);
-        const maxPriceCent = maxPriceCentRaw ? toFiniteNumberValue(item.maxPriceCent) : null;
-        const hasValidPriceCent =
-          triggerPriceCent != null && triggerPriceCent > 0 && triggerPriceCent <= 100;
-        const hasValidMaxPriceCent =
-          !maxPriceCentRaw ||
-          (maxPriceCent != null && maxPriceCent > 0 && maxPriceCent <= 100);
-        return (
-          !!tokenId &&
-          !!outcomeLabel &&
-          (triggerCondition === 'cross_above' || triggerCondition === 'cross_below') &&
-          hasValidPriceCent &&
-          hasValidMaxPriceCent
-        );
-      });
+      const validatedOutcomeConditions = outcomeConditions.map((item) => ({
+        item,
+        validation: validateOutcomeConditionRow({
+          nodeType: nextType,
+          tokenId: item.tokenId,
+          outcomeLabel: item.outcomeLabel,
+          triggerCondition: item.triggerCondition,
+          triggerPriceCent: item.triggerPriceCent,
+          maxPriceCent: item.maxPriceCent,
+          priceToBeatTriggerEnabled: ptbTriggerEnabled,
+        }),
+      }));
+      const hasLevelTriggerInLoopMode =
+        nextType === 'trigger.market_price' &&
+        toTrimmedStringValue(parsedConfig.repeatMode).toLowerCase() !== 'once' &&
+        validatedOutcomeConditions.some(({ validation }) => validation.requiresOnceRepeatMode);
+      if (hasLevelTriggerInLoopMode) {
+        onError('trigger.market_price level_above/level_below only support repeatMode=once.');
+        return;
+      }
+      const validOutcomeConditions = validatedOutcomeConditions
+        .filter(({ validation }) => validation.isValid)
+        .map(({ item }) => item);
 
       if (validOutcomeConditions.length === 0) {
         onError('En az bir gecerli outcome kosulu secmelisin.');

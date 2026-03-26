@@ -11,20 +11,38 @@ async fn execute_action_place_order(
     graph: &TradeFlowGraphRuntime,
     context: &mut Value,
 ) -> Result<TradeFlowNodeExecution> {
-    let side = node_config_string(node, "side")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("action.place_order requires side (buy or sell)"))?;
+    let internal_mode = step_input_string(step, &["internalMode", "internal_mode"])
+        .map(|value| value.trim().to_ascii_lowercase());
+    let is_internal_time_exit = internal_mode.as_deref() == Some("time_exit");
+    let is_window_end_auto_sell = step.input_json.as_ref()
+        .and_then(|value| value.get("windowEndAutoSell"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let effective_internal_mode =
+        internal_mode.clone().or_else(|| is_window_end_auto_sell.then_some("window_end_auto_sell".to_string()));
+    let is_special_internal_sell = is_internal_time_exit || is_window_end_auto_sell;
+    let side = if is_special_internal_sell {
+        "sell".to_string()
+    } else {
+        node_config_string(node, "side")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("action.place_order requires side (buy or sell)"))?
+    };
     anyhow::ensure!(
         matches!(side.as_str(), "buy" | "sell"),
         "action.place_order side must be buy or sell"
     );
-    let execution_mode = node_config_string(node, "executionMode")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!("action.place_order requires executionMode (market or limit)")
-        })?;
+    let execution_mode = if is_special_internal_sell {
+        "market".to_string()
+    } else {
+        node_config_string(node, "executionMode")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("action.place_order requires executionMode (market or limit)")
+            })?
+    };
     anyhow::ensure!(
         matches!(execution_mode.as_str(), "market" | "limit"),
         "action.place_order executionMode must be market or limit"
@@ -57,7 +75,7 @@ async fn execute_action_place_order(
     )
     .unwrap_or_else(|| token_id.clone());
     if let Some(stale_market_retry) =
-        resolve_action_place_order_stale_market_retry(node, context, step)
+        resolve_action_place_order_stale_market_retry(node, context, step, graph)
     {
         let stale_market_slug = stale_market_retry.stale_market_slug;
         let current_market_slug = stale_market_retry.current_market_slug;
@@ -287,9 +305,13 @@ async fn execute_action_place_order(
     if let Some(resolved_source_trade_id) = source_trade_id {
         set_flow_context(context, "sourceTradeId", json!(resolved_source_trade_id));
     }
-    let size_mode = node_config_string(node, "sizeMode")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty());
+    let size_mode = if is_special_internal_sell {
+        Some("pct".to_string())
+    } else {
+        node_config_string(node, "sizeMode")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+    };
     if let Some(mode) = size_mode.as_deref() {
         anyhow::ensure!(
             matches!(mode, "usdc" | "pct"),
@@ -323,10 +345,18 @@ async fn execute_action_place_order(
         Vec::new()
     };
     let trigger_size_for_first_fire = trigger_sizes.first().copied();
-    let configured_size_usdc =
-        node_config_f64(node, "sizeUsdc").or_else(|| node_config_f64(node, "targetNotionalUsdc"));
-    let configured_size_pct =
-        node_config_f64(node, "sizePct").or_else(|| node_config_f64(node, "sizePercent"));
+    let configured_size_usdc = if is_internal_time_exit {
+        None
+    } else {
+        node_config_f64(node, "sizeUsdc").or_else(|| node_config_f64(node, "targetNotionalUsdc"))
+    };
+    let configured_size_pct = if is_internal_time_exit {
+        step_input_f64(step, &["remainingPct", "remaining_pct"])
+    } else if is_window_end_auto_sell {
+        Some(100.0)
+    } else {
+        node_config_f64(node, "sizePct").or_else(|| node_config_f64(node, "sizePercent"))
+    };
     let use_pct_size = if trigger_size_for_first_fire.is_some() {
         if let Some(mode) = size_mode.as_deref() {
             mode == "pct"
@@ -334,7 +364,8 @@ async fn execute_action_place_order(
             configured_size_usdc.is_none() && configured_size_pct.is_some()
         }
     } else {
-        matches!(size_mode.as_deref(), Some("pct"))
+        is_special_internal_sell
+            || matches!(size_mode.as_deref(), Some("pct"))
             || (configured_size_usdc.is_none() && configured_size_pct.is_some())
     };
     if !trigger_sizes.is_empty() && use_pct_size {
@@ -344,6 +375,7 @@ async fn execute_action_place_order(
             "action.place_order pct triggerSizes total must be <= 100"
         );
     }
+    let reference_price = resolve_action_place_order_reference_price(node, step);
     if source_trade_id.is_none() {
         anyhow::ensure!(
             side == "buy",
@@ -361,14 +393,13 @@ async fn execute_action_place_order(
                 )
             })?;
         anyhow::ensure!(seed_size_usdc > 0.0, "action.place_order size must be > 0");
-        let reference_price = resolve_action_place_order_reference_price(node, step).unwrap_or(0.5);
         let ensured_source_trade_id = repo
             .ensure_manual_builder_source_trade(
                 run.user_id,
                 &market_slug,
                 &token_id,
                 &outcome_label,
-                reference_price,
+                reference_price.unwrap_or(0.5),
                 seed_size_usdc,
             )
             .await?;
@@ -386,10 +417,62 @@ async fn execute_action_place_order(
     }
     let source_trade_id = source_trade_id
         .ok_or_else(|| anyhow::anyhow!("action.place_order requires sourceTradeId"))?;
+    if is_internal_time_exit {
+        if load_action_place_order_sell_position(repo, source_trade_id, &token_id)
+            .await
+            .is_err()
+        {
+            if let Some(parent_builder_order_id) =
+                step_input_i64(step, &["parentBuilderOrderId", "parent_builder_order_id"])
+            {
+                repo.append_trade_builder_order_event(
+                    parent_builder_order_id,
+                    "time_exit_skipped_closed",
+                    &json!({
+                        "node_key": node.key,
+                        "source_trade_id": source_trade_id,
+                        "market_slug": market_slug,
+                        "token_id": token_id,
+                        "outcome_label": outcome_label,
+                    }),
+                )
+                .await?;
+            }
+            let skipped_output = json!({
+                "node_key": node.key,
+                "skipped": true,
+                "reason": "time_exit_skipped_closed",
+                "internal_mode": "time_exit",
+                "source_trade_id": source_trade_id,
+                "market_slug": market_slug,
+                "token_id": token_id,
+                "outcome_label": outcome_label,
+            });
+            return Ok(TradeFlowNodeExecution {
+                output: skipped_output,
+                routes: Vec::new(),
+                repeat_at: None,
+                repeat_idempotency_key: None,
+            });
+        }
+    }
+    let window_end_parent_builder_order_id = if is_window_end_auto_sell {
+        Some(step_input_i64(step, &["parentBuilderOrderId", "parent_builder_order_id"])
+            .filter(|value| *value > 0)
+            .ok_or_else(|| anyhow::anyhow!("windowEndAutoSell requires parentBuilderOrderId"))?)
+    } else { None };
     let ref_key = node_config_string(node, "refKey").unwrap_or_else(|| node.key.clone());
-    let trigger_condition = node_config_string(node, "triggerCondition");
-    let trigger_price = node_config_f64(node, "triggerPrice")
-        .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0));
+    let trigger_condition = if is_special_internal_sell {
+        None
+    } else {
+        node_config_string(node, "triggerCondition")
+    };
+    let trigger_price = if is_special_internal_sell {
+        None
+    } else {
+        node_config_f64(node, "triggerPrice")
+            .or_else(|| node_config_f64(node, "triggerPriceCent").map(|v| v / 100.0))
+    };
     if let Some(condition) = trigger_condition.as_deref() {
         anyhow::ensure!(
             matches!(
@@ -399,26 +482,64 @@ async fn execute_action_place_order(
             "action.place_order triggerCondition must be cross_above/cross_below/level_above/level_below"
         );
     }
-    let mut kind = node_config_string(node, "kind").unwrap_or_else(|| {
-        if trigger_condition.is_some() && trigger_price.is_some() {
-            "conditional".to_string()
-        } else {
-            "immediate".to_string()
-        }
-    });
+    let mut kind = if is_special_internal_sell {
+        "immediate".to_string()
+    } else {
+        node_config_string(node, "kind").unwrap_or_else(|| {
+            if trigger_condition.is_some() && trigger_price.is_some() {
+                "conditional".to_string()
+            } else {
+                "immediate".to_string()
+            }
+        })
+    };
     if kind != "conditional" && kind != "immediate" {
         kind = "immediate".to_string();
     }
     let expires_at = node_config_datetime(node, "expiresAt")?;
-    let mut ignored_existing_order: Option<(Option<i64>, &'static str)> = None;
-    let existing_order_id = resolve_action_place_order_existing_order_id(node, context);
+    let tp_rules = if is_special_internal_sell {
+        Vec::new()
+    } else {
+        parse_trade_builder_price_exit_rules(
+            node.config.get("tpRules"),
+            TRADE_BUILDER_EXIT_LADDER_KIND_TP,
+        )?
+    };
+    let sl_rules = if is_special_internal_sell {
+        Vec::new()
+    } else {
+        parse_trade_builder_price_exit_rules(
+            node.config.get("slRules"),
+            TRADE_BUILDER_EXIT_LADDER_KIND_SL,
+        )?
+    };
+    let time_exit_rules = if is_special_internal_sell {
+        Vec::new()
+    } else {
+        parse_trade_builder_time_exit_rules(node.config.get("timeExitRules"))?
+    };
+    let mut ignored_existing_order: Option<(
+        Option<i64>,
+        &'static str,
+        Option<ActionPlaceOrderExistingRefScope>,
+    )> = None;
+    let existing_order_ref = if is_special_internal_sell {
+        None
+    } else {
+        resolve_action_place_order_existing_order_ref(node, context)
+    };
+    let existing_order_id = existing_order_ref.map(|(existing_order_id, _)| existing_order_id);
+    let existing_order_ref_scope = existing_order_ref.map(|(_, scope)| scope);
     let mut existing_order = if let Some(existing_order_id) = existing_order_id {
         match repo.get_trade_builder_order(existing_order_id).await? {
             Some(order) => Some(order),
             None => {
-                ignored_existing_order = Some((Some(existing_order_id), "missing_existing_order"));
-                set_flow_ref(context, &ref_key, Value::Null);
-                set_flow_ref(context, &node.key, Value::Null);
+                ignored_existing_order = Some((
+                    Some(existing_order_id),
+                    "missing_existing_order",
+                    existing_order_ref_scope,
+                ));
+                clear_action_place_order_ref_bindings(context, node, &ref_key);
                 repo.append_trade_flow_event(
                     Some(run.id),
                     run.definition_id,
@@ -430,6 +551,7 @@ async fn execute_action_place_order(
                         "ref_key": ref_key,
                         "reason": "missing_existing_order",
                         "existing_order_id": existing_order_id,
+                        "existing_ref_scope": existing_order_ref_scope.map(|scope| scope.as_str()),
                         "expected_market_slug": market_slug,
                         "expected_token_id": token_id,
                         "expected_source_trade_id": source_trade_id,
@@ -456,8 +578,12 @@ async fn execute_action_place_order(
             &execution_mode,
         ) {
             ActionPlaceOrderExistingOrderDecision::ReuseActive => {
-                set_flow_ref(context, &ref_key, json!(existing_order_snapshot.id));
-                set_flow_ref(context, &node.key, json!(existing_order_snapshot.id));
+                bind_action_place_order_ref_bindings(
+                    context,
+                    node,
+                    &ref_key,
+                    existing_order_snapshot.id,
+                );
                 return Ok(TradeFlowNodeExecution {
                     output: json!({
                         "node_key": node.key,
@@ -474,6 +600,7 @@ async fn execute_action_place_order(
                         "size_usdc": existing_order_snapshot.size_usdc,
                         "target_qty": existing_order_snapshot.target_qty,
                         "remaining_qty": existing_order_snapshot.remaining_qty,
+                        "existing_ref_scope": existing_order_ref_scope.map(|scope| scope.as_str()),
                         "should_inline_submit": false,
                         "reused_existing_order": true
                     }),
@@ -483,13 +610,20 @@ async fn execute_action_place_order(
                 });
             }
             ActionPlaceOrderExistingOrderDecision::RearmErrorSell => {
-                set_flow_ref(context, &ref_key, json!(existing_order_snapshot.id));
-                set_flow_ref(context, &node.key, json!(existing_order_snapshot.id));
+                bind_action_place_order_ref_bindings(
+                    context,
+                    node,
+                    &ref_key,
+                    existing_order_snapshot.id,
+                );
             }
             ActionPlaceOrderExistingOrderDecision::Ignore(reason) => {
-                ignored_existing_order = Some((Some(existing_order_snapshot.id), reason));
-                set_flow_ref(context, &ref_key, Value::Null);
-                set_flow_ref(context, &node.key, Value::Null);
+                ignored_existing_order = Some((
+                    Some(existing_order_snapshot.id),
+                    reason,
+                    existing_order_ref_scope,
+                ));
+                clear_action_place_order_ref_bindings(context, node, &ref_key);
                 repo.append_trade_flow_event(
                     Some(run.id),
                     run.definition_id,
@@ -501,6 +635,7 @@ async fn execute_action_place_order(
                         "ref_key": ref_key,
                         "reason": reason,
                         "existing_order_id": existing_order_snapshot.id,
+                        "existing_ref_scope": existing_order_ref_scope.map(|scope| scope.as_str()),
                         "existing_status": existing_order_snapshot.status,
                         "existing_market_slug": existing_order_snapshot.market_slug,
                         "existing_token_id": existing_order_snapshot.token_id,
@@ -527,10 +662,10 @@ async fn execute_action_place_order(
         "action.place_order minPriceDistanceCent must be > 0"
     );
     let should_inline_submit = kind == "immediate";
-    let max_price = resolve_action_place_order_max_price(node, step, context);
+    let base_max_price = resolve_action_place_order_max_price(node, step, context);
     let trigger_price_guard_enabled =
         node_config_bool(node, "triggerPriceGuardEnabled").unwrap_or(false);
-    let guard_trigger_price = if trigger_price_guard_enabled && side == "buy" {
+    let base_guard_trigger_price = if trigger_price_guard_enabled && side == "buy" {
         Some(resolve_action_place_order_guard_trigger_price(step).ok_or_else(|| {
             anyhow::anyhow!(
                 "action.place_order triggerPriceGuardEnabled=true but no trigger_price found in step inputs"
@@ -539,13 +674,19 @@ async fn execute_action_place_order(
     } else {
         None
     };
+    let reentry_guard_resolution = resolve_action_place_order_reentry_guard_resolution(
+        node,
+        context,
+        base_guard_trigger_price,
+        base_max_price,
+    )?;
+    let max_price = reentry_guard_resolution.effective_max_price;
+    let guard_trigger_price = reentry_guard_resolution.effective_guard_trigger_price;
     let execution_floor_guard_enabled =
         node_config_bool(node, "executionFloorGuardEnabled").unwrap_or(false);
     let best_ask_floor_price = if execution_floor_guard_enabled && side == "buy" {
-        Some(resolve_action_place_order_guard_trigger_price(step).ok_or_else(|| {
-            anyhow::anyhow!(
-                "action.place_order executionFloorGuardEnabled=true but no trigger_price found in step inputs"
-            )
+        Some(resolve_action_place_order_execution_floor_price(node, step).ok_or_else(|| {
+            anyhow::anyhow!("action.place_order executionFloorGuardEnabled=true but neither executionFloorPriceCent nor trigger_price found")
         })?)
     } else {
         None
@@ -587,24 +728,34 @@ async fn execute_action_place_order(
     let notify_on_max_price_blocked =
         node_config_bool(node, "notifyOnMaxPriceBlocked").unwrap_or(false);
 
-    let tp_enabled = node_config_bool(node, "tpEnabled").unwrap_or(false);
-    let tp_price = resolve_action_place_order_exit_price(
-        node,
-        &side,
-        tp_enabled,
-        "tpPriceCent",
-        "tpPrice",
-        "tp",
-    )?;
-    let sl_enabled = node_config_bool(node, "slEnabled").unwrap_or(false);
-    let sl_price = resolve_action_place_order_exit_price(
-        node,
-        &side,
-        sl_enabled,
-        "slPriceCent",
-        "slPrice",
-        "sl",
-    )?;
+    let hard_tp_price = if is_internal_time_exit {
+        None
+    } else {
+        resolve_action_place_order_exit_price(
+            node,
+            &side,
+            node_config_bool(node, "tpEnabled").unwrap_or(false),
+            "tpPriceCent",
+            "tpPrice",
+            "tp",
+        )?
+    };
+    let hard_sl_price = if is_internal_time_exit {
+        None
+    } else {
+        resolve_action_place_order_exit_price(
+            node,
+            &side,
+            node_config_bool(node, "slEnabled").unwrap_or(false),
+            "slPriceCent",
+            "slPrice",
+            "sl",
+        )?
+    };
+    let tp_enabled = hard_tp_price.is_some() || !tp_rules.is_empty();
+    let tp_price = hard_tp_price;
+    let sl_enabled = hard_sl_price.is_some() || !sl_rules.is_empty();
+    let sl_price = hard_sl_price;
     let sl_trigger_price_mode: Option<&str> = if sl_enabled {
         let raw = node_config_string(node, "slTriggerPriceMode");
         let mode = match raw.as_deref() {
@@ -624,7 +775,7 @@ async fn execute_action_place_order(
     } else {
         None
     };
-    let reenter_on_sl_hit =
+    let reenter_on_sl_hit = !is_internal_time_exit &&
         node_config_bool(node, "reenterOnSlHit").unwrap_or(false) && sl_enabled && side == "buy";
     let reentry_max_attempts = if reenter_on_sl_hit {
         node_config_i64(node, "reentryMaxAttempts")
@@ -661,18 +812,53 @@ async fn execute_action_place_order(
         );
     }
     let sizing = if side == "sell" {
-        resolve_action_place_order_sell_sizing(
-            repo,
-            node,
-            step,
-            source_trade_id,
-            &token_id,
-            trigger_size_for_first_fire,
-            configured_size_usdc,
-            configured_size_pct,
-            use_pct_size,
-        )
-        .await?
+        if let Some(parent_builder_order_id) = window_end_parent_builder_order_id {
+            let Some(sizing) = resolve_action_place_order_window_end_auto_sell_sizing(
+                repo,
+                node,
+                step,
+                parent_builder_order_id,
+                source_trade_id,
+                &token_id,
+            )
+            .await?
+            else {
+                repo.append_trade_builder_order_event(
+                    parent_builder_order_id,
+                    "window_end_auto_sell_skipped_closed",
+                    &json!({
+                        "node_key": node.key,
+                        "source_trade_id": source_trade_id,
+                        "market_slug": market_slug,
+                        "token_id": token_id,
+                        "outcome_label": outcome_label,
+                    }),
+                )
+                .await?;
+                return Ok(TradeFlowNodeExecution {
+                    output: json!({
+                        "node_key": node.key,
+                        "skipped": true,
+                        "reason": "window_end_auto_sell_skipped_closed",
+                        "internal_mode": effective_internal_mode,
+                        "source_trade_id": source_trade_id,
+                        "market_slug": market_slug,
+                        "token_id": token_id,
+                        "outcome_label": outcome_label,
+                        "parent_builder_order_id": parent_builder_order_id,
+                    }),
+                    routes: Vec::new(),
+                    repeat_at: None,
+                    repeat_idempotency_key: None,
+                });
+            };
+            sizing
+        } else {
+            resolve_action_place_order_sell_sizing(
+                repo, node, step, source_trade_id, &token_id, trigger_size_for_first_fire,
+                configured_size_usdc, configured_size_pct, use_pct_size,
+            ).await?
+        }
     } else if use_pct_size {
         let size_pct = trigger_size_for_first_fire
             .or(configured_size_pct)
@@ -722,6 +908,16 @@ async fn execute_action_place_order(
             resolved_size_pct: None,
         }
     };
+    let persisted_trigger_price =
+        if side == "buy"
+            && kind == "immediate"
+            && execution_mode == "market"
+            && sizing.size_basis == TRADE_BUILDER_SIZE_BASIS_NOTIONAL_USDC
+        {
+            reference_price.or(trigger_price)
+        } else {
+            trigger_price
+        };
 
     let risk = risk_gate_manual_order(
         repo,
@@ -738,11 +934,15 @@ async fn execute_action_place_order(
         let output = json!({
             "node_key": node.key,
             "blocked": true,
+            "blocked_by": "risk_policy",
             "risk_decision": format!("{risk:?}"),
             "source_trade_id": source_trade_id,
             "ignored_stale_existing_order": ignored_existing_order.is_some(),
-            "ignored_existing_order_id": ignored_existing_order.as_ref().and_then(|(id, _)| *id),
-            "ignored_existing_order_reason": ignored_existing_order.as_ref().map(|(_, reason)| *reason)
+            "ignored_existing_order_id": ignored_existing_order.as_ref().and_then(|(id, _, _)| *id),
+            "ignored_existing_order_reason": ignored_existing_order.as_ref().map(|(_, reason, _)| *reason),
+            "ignored_existing_order_scope": ignored_existing_order
+                .as_ref()
+                .and_then(|(_, _, scope)| scope.map(|scope| scope.as_str()))
         });
         return Ok(TradeFlowNodeExecution {
             output,
@@ -841,8 +1041,9 @@ async fn execute_action_place_order(
             }),
         )
         .await?;
-        set_flow_ref(context, &ref_key, json!(existing_order.id));
-        set_flow_ref(context, &node.key, json!(existing_order.id));
+        if !is_internal_time_exit {
+            bind_action_place_order_ref_bindings(context, node, &ref_key, existing_order.id);
+        }
         return Ok(TradeFlowNodeExecution {
             output: json!({
                 "node_key": node.key,
@@ -904,8 +1105,16 @@ async fn execute_action_place_order(
         );
     }
 
+    let parent_builder_order_id = if is_internal_time_exit || is_window_end_auto_sell {
+        window_end_parent_builder_order_id.or_else(|| {
+            step_input_i64(step, &["parentBuilderOrderId", "parent_builder_order_id"])
+                .filter(|value| *value > 0)
+        })
+    } else {
+        None
+    };
     let builder_order_id = repo
-        .create_trade_builder_order(
+        .create_trade_builder_order_with_exit_ladders(
             source_trade_id,
             &kind,
             if side == "sell" && kind == "immediate" {
@@ -919,7 +1128,7 @@ async fn execute_action_place_order(
             &side,
             &execution_mode,
             trigger_condition.as_deref(),
-            trigger_price,
+            persisted_trigger_price,
             max_price,
             guard_trigger_price,
             best_ask_floor_price,
@@ -932,11 +1141,14 @@ async fn execute_action_place_order(
             eligible_after_at.clone(),
             eligible_before_at.clone(),
             max_triggers,
-            None,
+            parent_builder_order_id,
             tp_enabled,
             tp_price,
+            (!tp_rules.is_empty()).then_some(tp_rules.as_slice()),
             sl_enabled,
             sl_price,
+            (!sl_rules.is_empty()).then_some(sl_rules.as_slice()),
+            (!time_exit_rules.is_empty()).then_some(time_exit_rules.as_slice()),
             0,
             Some(run.definition_id),
             Some(run.id),
@@ -956,6 +1168,9 @@ async fn execute_action_place_order(
             retry_on_trigger_guard_block,
             retry_on_execution_floor_guard_block,
             retry_on_max_price_block,
+            None,
+            None,
+            None,
         )
         .await?;
     let initial_status = if side == "sell" && kind == "immediate" {
@@ -998,6 +1213,10 @@ async fn execute_action_place_order(
         json!(guard_trigger_price),
     );
     flow_created_payload.insert(
+        "reentry_band".to_string(),
+        json!({"generation": reentry_guard_resolution.generation, "band_active": reentry_guard_resolution.band_active, "configured_min_price": reentry_guard_resolution.configured_min_price, "configured_max_price": reentry_guard_resolution.configured_max_price, "effective_guard_trigger_price": guard_trigger_price, "effective_max_price": max_price}),
+    );
+    flow_created_payload.insert(
         "trigger_price_guard_enabled".to_string(),
         json!(trigger_price_guard_enabled),
     );
@@ -1015,17 +1234,39 @@ async fn execute_action_place_order(
     );
     flow_created_payload.insert(
         "ignored_existing_order_id".to_string(),
-        json!(ignored_existing_order.as_ref().and_then(|(id, _)| *id)),
+        json!(ignored_existing_order.as_ref().and_then(|(id, _, _)| *id)),
     );
     flow_created_payload.insert(
         "ignored_existing_order_reason".to_string(),
-        json!(ignored_existing_order.as_ref().map(|(_, reason)| *reason)),
+        json!(ignored_existing_order.as_ref().map(|(_, reason, _)| *reason)),
+    );
+    flow_created_payload.insert(
+        "ignored_existing_order_scope".to_string(),
+        json!(ignored_existing_order
+            .as_ref()
+            .and_then(|(_, _, scope)| scope.map(|scope| scope.as_str()))),
     );
     flow_created_payload.insert("protection".to_string(), protection_output.clone());
+    flow_created_payload.insert(
+        "internal_mode".to_string(),
+        json!(effective_internal_mode.clone()),
+    );
     flow_created_payload.insert("tp_enabled".to_string(), json!(tp_enabled));
     flow_created_payload.insert("tp_price".to_string(), json!(tp_price));
     flow_created_payload.insert("sl_enabled".to_string(), json!(sl_enabled));
     flow_created_payload.insert("sl_price".to_string(), json!(sl_price));
+    flow_created_payload.insert(
+        "tp_rules".to_string(),
+        serde_json::to_value(&tp_rules)?,
+    );
+    flow_created_payload.insert(
+        "sl_rules".to_string(),
+        serde_json::to_value(&sl_rules)?,
+    );
+    flow_created_payload.insert(
+        "time_exit_rules".to_string(),
+        serde_json::to_value(&time_exit_rules)?,
+    );
     flow_created_payload.insert(
         "sl_trigger_price_mode".to_string(),
         json!(sl_trigger_price_mode),
@@ -1085,8 +1326,45 @@ async fn execute_action_place_order(
     )
     .await?;
 
-    set_flow_ref(context, &ref_key, json!(builder_order_id));
-    set_flow_ref(context, &node.key, json!(builder_order_id));
+    if !is_special_internal_sell {
+        bind_action_place_order_ref_bindings(context, node, &ref_key, builder_order_id);
+    }
+    if is_window_end_auto_sell {
+        if let Some(parent_builder_order_id) = parent_builder_order_id {
+            repo.append_trade_builder_order_event(
+                parent_builder_order_id,
+                "window_end_auto_sell_submitted",
+                &json!({
+                    "node_key": node.key,
+                    "builder_order_id": builder_order_id,
+                    "source_trade_id": source_trade_id,
+                    "size_basis": sizing.size_basis,
+                    "target_qty": sizing.target_qty,
+                    "remaining_qty": sizing.remaining_qty,
+                }),
+            )
+            .await?;
+        }
+        if let Some(parent_builder_order_id) = parent_builder_order_id {
+            let siblings = repo
+                .list_trade_builder_child_orders_by_parent(parent_builder_order_id, None)
+                .await?
+                .into_iter()
+                .filter(|sibling| sibling.id != builder_order_id)
+                .map(|sibling| sibling.id)
+                .collect::<Vec<_>>();
+            repo.append_trade_builder_order_event(
+                parent_builder_order_id,
+                "window_end_auto_sell_child_exits_preserved",
+                &json!({
+                    "node_key": node.key,
+                    "builder_order_id": builder_order_id,
+                    "sibling_order_ids": siblings,
+                }),
+            )
+            .await?;
+        }
+    }
 
     let mut output = serde_json::Map::new();
     output.insert("node_key".to_string(), json!(node.key));
@@ -1112,6 +1390,10 @@ async fn execute_action_place_order(
         json!(guard_trigger_price),
     );
     output.insert(
+        "reentry_band".to_string(),
+        json!({"generation": reentry_guard_resolution.generation, "band_active": reentry_guard_resolution.band_active, "configured_min_price": reentry_guard_resolution.configured_min_price, "configured_max_price": reentry_guard_resolution.configured_max_price, "effective_guard_trigger_price": guard_trigger_price, "effective_max_price": max_price}),
+    );
+    output.insert(
         "best_ask_floor_price".to_string(),
         json!(best_ask_floor_price),
     );
@@ -1126,6 +1408,20 @@ async fn execute_action_place_order(
     output.insert("tp_price".to_string(), json!(tp_price));
     output.insert("sl_enabled".to_string(), json!(sl_enabled));
     output.insert("sl_price".to_string(), json!(sl_price));
+    output.insert(
+        "internal_mode".to_string(),
+        json!(effective_internal_mode.clone()),
+    );
+    output.insert(
+        "parent_builder_order_id".to_string(),
+        json!(parent_builder_order_id),
+    );
+    output.insert("tp_rules".to_string(), serde_json::to_value(&tp_rules)?);
+    output.insert("sl_rules".to_string(), serde_json::to_value(&sl_rules)?);
+    output.insert(
+        "time_exit_rules".to_string(),
+        serde_json::to_value(&time_exit_rules)?,
+    );
     output.insert(
         "execution_floor_guard_enabled".to_string(),
         json!(execution_floor_guard_enabled),

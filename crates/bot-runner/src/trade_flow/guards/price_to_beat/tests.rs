@@ -21,6 +21,7 @@ fn builds_gap_below_threshold_notification_with_values() {
         timeframe: Some("5m".to_string()),
         asset: Some("btc".to_string()),
         price_to_beat: Some(69_279.93484689),
+        price_to_beat_status: Some("polymarket_verified".to_string()),
         price_to_beat_source: Some("polymarket".to_string()),
         price_to_beat_source_latency_ms: None,
         current_price: Some(69_300.12),
@@ -56,6 +57,7 @@ fn blocked_notification_includes_reason_detail_and_partial_prices() {
         timeframe: Some("5m".to_string()),
         asset: Some("btc".to_string()),
         price_to_beat: None,
+        price_to_beat_status: None,
         price_to_beat_source: None,
         price_to_beat_source_latency_ms: None,
         current_price: Some(70_404.25964978),
@@ -87,6 +89,7 @@ fn pending_notification_without_detail_omits_detail_line() {
         timeframe: Some("5m".to_string()),
         asset: Some("btc".to_string()),
         price_to_beat: None,
+        price_to_beat_status: None,
         price_to_beat_source: None,
         price_to_beat_source_latency_ms: None,
         current_price: None,
@@ -117,6 +120,7 @@ fn waiting_notification_mentions_recovery_retry() {
         timeframe: Some("5m".to_string()),
         asset: Some("btc".to_string()),
         price_to_beat: Some(69_279.93484689),
+        price_to_beat_status: Some("polymarket_verified".to_string()),
         price_to_beat_source: Some("polymarket".to_string()),
         price_to_beat_source_latency_ms: None,
         current_price: Some(69_300.12),
@@ -131,6 +135,41 @@ fn waiting_notification_mentions_recovery_retry() {
     let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
     assert!(message.contains("Bekleme moduna alindi"));
     assert!(message.contains("yeniden denenecek"));
+}
+
+#[test]
+fn recovered_notification_mentions_previous_reason_and_metrics() {
+    let evaluation = PriceToBeatGuardEvaluation {
+        passed: true,
+        reason_code: "passed".to_string(),
+        reason_detail: None,
+        normalized_outcome_label: Some("yes".to_string()),
+        direction: Some("up".to_string()),
+        market_slug: "btc-updown-5m-1773232500".to_string(),
+        event_url: "https://polymarket.com/event/btc-updown-5m-1773232500".to_string(),
+        timeframe: Some("5m".to_string()),
+        asset: Some("btc".to_string()),
+        price_to_beat: Some(69_279.93484689),
+        price_to_beat_status: Some("polymarket_verified".to_string()),
+        price_to_beat_source: Some("polymarket".to_string()),
+        price_to_beat_source_latency_ms: None,
+        current_price: Some(69_320.12),
+        current_price_source: CURRENT_PRICE_SOURCE_CHAINLINK,
+        directional_gap: Some(40.18515311),
+        gap_abs: Some(40.18515311),
+        threshold_value: 30.0,
+        threshold_unit: "usd".to_string(),
+        threshold_usd: 30.0,
+    };
+
+    let message = build_price_to_beat_guard_recovered_notification_message(
+        &evaluation,
+        "price_to_beat_gap_below_threshold",
+    );
+    assert!(message.contains("Price to Beat Korumasi Gecti"));
+    assert!(message.contains("Onceki Sebep: price_to_beat_gap_below_threshold"));
+    assert!(message.contains("Price to Beat Source: polymarket"));
+    assert!(message.contains("Current (Chainlink): 69320.12000000"));
 }
 
 #[test]
@@ -184,6 +223,7 @@ fn trigger_gate_value_includes_reason_and_bounds() {
         reason: "below_min_gap",
         directional_gap: Some(12.5),
         price_to_beat: Some(100.0),
+        price_to_beat_status: Some("polymarket_verified".to_string()),
         current_price: Some(112.5),
         min_gap: 30.0,
         max_gap: Some(60.0),
@@ -280,6 +320,7 @@ fn current_price_unavailable_reason_is_supported() {
         timeframe: Some("5m".to_string()),
         asset: Some("btc".to_string()),
         price_to_beat: Some(70_714.62472011),
+        price_to_beat_status: Some("polymarket_verified".to_string()),
         price_to_beat_source: Some("polymarket".to_string()),
         price_to_beat_source_latency_ms: None,
         current_price: None,
@@ -298,24 +339,23 @@ fn current_price_unavailable_reason_is_supported() {
 }
 
 #[test]
-fn chainlink_carryover_stale_current_price_maps_to_pending() {
+fn chainlink_rtds_start_tick_stale_current_price_maps_to_pending() {
     let (reason_code, reason_detail) = map_current_price_error(
-        PriceToBeatSource::ChainlinkCarryover,
+        PriceToBeatSource::ChainlinkRtdsStartTick,
         BTC_MARKET_5M,
         "btc",
         Some(217_000),
         "stale price for btc/usd: 216s old (provider_age_ms=216937, receive_age_ms=90, provider_timestamp_ms=1774012890000, received_at_ms=1774013106847)",
-        Some("coinbase timeout"),
     );
     assert_eq!(reason_code, "price_to_beat_pending");
     assert!(reason_detail.contains("asset=btc"));
-    assert!(reason_detail.contains("snapshot_source=chainlink_carryover"));
+    assert!(reason_detail.contains("snapshot_source=chainlink_rtds_start_tick"));
     assert!(reason_detail.contains(&format!("market_slug={BTC_MARKET_5M}")));
     assert!(reason_detail.contains("gap_ms=217000"));
     assert!(reason_detail.contains("provider_age_ms=216937"));
     assert!(reason_detail.contains("receive_age_ms=90"));
-    assert!(reason_detail.contains("awaiting_authoritative_polymarket_snapshot=true"));
-    assert!(reason_detail.contains("fallback_error=coinbase timeout"));
+    assert!(reason_detail.contains("awaiting_current_price_tick=true"));
+    assert!(reason_detail.contains("chainlink_error=stale price for btc/usd"));
 }
 
 #[test]
@@ -326,13 +366,10 @@ fn authoritative_price_to_beat_keeps_current_price_unavailable_reason() {
         "btc",
         None,
         "stale price for btc/usd: 216s old (provider_age_ms=216937, receive_age_ms=90, provider_timestamp_ms=1774012890000, received_at_ms=1774013106847)",
-        Some("coinbase timeout"),
     );
     assert_eq!(reason_code, "current_price_unavailable");
     assert!(reason_detail.contains("primary_source=chainlink_live_data_ws"));
-    assert!(reason_detail.contains("fallback_source=coinbase_spot"));
     assert!(reason_detail.contains("chainlink_error=stale price for btc/usd"));
-    assert!(reason_detail.contains("fallback_error=coinbase timeout"));
 }
 
 #[test]
@@ -341,7 +378,7 @@ fn pending_reason_can_describe_authoritative_snapshot_wait() {
         passed: false,
         reason_code: "price_to_beat_pending".to_string(),
         reason_detail: Some(
-            "snapshot_source=chainlink_carryover; market_slug=btc-updown-5m-1774013100; gap_ms=217000; provider_age_ms=216937; receive_age_ms=90; awaiting_authoritative_polymarket_snapshot=true; raw_error=stale price for btc/usd: 216s old".to_string(),
+            "snapshot_source=chainlink_rtds_start_tick; market_slug=btc-updown-5m-1774013100; gap_ms=217000; provider_age_ms=216937; receive_age_ms=90; awaiting_current_price_tick=true; raw_error=stale price for btc/usd: 216s old".to_string(),
         ),
         normalized_outcome_label: None,
         direction: None,
@@ -350,7 +387,8 @@ fn pending_reason_can_describe_authoritative_snapshot_wait() {
         timeframe: Some("5m".to_string()),
         asset: Some("btc".to_string()),
         price_to_beat: Some(70_484.80743654),
-        price_to_beat_source: Some("chainlink_carryover".to_string()),
+        price_to_beat_status: Some("rtds_live".to_string()),
+        price_to_beat_source: Some("chainlink_rtds_start_tick".to_string()),
         price_to_beat_source_latency_ms: Some(217_000),
         current_price: None,
         current_price_source: CURRENT_PRICE_SOURCE_CHAINLINK,
@@ -363,30 +401,30 @@ fn pending_reason_can_describe_authoritative_snapshot_wait() {
 
     let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
     assert!(message.contains("Price to Beat verisi henuz hazir degil"));
-    assert!(message.contains("awaiting_authoritative_polymarket_snapshot=true"));
-    assert!(message.contains("Price to Beat Source: chainlink_carryover"));
+    assert!(message.contains("awaiting_current_price_tick=true"));
+    assert!(message.contains("Price to Beat Source: chainlink_rtds_start_tick"));
+    assert!(message.contains("Price to Beat Status: rtds_live"));
     assert!(message.contains("gap_ms=217000"));
 }
 
 #[test]
-fn chainlink_carryover_no_cached_current_price_uses_unknown_age_placeholders() {
+fn chainlink_rtds_start_tick_no_cached_current_price_uses_unknown_age_placeholders() {
     let (reason_code, reason_detail) = map_current_price_error(
-        PriceToBeatSource::ChainlinkCarryover,
+        PriceToBeatSource::ChainlinkRtdsStartTick,
         BTC_MARKET_5M,
         "btc",
         Some(217_000),
         "no cached price for btc/usd; last ws error: live data websocket stream ended",
-        Some("coinbase 503"),
     );
     assert_eq!(reason_code, "price_to_beat_pending");
     assert!(reason_detail.contains("provider_age_ms=unknown"));
     assert!(reason_detail.contains("receive_age_ms=unknown"));
     assert!(reason_detail.contains("gap_ms=217000"));
-    assert!(reason_detail.contains("fallback_error=coinbase 503"));
+    assert!(reason_detail.contains("chainlink_error=no cached price for btc/usd"));
 }
 
 #[test]
-fn resolve_current_price_result_uses_coinbase_fallback_for_all_supported_assets() {
+fn resolve_current_price_result_uses_chainlink_for_all_supported_assets() {
     for ((asset, market_slug), expected_price) in SUPPORTED_ASSET_MARKETS
         .into_iter()
         .zip([69_720.16, 2_124.25, 88.77, 1.43])
@@ -396,19 +434,15 @@ fn resolve_current_price_result_uses_coinbase_fallback_for_all_supported_assets(
             market_slug,
             asset,
             None,
-            Err("stale price for test/usd: 700s old"),
-            Some(Ok(expected_price)),
+            Ok(expected_price),
         )
-        .expect("coinbase fallback should resolve");
-        assert_eq!(
-            resolved,
-            (expected_price, CURRENT_PRICE_SOURCE_COINBASE_FALLBACK)
-        );
+        .expect("chainlink current price should resolve");
+        assert_eq!(resolved, (expected_price, CURRENT_PRICE_SOURCE_CHAINLINK));
     }
 }
 
 #[test]
-fn resolve_current_price_result_keeps_failure_when_coinbase_fails_for_all_supported_assets() {
+fn resolve_current_price_result_keeps_failure_for_all_supported_assets() {
     for (asset, market_slug) in SUPPORTED_ASSET_MARKETS {
         let (reason_code, reason_detail) = resolve_current_price_result(
             PriceToBeatSource::Polymarket,
@@ -416,18 +450,17 @@ fn resolve_current_price_result_keeps_failure_when_coinbase_fails_for_all_suppor
             asset,
             None,
             Err("stale price for test/usd: 700s old"),
-            Some(Err("coinbase timeout")),
         )
         .unwrap_err();
         assert_eq!(reason_code, "current_price_unavailable");
         assert!(reason_detail.contains(&format!("asset={asset}")));
         assert!(reason_detail.contains(&format!("market_slug={market_slug}")));
-        assert!(reason_detail.contains("fallback_source=coinbase_spot"));
+        assert!(reason_detail.contains("primary_source=chainlink_live_data_ws"));
     }
 }
 
 #[test]
-fn blocked_notification_uses_source_aware_current_price_label() {
+fn blocked_notification_uses_chainlink_current_price_label() {
     let evaluation = PriceToBeatGuardEvaluation {
         passed: false,
         reason_code: "price_to_beat_gap_below_threshold".to_string(),
@@ -439,10 +472,11 @@ fn blocked_notification_uses_source_aware_current_price_label() {
         timeframe: Some("5m".to_string()),
         asset: Some("eth".to_string()),
         price_to_beat: Some(2_120.0),
+        price_to_beat_status: Some("polymarket_verified".to_string()),
         price_to_beat_source: Some("polymarket".to_string()),
         price_to_beat_source_latency_ms: None,
         current_price: Some(2_124.25),
-        current_price_source: CURRENT_PRICE_SOURCE_COINBASE_FALLBACK,
+        current_price_source: CURRENT_PRICE_SOURCE_CHAINLINK,
         directional_gap: Some(4.25),
         gap_abs: Some(4.25),
         threshold_value: 4.0,
@@ -451,7 +485,7 @@ fn blocked_notification_uses_source_aware_current_price_label() {
     };
 
     let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
-    assert!(message.contains("Current (Coinbase fallback): 2124.25000000"));
+    assert!(message.contains("Current (Chainlink): 2124.25000000"));
 }
 
 #[test]
@@ -467,6 +501,7 @@ fn unsupported_outcome_label_reason_is_supported() {
         timeframe: Some("5m".to_string()),
         asset: Some("eth".to_string()),
         price_to_beat: Some(2366.97),
+        price_to_beat_status: Some("polymarket_provisional".to_string()),
         price_to_beat_source: Some("polymarket".to_string()),
         price_to_beat_source_latency_ms: None,
         current_price: Some(2368.11),
@@ -538,5 +573,74 @@ fn price_to_beat_notification_seed_ignores_mismatched_identity() {
         )
         .as_deref(),
         Some("price_to_beat:price_to_beat_gap_below_threshold")
+    );
+}
+
+#[test]
+fn waiting_state_tracks_market_and_reason() {
+    let mut context = json!({});
+    set_price_to_beat_guard_waiting_state(
+        &mut context,
+        "btc-updown-5m-1773232500",
+        "price_to_beat_gap_below_threshold",
+    );
+
+    let state = price_to_beat_guard_waiting_state(&context).expect("waiting state");
+    assert_eq!(state.market_slug, "btc-updown-5m-1773232500");
+    assert_eq!(state.reason_code, "price_to_beat_gap_below_threshold");
+}
+
+#[test]
+fn notification_phase_tracks_identity_and_phase() {
+    let mut context = json!({});
+    set_price_to_beat_guard_notification_phase(
+        &mut context,
+        "action_1",
+        "btc-updown-5m-1773232500",
+        "tok-up",
+        PriceToBeatGuardNotificationPhase::BlockedNotified,
+        "price_to_beat_gap_below_threshold",
+    );
+
+    assert_eq!(
+        price_to_beat_guard_notification_phase(
+            &context,
+            "action_1",
+            "btc-updown-5m-1773232500",
+            "tok-up"
+        ),
+        Some(PriceToBeatGuardNotificationPhase::BlockedNotified)
+    );
+}
+
+#[test]
+fn notification_phase_is_identity_scoped() {
+    let mut context = json!({});
+    set_price_to_beat_guard_notification_phase(
+        &mut context,
+        "action_1",
+        "btc-updown-5m-1773232500",
+        "tok-up",
+        PriceToBeatGuardNotificationPhase::PassedNotified,
+        "passed",
+    );
+
+    assert_eq!(
+        price_to_beat_guard_notification_phase(
+            &context,
+            "action_2",
+            "btc-updown-5m-1773232500",
+            "tok-up"
+        ),
+        None
+    );
+    assert_eq!(
+        price_to_beat_guard_notification_phase(
+            &context,
+            "action_1",
+            "btc-updown-5m-1773232800",
+            "tok-up"
+        ),
+        None
     );
 }

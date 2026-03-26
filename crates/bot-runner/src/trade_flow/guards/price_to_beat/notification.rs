@@ -51,7 +51,7 @@ pub(super) fn build_price_to_beat_guard_blocked_notification_message(
         .unwrap_or_default();
 
     format!(
-        "{}\nSebep: {}{}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}{}\nLimit: {:.8} {} (~{:.8} USD)",
+        "{}\nSebep: {}{}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Status: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}{}\nLimit: {:.8} {} (~{:.8} USD)",
         "Price to Beat Korumasi Engelledi",
         reason,
         detail_line,
@@ -60,6 +60,7 @@ pub(super) fn build_price_to_beat_guard_blocked_notification_message(
         evaluation.asset.as_deref().unwrap_or("N/A"),
         evaluation.timeframe.as_deref().unwrap_or("N/A"),
         format_optional_guard_number(evaluation.price_to_beat),
+        evaluation.price_to_beat_status.as_deref().unwrap_or("N/A"),
         evaluation.price_to_beat_source.as_deref().unwrap_or("N/A"),
         format_current_price_label(evaluation.current_price_source),
         format_optional_guard_number(evaluation.current_price),
@@ -78,5 +79,30 @@ pub(super) fn build_price_to_beat_guard_waiting_notification_message(
     format!(
         "{}\nDurum: Bekleme moduna alindi. Kosullar duzelince order yeniden denenecek.",
         build_price_to_beat_guard_blocked_notification_message(evaluation)
+    )
+}
+
+pub(super) fn build_price_to_beat_guard_recovered_notification_message(
+    evaluation: &PriceToBeatGuardEvaluation,
+    recovered_from_reason_code: &str,
+) -> String {
+    format!(
+        "{}\nDurum: Price to Beat yeniden uygun hale geldi.\nOnceki Sebep: {}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Status: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}\nLimit: {:.8} {} (~{:.8} USD)",
+        "Price to Beat Korumasi Gecti",
+        recovered_from_reason_code,
+        format_optional_direction(evaluation.direction.as_deref()),
+        evaluation.market_slug,
+        evaluation.asset.as_deref().unwrap_or("N/A"),
+        evaluation.timeframe.as_deref().unwrap_or("N/A"),
+        format_optional_guard_number(evaluation.price_to_beat),
+        evaluation.price_to_beat_status.as_deref().unwrap_or("N/A"),
+        evaluation.price_to_beat_source.as_deref().unwrap_or("N/A"),
+        format_current_price_label(evaluation.current_price_source),
+        format_optional_guard_number(evaluation.current_price),
+        format_optional_guard_number(evaluation.directional_gap),
+        format_optional_guard_number(evaluation.gap_abs),
+        evaluation.threshold_value,
+        evaluation.threshold_unit,
+        evaluation.threshold_usd
     )
 }

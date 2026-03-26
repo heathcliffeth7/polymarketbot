@@ -7,6 +7,7 @@ async fn reconcile_trade_builder_open_order(
     order: &TradeBuilderOrder,
     exchange_order_id: &str,
     current_price: f64,
+    best_ask: Option<f64>,
 ) -> Result<()> {
     let mut order = order.clone();
     if order.status == "canceled_requested" {
@@ -95,34 +96,36 @@ async fn reconcile_trade_builder_open_order(
     let size_basis = normalize_trade_builder_size_basis(&order.size_basis);
     let (mut remaining_usdc, mut remaining_qty) =
         estimate_remaining_trade_builder_sizing(&order, &order_info, current_price);
-    if trade_builder_is_take_profit_child(&order) {
-        if let Some(remaining_qty) = remaining_qty {
-            let resized_sibling_ids = sync_trade_builder_pending_sibling_exit_qty(
-                repo,
-                &order,
-                remaining_qty,
-                "tp_partial_fill",
-            )
-            .await?;
-            if !resized_sibling_ids.is_empty() {
-                repo.append_trade_builder_order_event(
-                    order.id,
-                    "sibling_resized_after_partial_fill",
-                    &json!({
-                        "exchange_order_id": exchange_order_id,
-                        "status": normalized,
-                        "remaining_qty": remaining_qty,
-                        "resized_sibling_order_ids": resized_sibling_ids,
-                    }),
-                )
-                .await?;
+    if trade_builder_is_child_exit_sell(&order) {
+        if let Some(parent_order_id) = order.parent_order_id {
+            if let Some(parent_order) = repo.get_trade_builder_order(parent_order_id).await? {
+                if let Err(err) =
+                    trade_builder_sync_parent_exit_children(repo, &parent_order, "partial_fill")
+                        .await
+                {
+                    warn!(
+                        builder_order_id = order.id,
+                        parent_builder_order_id = parent_order.id,
+                        error = %err,
+                        "TRADE_BUILDER_EXIT_PARTIAL_SYNC_FAILED"
+                    );
+                }
             }
         }
     }
-    let uncapped_desired_price =
-        aggressive_price_for_side(&order.side, current_price, order.min_price_distance_cent);
-    let desired_price = trade_builder_cap_exit_sell_price(&order, uncapped_desired_price);
-    if (desired_price - uncapped_desired_price).abs() >= 0.000001 {
+    let immediate_buy_execution_price =
+        trade_builder_immediate_buy_notional_execution_price(&order, current_price, best_ask);
+    let desired_price = immediate_buy_execution_price
+        .map(|resolution| resolution.price)
+        .unwrap_or_else(|| trade_builder_submit_desired_price(&order, current_price));
+    let uncapped_desired_price = immediate_buy_execution_price
+        .map(|resolution| resolution.price)
+        .unwrap_or_else(|| {
+            aggressive_price_for_side(&order.side, current_price, order.min_price_distance_cent)
+        });
+    if immediate_buy_execution_price.is_none()
+        && (desired_price - uncapped_desired_price).abs() >= 0.000001
+    {
         repo.append_trade_builder_order_event(
             order.id,
             "exit_price_capped",
@@ -813,6 +816,11 @@ async fn reconcile_trade_builder_open_order(
         "execution_mode": normalize_trade_builder_execution_mode(&order.execution_mode),
         "order_type": clob_order_type_for_execution_mode(normalize_trade_builder_execution_mode(&order.execution_mode)),
         "target_price": desired_price,
+        "execution_price_source": immediate_buy_execution_price
+            .map(|resolution| resolution.source)
+            .unwrap_or("runtime_price"),
+        "trigger_reference_price": immediate_buy_execution_price
+            .and_then(|resolution| resolution.trigger_reference_price),
         "max_price": order.max_price,
         "remaining_usdc": if size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES { Some((size * desired_price).max(0.0)) } else { remaining_usdc },
         "remaining_qty": if size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES { Some(size) } else { remaining_qty },

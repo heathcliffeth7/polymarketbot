@@ -42,6 +42,7 @@ export type BuilderWorkflowStatus =
   | 'expired'
   | 'error';
 export type BuilderWorkflowLegType = 'sell' | 'buy';
+export type TradeBuilderExitLadderKind = 'tp' | 'sl';
 export type BuilderWorkflowLegStatus =
   | 'pending'
   | 'armed'
@@ -312,8 +313,23 @@ export interface TradeBuilderOrder {
   origin_flow_node_key: string | null;
   tp_enabled: boolean;
   tp_price: number | null;
+  tp_rules_json?: Array<{
+    price: number;
+    size_pct: number;
+  }>;
   sl_enabled: boolean;
   sl_price: number | null;
+  sl_rules_json?: Array<{
+    price: number;
+    size_pct: number;
+  }>;
+  time_exit_rules_json?: Array<{
+    elapsed_minutes: number;
+    remaining_pct: number;
+  }>;
+  exit_ladder_kind?: TradeBuilderExitLadderKind | null;
+  exit_ladder_index?: number | null;
+  exit_ladder_size_pct?: number | null;
 }
 
 export interface TradeBuilderOrderEvent {
@@ -407,6 +423,7 @@ export interface TradeBuilderOutcome {
   token_id: string;
   label: string;
   price: number | null;
+  legSide: 'yes' | 'no';
 }
 
 export interface TradeFlowOpenPositionOption {
@@ -512,6 +529,15 @@ export interface TradeFlowDefinitionDetail {
   definition: TradeFlowDefinition;
   draftVersion: TradeFlowVersion | null;
   publishedVersion: TradeFlowVersion | null;
+  draftCustomRangeSnapshots: TradeFlowCustomRangeSnapshot[];
+  publishedCustomRangeSnapshots: TradeFlowCustomRangeSnapshot[];
+}
+
+export interface TradeFlowCustomRangeSnapshot {
+  nodeKey: string;
+  startSec: number;
+  endSec: number;
+  autoSellOnWindowEnd: boolean;
 }
 
 export interface TradeFlowValidationIssue {
@@ -537,6 +563,7 @@ export interface TradeFlowRun {
   id: number;
   definition_id: number;
   version_id: number;
+  version_no?: number | null;
   status: TradeFlowRunStatus;
   trigger_source: string | null;
   context_json: Record<string, unknown>;
