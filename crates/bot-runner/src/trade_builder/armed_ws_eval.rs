@@ -139,9 +139,11 @@ async fn ensure_fast_path_market_stream_union(ws: &ClobWsClient) -> Result<()> {
         cache.token_targets.keys().cloned().collect::<Vec<_>>()
     };
     let builder_token_ids = armed_builder_order_cache_token_ids().await;
+    let guarded_buy_token_ids = guarded_buy_order_cache_token_ids().await;
     let all_token_ids: Vec<String> = flow_token_ids
         .into_iter()
         .chain(builder_token_ids)
+        .chain(guarded_buy_token_ids)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -470,6 +472,7 @@ fn spawn_armed_order_immediate_processing(
                 .await;
         }
         rearm_builder_order_to_cache_if_armed(&repo, order_id).await;
+        sync_guarded_buy_order_cache_for_order(&repo, order_id).await;
     });
 }
 
@@ -527,6 +530,8 @@ mod armed_ws_eval_tests {
             trigger_latched_at: None,
             submitted_dynamic_qty: None,
             submitted_dynamic_price: None,
+            runtime_snapshot_json: None,
+            fresh_submit_lease_until: None,
             guard_trigger_price: None,
             best_ask_floor_price: None,
             retry_on_trigger_guard_block: false,

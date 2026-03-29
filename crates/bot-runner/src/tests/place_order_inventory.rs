@@ -1,5 +1,6 @@
 use super::support::*;
 use super::*;
+use bot_infra::exchange::OrderBookLevel;
 
 #[test]
 fn exit_child_sizing_uses_filled_qty_as_share_target() {
@@ -497,6 +498,149 @@ fn immediate_buy_execution_price_resolution_ignores_share_basis_orders() {
     );
 }
 
+fn test_stop_loss_sell_order_for_submit() -> TradeBuilderOrder {
+    let mut order = test_builder_order("sell", Some(9));
+    order.status = "armed".to_string();
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.60);
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(4.0);
+    order.remaining_qty = Some(4.0);
+    order
+}
+
+#[test]
+fn sell_submit_price_uses_best_bid_when_single_level_covers_qty() {
+    let order = test_stop_loss_sell_order_for_submit();
+    let order_book = OrderBookSnapshot {
+        bids: vec![
+            OrderBookLevel {
+                price: 0.49,
+                size: 2.0,
+            },
+            OrderBookLevel {
+                price: 0.50,
+                size: 5.0,
+            },
+        ],
+        asks: Vec::new(),
+    };
+
+    let resolved = resolve_trade_builder_sell_submit_price_with_book(
+        &order,
+        0.48,
+        Some(0.48),
+        Some(0.47),
+        Some(4.0),
+        Some(&order_book),
+    );
+
+    assert_eq!(resolved.source, "orderbook_depth");
+    assert_eq!(resolved.desired_price, 0.50);
+    assert_eq!(resolved.depth_levels_used, Some(1));
+    assert_eq!(resolved.visible_bid_qty, Some(7.0));
+    assert_eq!(resolved.requested_qty, Some(4.0));
+}
+
+#[test]
+fn sell_submit_price_walks_bid_depth_for_multi_level_fill() {
+    let mut order = test_stop_loss_sell_order_for_submit();
+    order.target_qty = Some(4.5);
+    order.remaining_qty = Some(4.5);
+    let order_book = OrderBookSnapshot {
+        bids: vec![
+            OrderBookLevel {
+                price: 0.30,
+                size: 3.0,
+            },
+            OrderBookLevel {
+                price: 0.31,
+                size: 2.0,
+            },
+            OrderBookLevel {
+                price: 0.32,
+                size: 1.0,
+            },
+        ],
+        asks: Vec::new(),
+    };
+
+    let resolved = resolve_trade_builder_sell_submit_price_with_book(
+        &order,
+        0.31,
+        Some(0.31),
+        Some(0.30),
+        Some(4.5),
+        Some(&order_book),
+    );
+
+    assert_eq!(resolved.source, "orderbook_depth");
+    assert_eq!(resolved.desired_price, 0.30);
+    assert_eq!(resolved.depth_levels_used, Some(3));
+    assert_eq!(resolved.visible_bid_qty, Some(6.0));
+    assert_eq!(resolved.requested_qty, Some(4.5));
+}
+
+#[test]
+fn sell_submit_price_falls_back_to_best_bid_when_depth_is_insufficient() {
+    let order = test_stop_loss_sell_order_for_submit();
+    let order_book = OrderBookSnapshot {
+        bids: vec![
+            OrderBookLevel {
+                price: 0.39,
+                size: 1.0,
+            },
+            OrderBookLevel {
+                price: 0.40,
+                size: 2.0,
+            },
+        ],
+        asks: Vec::new(),
+    };
+
+    let resolved = resolve_trade_builder_sell_submit_price_with_book(
+        &order,
+        0.38,
+        Some(0.41),
+        Some(0.37),
+        Some(4.0),
+        Some(&order_book),
+    );
+
+    assert_eq!(resolved.source, "best_bid_fallback");
+    assert_eq!(resolved.desired_price, 0.41);
+    assert_eq!(resolved.depth_levels_used, None);
+    assert_eq!(resolved.visible_bid_qty, Some(3.0));
+    assert_eq!(resolved.requested_qty, Some(4.0));
+}
+
+#[test]
+fn sell_submit_price_falls_back_to_last_trade_then_current_price() {
+    let order = test_stop_loss_sell_order_for_submit();
+
+    let last_trade_resolved = resolve_trade_builder_sell_submit_price_with_book(
+        &order,
+        0.38,
+        None,
+        Some(0.37),
+        Some(4.0),
+        None,
+    );
+    assert_eq!(last_trade_resolved.source, "last_trade_fallback");
+    assert_eq!(last_trade_resolved.desired_price, 0.37);
+
+    let price_resolved = resolve_trade_builder_sell_submit_price_with_book(
+        &order,
+        0.38,
+        None,
+        None,
+        Some(4.0),
+        None,
+    );
+    assert_eq!(price_resolved.source, "price_fallback");
+    assert_eq!(price_resolved.desired_price, 0.38);
+}
+
 #[test]
 fn ws_fast_path_scope_only_includes_tp_sl_child_orders() {
     let mut tp_child = test_builder_order("sell", Some(9));
@@ -944,6 +1088,88 @@ fn parent_position_seed_qty_falls_back_to_canonical_fill_qty() {
 
     assert_eq!(qty, 2.94);
     assert_eq!(source, "canonical_entry_qty");
+}
+
+#[test]
+fn staged_exit_children_initial_sizing_uses_total_entry_qty() {
+    let first_sl = trade_builder_ladder_child_qty(2.78, 50.0).expect("first staged sl");
+    let second_sl = trade_builder_ladder_child_qty(2.78, 50.0).expect("second staged sl");
+
+    assert_eq!(first_sl.target_qty, 1.39);
+    assert_eq!(first_sl.remaining_qty, 1.39);
+    assert_eq!(second_sl.target_qty, 1.39);
+    assert_eq!(second_sl.remaining_qty, 1.39);
+}
+
+#[test]
+fn preempted_staged_stop_loss_inventory_plan_ignores_take_profit_remaining_qty() {
+    let mut tp = test_builder_order("sell", Some(9));
+    tp.id = 31;
+    tp.status = "armed".to_string();
+    tp.trigger_condition = Some("cross_above".to_string());
+    tp.trigger_price = Some(0.84);
+    tp.exit_ladder_kind = Some("tp".to_string());
+    tp.exit_ladder_index = Some(0);
+    tp.exit_ladder_size_pct = Some(50.0);
+    tp.target_qty = Some(0.71);
+    tp.remaining_qty = Some(0.71);
+
+    let mut sl = test_builder_order("sell", Some(9));
+    sl.id = 32;
+    sl.status = "armed".to_string();
+    sl.trigger_condition = Some("cross_below".to_string());
+    sl.trigger_price = Some(0.50);
+    sl.exit_ladder_kind = Some("sl".to_string());
+    sl.exit_ladder_index = Some(1);
+    sl.exit_ladder_size_pct = Some(50.0);
+    sl.target_qty = Some(1.41);
+    sl.remaining_qty = Some(1.41);
+
+    let plan = plan_trade_builder_preempted_stop_loss_inventory(&[tp, sl], Some(1.41));
+
+    assert_eq!(plan.current_parent_qty, Some(1.41));
+    assert_eq!(plan.remaining_qty_for(32), Some(1.41));
+}
+
+#[test]
+fn staged_take_profit_last_stage_absorbs_rounding_remainder() {
+    let mut first_tp = test_builder_order("sell", Some(9));
+    first_tp.id = 41;
+    first_tp.status = "armed".to_string();
+    first_tp.trigger_condition = Some("cross_above".to_string());
+    first_tp.trigger_price = Some(0.80);
+    first_tp.exit_ladder_kind = Some("tp".to_string());
+    first_tp.exit_ladder_index = Some(0);
+    first_tp.exit_ladder_size_pct = Some(33.33);
+
+    let mut second_tp = first_tp.clone();
+    second_tp.id = 42;
+    second_tp.exit_ladder_index = Some(1);
+
+    let mut third_tp = first_tp.clone();
+    third_tp.id = 43;
+    third_tp.exit_ladder_index = Some(2);
+    third_tp.exit_ladder_size_pct = Some(33.34);
+
+    let targets = trade_builder_ladder_family_target_qtys(&[&first_tp, &second_tp, &third_tp], 1.0);
+
+    assert_eq!(targets, vec![(41, 0.33), (42, 0.33), (43, 0.34)]);
+}
+
+#[test]
+fn single_live_take_profit_stage_becomes_full_close() {
+    let mut last_tp = test_builder_order("sell", Some(9));
+    last_tp.id = 52;
+    last_tp.status = "armed".to_string();
+    last_tp.trigger_condition = Some("cross_above".to_string());
+    last_tp.trigger_price = Some(0.99);
+    last_tp.exit_ladder_kind = Some("tp".to_string());
+    last_tp.exit_ladder_index = Some(1);
+    last_tp.exit_ladder_size_pct = Some(50.0);
+
+    let targets = trade_builder_ladder_family_target_qtys(&[&last_tp], 1.41);
+
+    assert_eq!(targets, vec![(52, 1.41)]);
 }
 
 #[test]

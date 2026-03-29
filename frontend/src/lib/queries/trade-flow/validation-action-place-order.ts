@@ -772,25 +772,40 @@ export function validateActionPlaceOrderConfig(
     );
   }
   if (priceToBeatGuardEnabled === true) {
-    const priceToBeatMaxDiff = toFiniteNumber(config.priceToBeatMaxDiff);
-    if (priceToBeatMaxDiff == null || priceToBeatMaxDiff <= 0) {
+    const ptbMode = String(config.priceToBeatMode ?? '').trim().toLowerCase();
+    const normalizedPtbMode =
+      !ptbMode || ptbMode === 'manual' || ptbMode === 'auto_last_3_avg_excursion'
+        ? ptbMode || 'manual'
+        : null;
+    if (normalizedPtbMode == null) {
       pushNodeError(
         issues,
         node,
-        'invalid_price_to_beat_max_diff',
-        'action.place_order priceToBeatMaxDiff must be > 0 when guard is enabled.'
+        'invalid_price_to_beat_mode',
+        'action.place_order priceToBeatMode must be manual or auto_last_3_avg_excursion.'
       );
     }
-    const priceToBeatMaxDiffUnit = String(config.priceToBeatMaxDiffUnit ?? '')
-      .trim()
-      .toLowerCase();
-    if (priceToBeatMaxDiffUnit !== 'usd' && priceToBeatMaxDiffUnit !== 'cent') {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_price_to_beat_max_diff_unit',
-        'action.place_order priceToBeatMaxDiffUnit must be usd or cent when guard is enabled.'
-      );
+    if (normalizedPtbMode !== 'auto_last_3_avg_excursion') {
+      const priceToBeatMaxDiff = toFiniteNumber(config.priceToBeatMaxDiff);
+      if (priceToBeatMaxDiff == null || priceToBeatMaxDiff <= 0) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_price_to_beat_max_diff',
+          'action.place_order priceToBeatMaxDiff must be > 0 when guard is enabled.'
+        );
+      }
+      const priceToBeatMaxDiffUnit = String(config.priceToBeatMaxDiffUnit ?? '')
+        .trim()
+        .toLowerCase();
+      if (priceToBeatMaxDiffUnit !== 'usd' && priceToBeatMaxDiffUnit !== 'cent') {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_price_to_beat_max_diff_unit',
+          'action.place_order priceToBeatMaxDiffUnit must be usd or cent when guard is enabled.'
+        );
+      }
     }
 
     const effectiveMarketSlug = String(config.marketSlug ?? graphMarketSlug).trim().toLowerCase();

@@ -118,6 +118,16 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       help: 'Aktifken tetik price-to-beat farki araligina gore degerlendirilir. Fiyat kosulu bos birakilabilir. Sadece auto_scope.',
     },
     {
+      key: 'priceToBeatMode',
+      label: 'PTB Modu',
+      input: 'select',
+      options: [
+        { label: 'Manual', value: 'manual' },
+        { label: 'Auto: son 3 market excursion ort.', value: 'auto_last_3_avg_excursion' },
+      ],
+      help: 'Manual modda fark alanlari kullanilir. Auto modda son 3 tamamlanmis marketin yonsel excursion ortalamasi otomatik esik olur.',
+    },
+    {
       key: 'priceToBeatTriggerUnit',
       label: 'Fark Birimi',
       input: 'select',
@@ -531,6 +541,16 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       label: 'Price to Beat Korumasi',
       input: 'checkbox',
       help: 'Price to Beat ile ayni Polymarket/Chainlink current price feedini kullanir. Fark belirlenen minimum seviyenin altindaysa buy emrini engeller.',
+    },
+    {
+      key: 'priceToBeatMode',
+      label: 'PTB Modu',
+      input: 'select',
+      options: [
+        { label: 'Manual', value: 'manual' },
+        { label: 'Auto: son 3 market excursion ort.', value: 'auto_last_3_avg_excursion' },
+      ],
+      help: 'Manual modda minimum fark elle girilir. Auto modda son 3 marketin yonsel excursion ortalamasi dinamik esik olur.',
     },
     {
       key: 'priceToBeatMaxDiff',

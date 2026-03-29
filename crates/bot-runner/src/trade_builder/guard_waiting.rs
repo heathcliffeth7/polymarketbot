@@ -54,11 +54,14 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
     order_info: &OrderInfo,
     normalized: &str,
     current_price: f64,
+    best_ask: Option<f64>,
     desired_price: f64,
     remaining_size: Option<f64>,
     remaining_qty: Option<f64>,
 ) -> Result<bool> {
-    if !trade_builder_price_below_guard_trigger(order, current_price) {
+    let (trigger_guard_reference_price, trigger_guard_reference_source) =
+        trade_builder_resolve_trigger_guard_reference_price(order, current_price, best_ask);
+    if !trade_builder_price_below_guard_trigger(order, trigger_guard_reference_price) {
         return Ok(false);
     }
 
@@ -114,6 +117,8 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
                         "actual_fill_qty_source": actual_fill_qty_source,
                         "execution_price": terminal_price,
                         "current_price": current_price,
+                        "trigger_guard_reference_price": trigger_guard_reference_price,
+                        "trigger_guard_reference_source": trigger_guard_reference_source,
                         "desired_price": desired_price,
                         "working_price": order.working_price,
                         "submitted_dynamic_price": order.submitted_dynamic_price,
@@ -151,6 +156,8 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
             "actual_fill_qty": filled_size,
             "execution_price": execution_price,
             "current_price": current_price,
+            "trigger_guard_reference_price": trigger_guard_reference_price,
+            "trigger_guard_reference_source": trigger_guard_reference_source,
             "desired_price": desired_price,
             "working_price": order.working_price,
             "guard_trigger_price": order.guard_trigger_price
@@ -182,7 +189,13 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
             build_guard_notification_reason("trigger_price", "below_trigger_price_guard");
         let notification_message = order
             .notify_on_trigger_guard_blocked
-            .then(|| build_trigger_guard_waiting_notification_message(order, current_price));
+            .then(|| {
+                build_trigger_guard_waiting_notification_message(
+                    order,
+                    trigger_guard_reference_price,
+                    trigger_guard_reference_source,
+                )
+            });
         transition_trade_builder_order_to_guard_waiting(
             repo,
             order,
@@ -193,6 +206,8 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
                 "status_before": normalized,
                 "status_after": TRADE_BUILDER_GUARD_BLOCKED_STATUS,
                 "current_price": current_price,
+                "trigger_guard_reference_price": trigger_guard_reference_price,
+                "trigger_guard_reference_source": trigger_guard_reference_source,
                 "desired_price": desired_price,
                 "working_price": order.working_price,
                 "guard_trigger_price": order.guard_trigger_price,
@@ -217,7 +232,11 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
         .await?;
         let candidate_reason =
             build_guard_notification_reason("trigger_price", "below_trigger_price_guard");
-        let message = build_trigger_guard_blocked_notification_message(order, current_price);
+        let message = build_trigger_guard_blocked_notification_message(
+            order,
+            trigger_guard_reference_price,
+            trigger_guard_reference_source,
+        );
         maybe_send_guard_transition_notification(
             repo,
             order,

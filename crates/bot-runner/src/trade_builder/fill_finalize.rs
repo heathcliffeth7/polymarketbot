@@ -87,7 +87,12 @@ async fn maybe_schedule_trade_builder_stop_loss_reentry(
     }
 
     let max_attempts = i64::from(parent_order.reentry_max_attempts.max(0));
-    let attempts_used = flow_node_reentry_attempts_used(&flow_run.context_json, action_node_key);
+    let (attempts_used, stored_reentry_market_slug) =
+        resolve_trade_flow_reentry_attempts_for_market(
+            &flow_run.context_json,
+            action_node_key,
+            &parent_order.market_slug,
+        );
     if attempts_used >= max_attempts {
         repo.append_trade_builder_order_event(
             parent_order.id,
@@ -98,6 +103,8 @@ async fn maybe_schedule_trade_builder_stop_loss_reentry(
                 "trigger_node_key": trigger_node_key,
                 "attempts_used": attempts_used,
                 "max_attempts": max_attempts,
+                "current_market_slug": &parent_order.market_slug,
+                "stored_reentry_market_slug": stored_reentry_market_slug,
             }),
         )
         .await?;
@@ -111,6 +118,12 @@ async fn maybe_schedule_trade_builder_stop_loss_reentry(
         action_node_key,
         FLOW_NODE_STATE_REENTRY_ATTEMPTS_USED,
         json!(next_generation),
+    );
+    set_flow_node_state(
+        &mut context,
+        action_node_key,
+        FLOW_NODE_STATE_REENTRY_MARKET_SLUG,
+        json!(&parent_order.market_slug),
     );
     set_flow_node_state(
         &mut context,
@@ -154,6 +167,8 @@ async fn maybe_schedule_trade_builder_stop_loss_reentry(
             "generation": next_generation,
             "attempts_used": next_generation,
             "max_attempts": max_attempts,
+            "current_market_slug": &parent_order.market_slug,
+            "stored_reentry_market_slug": stored_reentry_market_slug,
             "idempotency_key": idempotency_key,
             "step_enqueued": enqueued.is_some(),
             "fast_path_cache_updated": cache_updated,
@@ -714,6 +729,26 @@ async fn finalize_builder_fill(
             unblocked_order_id = unblocked_id,
             trade_id = order.trade_id,
             "TRADE_BUILDER_DCA_NEXT_LEVEL_UNBLOCKED"
+        );
+    }
+
+    let snapshot_root_order_id = parent_order
+        .as_ref()
+        .map(|parent| parent.id)
+        .unwrap_or(order.id);
+    let snapshot_mark_price = order.last_seen_price.or(Some(execution_price));
+    if let Err(err) = refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
+        repo,
+        snapshot_root_order_id,
+        snapshot_mark_price,
+    )
+    .await
+    {
+        warn!(
+            builder_order_id = order.id,
+            root_builder_order_id = snapshot_root_order_id,
+            error = %err,
+            "AUTO_SCOPE_ANALYSIS_REFRESH_FAILED"
         );
     }
 

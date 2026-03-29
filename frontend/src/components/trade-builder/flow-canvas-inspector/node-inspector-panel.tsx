@@ -212,6 +212,11 @@ export function NodeInspectorPanel({
   const triggerCycleWindowMode = (form.fields.cycleWindowMode ?? '').trim().toLowerCase();
   const triggerPriceToBeatEnabled =
     (form.fields.priceToBeatTriggerEnabled ?? '').toString().trim().toLowerCase() === 'true';
+  const triggerPriceToBeatMode =
+    (form.fields.priceToBeatMode ?? '').toString().trim().toLowerCase() ===
+    'auto_last_3_avg_excursion'
+      ? 'auto_last_3_avg_excursion'
+      : 'manual';
   const placeOrderMaxTriggersRaw = Number(form.fields.maxTriggers ?? '');
   const placeOrderMaxTriggers =
     Number.isFinite(placeOrderMaxTriggersRaw) && placeOrderMaxTriggersRaw > 0
@@ -331,6 +336,11 @@ export function NodeInspectorPanel({
     (form.fields.priceToBeatGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
   const priceToBeatRetryChecked =
     (form.fields.retryOnPriceToBeatGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
+  const priceToBeatGuardMode =
+    (form.fields.priceToBeatMode ?? '').toString().trim().toLowerCase() ===
+    'auto_last_3_avg_excursion'
+      ? 'auto_last_3_avg_excursion'
+      : 'manual';
   const priceToBeatGuardUnit =
     (form.fields.priceToBeatMaxDiffUnit ?? '').toString().trim().toLowerCase() === 'cent'
       ? 'cent'
@@ -466,6 +476,7 @@ export function NodeInspectorPanel({
         field.key === 'executionFloorPriceCent' ||
         field.key === 'retryOnExecutionFloorGuardBlock' ||
         field.key === 'priceToBeatGuardEnabled' ||
+        field.key === 'priceToBeatMode' ||
         field.key === 'priceToBeatMaxDiff' ||
         field.key === 'priceToBeatMaxDiffUnit' ||
         field.key === 'notifyOnPriceToBeatGapBlocked' ||
@@ -511,12 +522,19 @@ export function NodeInspectorPanel({
       if (field.key === 'priceToBeatTriggerEnabled') {
         return triggerMarketMode === 'auto_scope';
       }
+      if (field.key === 'priceToBeatMode') {
+        return triggerMarketMode === 'auto_scope' && triggerPriceToBeatEnabled;
+      }
       if (
         field.key === 'priceToBeatTriggerUnit' ||
         field.key === 'priceToBeatTriggerMinGap' ||
         field.key === 'priceToBeatTriggerMaxGap'
       ) {
-        return triggerMarketMode === 'auto_scope' && triggerPriceToBeatEnabled;
+        return (
+          triggerMarketMode === 'auto_scope' &&
+          triggerPriceToBeatEnabled &&
+          triggerPriceToBeatMode === 'manual'
+        );
       }
     }
     return true;
@@ -693,6 +711,18 @@ export function NodeInspectorPanel({
                     checked={(form.fields[field.key] ?? '').toString().trim().toLowerCase() === 'true'}
                     onChange={(e) => {
                       actions.onUpdateField(field.key, e.target.checked ? 'true' : 'false');
+                      if (
+                        field.key === 'priceToBeatTriggerEnabled' &&
+                        e.target.checked &&
+                        !['manual', 'auto_last_3_avg_excursion'].includes(
+                          (form.fields.priceToBeatMode ?? '')
+                            .toString()
+                            .trim()
+                            .toLowerCase()
+                        )
+                      ) {
+                        actions.onUpdateField('priceToBeatMode', 'manual');
+                      }
                       if (
                         field.key === 'priceToBeatTriggerEnabled' &&
                         e.target.checked &&
@@ -945,6 +975,17 @@ export function NodeInspectorPanel({
                             );
                             if (
                               e.target.checked &&
+                              !['manual', 'auto_last_3_avg_excursion'].includes(
+                                (form.fields.priceToBeatMode ?? '')
+                                  .toString()
+                                  .trim()
+                                  .toLowerCase()
+                              )
+                            ) {
+                              actions.onUpdateField('priceToBeatMode', 'manual');
+                            }
+                            if (
+                              e.target.checked &&
                               !['usd', 'cent'].includes(
                                 (form.fields.priceToBeatMaxDiffUnit ?? '')
                                   .toString()
@@ -976,27 +1017,12 @@ export function NodeInspectorPanel({
                       <div className="mt-2 space-y-2 border-t border-slate-200 pt-2">
                         <div className="space-y-1">
                           <Label className="text-[11px] font-medium text-slate-600">
-                            Minimum Fark
-                          </Label>
-                          <Input
-                            type="number"
-                            step="any"
-                            value={form.fields.priceToBeatMaxDiff ?? ''}
-                            onChange={(event) =>
-                              actions.onUpdateField('priceToBeatMaxDiff', event.target.value)
-                            }
-                            placeholder={priceToBeatGuardUnit === 'cent' ? '1' : '5'}
-                            className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <Label className="text-[11px] font-medium text-slate-600">
-                            Birim
+                            PTB Modu
                           </Label>
                           <Select
-                            value={priceToBeatGuardUnit}
+                            value={priceToBeatGuardMode}
                             onValueChange={(value) =>
-                              actions.onUpdateField('priceToBeatMaxDiffUnit', value)
+                              actions.onUpdateField('priceToBeatMode', value)
                             }
                           >
                             <SelectTrigger
@@ -1006,16 +1032,64 @@ export function NodeInspectorPanel({
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="usd">USD</SelectItem>
-                              <SelectItem value="cent">Cent</SelectItem>
+                              <SelectItem value="manual">Manual</SelectItem>
+                              <SelectItem value="auto_last_3_avg_excursion">
+                                Auto: son 3 market excursion ort.
+                              </SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
-                        <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                          {priceToBeatGuardUnit === 'cent'
-                            ? 'Cent modu: 1 = $0.01. Fark bu minimum degerin altinda kalirsa bloklanir.'
-                            : 'USD modu: 5 = $5.00. Fark bu minimum degerin altinda kalirsa bloklanir.'}
-                        </p>
+                        {priceToBeatGuardMode === 'manual' ? (
+                          <>
+                            <div className="space-y-1">
+                              <Label className="text-[11px] font-medium text-slate-600">
+                                Minimum Fark
+                              </Label>
+                              <Input
+                                type="number"
+                                step="any"
+                                value={form.fields.priceToBeatMaxDiff ?? ''}
+                                onChange={(event) =>
+                                  actions.onUpdateField('priceToBeatMaxDiff', event.target.value)
+                                }
+                                placeholder={priceToBeatGuardUnit === 'cent' ? '1' : '5'}
+                                className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <Label className="text-[11px] font-medium text-slate-600">
+                                Birim
+                              </Label>
+                              <Select
+                                value={priceToBeatGuardUnit}
+                                onValueChange={(value) =>
+                                  actions.onUpdateField('priceToBeatMaxDiffUnit', value)
+                                }
+                              >
+                                <SelectTrigger
+                                  className="h-8 w-full border-slate-200 bg-white text-xs text-slate-900"
+                                  size="sm"
+                                >
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="usd">USD</SelectItem>
+                                  <SelectItem value="cent">Cent</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                              {priceToBeatGuardUnit === 'cent'
+                                ? 'Cent modu: 1 = $0.01. Fark bu minimum degerin altinda kalirsa bloklanir.'
+                                : 'USD modu: 5 = $5.00. Fark bu minimum degerin altinda kalirsa bloklanir.'}
+                            </p>
+                          </>
+                        ) : (
+                          <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                            Dinamik modda esik elle girilmez. Ayni asset/timeframe icin son 3
+                            tamamlanmis marketin yonlu excursion ortalamasi otomatik kullanilir.
+                          </p>
+                        )}
                         <div className="flex items-center justify-between gap-2">
                           <Label className="text-[11px] font-medium text-slate-600">
                             Price to Beat Engel Bildirimi

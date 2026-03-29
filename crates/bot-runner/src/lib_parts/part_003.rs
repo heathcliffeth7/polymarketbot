@@ -90,6 +90,7 @@ struct WsOpenPositionPriceNodeSpec {
     trigger_price: f64,
     max_price: Option<f64>,
     price_to_beat_trigger_enabled: bool,
+    price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode,
     price_to_beat_trigger_min_gap: Option<f64>,
     price_to_beat_trigger_max_gap: Option<f64>,
     price_to_beat_trigger_unit: crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit,

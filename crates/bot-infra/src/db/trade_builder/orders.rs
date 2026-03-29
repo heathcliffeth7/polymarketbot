@@ -11,7 +11,8 @@ const TRADE_BUILDER_ORDER_SELECT_COLUMNS: &str =
      origin_flow_run_id, origin_flow_node_key, tp_enabled, tp_price, tp_rules_json, sl_enabled, \
      sl_price, sl_rules_json, time_exit_rules_json, filled_qty, fee_rate_bps, trigger_latched, \
      trigger_latched_reason, trigger_latched_at, submitted_dynamic_qty, submitted_dynamic_price, \
-     retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, \
+     runtime_snapshot_json, fresh_submit_lease_until, retry_on_trigger_guard_block, \
+     retry_on_execution_floor_guard_block, retry_on_max_price_block, \
      sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, \
      notify_on_fill, notify_on_order_not_filled, notify_on_trigger_guard_blocked, \
      notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, \
@@ -29,7 +30,8 @@ const TRADE_BUILDER_ORDER_SELECT_COLUMNS_O_ALIAS: &str =
      o.origin_flow_node_key, o.tp_enabled, o.tp_price, o.tp_rules_json, o.sl_enabled, \
      o.sl_price, o.sl_rules_json, o.time_exit_rules_json, o.filled_qty, o.fee_rate_bps, \
      o.trigger_latched, o.trigger_latched_reason, o.trigger_latched_at, o.submitted_dynamic_qty, \
-     o.submitted_dynamic_price, o.retry_on_trigger_guard_block, \
+     o.submitted_dynamic_price, o.runtime_snapshot_json, o.fresh_submit_lease_until, \
+     o.retry_on_trigger_guard_block, \
      o.retry_on_execution_floor_guard_block, o.retry_on_max_price_block, o.sl_trigger_price_mode, \
      o.reenter_on_sl_hit, o.reentry_max_attempts, o.reentry_trigger_node_key, o.notify_on_fill, \
      o.notify_on_order_not_filled, o.notify_on_trigger_guard_blocked, \
@@ -60,6 +62,38 @@ where
     T: serde::de::DeserializeOwned,
 {
     serde_json::from_value(value).unwrap_or_default()
+}
+
+fn trade_builder_order_uses_ws_fast_path(order: &TradeBuilderOrder) -> bool {
+    order.parent_order_id.is_some()
+        && order.side == "sell"
+        && order.kind == "conditional"
+        && matches!(order.status.as_str(), "armed" | "triggered")
+        && order.trigger_condition.is_some()
+        && order.trigger_price.is_some()
+}
+
+fn trade_builder_order_requires_housekeeping(order: &TradeBuilderOrder) -> bool {
+    if order.status == "error" {
+        return order.trigger_latched
+            && order.trigger_latched_reason.as_deref() == Some("stop_loss");
+    }
+
+    if trade_builder_order_uses_ws_fast_path(order) {
+        return false;
+    }
+
+    matches!(
+        order.status.as_str(),
+        "pending"
+            | "armed"
+            | "triggered"
+            | "open"
+            | "partially_filled"
+            | "canceled_requested"
+            | "inventory_pending"
+            | "guard_blocked"
+    )
 }
 
 fn map_trade_builder_order_row(row: sqlx::postgres::PgRow) -> TradeBuilderOrder {
@@ -114,6 +148,8 @@ fn map_trade_builder_order_row(row: sqlx::postgres::PgRow) -> TradeBuilderOrder 
         trigger_latched_at: row.get("trigger_latched_at"),
         submitted_dynamic_qty: row.get("submitted_dynamic_qty"),
         submitted_dynamic_price: row.get("submitted_dynamic_price"),
+        runtime_snapshot_json: row.get("runtime_snapshot_json"),
+        fresh_submit_lease_until: row.get("fresh_submit_lease_until"),
         retry_on_trigger_guard_block: row.get("retry_on_trigger_guard_block"),
         retry_on_execution_floor_guard_block: row.get("retry_on_execution_floor_guard_block"),
         retry_on_max_price_block: row.get("retry_on_max_price_block"),
@@ -398,8 +434,19 @@ impl PostgresRepository {
         let rows = sqlx::query(&format!(
             "SELECT {TRADE_BUILDER_ORDER_SELECT_COLUMNS} \
              FROM trade_builder_orders \
-             WHERE status IN ('pending', 'armed', 'triggered', 'open', 'partially_filled', 'canceled_requested', 'inventory_pending', 'guard_blocked') \
+             WHERE (
+                    status IN ('pending', 'open', 'partially_filled', 'canceled_requested', 'inventory_pending', 'guard_blocked') \
+                OR (status IN ('armed', 'triggered') \
+                    AND NOT (
+                        parent_order_id IS NOT NULL \
+                        AND side = 'sell' \
+                        AND kind = 'conditional' \
+                        AND trigger_condition IS NOT NULL \
+                        AND trigger_price IS NOT NULL
+                    )) \
                 OR (status = 'error' AND trigger_latched = TRUE AND trigger_latched_reason = 'stop_loss') \
+                 ) \
+               AND (fresh_submit_lease_until IS NULL OR fresh_submit_lease_until <= NOW()) \
              ORDER BY \
                 CASE \
                     WHEN trigger_latched = TRUE AND trigger_latched_reason = 'stop_loss' THEN 0 \
@@ -414,7 +461,11 @@ impl PostgresRepository {
         .fetch_all(self.pool())
         .await?;
 
-        Ok(rows.into_iter().map(map_trade_builder_order_row).collect())
+        Ok(rows
+            .into_iter()
+            .map(map_trade_builder_order_row)
+            .filter(trade_builder_order_requires_housekeeping)
+            .collect())
     }
 
     pub async fn list_armed_tp_sl_child_builder_orders(&self) -> Result<Vec<TradeBuilderOrder>> {
@@ -620,6 +671,25 @@ impl PostgresRepository {
         Ok(())
     }
 
+    pub async fn set_trade_builder_order_runtime_snapshot(
+        &self,
+        builder_order_id: i64,
+        runtime_snapshot_json: Option<&Value>,
+        fresh_submit_lease_until: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders \
+             SET runtime_snapshot_json = $2, fresh_submit_lease_until = $3, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(runtime_snapshot_json)
+        .bind(fresh_submit_lease_until)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn set_trade_builder_order_notification_flags(
         &self,
         builder_order_id: i64,
@@ -697,6 +767,24 @@ impl PostgresRepository {
         Ok(())
     }
 
+    pub async fn list_guard_blocked_immediate_buy_builder_orders(
+        &self,
+    ) -> Result<Vec<TradeBuilderOrder>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TRADE_BUILDER_ORDER_SELECT_COLUMNS} \
+             FROM trade_builder_orders \
+             WHERE side = 'buy' \
+               AND kind = 'immediate' \
+               AND status = 'guard_blocked' \
+               AND active_exchange_order_id IS NULL \
+             ORDER BY created_at ASC"
+        ))
+        .fetch_all(self.pool())
+        .await?;
+
+        Ok(rows.into_iter().map(map_trade_builder_order_row).collect())
+    }
+
     pub async fn set_trade_builder_order_trigger_latched(
         &self,
         builder_order_id: i64,
@@ -742,7 +830,7 @@ impl PostgresRepository {
     ) -> Result<()> {
         sqlx::query(
             "UPDATE trade_builder_orders \
-             SET active_exchange_order_id = $2, working_price = $3, remaining_size = $4, remaining_qty = $5, status = $6, last_error = NULL, updated_at = NOW() \
+             SET active_exchange_order_id = $2, working_price = $3, remaining_size = $4, remaining_qty = $5, status = $6, last_error = NULL, fresh_submit_lease_until = NULL, updated_at = NOW() \
              WHERE id = $1",
         )
         .bind(builder_order_id)
@@ -960,5 +1048,153 @@ impl PostgresRepository {
         .execute(self.pool())
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn test_trade_builder_order(status: &str) -> TradeBuilderOrder {
+        TradeBuilderOrder {
+            id: 1,
+            trade_id: 77,
+            user_id: 1,
+            kind: "immediate".to_string(),
+            status: status.to_string(),
+            market_slug: "eth-updown-5m-1".to_string(),
+            token_id: "tok-up".to_string(),
+            outcome_label: "Up".to_string(),
+            side: "buy".to_string(),
+            execution_mode: "market".to_string(),
+            trigger_condition: None,
+            trigger_price: None,
+            max_price: None,
+            guard_trigger_price: None,
+            best_ask_floor_price: None,
+            size_basis: "notional_usdc".to_string(),
+            size_usdc: 5.0,
+            target_qty: None,
+            min_price_distance_cent: 1.0,
+            expires_at: None,
+            eligible_after_at: None,
+            eligible_before_at: None,
+            max_triggers: 1,
+            triggers_fired: 0,
+            active_exchange_order_id: None,
+            remaining_size: None,
+            remaining_qty: None,
+            working_price: None,
+            last_seen_price: None,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            parent_order_id: None,
+            origin_flow_definition_id: None,
+            origin_flow_run_id: None,
+            origin_flow_node_key: None,
+            tp_enabled: false,
+            tp_price: None,
+            tp_rules_json: Vec::new(),
+            sl_enabled: false,
+            sl_price: None,
+            sl_rules_json: Vec::new(),
+            time_exit_rules_json: Vec::new(),
+            filled_qty: 0.0,
+            fee_rate_bps: 0,
+            trigger_latched: false,
+            trigger_latched_reason: None,
+            trigger_latched_at: None,
+            submitted_dynamic_qty: None,
+            submitted_dynamic_price: None,
+            runtime_snapshot_json: None,
+            fresh_submit_lease_until: None,
+            retry_on_trigger_guard_block: false,
+            retry_on_execution_floor_guard_block: false,
+            retry_on_max_price_block: false,
+            sl_trigger_price_mode: None,
+            reenter_on_sl_hit: false,
+            reentry_max_attempts: 0,
+            reentry_trigger_node_key: None,
+            notify_on_fill: false,
+            notify_on_order_not_filled: false,
+            notify_on_trigger_guard_blocked: false,
+            notify_on_execution_floor_blocked: false,
+            notify_on_tp_hit: false,
+            notify_on_sl_hit: false,
+            notify_on_max_price_blocked: false,
+            last_guard_notification_reason: None,
+            exit_ladder_kind: None,
+            exit_ladder_index: None,
+            exit_ladder_size_pct: None,
+        }
+    }
+
+    #[test]
+    fn housekeeping_excludes_armed_and_triggered_child_exit_sells() {
+        let mut armed_child = test_trade_builder_order("armed");
+        armed_child.parent_order_id = Some(9);
+        armed_child.side = "sell".to_string();
+        armed_child.kind = "conditional".to_string();
+        armed_child.trigger_condition = Some("cross_below".to_string());
+        armed_child.trigger_price = Some(0.60);
+
+        let mut triggered_child = armed_child.clone();
+        triggered_child.status = "triggered".to_string();
+
+        assert!(!trade_builder_order_requires_housekeeping(&armed_child));
+        assert!(!trade_builder_order_requires_housekeeping(&triggered_child));
+    }
+
+    #[test]
+    fn housekeeping_excludes_armed_and_triggered_child_take_profit_sells() {
+        let mut armed_child = test_trade_builder_order("armed");
+        armed_child.parent_order_id = Some(9);
+        armed_child.side = "sell".to_string();
+        armed_child.kind = "conditional".to_string();
+        armed_child.trigger_condition = Some("cross_above".to_string());
+        armed_child.trigger_price = Some(0.84);
+
+        let mut triggered_child = armed_child.clone();
+        triggered_child.status = "triggered".to_string();
+
+        assert!(!trade_builder_order_requires_housekeeping(&armed_child));
+        assert!(!trade_builder_order_requires_housekeeping(&triggered_child));
+    }
+
+    #[test]
+    fn housekeeping_keeps_repair_and_fallback_statuses() {
+        for status in [
+            "pending",
+            "open",
+            "partially_filled",
+            "canceled_requested",
+            "inventory_pending",
+            "guard_blocked",
+        ] {
+            let mut child = test_trade_builder_order(status);
+            child.parent_order_id = Some(9);
+            child.side = "sell".to_string();
+            child.kind = "conditional".to_string();
+            child.trigger_condition = Some("cross_below".to_string());
+            child.trigger_price = Some(0.60);
+            assert!(
+                trade_builder_order_requires_housekeeping(&child),
+                "expected {status} to remain in housekeeping"
+            );
+        }
+    }
+
+    #[test]
+    fn housekeeping_keeps_latched_stop_loss_errors_only() {
+        let mut latched_error = test_trade_builder_order("error");
+        latched_error.trigger_latched = true;
+        latched_error.trigger_latched_reason = Some("stop_loss".to_string());
+
+        let plain_error = test_trade_builder_order("error");
+
+        assert!(trade_builder_order_requires_housekeeping(&latched_error));
+        assert!(!trade_builder_order_requires_housekeeping(&plain_error));
     }
 }

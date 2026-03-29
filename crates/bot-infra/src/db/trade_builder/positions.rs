@@ -4,9 +4,7 @@ const TRADE_BUILDER_PARENT_POSITION_SELECT_COLUMNS: &str =
     "parent_builder_order_id, user_id, source_trade_id, market_slug, token_id, outcome_label, \
      baseline_qty, current_qty, last_fill_qty, last_fill_price, qty_source, created_at, updated_at";
 
-fn map_trade_builder_parent_position_row(
-    row: sqlx::postgres::PgRow,
-) -> TradeBuilderParentPosition {
+fn map_trade_builder_parent_position_row(row: sqlx::postgres::PgRow) -> TradeBuilderParentPosition {
     TradeBuilderParentPosition {
         parent_builder_order_id: row.get("parent_builder_order_id"),
         user_id: row.get("user_id"),

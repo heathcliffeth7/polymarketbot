@@ -198,6 +198,7 @@ fn sync_trade_flow_auto_scope_market_rollover_state(
 
         if old_market_slug.as_deref() != Some(new_market_slug) {
             clear_trade_flow_market_price_ws_runtime_state(context, &node_spec.node_key);
+            clear_trade_flow_market_price_rotation_state(context, &node_spec.node_key);
             if let Some(old_market_slug) = old_market_slug {
                 rotations.push(AutoScopeMarketRotation {
                     node_key: node_spec.node_key.clone(),

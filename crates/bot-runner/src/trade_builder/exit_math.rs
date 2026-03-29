@@ -464,13 +464,38 @@ fn trade_builder_resolve_max_price_reference(
     }
 }
 
-fn trade_builder_price_below_guard_trigger(order: &TradeBuilderOrder, current_price: f64) -> bool {
+fn trade_builder_resolve_trigger_guard_reference_price(
+    order: &TradeBuilderOrder,
+    current_price: f64,
+    best_ask: Option<f64>,
+) -> (f64, &'static str) {
+    if order.side != "buy" {
+        return (current_price, "current_price");
+    }
+    match best_ask
+        .and_then(|value| normalize_trade_builder_reference_price(Some(value)))
+        .map(clamp_probability)
+    {
+        Some(best_ask) => (best_ask, "best_ask"),
+        None => (
+            normalize_trade_builder_reference_price(Some(current_price))
+                .map(clamp_probability)
+                .unwrap_or_else(|| clamp_probability(current_price)),
+            "current_price_fallback",
+        ),
+    }
+}
+
+fn trade_builder_price_below_guard_trigger(
+    order: &TradeBuilderOrder,
+    reference_price: f64,
+) -> bool {
     if order.side != "buy" {
         return false;
     }
     order
         .guard_trigger_price
-        .map(|guard| current_price.is_finite() && current_price < guard)
+        .map(|guard| reference_price.is_finite() && reference_price < guard)
         .unwrap_or(false)
 }
 

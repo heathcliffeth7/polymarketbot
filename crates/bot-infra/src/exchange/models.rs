@@ -20,6 +20,18 @@ pub struct PriceSnapshot {
     pub price: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderBookLevel {
+    pub price: f64,
+    pub size: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrderBookSnapshot {
+    pub bids: Vec<OrderBookLevel>,
+    pub asks: Vec<OrderBookLevel>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaceOrderRequest {
     pub market: String,
@@ -50,6 +62,9 @@ pub struct OrderAck {
     pub reject_reason: Option<String>,
     pub raw_status: Option<String>,
     pub exchange_ts: Option<i64>,
+    pub sign_ms: Option<i64>,
+    pub http_ms: Option<i64>,
+    pub total_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +97,10 @@ pub trait GammaClient: Send + Sync {
 #[async_trait]
 pub trait ClobRestClient: Send + Sync {
     async fn get_price_snapshot(&self, market: &str) -> Result<PriceSnapshot>;
+
+    async fn get_order_book(&self, _token_id: &str) -> Result<Option<OrderBookSnapshot>> {
+        Ok(None)
+    }
 
     async fn get_best_bid_ask(&self, _token_id: &str) -> Result<(Option<f64>, Option<f64>)> {
         Ok((None, None))

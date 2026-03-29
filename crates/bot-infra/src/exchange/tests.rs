@@ -1,6 +1,8 @@
-use super::clob::{extract_best_bid_ask_from_book, parse_fee_rate_bps_response};
+use super::clob::{
+    extract_best_bid_ask_from_book, extract_order_book_from_book, parse_fee_rate_bps_response,
+};
 use super::parse::{parse_gamma_market, parse_gamma_market_any, parse_yes_no_token_ids};
-use super::{ClobHttpClient, ClobRestClient, PlaceOrderRequest};
+use super::{ClobHttpClient, ClobRestClient, OrderBookLevel, PlaceOrderRequest};
 use crate::signer::ApiCredentials;
 use anyhow::Result;
 use ethers::{signers::LocalWallet, types::Address};
@@ -230,6 +232,73 @@ fn book_parser_returns_none_when_both_sides_are_empty() {
     let (best_bid, best_ask) = extract_best_bid_ask_from_book(&raw);
     assert_eq!(best_bid, None);
     assert_eq!(best_ask, None);
+}
+
+#[test]
+fn order_book_parser_keeps_positive_price_and_size_levels() {
+    let raw = json!({
+        "bids": [
+            { "price": "0.40", "size": "10.5" },
+            { "price": "0.42", "size": "7.25" }
+        ],
+        "asks": [
+            { "price": "0.58", "size": "3.5" }
+        ]
+    });
+
+    let snapshot = extract_order_book_from_book(&raw);
+    assert_eq!(
+        snapshot.bids,
+        vec![
+            OrderBookLevel {
+                price: 0.40,
+                size: 10.5
+            },
+            OrderBookLevel {
+                price: 0.42,
+                size: 7.25
+            }
+        ]
+    );
+    assert_eq!(
+        snapshot.asks,
+        vec![OrderBookLevel {
+            price: 0.58,
+            size: 3.5
+        }]
+    );
+}
+
+#[test]
+fn order_book_parser_ignores_invalid_or_zero_levels() {
+    let raw = json!({
+        "bids": [
+            { "price": "0.40", "size": "0" },
+            { "price": "0.41", "size": "-2" },
+            { "price": "NaN", "size": "3" },
+            { "price": "0.42", "size": "4.5" }
+        ],
+        "asks": [
+            { "price": "0.60", "amount": "2.2" },
+            { "price": "0.61", "shares": "0" }
+        ]
+    });
+
+    let snapshot = extract_order_book_from_book(&raw);
+    assert_eq!(
+        snapshot.bids,
+        vec![OrderBookLevel {
+            price: 0.42,
+            size: 4.5
+        }]
+    );
+    assert_eq!(
+        snapshot.asks,
+        vec![OrderBookLevel {
+            price: 0.60,
+            size: 2.2
+        }]
+    );
 }
 
 #[test]

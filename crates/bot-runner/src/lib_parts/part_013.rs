@@ -33,7 +33,7 @@ async fn execute_trade_flow_node(
         "action.dual_dca" => execute_action_dual_dca(repo, run, node, context).await,
         "action.place_order" => {
             execute_action_place_order(
-                repo, run_id, cfg, limits, policy, run, step, node, graph, context,
+                repo, run_id, cfg, limits, policy, client, run, step, node, graph, context,
             )
             .await
         }

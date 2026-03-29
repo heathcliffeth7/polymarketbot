@@ -232,26 +232,30 @@ fn build_trade_builder_fill_notification(
 
 fn build_trigger_guard_blocked_notification_message(
     order: &TradeBuilderOrder,
-    current_price: f64,
+    reference_price: f64,
+    reference_source: &str,
 ) -> String {
     format!(
-        "Tetik Fiyat Korumasi Engelledi\nSebep: Guncel fiyat guard seviyesinin altina dustu.\nMarket: {}\nOutcome: {}\nGuncel: {:.4}\nGuard: {:.4}",
+        "Tetik Fiyat Korumasi Engelledi\nSebep: Referans fiyat guard seviyesinin altina dustu.\nMarket: {}\nOutcome: {}\nReferans ({}): {:.4}\nGuard: {:.4}",
         order.market_slug,
         order.outcome_label,
-        current_price,
+        reference_source,
+        reference_price,
         order.guard_trigger_price.unwrap_or(0.0)
     )
 }
 
 fn build_trigger_guard_waiting_notification_message(
     order: &TradeBuilderOrder,
-    current_price: f64,
+    reference_price: f64,
+    reference_source: &str,
 ) -> String {
     format!(
-        "Tetik Fiyat Korumasi Bekleme Modu\nSebep: Guncel fiyat guard seviyesinin altina dustu. Kosullar duzelince order yeniden denenecek.\nMarket: {}\nOutcome: {}\nGuncel: {:.4}\nGuard: {:.4}",
+        "Tetik Fiyat Korumasi Bekleme Modu\nSebep: Referans fiyat guard seviyesinin altina dustu. Kosullar duzelince order yeniden denenecek.\nMarket: {}\nOutcome: {}\nReferans ({}): {:.4}\nGuard: {:.4}",
         order.market_slug,
         order.outcome_label,
-        current_price,
+        reference_source,
+        reference_price,
         order.guard_trigger_price.unwrap_or(0.0)
     )
 }

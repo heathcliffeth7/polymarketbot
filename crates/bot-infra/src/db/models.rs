@@ -92,6 +92,8 @@ pub struct TradeBuilderOrder {
     pub trigger_latched_at: Option<DateTime<Utc>>,
     pub submitted_dynamic_qty: Option<f64>,
     pub submitted_dynamic_price: Option<f64>,
+    pub runtime_snapshot_json: Option<Value>,
+    pub fresh_submit_lease_until: Option<DateTime<Utc>>,
     pub guard_trigger_price: Option<f64>,
     pub best_ask_floor_price: Option<f64>,
     pub retry_on_trigger_guard_block: bool,
@@ -246,6 +248,59 @@ pub struct TradeBuilderWorkflowLeg {
     pub last_seen_price: Option<f64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderOrderEventRecord {
+    pub builder_order_id: i64,
+    pub event_type: String,
+    pub payload_json: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeFlowEventRecord {
+    pub run_id: i64,
+    pub event_type: String,
+    pub payload_json: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderExchangeFillSummary {
+    pub exchange_order_id: String,
+    pub filled_qty: f64,
+    pub filled_notional_usdc: f64,
+    pub fee_usdc: f64,
+    pub first_filled_at: Option<DateTime<Utc>>,
+    pub last_filled_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeFlowAutoScopeAnalysisRowInput {
+    pub row_key: String,
+    pub user_id: i64,
+    pub definition_id: i64,
+    pub run_id: i64,
+    pub root_builder_order_id: i64,
+    pub exit_builder_order_id: Option<i64>,
+    pub row_type: String,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub exit_reason: String,
+    pub market_open_at: Option<DateTime<Utc>>,
+    pub triggered_at: Option<DateTime<Utc>>,
+    pub buy_filled_at: Option<DateTime<Utc>>,
+    pub sell_filled_at: Option<DateTime<Utc>>,
+    pub open_to_trigger_ms: Option<i64>,
+    pub trigger_to_buy_fill_ms: Option<i64>,
+    pub buy_avg_price: Option<f64>,
+    pub mark_or_sell_price: Option<f64>,
+    pub mark_price_captured_at: Option<DateTime<Utc>>,
+    pub row_qty: f64,
+    pub remaining_qty_after_exit: f64,
+    pub row_pnl_usdc: f64,
 }
 
 #[derive(Debug, Clone)]

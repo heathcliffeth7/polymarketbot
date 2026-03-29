@@ -908,6 +908,8 @@ mod place_order_binding_tests {
             trigger_latched_at: None,
             submitted_dynamic_qty: None,
             submitted_dynamic_price: None,
+            runtime_snapshot_json: None,
+            fresh_submit_lease_until: None,
             guard_trigger_price: None,
             best_ask_floor_price: None,
             retry_on_trigger_guard_block: false,

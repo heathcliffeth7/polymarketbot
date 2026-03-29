@@ -57,10 +57,11 @@ fn trigger_guard_notification_includes_reason_line() {
     let mut order = test_builder_order("buy", None);
     order.guard_trigger_price = Some(0.77);
 
-    let message = build_trigger_guard_blocked_notification_message(&order, 0.76);
+    let message = build_trigger_guard_blocked_notification_message(&order, 0.76, "best_ask");
 
     assert!(message.contains("Sebep:"));
     assert!(message.contains("guard seviyesinin altina dustu"));
+    assert!(message.contains("Referans (best_ask): 0.7600"));
     assert!(message.contains("Guard: 0.7700"));
 }
 
@@ -69,10 +70,15 @@ fn trigger_guard_waiting_notification_mentions_recovery_retry() {
     let mut order = test_builder_order("buy", None);
     order.guard_trigger_price = Some(0.77);
 
-    let message = build_trigger_guard_waiting_notification_message(&order, 0.76);
+    let message = build_trigger_guard_waiting_notification_message(
+        &order,
+        0.76,
+        "current_price_fallback",
+    );
 
     assert!(message.contains("Bekleme"));
     assert!(message.contains("yeniden denenecek"));
+    assert!(message.contains("Referans (current_price_fallback): 0.7600"));
     assert!(message.contains("Guard: 0.7700"));
 }
 

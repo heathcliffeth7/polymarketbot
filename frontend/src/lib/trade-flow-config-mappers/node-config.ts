@@ -76,12 +76,21 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
     if (
       (fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
+      !['manual', 'auto_last_3_avg_excursion'].includes(
+        (fields.priceToBeatMode ?? '').trim().toLowerCase()
+      )
+    ) {
+      fields.priceToBeatMode = 'manual';
+    }
+    if (
+      (fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
       !(fields.notifyOnPriceToBeatGapBlocked ?? '').trim()
     ) {
       fields.notifyOnPriceToBeatGapBlocked = 'true';
     }
     if (
       (fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
+      (fields.priceToBeatMode ?? '').trim().toLowerCase() === 'manual' &&
       !['usd', 'cent'].includes((fields.priceToBeatMaxDiffUnit ?? '').trim().toLowerCase())
     ) {
       fields.priceToBeatMaxDiffUnit = 'usd';
@@ -278,6 +287,15 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
     if (
       (fields.priceToBeatTriggerEnabled ?? '').trim().toLowerCase() === 'true' &&
+      !['manual', 'auto_last_3_avg_excursion'].includes(
+        (fields.priceToBeatMode ?? '').trim().toLowerCase()
+      )
+    ) {
+      fields.priceToBeatMode = 'manual';
+    }
+    if (
+      (fields.priceToBeatTriggerEnabled ?? '').trim().toLowerCase() === 'true' &&
+      (fields.priceToBeatMode ?? '').trim().toLowerCase() === 'manual' &&
       !['usd', 'cent'].includes((fields.priceToBeatTriggerUnit ?? '').trim().toLowerCase())
     ) {
       fields.priceToBeatTriggerUnit = 'usd';
@@ -554,14 +572,25 @@ export function buildNodeConfigFromForm(
         delete config.executionFloorPriceCent;
       }
       if (config.priceToBeatGuardEnabled !== true) {
+        delete config.priceToBeatMode;
         delete config.priceToBeatMaxDiff;
         delete config.priceToBeatMaxDiffUnit;
         delete config.notifyOnPriceToBeatGapBlocked;
         delete config.retryOnPriceToBeatGuardBlock;
       } else {
-        const priceToBeatUnitRaw = toStringValue(config.priceToBeatMaxDiffUnit).trim().toLowerCase();
-        config.priceToBeatMaxDiffUnit =
-          priceToBeatUnitRaw === 'cent' ? 'cent' : 'usd';
+        const priceToBeatModeRaw = toStringValue(config.priceToBeatMode).trim().toLowerCase();
+        config.priceToBeatMode =
+          priceToBeatModeRaw === 'auto_last_3_avg_excursion'
+            ? 'auto_last_3_avg_excursion'
+            : 'manual';
+        if (config.priceToBeatMode === 'manual') {
+          const priceToBeatUnitRaw = toStringValue(config.priceToBeatMaxDiffUnit).trim().toLowerCase();
+          config.priceToBeatMaxDiffUnit =
+            priceToBeatUnitRaw === 'cent' ? 'cent' : 'usd';
+        } else {
+          delete config.priceToBeatMaxDiff;
+          delete config.priceToBeatMaxDiffUnit;
+        }
       }
       if (config.maxPriceCent == null) {
         delete config.notifyOnMaxPriceBlocked;
@@ -766,29 +795,41 @@ export function buildNodeConfigFromForm(
         }
       }
       if (config.priceToBeatTriggerEnabled === true) {
-        const ptbUnitRaw = toStringValue(config.priceToBeatTriggerUnit).trim().toLowerCase();
-        config.priceToBeatTriggerUnit =
-          ptbUnitRaw === 'cent' || ptbUnitRaw === 'usd' ? ptbUnitRaw : 'usd';
-        const minGap = Number(toStringValue(config.priceToBeatTriggerMinGap).trim());
-        if (Number.isFinite(minGap) && minGap > 0) {
-          config.priceToBeatTriggerMinGap = minGap;
+        const priceToBeatModeRaw = toStringValue(config.priceToBeatMode).trim().toLowerCase();
+        config.priceToBeatMode =
+          priceToBeatModeRaw === 'auto_last_3_avg_excursion'
+            ? 'auto_last_3_avg_excursion'
+            : 'manual';
+        if (config.priceToBeatMode === 'manual') {
+          const ptbUnitRaw = toStringValue(config.priceToBeatTriggerUnit).trim().toLowerCase();
+          config.priceToBeatTriggerUnit =
+            ptbUnitRaw === 'cent' || ptbUnitRaw === 'usd' ? ptbUnitRaw : 'usd';
+          const minGap = Number(toStringValue(config.priceToBeatTriggerMinGap).trim());
+          if (Number.isFinite(minGap) && minGap > 0) {
+            config.priceToBeatTriggerMinGap = minGap;
+          } else {
+            delete config.priceToBeatTriggerMinGap;
+          }
+          const maxGapRaw = toStringValue(config.priceToBeatTriggerMaxGap).trim();
+          const maxGap = Number(maxGapRaw);
+          if (
+            maxGapRaw &&
+            Number.isFinite(maxGap) &&
+            maxGap > 0 &&
+            Number.isFinite(minGap) &&
+            maxGap >= minGap
+          ) {
+            config.priceToBeatTriggerMaxGap = maxGap;
+          } else {
+            delete config.priceToBeatTriggerMaxGap;
+          }
         } else {
+          delete config.priceToBeatTriggerUnit;
           delete config.priceToBeatTriggerMinGap;
-        }
-        const maxGapRaw = toStringValue(config.priceToBeatTriggerMaxGap).trim();
-        const maxGap = Number(maxGapRaw);
-        if (
-          maxGapRaw &&
-          Number.isFinite(maxGap) &&
-          maxGap > 0 &&
-          Number.isFinite(minGap) &&
-          maxGap >= minGap
-        ) {
-          config.priceToBeatTriggerMaxGap = maxGap;
-        } else {
           delete config.priceToBeatTriggerMaxGap;
         }
       } else {
+        delete config.priceToBeatMode;
         delete config.priceToBeatTriggerUnit;
         delete config.priceToBeatTriggerMinGap;
         delete config.priceToBeatTriggerMaxGap;
@@ -804,6 +845,7 @@ export function buildNodeConfigFromForm(
       delete config.cycleWindowEndSec;
       delete config.autoSellOnWindowEnd;
       delete config.priceToBeatTriggerEnabled;
+      delete config.priceToBeatMode;
       delete config.priceToBeatTriggerUnit;
       delete config.priceToBeatTriggerMinGap;
       delete config.priceToBeatTriggerMaxGap;

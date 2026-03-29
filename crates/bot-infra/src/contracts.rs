@@ -1,6 +1,7 @@
 use crate::db::PostgresRepository;
 use crate::exchange::{
-    ClobRestClient, FillInfo, OrderAck, OrderInfo, PlaceOrderRequest, PriceSnapshot,
+    ClobRestClient, FillInfo, OrderAck, OrderBookSnapshot, OrderInfo, PlaceOrderRequest,
+    PriceSnapshot,
 };
 pub use crate::market_data::MarketDataProvider;
 use anyhow::Result;
@@ -10,6 +11,9 @@ use bot_core::TradeState;
 #[async_trait]
 pub trait OrderExecutor: Send + Sync {
     async fn midpoint(&self, market: &str) -> Result<PriceSnapshot>;
+    async fn order_book(&self, _token_id: &str) -> Result<Option<OrderBookSnapshot>> {
+        Ok(None)
+    }
     async fn best_bid_ask(&self, _token_id: &str) -> Result<(Option<f64>, Option<f64>)> {
         Ok((None, None))
     }
@@ -41,6 +45,10 @@ where
 
     async fn best_bid_ask(&self, token_id: &str) -> Result<(Option<f64>, Option<f64>)> {
         ClobRestClient::get_best_bid_ask(self, token_id).await
+    }
+
+    async fn order_book(&self, token_id: &str) -> Result<Option<OrderBookSnapshot>> {
+        ClobRestClient::get_order_book(self, token_id).await
     }
 
     async fn last_trade_price(&self, token_id: &str) -> Result<Option<f64>> {

@@ -165,6 +165,19 @@ async fn resolve_trade_builder_order_fee_rate_bps(
     client: &dyn OrderExecutor,
     order: &mut TradeBuilderOrder,
 ) -> Result<u64> {
+    let now = Utc::now();
+    if let Some(snapshot) = trade_builder_runtime_snapshot_from_order(order)
+        .filter(|snapshot| trade_builder_runtime_snapshot_is_fresh(snapshot, now))
+    {
+        if let Some(fee_rate_bps) = snapshot.fee_rate_bps {
+            if order.fee_rate_bps != fee_rate_bps as i64 {
+                repo.set_trade_builder_order_fee_rate_bps(order.id, fee_rate_bps as i64)
+                    .await?;
+                order.fee_rate_bps = fee_rate_bps as i64;
+            }
+            return Ok(fee_rate_bps);
+        }
+    }
     let default_fee_rate_bps = trade_builder_fee_rate_bps_or_default(order.fee_rate_bps);
     match client.fee_rate_bps(&order.token_id).await {
         Ok(Some(fee_rate_bps)) => {

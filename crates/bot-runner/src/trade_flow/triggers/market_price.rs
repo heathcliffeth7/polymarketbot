@@ -700,8 +700,14 @@ async fn execute_trigger_market_price(
                                 price_to_beat: None,
                                 price_to_beat_status: None,
                                 current_price: None,
+                                threshold_mode: "manual".to_string(),
                                 min_gap: 0.0,
                                 max_gap: None,
+                                auto_threshold_usd: None,
+                                lookback_windows_used: None,
+                                avg_up_excursion_usd: None,
+                                avg_down_excursion_usd: None,
+                                lookback_market_slugs: None,
                             }
                         });
                         (ptb_gate.passed, eval_mode, ptb_gate.to_value())
@@ -735,8 +741,14 @@ async fn execute_trigger_market_price(
                                 price_to_beat: None,
                                 price_to_beat_status: None,
                                 current_price: None,
+                                threshold_mode: "manual".to_string(),
                                 min_gap: 0.0,
                                 max_gap: None,
+                                auto_threshold_usd: None,
+                                lookback_windows_used: None,
+                                avg_up_excursion_usd: None,
+                                avg_down_excursion_usd: None,
+                                lookback_market_slugs: None,
                             }
                         });
                         (ptb_gate.passed, "ptb_only", ptb_gate.to_value())
@@ -984,8 +996,14 @@ async fn execute_trigger_market_price(
                                 price_to_beat: None,
                                 price_to_beat_status: None,
                                 current_price: None,
+                                threshold_mode: "manual".to_string(),
                                 min_gap: 0.0,
                                 max_gap: None,
+                                auto_threshold_usd: None,
+                                lookback_windows_used: None,
+                                avg_up_excursion_usd: None,
+                                avg_down_excursion_usd: None,
+                                lookback_market_slugs: None,
                             }
                         });
                         price_to_beat_trigger_gate_output = ptb_gate.to_value();
@@ -1014,8 +1032,14 @@ async fn execute_trigger_market_price(
                                 price_to_beat: None,
                                 price_to_beat_status: None,
                                 current_price: None,
+                                threshold_mode: "manual".to_string(),
                                 min_gap: 0.0,
                                 max_gap: None,
+                                auto_threshold_usd: None,
+                                lookback_windows_used: None,
+                                avg_up_excursion_usd: None,
+                                avg_down_excursion_usd: None,
+                                lookback_market_slugs: None,
                             }
                         });
                         price_to_beat_trigger_gate_output = ptb_gate.to_value();

@@ -7,7 +7,9 @@ async fn reconcile_trade_builder_open_order(
     order: &TradeBuilderOrder,
     exchange_order_id: &str,
     current_price: f64,
+    best_bid: Option<f64>,
     best_ask: Option<f64>,
+    last_trade_price: Option<f64>,
 ) -> Result<()> {
     let mut order = order.clone();
     if order.status == "canceled_requested" {
@@ -113,13 +115,35 @@ async fn reconcile_trade_builder_open_order(
             }
         }
     }
+    let submit_price_requested_qty = if size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES {
+        remaining_qty
+    } else {
+        None
+    };
     let immediate_buy_execution_price =
         trade_builder_immediate_buy_notional_execution_price(&order, current_price, best_ask);
-    let desired_price = immediate_buy_execution_price
-        .map(|resolution| resolution.price)
+    let sell_submit_price = if order.side == "sell" {
+        Some(
+            resolve_trade_builder_sell_submit_price(
+                client,
+                &order,
+                current_price,
+                best_bid,
+                last_trade_price,
+                submit_price_requested_qty,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let desired_price = sell_submit_price
+        .map(|resolution| resolution.desired_price)
+        .or_else(|| immediate_buy_execution_price.map(|resolution| resolution.price))
         .unwrap_or_else(|| trade_builder_submit_desired_price(&order, current_price));
-    let uncapped_desired_price = immediate_buy_execution_price
-        .map(|resolution| resolution.price)
+    let uncapped_desired_price = sell_submit_price
+        .map(|resolution| resolution.uncapped_desired_price)
+        .or_else(|| immediate_buy_execution_price.map(|resolution| resolution.price))
         .unwrap_or_else(|| {
             aggressive_price_for_side(&order.side, current_price, order.min_price_distance_cent)
         });
@@ -187,6 +211,7 @@ async fn reconcile_trade_builder_open_order(
         &order_info,
         normalized,
         current_price,
+        best_ask,
         desired_price,
         remaining_usdc,
         remaining_qty,
@@ -647,6 +672,10 @@ async fn reconcile_trade_builder_open_order(
                 "size_basis": size_basis,
                 "available_qty": available_qty,
                 "precheck_skipped": optimistic_exit_stage != Some(TradeBuilderExitSubmitStage::VisibleInventory),
+                "submit_price_source": sell_submit_price.map(|resolution| resolution.source),
+                "submit_price_depth_levels_used": sell_submit_price.and_then(|resolution| resolution.depth_levels_used),
+                "submit_price_visible_bid_qty": sell_submit_price.and_then(|resolution| resolution.visible_bid_qty),
+                "submit_price_requested_qty": sell_submit_price.and_then(|resolution| resolution.requested_qty),
             }),
         )
         .await?;
@@ -670,6 +699,10 @@ async fn reconcile_trade_builder_open_order(
                         "neg_risk": replace_req.neg_risk,
                         "order_price_min_tick_size": market_spec.and_then(|spec| spec.order_price_min_tick_size),
                         "order_min_size": market_spec.and_then(|spec| spec.order_min_size),
+                        "submit_price_source": sell_submit_price.map(|resolution| resolution.source),
+                        "submit_price_depth_levels_used": sell_submit_price.and_then(|resolution| resolution.depth_levels_used),
+                        "submit_price_visible_bid_qty": sell_submit_price.and_then(|resolution| resolution.visible_bid_qty),
+                        "submit_price_requested_qty": sell_submit_price.and_then(|resolution| resolution.requested_qty),
                     }),
                 )
                 .await?;
@@ -818,9 +851,13 @@ async fn reconcile_trade_builder_open_order(
         "target_price": desired_price,
         "execution_price_source": immediate_buy_execution_price
             .map(|resolution| resolution.source)
-            .unwrap_or("runtime_price"),
+            .unwrap_or_else(|| sell_submit_price.map(|resolution| resolution.source).unwrap_or("runtime_price")),
         "trigger_reference_price": immediate_buy_execution_price
             .and_then(|resolution| resolution.trigger_reference_price),
+        "submit_price_source": sell_submit_price.map(|resolution| resolution.source),
+        "submit_price_depth_levels_used": sell_submit_price.and_then(|resolution| resolution.depth_levels_used),
+        "submit_price_visible_bid_qty": sell_submit_price.and_then(|resolution| resolution.visible_bid_qty),
+        "submit_price_requested_qty": sell_submit_price.and_then(|resolution| resolution.requested_qty),
         "max_price": order.max_price,
         "remaining_usdc": if size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES { Some((size * desired_price).max(0.0)) } else { remaining_usdc },
         "remaining_qty": if size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES { Some(size) } else { remaining_qty },

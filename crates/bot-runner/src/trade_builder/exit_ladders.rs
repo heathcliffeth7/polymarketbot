@@ -257,6 +257,47 @@ fn trade_builder_ladder_rule_weight(order: &TradeBuilderOrder) -> Option<f64> {
         .filter(|value| value.is_finite() && *value > 0.0)
 }
 
+fn trade_builder_ladder_family_target_qtys(
+    family_children: &[&TradeBuilderOrder],
+    current_parent_qty: f64,
+) -> Vec<(i64, f64)> {
+    let current_parent_qty = round_trade_builder_share_qty(current_parent_qty.max(0.0));
+    if current_parent_qty <= TRADE_BUILDER_EXIT_QTY_TOLERANCE {
+        return Vec::new();
+    }
+
+    let mut weighted_children = family_children
+        .iter()
+        .filter_map(|child| {
+            trade_builder_ladder_rule_weight(child).map(|weight_pct| (*child, weight_pct))
+        })
+        .collect::<Vec<_>>();
+    weighted_children.sort_by_key(|(child, _)| (child.exit_ladder_index.unwrap_or(i32::MAX), child.id));
+
+    let family_weight_sum: f64 = weighted_children.iter().map(|(_, weight_pct)| *weight_pct).sum();
+    if family_weight_sum <= 0.0 {
+        return Vec::new();
+    }
+
+    let mut targets = Vec::new();
+    let mut assigned_qty = 0.0;
+    for (index, (child, weight_pct)) in weighted_children.iter().enumerate() {
+        let is_last = index + 1 == weighted_children.len();
+        let desired_qty = if is_last {
+            round_trade_builder_share_qty((current_parent_qty - assigned_qty).max(0.0))
+        } else {
+            round_trade_builder_share_qty(current_parent_qty * (*weight_pct / family_weight_sum))
+        };
+        if desired_qty <= 0.0 {
+            continue;
+        }
+        assigned_qty = round_trade_builder_share_qty((assigned_qty + desired_qty).max(0.0));
+        targets.push((child.id, desired_qty));
+    }
+
+    targets
+}
+
 fn trade_builder_live_ladder_children<'a>(
     children: &'a [TradeBuilderOrder],
     family: &str,
@@ -283,13 +324,16 @@ async fn trade_builder_sync_ladder_family_remaining_qty(
     current_parent_qty: f64,
     event_reason: &str,
 ) -> Result<Vec<i64>> {
+    let family_child_refs = family_children.iter().collect::<Vec<_>>();
+    let target_qtys = trade_builder_ladder_family_target_qtys(&family_child_refs, current_parent_qty);
     let family_weight_sum: f64 = family_children
         .iter()
         .filter_map(|order| trade_builder_ladder_rule_weight(order))
         .sum();
-    if family_weight_sum <= 0.0 {
+    if family_weight_sum <= 0.0 || target_qtys.is_empty() {
         return Ok(Vec::new());
     }
+    let remainder_close_order_id = target_qtys.last().map(|(order_id, _)| *order_id);
 
     let mut updated_order_ids = Vec::new();
     for child in family_children {
@@ -299,11 +343,13 @@ async fn trade_builder_sync_ladder_family_remaining_qty(
         let Some(weight_pct) = trade_builder_ladder_rule_weight(child) else {
             continue;
         };
-        let desired_qty =
-            round_trade_builder_share_qty(current_parent_qty * (weight_pct / family_weight_sum));
-        if desired_qty <= 0.0 {
+        let Some((_, desired_qty)) = target_qtys
+            .iter()
+            .find(|(order_id, _)| *order_id == child.id)
+        else {
             continue;
-        }
+        };
+        let desired_qty = *desired_qty;
         let desired_size_usdc = trade_builder_scaled_size_usdc(child, desired_qty);
         repo.update_trade_builder_order_sizing_and_state(
             child.id,
@@ -330,6 +376,11 @@ async fn trade_builder_sync_ladder_family_remaining_qty(
                 "weight_pct": weight_pct,
                 "family_weight_sum": family_weight_sum,
                 "next_target_qty": desired_qty,
+                "remaining_qty_source": if Some(child.id) == remainder_close_order_id {
+                    "remainder_close"
+                } else {
+                    "family_weight_sync"
+                },
                 "status_after": &child.status,
             }),
         )
@@ -559,6 +610,8 @@ mod exit_ladder_tests {
             trigger_latched_at: None,
             submitted_dynamic_qty: None,
             submitted_dynamic_price: None,
+            runtime_snapshot_json: None,
+            fresh_submit_lease_until: None,
             guard_trigger_price: None,
             best_ask_floor_price: None,
             retry_on_trigger_guard_block: false,
@@ -654,5 +707,41 @@ mod exit_ladder_tests {
             trade_builder_exit_sibling_policy(&hard),
             TRADE_BUILDER_EXIT_SIBLING_POLICY_CANCEL_ALL
         );
+    }
+
+    #[test]
+    fn ladder_family_target_qtys_make_last_stage_absorb_rounding_remainder() {
+        let mut first_tp = test_builder_order("sell", Some(9));
+        first_tp.id = 11;
+        first_tp.exit_ladder_kind = Some("tp".to_string());
+        first_tp.exit_ladder_index = Some(0);
+        first_tp.exit_ladder_size_pct = Some(33.33);
+
+        let mut second_tp = first_tp.clone();
+        second_tp.id = 12;
+        second_tp.exit_ladder_index = Some(1);
+
+        let mut third_tp = first_tp.clone();
+        third_tp.id = 13;
+        third_tp.exit_ladder_index = Some(2);
+        third_tp.exit_ladder_size_pct = Some(33.34);
+
+        let targets =
+            trade_builder_ladder_family_target_qtys(&[&first_tp, &second_tp, &third_tp], 1.0);
+
+        assert_eq!(targets, vec![(11, 0.33), (12, 0.33), (13, 0.34)]);
+    }
+
+    #[test]
+    fn ladder_family_target_qtys_make_single_live_last_stage_full_close() {
+        let mut last_tp = test_builder_order("sell", Some(9));
+        last_tp.id = 22;
+        last_tp.exit_ladder_kind = Some("tp".to_string());
+        last_tp.exit_ladder_index = Some(1);
+        last_tp.exit_ladder_size_pct = Some(50.0);
+
+        let targets = trade_builder_ladder_family_target_qtys(&[&last_tp], 1.41);
+
+        assert_eq!(targets, vec![(22, 1.41)]);
     }
 }

@@ -148,34 +148,49 @@ export function validateTriggerMarketPriceNodeConfig(
     );
   }
   if (priceToBeatTriggerEnabled === true) {
-    const minGap = toFiniteNumber(config.priceToBeatTriggerMinGap);
-    if (minGap == null || minGap <= 0) {
+    const ptbMode = toTrimmedString(config.priceToBeatMode).toLowerCase();
+    const normalizedPtbMode =
+      !ptbMode || ptbMode === 'manual' || ptbMode === 'auto_last_3_avg_excursion'
+        ? ptbMode || 'manual'
+        : null;
+    if (normalizedPtbMode == null) {
       pushNodeError(
         issues,
         node,
-        'invalid_price_to_beat_trigger_min_gap',
-        'trigger.market_price priceToBeatTriggerMinGap must be > 0 when gate is enabled.'
+        'invalid_price_to_beat_mode',
+        'trigger.market_price priceToBeatMode must be manual or auto_last_3_avg_excursion.'
       );
     }
-    if (hasProvidedValue(config.priceToBeatTriggerMaxGap)) {
-      const maxGap = toFiniteNumber(config.priceToBeatTriggerMaxGap);
-      if (maxGap == null || maxGap <= 0 || (minGap != null && maxGap < minGap)) {
+    if (normalizedPtbMode !== 'auto_last_3_avg_excursion') {
+      const minGap = toFiniteNumber(config.priceToBeatTriggerMinGap);
+      if (minGap == null || minGap <= 0) {
         pushNodeError(
           issues,
           node,
-          'invalid_price_to_beat_trigger_max_gap',
-          'trigger.market_price priceToBeatTriggerMaxGap must be >= min gap when provided.'
+          'invalid_price_to_beat_trigger_min_gap',
+          'trigger.market_price priceToBeatTriggerMinGap must be > 0 when gate is enabled.'
         );
       }
-    }
-    const unit = toTrimmedString(config.priceToBeatTriggerUnit).toLowerCase();
-    if (unit && unit !== 'usd' && unit !== 'cent') {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_price_to_beat_trigger_unit',
-        'trigger.market_price priceToBeatTriggerUnit must be usd or cent.'
-      );
+      if (hasProvidedValue(config.priceToBeatTriggerMaxGap)) {
+        const maxGap = toFiniteNumber(config.priceToBeatTriggerMaxGap);
+        if (maxGap == null || maxGap <= 0 || (minGap != null && maxGap < minGap)) {
+          pushNodeError(
+            issues,
+            node,
+            'invalid_price_to_beat_trigger_max_gap',
+            'trigger.market_price priceToBeatTriggerMaxGap must be >= min gap when provided.'
+          );
+        }
+      }
+      const unit = toTrimmedString(config.priceToBeatTriggerUnit).toLowerCase();
+      if (unit && unit !== 'usd' && unit !== 'cent') {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_price_to_beat_trigger_unit',
+          'trigger.market_price priceToBeatTriggerUnit must be usd or cent.'
+        );
+      }
     }
   }
 

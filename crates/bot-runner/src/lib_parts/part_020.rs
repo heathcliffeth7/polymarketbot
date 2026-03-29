@@ -344,6 +344,26 @@ fn flow_node_reentry_attempts_used(context: &Value, node_key: &str) -> i64 {
     flow_node_state_i64(context, node_key, FLOW_NODE_STATE_REENTRY_ATTEMPTS_USED).unwrap_or(0)
 }
 
+fn flow_node_reentry_market_slug(context: &Value, node_key: &str) -> Option<String> {
+    flow_node_state_string(context, node_key, FLOW_NODE_STATE_REENTRY_MARKET_SLUG)
+        .map(|slug| slug.trim().to_string())
+        .filter(|slug| !slug.is_empty())
+}
+
+fn resolve_trade_flow_reentry_attempts_for_market(
+    context: &Value,
+    node_key: &str,
+    market_slug: &str,
+) -> (i64, Option<String>) {
+    let stored_reentry_market_slug = flow_node_reentry_market_slug(context, node_key);
+    let attempts_used = if stored_reentry_market_slug.as_deref() == Some(market_slug) {
+        flow_node_reentry_attempts_used(context, node_key)
+    } else {
+        0
+    };
+    (attempts_used, stored_reentry_market_slug)
+}
+
 fn trade_flow_market_price_once_idempotency_key(
     run_id: i64,
     node_key: &str,
@@ -489,6 +509,11 @@ fn clear_trade_flow_market_price_once_state(context: &mut Value, node_key: &str)
         node_key,
         FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG,
     );
+}
+
+fn clear_trade_flow_market_price_rotation_state(context: &mut Value, node_key: &str) {
+    clear_trade_flow_market_price_once_state(context, node_key);
+    remove_flow_node_state(context, node_key, FLOW_NODE_STATE_REENTRY_GENERATION);
 }
 
 fn build_trade_flow_eval_data(context: &Value) -> Value {
@@ -929,8 +954,14 @@ async fn process_trade_builder_orders(
 
     let armed_orders = repo.list_armed_tp_sl_child_builder_orders().await?;
     refresh_armed_builder_order_cache(armed_orders).await;
+    let guarded_buy_orders = repo.list_guard_blocked_immediate_buy_builder_orders().await?;
+    refresh_guarded_buy_order_cache(guarded_buy_orders).await;
     if let Err(err) = ensure_fast_path_market_stream_union(ws).await {
         warn!(run_id, error = %err, "ARMED_ORDER_WS_STREAM_UNION_REFRESH_FAILED");
+    }
+
+    if let Err(err) = maybe_backfill_trade_builder_auto_scope_analysis_snapshots(repo).await {
+        warn!(run_id, error = %err, "AUTO_SCOPE_ANALYSIS_BACKFILL_CYCLE_FAILED");
     }
 
     if orders_empty && pending_inventory_observations_empty {

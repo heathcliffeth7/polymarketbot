@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         LazyLock,
     },
     time::Duration,
@@ -19,7 +19,9 @@ const WS_URL_ENV: &str = "POLYMARKET_LIVE_DATA_WS_URL";
 const SUBSCRIPTION_TOPIC: &str = "crypto_prices_chainlink";
 const PING_INTERVAL_SECS: u64 = 5;
 const RECONNECT_DELAY_SECS: u64 = 2;
+const WS_IDLE_TIMEOUT_SECS: u64 = 15;
 const MAX_PRICE_AGE_SECS: i64 = 30;
+const STALE_RECONNECT_REQUEST_COOLDOWN_SECS: i64 = 10;
 const MAX_TICK_HISTORY_AGE_SECS: i64 = 4 * 60 * 60;
 const MAX_TICK_HISTORY_SAMPLES_PER_SYMBOL: usize = 20_000;
 #[cfg(test)]
@@ -42,6 +44,15 @@ struct CachedPrice {
 pub(crate) struct ChainlinkPriceTimestampSnapshot {
     pub(crate) price: f64,
     pub(crate) timestamp_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ChainlinkPriceWindowStats {
+    pub(crate) open_price: f64,
+    pub(crate) high_price: f64,
+    pub(crate) low_price: f64,
+    pub(crate) close_price: f64,
+    pub(crate) sample_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +85,8 @@ struct ChainlinkPriceService {
     last_error: RwLock<Option<String>>,
     warned_unexpected_symbols: RwLock<HashSet<String>>,
     started: AtomicBool,
+    reconnect_requested: AtomicBool,
+    last_reconnect_request_at_ms: AtomicI64,
     session_seq: AtomicU64,
 }
 
@@ -102,6 +115,8 @@ impl ChainlinkPriceService {
             last_error: RwLock::new(None),
             warned_unexpected_symbols: RwLock::new(HashSet::new()),
             started: AtomicBool::new(false),
+            reconnect_requested: AtomicBool::new(false),
+            last_reconnect_request_at_ms: AtomicI64::new(0),
             session_seq: AtomicU64::new(0),
         }
     }
@@ -122,6 +137,46 @@ impl ChainlinkPriceService {
             .insert(symbol.to_string())
     }
 
+    fn take_reconnect_requested(&self) -> bool {
+        self.reconnect_requested.swap(false, Ordering::SeqCst)
+    }
+
+    fn request_reconnect_if_cooldown_elapsed(
+        &self,
+        symbol: &str,
+        provider_age_ms: i64,
+        receive_age_ms: i64,
+        now_ms: i64,
+    ) -> bool {
+        let cooldown_ms = STALE_RECONNECT_REQUEST_COOLDOWN_SECS * 1_000;
+        loop {
+            let last_requested_at_ms = self.last_reconnect_request_at_ms.load(Ordering::SeqCst);
+            if last_requested_at_ms > 0 && diff_ms(now_ms, last_requested_at_ms) < cooldown_ms {
+                return false;
+            }
+            if self
+                .last_reconnect_request_at_ms
+                .compare_exchange(
+                    last_requested_at_ms,
+                    now_ms,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                self.reconnect_requested.store(true, Ordering::SeqCst);
+                tracing::warn!(
+                    symbol,
+                    provider_age_ms,
+                    receive_age_ms,
+                    reconnect_cooldown_secs = STALE_RECONNECT_REQUEST_COOLDOWN_SECS,
+                    "CHAINLINK_LIVE_DATA_WS_RECONNECT_REQUESTED"
+                );
+                return true;
+            }
+        }
+    }
+
     fn get_price(&self, asset: &str) -> Result<f64> {
         let symbol = asset_to_symbol(asset).ok_or_else(|| anyhow!("unsupported asset: {asset}"))?;
         let (cached, last_received_at_ms) = {
@@ -136,9 +191,19 @@ impl ChainlinkPriceService {
                 .ok_or_else(|| self.no_cached_price_error(symbol))?;
             (cached, entry.last_received_at_ms)
         };
-        let age_secs = diff_ms(Utc::now().timestamp_millis(), cached.timestamp_ms) / 1_000;
+        let now_ms = Utc::now().timestamp_millis();
+        let age_secs = diff_ms(now_ms, cached.timestamp_ms) / 1_000;
         if age_secs > MAX_PRICE_AGE_SECS {
-            let error = self.build_stale_price_error(symbol, &cached, last_received_at_ms);
+            let received_at_ms = last_received_at_ms.unwrap_or(cached.received_at_ms);
+            let provider_age_ms = diff_ms(now_ms, cached.timestamp_ms);
+            let receive_age_ms = diff_ms(now_ms, received_at_ms);
+            self.request_reconnect_if_cooldown_elapsed(
+                symbol,
+                provider_age_ms,
+                receive_age_ms,
+                now_ms,
+            );
+            let error = self.build_stale_price_error(symbol, &cached, Some(received_at_ms), now_ms);
             self.record_stale_reason(symbol, error.to_string());
             return Err(error);
         }
@@ -244,6 +309,71 @@ impl ChainlinkPriceService {
         })
     }
 
+    fn get_window_stats(
+        &self,
+        asset: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<ChainlinkPriceWindowStats> {
+        anyhow::ensure!(
+            end_ms > start_ms,
+            "invalid chainlink window stats range: start_ms={start_ms}, end_ms={end_ms}"
+        );
+        let open = self
+            .get_price_near_timestamp_with_tolerance(
+                asset,
+                start_ms,
+                PTB_START_TICK_MAX_PAST_TOLERANCE_MS,
+                PTB_START_TICK_MAX_FUTURE_TOLERANCE_MS,
+            )
+            .context("resolving chainlink window open tick")?;
+        let close = self
+            .get_price_near_timestamp_with_tolerance(asset, end_ms, MAX_PRICE_AGE_SECS * 1_000, 0)
+            .context("resolving chainlink window close tick")?;
+        let symbol = asset_to_symbol(asset).ok_or_else(|| anyhow!("unsupported asset: {asset}"))?;
+        let state = self.state.read();
+        let entry = state
+            .get(symbol)
+            .ok_or_else(|| self.no_cached_price_error(symbol))?;
+
+        let mut samples = Vec::new();
+        let mut seen_timestamps = HashSet::new();
+        let mut push_sample = |timestamp_ms: i64, value: f64| {
+            if !value.is_finite() || !seen_timestamps.insert(timestamp_ms) {
+                return;
+            }
+            samples.push((timestamp_ms, value));
+        };
+
+        push_sample(open.timestamp_ms, open.price);
+        for sample in entry.ticks.iter() {
+            if sample.timestamp_ms < open.timestamp_ms || sample.timestamp_ms > end_ms {
+                continue;
+            }
+            push_sample(sample.timestamp_ms, sample.value);
+        }
+        if let Some(latest) = entry.latest.as_ref() {
+            if latest.timestamp_ms >= open.timestamp_ms && latest.timestamp_ms <= end_ms {
+                push_sample(latest.timestamp_ms, latest.value);
+            }
+        }
+        push_sample(close.timestamp_ms, close.price);
+        samples.sort_by_key(|(timestamp_ms, _)| *timestamp_ms);
+
+        let (high_price, low_price) = samples.iter().fold(
+            (f64::NEG_INFINITY, f64::INFINITY),
+            |(high, low), (_, value)| (high.max(*value), low.min(*value)),
+        );
+
+        Ok(ChainlinkPriceWindowStats {
+            open_price: open.price,
+            high_price,
+            low_price,
+            close_price: close.price,
+            sample_count: samples.len(),
+        })
+    }
+
     fn no_cached_price_error(&self, symbol: &str) -> anyhow::Error {
         match self.last_error.read().clone() {
             Some(last_error) => {
@@ -272,8 +402,8 @@ impl ChainlinkPriceService {
         symbol: &str,
         cached: &CachedPrice,
         last_received_at_ms: Option<i64>,
+        now_ms: i64,
     ) -> anyhow::Error {
-        let now_ms = Utc::now().timestamp_millis();
         let provider_age_ms = diff_ms(now_ms, cached.timestamp_ms);
         let received_at_ms = last_received_at_ms.unwrap_or(cached.received_at_ms);
         let receive_age_ms = diff_ms(now_ms, received_at_ms);
@@ -449,6 +579,25 @@ fn is_supported_symbol(symbol: &str) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(symbol))
 }
 
+fn build_ws_idle_timeout_error() -> anyhow::Error {
+    anyhow!(
+        "live data websocket idle timeout after {WS_IDLE_TIMEOUT_SECS}s without inbound text/pong"
+    )
+}
+
+fn build_reconnect_requested_error() -> anyhow::Error {
+    anyhow!("live data websocket reconnect requested after stale current price read")
+}
+
+fn ws_idle_deadline(last_inbound_at: tokio::time::Instant) -> tokio::time::Instant {
+    last_inbound_at + Duration::from_secs(WS_IDLE_TIMEOUT_SECS)
+}
+
+async fn wait_for_ws_idle_timeout(last_inbound_at: tokio::time::Instant) -> anyhow::Error {
+    tokio::time::sleep_until(ws_idle_deadline(last_inbound_at)).await;
+    build_ws_idle_timeout_error()
+}
+
 async fn ws_stream_loop() {
     loop {
         let session_id = SERVICE.next_session_id();
@@ -477,10 +626,12 @@ async fn ws_stream_once(session_id: u64) -> Result<()> {
         subscribed_symbol_count = SUPPORTED_RTDS_SYMBOLS.len(),
         "CHAINLINK_LIVE_DATA_WS_CONNECTED"
     );
+    SERVICE.take_reconnect_requested();
 
     let mut ping_interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL_SECS));
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping_interval.tick().await;
+    let mut last_inbound_at = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
@@ -488,12 +639,30 @@ async fn ws_stream_once(session_id: u64) -> Result<()> {
                 sink.send(Message::Text("PING".into()))
                     .await
                     .context("sending live data websocket ping")?;
+                if SERVICE.take_reconnect_requested() {
+                    return Err(build_reconnect_requested_error());
+                }
+            }
+            err = wait_for_ws_idle_timeout(last_inbound_at) => {
+                tracing::warn!(
+                    session_id,
+                    idle_timeout_secs = WS_IDLE_TIMEOUT_SECS,
+                    "CHAINLINK_LIVE_DATA_WS_IDLE_TIMEOUT"
+                );
+                return Err(err);
             }
             message = stream.next() => {
                 let Some(message) = message else {
                     return Err(anyhow!("live data websocket stream ended"));
                 };
-                handle_ws_message(message?, session_id)?;
+                let message = message?;
+                if matches!(&message, Message::Text(_) | Message::Pong(_)) {
+                    last_inbound_at = tokio::time::Instant::now();
+                }
+                handle_ws_message(message, session_id)?;
+                if SERVICE.take_reconnect_requested() {
+                    return Err(build_reconnect_requested_error());
+                }
             }
         }
     }
@@ -596,6 +765,41 @@ pub(crate) fn get_chainlink_price_start_tick(
     )
 }
 
+pub(crate) fn get_chainlink_price_window_stats(
+    asset: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<ChainlinkPriceWindowStats> {
+    SERVICE.ensure_started();
+    SERVICE.get_window_stats(asset, start_ms, end_ms)
+}
+
+#[cfg(test)]
+pub(crate) fn seed_chainlink_price_test_ticks(asset: &str, samples: &[(i64, f64)]) -> Result<()> {
+    let symbol = asset_to_symbol(asset).ok_or_else(|| anyhow!("unsupported asset: {asset}"))?;
+    let ticks = samples
+        .iter()
+        .map(|(timestamp_ms, value)| CachedPrice {
+            value: *value,
+            timestamp_ms: *timestamp_ms,
+            received_at_ms: *timestamp_ms,
+        })
+        .collect::<VecDeque<_>>();
+    let latest = ticks.back().cloned();
+    SERVICE.state.write().insert(
+        symbol.to_string(),
+        SymbolPriceState {
+            latest,
+            ticks,
+            last_received_at_ms: samples.last().map(|(timestamp_ms, _)| *timestamp_ms),
+            last_stale_reason: None,
+            last_stale_warning_at_ms: None,
+        },
+    );
+    *SERVICE.last_error.write() = None;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +843,53 @@ mod tests {
     }
 
     #[test]
+    fn stale_get_price_requests_reconnect() {
+        let service = ChainlinkPriceService::new();
+        let now_ms = Utc::now().timestamp_millis();
+        service.state.write().insert(
+            "btc/usd".to_string(),
+            SymbolPriceState {
+                latest: Some(CachedPrice {
+                    value: 70_505.34,
+                    timestamp_ms: now_ms - ((MAX_PRICE_AGE_SECS + 1) * 1_000),
+                    received_at_ms: now_ms - 250,
+                }),
+                last_received_at_ms: Some(now_ms - 250),
+                ..SymbolPriceState::default()
+            },
+        );
+
+        assert!(!service.take_reconnect_requested());
+        let err = service.get_price("btc").unwrap_err().to_string();
+        assert!(err.contains("stale price for btc/usd"));
+        assert!(service.take_reconnect_requested());
+    }
+
+    #[test]
+    fn stale_reconnect_request_is_rate_limited() {
+        let service = ChainlinkPriceService::new();
+
+        assert!(service.request_reconnect_if_cooldown_elapsed("btc/usd", 31_000, 31_000, 1_000_000));
+        assert!(service.take_reconnect_requested());
+
+        assert!(!service.request_reconnect_if_cooldown_elapsed(
+            "btc/usd",
+            35_000,
+            35_000,
+            1_000_000 + ((STALE_RECONNECT_REQUEST_COOLDOWN_SECS - 1) * 1_000)
+        ));
+        assert!(!service.take_reconnect_requested());
+
+        assert!(service.request_reconnect_if_cooldown_elapsed(
+            "btc/usd",
+            41_000,
+            41_000,
+            1_000_000 + (STALE_RECONNECT_REQUEST_COOLDOWN_SECS * 1_000)
+        ));
+        assert!(service.take_reconnect_requested());
+    }
+
+    #[test]
     fn get_price_returns_cached_value_when_price_is_fresh() {
         let service = ChainlinkPriceService::new();
         service.state.write().insert(
@@ -655,6 +906,42 @@ mod tests {
 
         let price = service.get_price("eth").unwrap();
         assert_eq!(price, 2_069.351149877574);
+    }
+
+    #[test]
+    fn get_price_recovers_after_fresh_tick_replaces_stale_cache() {
+        let service = ChainlinkPriceService::new();
+        let now_ms = Utc::now().timestamp_millis();
+        service.state.write().insert(
+            "eth/usd".to_string(),
+            SymbolPriceState {
+                latest: Some(CachedPrice {
+                    value: 2_069.0,
+                    timestamp_ms: now_ms - ((MAX_PRICE_AGE_SECS + 1) * 1_000),
+                    received_at_ms: now_ms - 250,
+                }),
+                last_received_at_ms: Some(now_ms - 250),
+                ..SymbolPriceState::default()
+            },
+        );
+
+        let err = service.get_price("eth").unwrap_err().to_string();
+        assert!(err.contains("stale price for eth/usd"));
+        assert!(service.take_reconnect_requested());
+
+        service.update_price(
+            PricePayload {
+                symbol: "eth/usd".to_string(),
+                value: 2_071.25,
+                timestamp: Utc::now().timestamp_millis(),
+            },
+            7,
+        );
+
+        let price = service
+            .get_price("eth")
+            .expect("fresh price after new tick");
+        assert_eq!(price, 2_071.25);
     }
 
     #[test]
@@ -807,6 +1094,98 @@ mod tests {
     }
 
     #[test]
+    fn get_window_stats_uses_open_high_low_close_inside_range() {
+        let service = ChainlinkPriceService::new();
+        service.state.write().insert(
+            "btc/usd".to_string(),
+            SymbolPriceState {
+                latest: Some(CachedPrice {
+                    value: 70_120.0,
+                    timestamp_ms: 1_600,
+                    received_at_ms: 1_600,
+                }),
+                ticks: VecDeque::from(vec![
+                    CachedPrice {
+                        value: 70_000.0,
+                        timestamp_ms: 1_000,
+                        received_at_ms: 1_000,
+                    },
+                    CachedPrice {
+                        value: 70_050.0,
+                        timestamp_ms: 1_100,
+                        received_at_ms: 1_100,
+                    },
+                    CachedPrice {
+                        value: 69_980.0,
+                        timestamp_ms: 1_250,
+                        received_at_ms: 1_250,
+                    },
+                    CachedPrice {
+                        value: 70_120.0,
+                        timestamp_ms: 1_450,
+                        received_at_ms: 1_450,
+                    },
+                    CachedPrice {
+                        value: 70_090.0,
+                        timestamp_ms: 1_500,
+                        received_at_ms: 1_500,
+                    },
+                ]),
+                ..SymbolPriceState::default()
+            },
+        );
+
+        let stats = service
+            .get_window_stats("btc", 1_000, 1_500)
+            .expect("window stats");
+        assert_eq!(
+            stats,
+            ChainlinkPriceWindowStats {
+                open_price: 70_000.0,
+                high_price: 70_120.0,
+                low_price: 69_980.0,
+                close_price: 70_090.0,
+                sample_count: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn get_window_stats_requires_close_tick_not_too_old() {
+        let service = ChainlinkPriceService::new();
+        service.state.write().insert(
+            "eth/usd".to_string(),
+            SymbolPriceState {
+                ticks: VecDeque::from(vec![
+                    CachedPrice {
+                        value: 2_000.0,
+                        timestamp_ms: 100_000,
+                        received_at_ms: 100_000,
+                    },
+                    CachedPrice {
+                        value: 2_030.0,
+                        timestamp_ms: 120_000,
+                        received_at_ms: 120_000,
+                    },
+                ]),
+                latest: Some(CachedPrice {
+                    value: 2_030.0,
+                    timestamp_ms: 120_000,
+                    received_at_ms: 120_000,
+                }),
+                ..SymbolPriceState::default()
+            },
+        );
+
+        let err = service
+            .get_window_stats("eth", 100_000, 200_000)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("resolving chainlink window close tick"));
+        assert!(err.contains("closest past tick is"));
+    }
+
+    #[test]
     fn get_price_near_timestamp_with_tolerance_rejects_old_tick_for_ptb() {
         let service = ChainlinkPriceService::new();
         service.state.write().insert(
@@ -950,5 +1329,24 @@ mod tests {
         assert!(is_supported_symbol("BTC/USD"));
         assert!(!is_supported_symbol("ethUsd"));
         assert!(!is_supported_symbol("doge/usd"));
+    }
+
+    #[test]
+    fn ws_idle_deadline_uses_configured_window() {
+        let last_inbound_at = tokio::time::Instant::now();
+        let deadline = ws_idle_deadline(last_inbound_at);
+        assert_eq!(
+            deadline.duration_since(last_inbound_at).as_secs(),
+            WS_IDLE_TIMEOUT_SECS
+        );
+    }
+
+    #[test]
+    fn ws_idle_timeout_error_mentions_text_pong_window() {
+        let err = build_ws_idle_timeout_error();
+        assert!(err
+            .to_string()
+            .contains("live data websocket idle timeout after"));
+        assert!(err.to_string().contains("text/pong"));
     }
 }

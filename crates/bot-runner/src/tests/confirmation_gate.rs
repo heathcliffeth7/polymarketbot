@@ -19,6 +19,7 @@ fn test_node_spec(
         trigger_price,
         max_price: None,
         price_to_beat_trigger_enabled: false,
+        price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual,
         price_to_beat_trigger_min_gap: None,
         price_to_beat_trigger_max_gap: None,
         price_to_beat_trigger_unit:

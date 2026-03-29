@@ -5,6 +5,7 @@ async fn execute_action_place_order(
     cfg: &AppConfig,
     limits: &RiskLimits,
     policy: &impl RiskPolicy,
+    client: Option<&dyn OrderExecutor>,
     run: &TradeFlowRun,
     step: &TradeFlowRunStep,
     node: &TradeFlowNode,
@@ -691,6 +692,7 @@ async fn execute_action_place_order(
     } else {
         None
     };
+    let (runtime_snapshot, runtime_snapshot_json, fresh_submit_lease_until, prefetched_fee_rate_bps) = prepare_trade_builder_runtime_snapshot_state(cfg, client, step, &market_slug, &token_id, should_inline_submit, &side, reference_price, best_ask_floor_price).await;
     let cycle_window_open_at = resolve_action_place_order_datetime(
         step,
         context,
@@ -985,6 +987,14 @@ async fn execute_action_place_order(
             repo.update_trade_builder_guard_notification_reason(existing_order.id, Some(reason))
                 .await?;
         }
+        persist_trade_builder_runtime_snapshot_state(
+            repo,
+            existing_order.id,
+            prefetched_fee_rate_bps,
+            runtime_snapshot_json.as_ref(),
+            fresh_submit_lease_until,
+        )
+        .await?;
         repo.set_trade_builder_order_notification_flags(
             existing_order.id,
             notify_on_fill,
@@ -1003,17 +1013,7 @@ async fn execute_action_place_order(
             retry_on_max_price_block,
         )
         .await?;
-        repo.set_trade_builder_order_guard_retry_flags(
-            existing_order.id,
-            retry_on_trigger_guard_block,
-            retry_on_execution_floor_guard_block,
-            retry_on_max_price_block,
-        )
-        .await?;
-        repo.append_trade_builder_order_event(
-            existing_order.id,
-            "flow_rearmed",
-            &json!({
+        let mut flow_rearmed_payload = json!({
                 "flow_run_id": run.id,
                 "node_key": node.key,
                 "previous_status": &existing_order.status,
@@ -1038,14 +1038,14 @@ async fn execute_action_place_order(
                 "notify_on_sl_hit": notify_on_sl_hit,
                 "last_guard_notification_reason": price_to_beat_guard_notification_seed.clone(),
                 "price_to_beat_guard": price_to_beat_guard_snapshot.clone(),
-            }),
-        )
+            });
+        append_trade_builder_runtime_snapshot_payload(flow_rearmed_payload.as_object_mut().expect("flow_rearmed payload"), runtime_snapshot.as_ref(), fresh_submit_lease_until);
+        repo.append_trade_builder_order_event(existing_order.id, "flow_rearmed", &flow_rearmed_payload)
         .await?;
         if !is_internal_time_exit {
             bind_action_place_order_ref_bindings(context, node, &ref_key, existing_order.id);
         }
-        return Ok(TradeFlowNodeExecution {
-            output: json!({
+        let mut output = json!({
                 "node_key": node.key,
                 "builder_order_id": existing_order.id,
                 "ref_key": ref_key,
@@ -1075,7 +1075,14 @@ async fn execute_action_place_order(
                 "price_to_beat_guard": price_to_beat_guard_snapshot.clone(),
                 "should_inline_submit": should_inline_submit,
                 "rearmed_existing_order": true
-            }),
+            });
+        append_trade_builder_runtime_snapshot_payload(
+            output.as_object_mut().expect("rearmed output"),
+            runtime_snapshot.as_ref(),
+            fresh_submit_lease_until,
+        );
+        return Ok(TradeFlowNodeExecution {
+            output,
             routes: Vec::new(),
             repeat_at: None,
             repeat_idempotency_key: None,
@@ -1149,7 +1156,7 @@ async fn execute_action_place_order(
             sl_price,
             (!sl_rules.is_empty()).then_some(sl_rules.as_slice()),
             (!time_exit_rules.is_empty()).then_some(time_exit_rules.as_slice()),
-            0,
+            prefetched_fee_rate_bps.unwrap_or_default() as i64,
             Some(run.definition_id),
             Some(run.id),
             Some(&node.key),
@@ -1173,6 +1180,7 @@ async fn execute_action_place_order(
             None,
         )
         .await?;
+    persist_trade_builder_runtime_snapshot_state(repo, builder_order_id, prefetched_fee_rate_bps, runtime_snapshot_json.as_ref(), fresh_submit_lease_until).await?;
     let initial_status = if side == "sell" && kind == "immediate" {
         "triggered"
     } else {
@@ -1319,6 +1327,7 @@ async fn execute_action_place_order(
         "should_inline_submit".to_string(),
         json!(should_inline_submit),
     );
+    append_trade_builder_runtime_snapshot_payload(&mut flow_created_payload, runtime_snapshot.as_ref(), fresh_submit_lease_until);
     repo.append_trade_builder_order_event(
         builder_order_id,
         "flow_created",
@@ -1474,6 +1483,7 @@ async fn execute_action_place_order(
         "should_inline_submit".to_string(),
         json!(should_inline_submit),
     );
+    append_trade_builder_runtime_snapshot_payload(&mut output, runtime_snapshot.as_ref(), fresh_submit_lease_until);
 
     Ok(TradeFlowNodeExecution {
         output: Value::Object(output),

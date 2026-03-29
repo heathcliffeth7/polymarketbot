@@ -8,6 +8,56 @@ const SUPPORTED_ASSET_MARKETS: [(&str, &str); 4] = [
     ("xrp", "xrp-updown-5m-1774016400"),
 ];
 
+fn default_guard_evaluation() -> PriceToBeatGuardEvaluation {
+    PriceToBeatGuardEvaluation {
+        passed: false,
+        reason_code: String::new(),
+        reason_detail: None,
+        normalized_outcome_label: None,
+        direction: None,
+        market_slug: String::new(),
+        event_url: String::new(),
+        timeframe: None,
+        asset: None,
+        price_to_beat: None,
+        price_to_beat_status: None,
+        price_to_beat_source: None,
+        price_to_beat_source_latency_ms: None,
+        current_price: None,
+        current_price_source: CURRENT_PRICE_SOURCE_CHAINLINK,
+        directional_gap: None,
+        gap_abs: None,
+        threshold_mode: "manual".to_string(),
+        threshold_value: 0.0,
+        threshold_unit: "usd".to_string(),
+        threshold_usd: 0.0,
+        auto_threshold_usd: None,
+        lookback_windows_used: None,
+        avg_up_excursion_usd: None,
+        avg_down_excursion_usd: None,
+        lookback_market_slugs: None,
+    }
+}
+
+fn default_trigger_gate_result() -> PriceToBeatTriggerGateResult {
+    PriceToBeatTriggerGateResult {
+        passed: false,
+        reason: "price_to_beat_pending",
+        directional_gap: None,
+        price_to_beat: None,
+        price_to_beat_status: None,
+        current_price: None,
+        threshold_mode: "manual".to_string(),
+        min_gap: 0.0,
+        max_gap: None,
+        auto_threshold_usd: None,
+        lookback_windows_used: None,
+        avg_up_excursion_usd: None,
+        avg_down_excursion_usd: None,
+        lookback_market_slugs: None,
+    }
+}
+
 #[test]
 fn builds_gap_below_threshold_notification_with_values() {
     let evaluation = PriceToBeatGuardEvaluation {
@@ -31,6 +81,7 @@ fn builds_gap_below_threshold_notification_with_values() {
         threshold_value: 30.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 30.0,
+        ..default_guard_evaluation()
     };
 
     let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
@@ -67,6 +118,7 @@ fn blocked_notification_includes_reason_detail_and_partial_prices() {
         threshold_value: 30.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 30.0,
+        ..default_guard_evaluation()
     };
 
     let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
@@ -99,6 +151,7 @@ fn pending_notification_without_detail_omits_detail_line() {
         threshold_value: 20.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 20.0,
+        ..default_guard_evaluation()
     };
 
     let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
@@ -130,6 +183,7 @@ fn waiting_notification_mentions_recovery_retry() {
         threshold_value: 30.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 30.0,
+        ..default_guard_evaluation()
     };
 
     let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
@@ -160,6 +214,7 @@ fn recovered_notification_mentions_previous_reason_and_metrics() {
         threshold_value: 30.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 30.0,
+        ..default_guard_evaluation()
     };
 
     let message = build_price_to_beat_guard_recovered_notification_message(
@@ -206,7 +261,8 @@ fn trigger_gate_cache_miss_blocks_as_pending() {
     let gate = evaluate_price_to_beat_trigger_gate(
         "missing-market-slug",
         "Up",
-        30.0,
+        PriceToBeatMode::Manual,
+        Some(30.0),
         Some(60.0),
         PriceToBeatDiffUnit::Usd,
     );
@@ -225,8 +281,10 @@ fn trigger_gate_value_includes_reason_and_bounds() {
         price_to_beat: Some(100.0),
         price_to_beat_status: Some("polymarket_verified".to_string()),
         current_price: Some(112.5),
+        threshold_mode: "manual".to_string(),
         min_gap: 30.0,
         max_gap: Some(60.0),
+        ..default_trigger_gate_result()
     };
     let value = gate.to_value();
     assert_eq!(
@@ -235,6 +293,133 @@ fn trigger_gate_value_includes_reason_and_bounds() {
     );
     assert_eq!(value.get("min_gap").and_then(Value::as_f64), Some(30.0));
     assert_eq!(value.get("max_gap").and_then(Value::as_f64), Some(60.0));
+}
+
+#[tokio::test]
+async fn auto_trigger_gate_uses_average_excursion_from_last_three_markets() {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    crate::trade_flow::guards::chainlink_price::seed_chainlink_price_test_ticks(
+        "btc",
+        &[
+            (1_774_012_200_000, 100.0),
+            (1_774_012_350_000, 130.0),
+            (1_774_012_480_000, 95.0),
+            (1_774_012_499_000, 110.0),
+            (1_774_012_500_000, 110.0),
+            (1_774_012_650_000, 125.0),
+            (1_774_012_790_000, 100.0),
+            (1_774_012_799_000, 122.0),
+            (1_774_012_800_000, 122.0),
+            (1_774_012_950_000, 145.0),
+            (1_774_013_090_000, 117.0),
+            (1_774_013_099_000, 130.0),
+            (now_ms, 123.0),
+        ],
+    )
+    .expect("seed chainlink ticks");
+    assert!(crate::trade_flow::guards::polymarket_price_to_beat::seed_price_to_beat_from_chainlink(
+        BTC_MARKET_5M,
+        "btc",
+        "5m",
+        100.0,
+        None,
+    ));
+
+    let gate = evaluate_price_to_beat_trigger_gate(
+        BTC_MARKET_5M,
+        "Up",
+        PriceToBeatMode::AutoLast3AvgExcursion,
+        None,
+        None,
+        PriceToBeatDiffUnit::Usd,
+    );
+
+    assert!(gate.passed);
+    assert_eq!(gate.reason, "in_range");
+    assert_eq!(gate.threshold_mode, "auto_last_3_avg_excursion");
+    assert_eq!(gate.lookback_windows_used, Some(3));
+    assert_eq!(gate.lookback_market_slugs.as_ref().map(Vec::len), Some(3));
+    assert_eq!(gate.avg_up_excursion_usd, Some(22.666666666666668));
+    assert_eq!(gate.avg_down_excursion_usd, Some(6.666666666666667));
+    assert_eq!(gate.auto_threshold_usd, gate.avg_up_excursion_usd);
+    assert_eq!(gate.min_gap, 22.666666666666668);
+}
+
+#[test]
+fn auto_trigger_gate_blocks_as_pending_when_three_completed_markets_are_missing() {
+    crate::trade_flow::guards::chainlink_price::seed_chainlink_price_test_ticks(
+        "eth",
+        &[
+            (1_774_012_500_000, 2_000.0),
+            (1_774_012_800_000, 2_020.0),
+            (1_774_012_800_000, 2_010.0),
+            (1_774_013_100_000, 2_030.0),
+            (1_774_013_101_000, 2_040.0),
+        ],
+    )
+    .expect("seed eth ticks");
+
+    let gate = evaluate_price_to_beat_trigger_gate(
+        "eth-updown-5m-1774013100",
+        "Up",
+        PriceToBeatMode::AutoLast3AvgExcursion,
+        None,
+        None,
+        PriceToBeatDiffUnit::Usd,
+    );
+
+    assert!(!gate.passed);
+    assert_eq!(gate.reason, "auto_threshold_pending");
+    assert_eq!(gate.threshold_mode, "auto_last_3_avg_excursion");
+    assert_eq!(gate.lookback_windows_used, None);
+}
+
+#[tokio::test]
+async fn auto_guard_uses_dynamic_threshold_diagnostics() {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    crate::trade_flow::guards::chainlink_price::seed_chainlink_price_test_ticks(
+        "sol",
+        &[
+            (1_774_012_200_000, 200.0),
+            (1_774_012_350_000, 215.0),
+            (1_774_012_480_000, 195.0),
+            (1_774_012_500_000, 205.0),
+            (1_774_012_500_500, 210.0),
+            (1_774_012_650_000, 225.0),
+            (1_774_012_790_000, 205.0),
+            (1_774_012_800_000, 222.0),
+            (1_774_012_800_500, 220.0),
+            (1_774_012_950_000, 235.0),
+            (1_774_013_090_000, 215.0),
+            (1_774_013_100_000, 230.0),
+            (now_ms, 231.0),
+        ],
+    )
+    .expect("seed sol ticks");
+    assert!(crate::trade_flow::guards::polymarket_price_to_beat::seed_price_to_beat_from_chainlink(
+        "sol-updown-5m-1774013100",
+        "sol",
+        "5m",
+        210.0,
+        None,
+    ));
+
+    let evaluation = evaluate_price_to_beat_guard(
+        "sol-updown-5m-1774013100",
+        PriceToBeatMode::AutoLast3AvgExcursion,
+        None,
+        PriceToBeatDiffUnit::Usd,
+        "Up",
+    )
+    .await;
+
+    assert!(evaluation.passed);
+    assert_eq!(evaluation.threshold_mode, "auto_last_3_avg_excursion");
+    assert_eq!(evaluation.lookback_windows_used, Some(3));
+    assert_eq!(evaluation.avg_up_excursion_usd, Some(16.0));
+    assert_eq!(evaluation.avg_down_excursion_usd, Some(4.0));
+    assert_eq!(evaluation.auto_threshold_usd, Some(16.0));
+    assert_eq!(evaluation.threshold_usd, 16.0);
 }
 
 #[test]
@@ -330,12 +515,48 @@ fn current_price_unavailable_reason_is_supported() {
         threshold_value: 30.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 30.0,
+        ..default_guard_evaluation()
     };
 
     let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
     assert!(message.contains("Current price verisi alinamadigi"));
     assert!(message.contains("Current (Chainlink): N/A"));
     assert!(message.contains("provider_age_ms=123000"));
+}
+
+#[test]
+fn current_price_unavailable_with_provisional_price_to_beat_stays_strict() {
+    let evaluation = PriceToBeatGuardEvaluation {
+        passed: false,
+        reason_code: "current_price_unavailable".to_string(),
+        reason_detail: Some(
+            "asset=eth; market_slug=eth-updown-5m-1774564800; primary_source=chainlink_live_data_ws; chainlink_error=stale price for eth/usd: 4237s old (provider_age_ms=4237828, receive_age_ms=4236687, provider_timestamp_ms=1774560571000, received_at_ms=1774560572141)".to_string(),
+        ),
+        normalized_outcome_label: None,
+        direction: None,
+        market_slug: "eth-updown-5m-1774564800".to_string(),
+        event_url: "https://polymarket.com/event/eth-updown-5m-1774564800".to_string(),
+        timeframe: Some("5m".to_string()),
+        asset: Some("eth".to_string()),
+        price_to_beat: Some(2_061.85412287),
+        price_to_beat_status: Some("polymarket_provisional".to_string()),
+        price_to_beat_source: Some("polymarket".to_string()),
+        price_to_beat_source_latency_ms: None,
+        current_price: None,
+        current_price_source: CURRENT_PRICE_SOURCE_CHAINLINK,
+        directional_gap: None,
+        gap_abs: None,
+        threshold_value: 80.0,
+        threshold_unit: "cent".to_string(),
+        threshold_usd: 0.8,
+        ..default_guard_evaluation()
+    };
+
+    let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
+    assert!(message.contains("Current price verisi alinamadigi"));
+    assert!(message.contains("Price to Beat Status: polymarket_provisional"));
+    assert!(message.contains("Current (Chainlink): N/A"));
+    assert!(message.contains("Bekleme moduna alindi"));
 }
 
 #[test]
@@ -397,6 +618,7 @@ fn pending_reason_can_describe_authoritative_snapshot_wait() {
         threshold_value: 20.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 20.0,
+        ..default_guard_evaluation()
     };
 
     let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
@@ -482,6 +704,7 @@ fn blocked_notification_uses_chainlink_current_price_label() {
         threshold_value: 4.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 4.0,
+        ..default_guard_evaluation()
     };
 
     let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
@@ -511,6 +734,7 @@ fn unsupported_outcome_label_reason_is_supported() {
         threshold_value: 4.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 4.0,
+        ..default_guard_evaluation()
     };
 
     let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);

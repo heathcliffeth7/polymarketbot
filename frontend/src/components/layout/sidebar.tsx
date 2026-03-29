@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { useAuthState } from '@/lib/auth-client';
 import {
+  BarChart3,
   LayoutDashboard,
   Settings,
   Power,
@@ -15,6 +16,7 @@ import {
 const navItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/trade-builder', label: 'İşlem Oluşturucu', icon: Zap },
+  { href: '/trade-analysis', label: 'İşlem Analizi', icon: BarChart3 },
   { href: '/settings', label: 'Settings', icon: Settings },
   { href: '/control', label: 'Bot Control', icon: Power },
 ];

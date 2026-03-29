@@ -305,6 +305,8 @@ export interface TradeBuilderOrder {
   working_price: number | null;
   last_seen_price: number | null;
   last_error: string | null;
+  runtime_snapshot_json?: unknown;
+  fresh_submit_lease_until?: string | null;
   created_at: string;
   updated_at: string;
   parent_order_id: number | null;
@@ -598,6 +600,55 @@ export interface TradeFlowEvent {
   event_type: string;
   payload_json: Record<string, unknown>;
   created_at: string;
+}
+
+export type AutoScopeTradeAnalysisRowType = 'sell_exit' | 'open_position';
+export type AutoScopeTradeAnalysisPositionState =
+  | 'open'
+  | 'closed_market_ended'
+  | 'closed_exit';
+export type AutoScopeTradeAnalysisSortBy = 'default' | 'pnl';
+export type AutoScopeTradeAnalysisSortDirection = 'asc' | 'desc';
+
+export type AutoScopeTradeAnalysisExitReason =
+  | 'tp'
+  | 'sl'
+  | 'window_end_auto_sell'
+  | 'other'
+  | 'open_position';
+
+export interface AutoScopeTradeAnalysisRow {
+  rowId: string;
+  rowType: AutoScopeTradeAnalysisRowType;
+  positionState: AutoScopeTradeAnalysisPositionState;
+  definitionId: number;
+  definitionName: string | null;
+  runId: number;
+  rootOrderId: number;
+  exitOrderId: number | null;
+  marketSlug: string;
+  tokenId: string;
+  outcomeLabel: string;
+  exitReason: AutoScopeTradeAnalysisExitReason;
+  marketEndAt: string | null;
+  marketOpenAt: string | null;
+  triggeredAt: string | null;
+  buyFilledAt: string | null;
+  sellFilledAt: string | null;
+  openToTriggerMs: number | null;
+  triggerToBuyFillMs: number | null;
+  buyAvgPrice: number | null;
+  sellOrLivePrice: number | null;
+  rowQty: number;
+  remainingQtyAfterExit: number;
+  rowPnlUsdc: number;
+}
+
+export interface AutoScopeTradeAnalysisResponse
+  extends PaginatedResponse<AutoScopeTradeAnalysisRow> {
+  refreshedAt: string;
+  sortBy: AutoScopeTradeAnalysisSortBy;
+  sortDirection: AutoScopeTradeAnalysisSortDirection;
 }
 
 export interface TradeFlowOverlapPeer {

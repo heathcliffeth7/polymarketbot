@@ -157,6 +157,33 @@ pub(super) fn parse_fee_rate_bps_response(raw: &serde_json::Value) -> Option<u64
         .and_then(parse_fee_rate_bps_value)
 }
 
+fn parse_order_book_levels(raw: &serde_json::Value, side_key: &str) -> Vec<OrderBookLevel> {
+    raw.get(side_key)
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let price = row.get("price").and_then(parse_f64_value)?;
+            let size = row
+                .get("size")
+                .or_else(|| row.get("amount"))
+                .or_else(|| row.get("shares"))
+                .and_then(parse_f64_value)?;
+            if !price.is_finite() || !size.is_finite() || price <= 0.0 || size <= 0.0 {
+                return None;
+            }
+            Some(OrderBookLevel { price, size })
+        })
+        .collect()
+}
+
+pub(super) fn extract_order_book_from_book(raw: &serde_json::Value) -> OrderBookSnapshot {
+    OrderBookSnapshot {
+        bids: parse_order_book_levels(raw, "bids"),
+        asks: parse_order_book_levels(raw, "asks"),
+    }
+}
+
 pub(super) fn extract_best_bid_ask_from_book(
     raw: &serde_json::Value,
 ) -> (Option<f64>, Option<f64>) {
@@ -174,7 +201,6 @@ pub(super) fn extract_best_bid_ask_from_book(
         .and_then(|rows| rows.last())
         .and_then(|row| row.get("price"))
         .and_then(parse_f64_value);
-
     (best_bid, best_ask)
 }
 
@@ -219,6 +245,22 @@ impl ClobRestClient for ClobHttpClient {
 
         let raw: serde_json::Value = response.json().await?;
         Ok(extract_best_bid_ask_from_book(&raw))
+    }
+
+    async fn get_order_book(&self, token_id: &str) -> Result<Option<OrderBookSnapshot>> {
+        if token_id.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let request_path = format!("/book?token_id={token_id}");
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), request_path);
+        let response = self.http.get(url).send().await?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let raw: serde_json::Value = response.json().await?;
+        Ok(Some(extract_order_book_from_book(&raw)))
     }
 
     async fn get_last_trade_price(&self, token_id: &str) -> Result<Option<f64>> {
@@ -451,6 +493,9 @@ impl ClobRestClient for ClobHttpClient {
                 .and_then(|v| v.as_str())
                 .map(ToString::to_string),
             exchange_ts: raw.get("timestamp").and_then(|v| v.as_i64()),
+            sign_ms: Some(sign_ms),
+            http_ms: Some(http_ms),
+            total_ms: Some(order_started.elapsed().as_millis() as i64),
         };
 
         tracing::info!(

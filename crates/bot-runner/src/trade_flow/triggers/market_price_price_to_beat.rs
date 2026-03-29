@@ -7,7 +7,8 @@ enum TriggerMarketPriceGateMode {
 
 #[derive(Debug, Clone, Copy)]
 struct TriggerMarketPricePtbConfig {
-    min_gap: f64,
+    mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode,
+    min_gap: Option<f64>,
     max_gap: Option<f64>,
     unit: crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit,
 }
@@ -23,7 +24,8 @@ fn trigger_market_price_ptb_config_from_spec(
         return None;
     }
     Some(TriggerMarketPricePtbConfig {
-        min_gap: node_spec.price_to_beat_trigger_min_gap?,
+        mode: node_spec.price_to_beat_mode,
+        min_gap: node_spec.price_to_beat_trigger_min_gap,
         max_gap: node_spec.price_to_beat_trigger_max_gap,
         unit: node_spec.price_to_beat_trigger_unit,
     })
@@ -38,16 +40,26 @@ fn trigger_market_price_ptb_config_from_node(
     if !node_config_bool(node, "priceToBeatTriggerEnabled").unwrap_or(false) {
         return None;
     }
+    let mode = crate::trade_flow::guards::price_to_beat::PriceToBeatMode::parse(
+        node_config_string(node, "priceToBeatMode").as_deref(),
+    )
+    .unwrap_or(crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual);
     let min_gap = node_config_f64(node, "priceToBeatTriggerMinGap")
-        .filter(|value| value.is_finite() && *value > 0.0)?;
+        .filter(|value| value.is_finite() && *value > 0.0);
+    if matches!(mode, crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual)
+        && min_gap.is_none()
+    {
+        return None;
+    }
     let max_gap = node_config_f64(node, "priceToBeatTriggerMaxGap")
         .filter(|value| value.is_finite() && *value > 0.0)
-        .filter(|value| *value >= min_gap);
+        .filter(|value| min_gap.map(|min_gap| *value >= min_gap).unwrap_or(false));
     let unit = crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::parse(
         node_config_string(node, "priceToBeatTriggerUnit").as_deref(),
     )
     .unwrap_or(crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd);
     Some(TriggerMarketPricePtbConfig {
+        mode,
         min_gap,
         max_gap,
         unit,
@@ -75,6 +87,7 @@ fn evaluate_trigger_market_price_ptb_gate(
     crate::trade_flow::guards::price_to_beat::evaluate_price_to_beat_trigger_gate(
         market_slug,
         outcome_label,
+        ptb_config.mode,
         ptb_config.min_gap,
         ptb_config.max_gap,
         ptb_config.unit,

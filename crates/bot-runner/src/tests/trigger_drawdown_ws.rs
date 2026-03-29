@@ -675,6 +675,7 @@ fn cycle_window_first_boundary_requires_real_cross() {
         trigger_price: 0.50,
         max_price: Some(0.92),
         price_to_beat_trigger_enabled: false,
+        price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual,
         price_to_beat_trigger_min_gap: None,
         price_to_beat_trigger_max_gap: None,
         price_to_beat_trigger_unit:
@@ -720,6 +721,7 @@ fn auto_scope_market_boundary_delay_returns_remaining_time_before_market_end() {
         trigger_price: 0.77,
         max_price: Some(0.90),
         price_to_beat_trigger_enabled: false,
+        price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual,
         price_to_beat_trigger_min_gap: None,
         price_to_beat_trigger_max_gap: None,
         price_to_beat_trigger_unit:
@@ -759,6 +761,7 @@ fn auto_scope_market_boundary_delay_returns_zero_after_market_end() {
         trigger_price: 0.77,
         max_price: Some(0.90),
         price_to_beat_trigger_enabled: false,
+        price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual,
         price_to_beat_trigger_min_gap: None,
         price_to_beat_trigger_max_gap: None,
         price_to_beat_trigger_unit:
@@ -820,6 +823,7 @@ fn cycle_window_boundary_due_target_only_fires_once_per_market_window() {
         trigger_price: 0.77,
         max_price: Some(0.90),
         price_to_beat_trigger_enabled: false,
+        price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual,
         price_to_beat_trigger_min_gap: None,
         price_to_beat_trigger_max_gap: None,
         price_to_beat_trigger_unit:
@@ -884,6 +888,7 @@ fn cycle_window_last_eval_state_payload_captures_boundary_diagnostics() {
         trigger_price: 0.77,
         max_price: Some(0.90),
         price_to_beat_trigger_enabled: false,
+        price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual,
         price_to_beat_trigger_min_gap: None,
         price_to_beat_trigger_max_gap: None,
         price_to_beat_trigger_unit:
@@ -1020,6 +1025,7 @@ fn auto_scope_market_rollover_updates_last_ws_slug_and_clears_transient_state() 
                 "last_price": 0.89,
                 "previous_price": 0.88,
                 "last_ws_market_slug": "btc-updown-5m-1773083700",
+                "reentry_generation": 2,
                 "previous_price_tok-old": 0.88,
                 "cross_pending_at_tok-old": "2026-03-09T19:18:01Z",
                 "cross_pending_price_tok-old": 0.89,
@@ -1046,6 +1052,7 @@ fn auto_scope_market_rollover_updates_last_ws_slug_and_clears_transient_state() 
         trigger_price: 0.77,
         max_price: Some(0.90),
         price_to_beat_trigger_enabled: false,
+        price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual,
         price_to_beat_trigger_min_gap: None,
         price_to_beat_trigger_max_gap: None,
         price_to_beat_trigger_unit:
@@ -1113,6 +1120,10 @@ fn auto_scope_market_rollover_updates_last_ws_slug_and_clears_transient_state() 
             "{cleared_key} should be cleared on market rollover"
         );
     }
+    assert!(
+        flow_node_state(&context, "trigger_market", FLOW_NODE_STATE_REENTRY_GENERATION).is_none(),
+        "reentry_generation should be cleared on market rollover"
+    );
 }
 
 #[test]
@@ -1146,6 +1157,7 @@ fn auto_scope_market_rollover_ignores_non_market_price_nodes() {
         trigger_price: 0.77,
         max_price: None,
         price_to_beat_trigger_enabled: false,
+        price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual,
         price_to_beat_trigger_min_gap: None,
         price_to_beat_trigger_max_gap: None,
         price_to_beat_trigger_unit:

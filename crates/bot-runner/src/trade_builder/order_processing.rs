@@ -143,9 +143,19 @@ async fn try_process_trade_builder_order(
         return Ok(false);
     };
     let processing_started = Instant::now();
-    let result =
-        process_trade_builder_order(repo, run_id, cfg, limits, policy, client, gamma, ws, order)
-            .await;
+    let result = process_trade_builder_order(
+        repo,
+        run_id,
+        cfg,
+        limits,
+        policy,
+        client,
+        gamma,
+        ws,
+        order,
+        "housekeeping",
+    )
+    .await;
     let latest_status = repo
         .get_trade_builder_order(order.id)
         .await
@@ -228,7 +238,7 @@ async fn try_process_trade_builder_order_by_id(
     };
     let processing_started = Instant::now();
     let result = Box::pin(process_trade_builder_order(
-        repo, run_id, cfg, limits, policy, client, gamma, ws, &order,
+        repo, run_id, cfg, limits, policy, client, gamma, ws, &order, path,
     ))
     .await;
     let latest_status = repo
@@ -263,6 +273,7 @@ async fn process_trade_builder_order(
     gamma: &GammaHttpClient,
     ws: &ClobWsClient,
     order: &TradeBuilderOrder,
+    submit_path: &'static str,
 ) -> Result<()> {
     let Some(mut order) = repo.get_trade_builder_order(order.id).await? else {
         return Ok(());
@@ -331,11 +342,27 @@ async fn process_trade_builder_order(
     }
 
     let previous_price = order.last_seen_price;
-    let runtime_price = match if trade_builder_uses_fast_runtime_pricing(&order) {
+    let runtime_price_fetch_started = Instant::now();
+    let fresh_runtime_snapshot = trade_builder_runtime_snapshot_from_order(&order)
+        .filter(|snapshot| trade_builder_runtime_snapshot_is_fresh(snapshot, now));
+    let snapshot_age_ms = fresh_runtime_snapshot
+        .as_ref()
+        .map(|snapshot| trade_builder_runtime_snapshot_age_ms(snapshot, now));
+    let runtime_price_fetch = if let Some(snapshot) = fresh_runtime_snapshot.as_ref() {
+        if let Some(runtime_price) = trade_builder_runtime_price_from_snapshot(snapshot) {
+            TradeBuilderRuntimePriceFetch::Resolved(runtime_price)
+        } else if trade_builder_uses_fast_runtime_pricing(&order) {
+            resolve_trade_builder_fast_runtime_price(ws, client, &order).await?
+        } else {
+            resolve_trade_builder_runtime_price(ws, client, &order).await?
+        }
+    } else if trade_builder_uses_fast_runtime_pricing(&order) {
         resolve_trade_builder_fast_runtime_price(ws, client, &order).await?
     } else {
         resolve_trade_builder_runtime_price(ws, client, &order).await?
-    } {
+    };
+    let runtime_price_fetch_ms = runtime_price_fetch_started.elapsed().as_millis() as i64;
+    let runtime_price = match runtime_price_fetch {
         TradeBuilderRuntimePriceFetch::Resolved(runtime_price) => runtime_price,
         TradeBuilderRuntimePriceFetch::Retry { error_text } => {
             repo.append_trade_builder_order_event(
@@ -454,7 +481,9 @@ async fn process_trade_builder_order(
             &order,
             exchange_order_id,
             execution_price,
+            runtime_price.best_bid,
             runtime_price.best_ask,
+            runtime_price.last_trade_price,
         )
         .await?;
         repo.set_trade_builder_last_seen_price(order.id, persisted_last_seen_price)
@@ -730,7 +759,7 @@ async fn process_trade_builder_order(
             ws,
             &order,
             &runtime_price,
-            "housekeeping",
+            submit_path,
         )
         .await?;
     }
@@ -780,12 +809,19 @@ async fn process_trade_builder_order(
         ws,
         &mut order,
         execution_price,
+        runtime_price.best_bid,
         runtime_price.best_ask,
+        runtime_price.last_trade_price,
         fee_rate_bps,
         resolved_size_usdc,
         trigger_size_mode,
         trigger_size_value,
         trigger_size_index,
+        &TradeBuilderSubmitAttemptContext {
+            submit_path,
+            runtime_price_fetch_ms,
+            snapshot_age_ms,
+        },
     )
     .await
 }
@@ -865,6 +901,8 @@ mod eligibility_window_tests {
             trigger_latched_at: None,
             submitted_dynamic_qty: None,
             submitted_dynamic_price: None,
+            runtime_snapshot_json: None,
+            fresh_submit_lease_until: None,
             guard_trigger_price: None,
             best_ask_floor_price: None,
             retry_on_trigger_guard_block: false,

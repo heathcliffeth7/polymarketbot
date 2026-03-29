@@ -3,6 +3,9 @@
 import { usePolling } from './use-polling';
 import { requestJson, type RequestJsonOptions } from '@/lib/http-client';
 import type {
+  AutoScopeTradeAnalysisResponse,
+  AutoScopeTradeAnalysisSortBy,
+  AutoScopeTradeAnalysisSortDirection,
   PaginatedResponse,
   TradeFlowDefinition,
   TradeFlowDefinitionDetail,
@@ -128,6 +131,23 @@ export function useTradeFlowRecentEvents(
   });
   const endpoint = enabled ? `/api/trade-flow/events/recent?${query}` : null;
   return usePolling<{ data: TradeFlowEvent[] }>(endpoint, 3000);
+}
+
+export function useTradeFlowAutoScopeAnalysis(
+  page = 1,
+  limit = 50,
+  sortBy: AutoScopeTradeAnalysisSortBy = 'default',
+  sortDirection: AutoScopeTradeAnalysisSortDirection = 'desc',
+  enabled = true
+) {
+  const query = buildSearchParams({
+    page: String(page),
+    limit: String(limit),
+    sortBy,
+    sortDirection,
+  });
+  const endpoint = enabled ? `/api/trade-flow/analytics/auto-scope?${query}` : null;
+  return usePolling<AutoScopeTradeAnalysisResponse>(endpoint, 10_000);
 }
 
 export async function createTradeFlowDefinition(payload: Record<string, unknown>) {

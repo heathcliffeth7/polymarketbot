@@ -26,8 +26,8 @@ pub use clob::ClobHttpClient;
 pub use gamma::GammaHttpClient;
 pub(crate) use http::build_http_client;
 pub use models::{
-    ClobRestClient, FillInfo, GammaClient, GammaMarket, OrderAck, OrderInfo, PlaceOrderRequest,
-    PriceSnapshot,
+    ClobRestClient, FillInfo, GammaClient, GammaMarket, OrderAck, OrderBookLevel,
+    OrderBookSnapshot, OrderInfo, PlaceOrderRequest, PriceSnapshot,
 };
 pub(crate) use parse::{
     data_api_position_matches_token, parse_f64_value, parse_gamma_market, parse_gamma_market_any,

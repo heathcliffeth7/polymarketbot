@@ -1,5 +1,5 @@
 import type { TradeFlowGraph, TradeFlowNode } from '@/lib/types';
-import { collectRootNodeKeys } from './graph';
+import { collectRootNodeKeys, findUniqueUpstreamMarketPriceTrigger } from './graph';
 import { isRecord, type Queryable } from './shared';
 
 const FLOW_STATE_PUBLISH_MARKER = '__publish_marker';
@@ -7,6 +7,9 @@ const FLOW_NODE_STATE_ONCE_FIRED = 'once_fired';
 const FLOW_NODE_STATE_ONCE_FIRED_AT = 'once_fired_at';
 const FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG = 'once_fired_market_slug';
 const FLOW_NODE_STATE_ONCE_BLOCK_LOGGED = 'once_blocked_logged';
+const FLOW_NODE_STATE_REENTRY_GENERATION = 'reentry_generation';
+const FLOW_NODE_STATE_REENTRY_ATTEMPTS_USED = 'reentry_attempts_used';
+const FLOW_NODE_STATE_REENTRY_MARKET_SLUG = 'reentry_market_slug';
 const FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG =
   'publish_auto_scope_locked_market_slug';
 const FLOW_NODE_STATE_CYCLE_WINDOW_BOUNDARY_MARKER_PREFIX = 'cycle_window_boundary_marker_';
@@ -45,6 +48,12 @@ export interface PublishRunCutoverResult {
   newRunId: number;
   skippedQueuedSteps: number;
   carriedState: boolean;
+}
+
+export interface PublishContextNormalizationResult {
+  context: Record<string, unknown>;
+  resetReentryActionNodeKeys: string[];
+  resetReentryTriggerNodeKeys: string[];
 }
 
 function cloneJson<T>(value: T): T {
@@ -126,6 +135,52 @@ function resetFixedOnceMarketPriceStateForPublish(stateForNode: Record<string, u
   return changed;
 }
 
+function deleteNodeStateKeys(
+  stateForNode: Record<string, unknown>,
+  keys: readonly string[]
+): boolean {
+  let changed = false;
+  for (const key of keys) {
+    if (!(key in stateForNode)) continue;
+    delete stateForNode[key];
+    changed = true;
+  }
+  return changed;
+}
+
+function resetTriggerReentryStateForPublish(
+  nodeState: Record<string, unknown>,
+  nodeKey: string
+): boolean {
+  if (!isRecord(nodeState[nodeKey])) {
+    return false;
+  }
+  return deleteNodeStateKeys(nodeState[nodeKey] as Record<string, unknown>, [
+    FLOW_NODE_STATE_REENTRY_GENERATION,
+  ]);
+}
+
+function resetActionReentryStateForPublish(
+  nodeState: Record<string, unknown>,
+  nodeKey: string
+): boolean {
+  if (!isRecord(nodeState[nodeKey])) {
+    return false;
+  }
+  return deleteNodeStateKeys(nodeState[nodeKey] as Record<string, unknown>, [
+    FLOW_NODE_STATE_REENTRY_ATTEMPTS_USED,
+    FLOW_NODE_STATE_REENTRY_MARKET_SLUG,
+  ]);
+}
+
+function isReentryEnabledPlaceOrderNode(node: TradeFlowNode): boolean {
+  return (
+    node.type === 'action.place_order' &&
+    isRecord(node.config) &&
+    truthy(node.config.reenterOnSlHit)
+  );
+}
+
 function buildInitialTradeFlowContext(graphContext: Record<string, unknown>): Record<string, unknown> {
   return {
     flowContext: cloneJson(graphContext),
@@ -136,17 +191,19 @@ function buildInitialTradeFlowContext(graphContext: Record<string, unknown>): Re
   };
 }
 
-function normalizeTradeFlowContextForPublish(
+export function normalizeTradeFlowContextForPublish(
   graph: TradeFlowGraph,
   existingContext: unknown,
   publishMarker: string
-): Record<string, unknown> {
+): PublishContextNormalizationResult {
   const context = ensureMutableRecord(existingContext);
   const flowContext = ensureNestedRecord(context, 'flowContext');
   const vars = ensureNestedRecord(context, 'vars');
   const state = ensureNestedRecord(context, 'state');
   const refs = ensureNestedRecord(context, 'refs');
   const nodeState = ensureNestedRecord(context, 'nodeState');
+  const resetReentryActionNodeKeys = new Set<string>();
+  const resetReentryTriggerNodeKeys = new Set<string>();
   void vars;
   void refs;
 
@@ -162,6 +219,19 @@ function normalizeTradeFlowContextForPublish(
   }
 
   for (const node of graph.nodes) {
+    if (isReentryEnabledPlaceOrderNode(node)) {
+      if (resetActionReentryStateForPublish(nodeState, node.key)) {
+        resetReentryActionNodeKeys.add(node.key);
+      }
+      const triggerNodeKey = findUniqueUpstreamMarketPriceTrigger(node.key, graph);
+      if (
+        triggerNodeKey &&
+        resetTriggerReentryStateForPublish(nodeState, triggerNodeKey)
+      ) {
+        resetReentryTriggerNodeKeys.add(triggerNodeKey);
+      }
+    }
+
     if (!isRecord(nodeState[node.key])) {
       continue;
     }
@@ -191,7 +261,11 @@ function normalizeTradeFlowContextForPublish(
   }
 
   state[FLOW_STATE_PUBLISH_MARKER] = publishMarker;
-  return context;
+  return {
+    context,
+    resetReentryActionNodeKeys: [...resetReentryActionNodeKeys].sort(),
+    resetReentryTriggerNodeKeys: [...resetReentryTriggerNodeKeys].sort(),
+  };
 }
 
 function selectTradeFlowSeedNodes(graph: TradeFlowGraph): TradeFlowNode[] {
@@ -345,9 +419,14 @@ export async function rotatePublishedFlowRunOnPublish(
   const carriedState = !!activeRun;
   const previousRunId = activeRun?.id ?? null;
 
-  const nextContext = activeRun
+  const normalization = activeRun
     ? normalizeTradeFlowContextForPublish(input.graph, activeRun.contextJson, input.publishMarker)
-    : buildInitialTradeFlowContext(input.graph.context);
+    : {
+        context: buildInitialTradeFlowContext(input.graph.context),
+        resetReentryActionNodeKeys: [],
+        resetReentryTriggerNodeKeys: [],
+      };
+  const nextContext = normalization.context;
 
   let skippedQueuedSteps = 0;
   if (activeRun) {
@@ -395,6 +474,8 @@ export async function rotatePublishedFlowRunOnPublish(
       trigger_source: activeRun ? 'publish_cutover' : 'publish_start',
       previous_run_id: previousRunId,
       carried_state: carriedState,
+      reset_reentry_action_node_keys: normalization.resetReentryActionNodeKeys,
+      reset_reentry_trigger_node_keys: normalization.resetReentryTriggerNodeKeys,
       seeded_step_count: seededStepCount,
     }
   );

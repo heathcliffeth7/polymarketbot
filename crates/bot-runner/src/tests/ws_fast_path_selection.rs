@@ -21,6 +21,7 @@ fn test_ws_fast_path_node(
         trigger_price: 0.49,
         max_price: None,
         price_to_beat_trigger_enabled: false,
+        price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual,
         price_to_beat_trigger_min_gap: None,
         price_to_beat_trigger_max_gap: None,
         price_to_beat_trigger_unit:

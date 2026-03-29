@@ -2,16 +2,22 @@ fn parse_market_price_ptb_trigger_config(
     node: &TradeFlowNode,
 ) -> (
     bool,
+    crate::trade_flow::guards::price_to_beat::PriceToBeatMode,
     Option<f64>,
     Option<f64>,
     crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit,
 ) {
+    let default_mode = crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual;
     let default_unit = crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd;
     if node.node_type != "trigger.market_price" || node_market_mode(node) != "auto_scope" {
-        return (false, None, None, default_unit);
+        return (false, default_mode, None, None, default_unit);
     }
 
     let enabled = node_config_bool(node, "priceToBeatTriggerEnabled").unwrap_or(false);
+    let mode = crate::trade_flow::guards::price_to_beat::PriceToBeatMode::parse(
+        node_config_string(node, "priceToBeatMode").as_deref(),
+    )
+    .unwrap_or(default_mode);
     let unit = crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::parse(
         node_config_string(node, "priceToBeatTriggerUnit").as_deref(),
     )
@@ -22,7 +28,16 @@ fn parse_market_price_ptb_trigger_config(
         .filter(|value| value.is_finite() && *value > 0.0)
         .filter(|value| min_gap.map(|min_gap| *value >= min_gap).unwrap_or(false));
 
-    (enabled && min_gap.is_some(), min_gap, max_gap, unit)
+    let trigger_enabled = match mode {
+        crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual => {
+            enabled && min_gap.is_some()
+        }
+        crate::trade_flow::guards::price_to_beat::PriceToBeatMode::AutoLast3AvgExcursion => {
+            enabled
+        }
+    };
+
+    (trigger_enabled, mode, min_gap, max_gap, unit)
 }
 
 fn resolve_ws_market_price_trigger_fields(
@@ -155,6 +170,7 @@ fn build_open_position_ws_price_node_specs(
             .unwrap_or(false);
     let (
         price_to_beat_trigger_enabled,
+        price_to_beat_mode,
         price_to_beat_trigger_min_gap,
         price_to_beat_trigger_max_gap,
         price_to_beat_trigger_unit,
@@ -255,6 +271,7 @@ fn build_open_position_ws_price_node_specs(
                 trigger_price,
                 max_price,
                 price_to_beat_trigger_enabled,
+                price_to_beat_mode,
                 price_to_beat_trigger_min_gap,
                 price_to_beat_trigger_max_gap,
                 price_to_beat_trigger_unit,
@@ -371,6 +388,7 @@ fn build_open_position_ws_price_node_specs(
         trigger_price,
         max_price,
         price_to_beat_trigger_enabled,
+        price_to_beat_mode,
         price_to_beat_trigger_min_gap,
         price_to_beat_trigger_max_gap,
         price_to_beat_trigger_unit,

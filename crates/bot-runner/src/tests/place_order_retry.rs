@@ -241,6 +241,90 @@ fn fast_runtime_price_rest_partial_failure_uses_book_only() {
 }
 
 #[test]
+fn runtime_snapshot_ttl_and_lease_share_same_window() {
+    let captured_at = Utc::now() - ChronoDuration::milliseconds(200);
+    let snapshot = TradeBuilderRuntimeSnapshot {
+        captured_at,
+        source: "ws_market_price".to_string(),
+        current_price: Some(0.72),
+        best_bid: Some(0.71),
+        best_ask: Some(0.73),
+        last_trade_price: Some(0.72),
+        trigger_reference_price: Some(0.72),
+        guard_reference_price: Some(0.72),
+        fee_rate_bps: Some(12),
+        market_spec: None,
+    };
+
+    assert!(trade_builder_runtime_snapshot_is_fresh(&snapshot, Utc::now()));
+    assert_eq!(
+        trade_builder_runtime_snapshot_lease_until(&snapshot),
+        captured_at + ChronoDuration::milliseconds(500)
+    );
+}
+
+#[test]
+fn runtime_price_from_snapshot_prefers_current_price_and_carries_book_fields() {
+    let snapshot = TradeBuilderRuntimeSnapshot {
+        captured_at: Utc::now(),
+        source: "ws_market_price".to_string(),
+        current_price: Some(0.74),
+        best_bid: Some(0.73),
+        best_ask: Some(0.75),
+        last_trade_price: Some(0.72),
+        trigger_reference_price: Some(0.74),
+        guard_reference_price: Some(0.74),
+        fee_rate_bps: Some(0),
+        market_spec: None,
+    };
+
+    let runtime_price = trade_builder_runtime_price_from_snapshot(&snapshot).unwrap();
+    assert_eq!(runtime_price.source, "runtime_snapshot");
+    assert_eq!(runtime_price.price, 0.74);
+    assert_eq!(runtime_price.best_bid, Some(0.73));
+    assert_eq!(runtime_price.best_ask, Some(0.75));
+    assert_eq!(runtime_price.last_trade_price, Some(0.72));
+}
+
+#[test]
+fn guard_blocked_buy_ws_ready_requires_all_buy_guards_to_pass() {
+    let mut order = test_builder_order("buy", None);
+    order.kind = "immediate".to_string();
+    order.status = TRADE_BUILDER_GUARD_BLOCKED_STATUS.to_string();
+    order.trigger_condition = None;
+    order.trigger_price = None;
+    order.guard_trigger_price = Some(0.70);
+    order.best_ask_floor_price = Some(0.68);
+    order.max_price = Some(0.74);
+
+    let ready_runtime_price = TradeBuilderRuntimePrice {
+        price: 0.72,
+        source: "runtime_snapshot",
+        runtime_warning: None,
+        best_bid: Some(0.71),
+        best_ask: Some(0.72),
+        last_trade_price: Some(0.71),
+    };
+    let blocked_runtime_price = TradeBuilderRuntimePrice {
+        price: 0.67,
+        source: "runtime_snapshot",
+        runtime_warning: None,
+        best_bid: Some(0.66),
+        best_ask: Some(0.67),
+        last_trade_price: Some(0.66),
+    };
+
+    assert!(trade_builder_guard_blocked_buy_ready_from_snapshot(
+        &order,
+        &ready_runtime_price
+    ));
+    assert!(!trade_builder_guard_blocked_buy_ready_from_snapshot(
+        &order,
+        &blocked_runtime_price
+    ));
+}
+
+#[test]
 fn exit_sell_price_floor_uses_trigger_buffer() {
     let mut tp_order = test_builder_order("sell", Some(9));
     tp_order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();

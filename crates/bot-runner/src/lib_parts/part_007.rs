@@ -848,6 +848,16 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                         {
                             warn!(run_id, error = %e, "ARMED_ORDER_WS_EVAL_FAILED");
                         }
+                        if let Err(e) = evaluate_guard_blocked_buy_orders_for_dirty_tokens(
+                            repo,
+                            run_id,
+                            &ws,
+                            &dirty_token_ids,
+                        )
+                        .await
+                        {
+                            warn!(run_id, error = %e, "GUARD_BLOCKED_BUY_WS_EVAL_FAILED");
+                        }
                     }
                     _ = FLOW_PROCESS_NOTIFY.notified() => {
                         if let Err(e) = process_trade_flow_ready_steps(
@@ -927,6 +937,16 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                         {
                             warn!(run_id, error = %e, "ARMED_ORDER_WS_EVAL_FAILED");
                         }
+                        if let Err(e) = evaluate_guard_blocked_buy_orders_for_dirty_tokens(
+                            repo,
+                            run_id,
+                            &ws,
+                            &dirty_token_ids,
+                        )
+                        .await
+                        {
+                            warn!(run_id, error = %e, "GUARD_BLOCKED_BUY_WS_EVAL_FAILED");
+                        }
                     }
                     _ = FLOW_PROCESS_NOTIFY.notified() => {
                         if let Err(e) = process_trade_flow_ready_steps(
@@ -999,6 +1019,16 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                     {
                         warn!(run_id, error = %e, "ARMED_ORDER_WS_EVAL_FAILED");
                     }
+                    if let Err(e) = evaluate_guard_blocked_buy_orders_for_dirty_tokens(
+                        repo,
+                        run_id,
+                        &ws,
+                        &dirty_token_ids,
+                    )
+                    .await
+                    {
+                        warn!(run_id, error = %e, "GUARD_BLOCKED_BUY_WS_EVAL_FAILED");
+                    }
                 }
                 _ = FLOW_PROCESS_NOTIFY.notified() => {
                     if let Err(e) = process_trade_flow_ready_steps(
@@ -1058,6 +1088,16 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                     .await
                     {
                         warn!(run_id, error = %e, "ARMED_ORDER_WS_EVAL_FAILED");
+                    }
+                    if let Err(e) = evaluate_guard_blocked_buy_orders_for_dirty_tokens(
+                        repo,
+                        run_id,
+                        &ws,
+                        &dirty_token_ids,
+                    )
+                    .await
+                    {
+                        warn!(run_id, error = %e, "GUARD_BLOCKED_BUY_WS_EVAL_FAILED");
                     }
                 }
                 _ = FLOW_PROCESS_NOTIFY.notified() => {

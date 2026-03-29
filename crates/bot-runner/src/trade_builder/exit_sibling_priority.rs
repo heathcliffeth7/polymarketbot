@@ -1,57 +1,110 @@
-async fn maybe_resize_trade_builder_pending_exit_order(
-    repo: &PostgresRepository,
-    order: &TradeBuilderOrder,
-    next_remaining_qty: f64,
-    triggered_by_order_id: i64,
-    reason: &str,
-) -> Result<bool> {
-    if trade_builder_is_terminal_status(&order.status)
-        || order.active_exchange_order_id.is_some()
-        || normalize_trade_builder_size_basis(&order.size_basis) != TRADE_BUILDER_SIZE_BASIS_SHARES
-    {
-        return Ok(false);
-    }
+#[derive(Debug, Clone, Default, PartialEq)]
+struct TradeBuilderStopLossPreemptionInventoryPlan {
+    current_parent_qty: Option<f64>,
+    sibling_remaining_qtys: Vec<(i64, f64)>,
+}
 
-    let Some(current_remaining_qty) = trade_builder_share_remaining_qty(order) else {
-        return Ok(false);
+impl TradeBuilderStopLossPreemptionInventoryPlan {
+    fn remaining_qty_for(&self, order_id: i64) -> Option<f64> {
+        self.sibling_remaining_qtys
+            .iter()
+            .find_map(|(candidate_id, qty)| (*candidate_id == order_id).then_some(*qty))
+    }
+}
+
+fn plan_trade_builder_preempted_stop_loss_inventory(
+    siblings: &[TradeBuilderOrder],
+    current_parent_qty: Option<f64>,
+) -> TradeBuilderStopLossPreemptionInventoryPlan {
+    let Some(current_parent_qty) =
+        current_parent_qty.filter(|qty| *qty > TRADE_BUILDER_EXIT_QTY_TOLERANCE)
+    else {
+        return TradeBuilderStopLossPreemptionInventoryPlan::default();
     };
-    let next_qty = round_trade_builder_share_qty(next_remaining_qty.min(current_remaining_qty));
-    if current_remaining_qty - next_qty < TRADE_BUILDER_EXIT_QTY_TOLERANCE {
-        return Ok(false);
+
+    let mut sibling_remaining_qtys = Vec::new();
+    for sibling in siblings.iter().filter(|sibling| {
+        trade_builder_is_stop_loss_child(sibling)
+            && trade_builder_is_hard_exit_child(sibling)
+            && !trade_builder_is_terminal_status(&sibling.status)
+    }) {
+        sibling_remaining_qtys.push((sibling.id, round_trade_builder_share_qty(current_parent_qty)));
     }
 
-    let next_size_usdc = trade_builder_scaled_size_usdc(order, next_qty);
-    repo.update_trade_builder_order_sizing_and_state(
-        order.id,
-        &order.size_basis,
-        next_size_usdc,
-        Some(next_qty),
-        Some(next_size_usdc),
-        Some(next_qty),
-        &order.status,
-        order.last_error.as_deref(),
-        order.eligible_after_at,
-        order.eligible_before_at,
-        None,
-        None,
-        None,
+    let live_staged_stop_loss_siblings = siblings
+        .iter()
+        .filter(|sibling| {
+            trade_builder_is_stop_loss_child(sibling)
+                && !trade_builder_is_hard_exit_child(sibling)
+                && !trade_builder_is_terminal_status(&sibling.status)
+        })
+        .collect::<Vec<_>>();
+    sibling_remaining_qtys.extend(trade_builder_ladder_family_target_qtys(
+        &live_staged_stop_loss_siblings,
+        current_parent_qty,
+    ));
+
+    sibling_remaining_qtys.sort_by_key(|(order_id, _)| *order_id);
+    TradeBuilderStopLossPreemptionInventoryPlan {
+        current_parent_qty: Some(current_parent_qty),
+        sibling_remaining_qtys,
+    }
+}
+
+async fn sync_trade_builder_preempted_stop_loss_inventory(
+    repo: &PostgresRepository,
+    parent_order_id: i64,
+    siblings: &[TradeBuilderOrder],
+) -> Result<TradeBuilderStopLossPreemptionInventoryPlan> {
+    let Some(parent_order) = repo.get_trade_builder_order(parent_order_id).await? else {
+        return Ok(TradeBuilderStopLossPreemptionInventoryPlan::default());
+    };
+
+    let current_parent_qty =
+        resolve_trade_builder_parent_exit_inventory(repo, &parent_order, "sl_priority_preempted")
+            .await?
+            .map(|(qty, _)| qty);
+    let plan = plan_trade_builder_preempted_stop_loss_inventory(siblings, current_parent_qty);
+
+    let Some(current_parent_qty) = plan.current_parent_qty else {
+        return Ok(plan);
+    };
+
+    let hard_stop_loss_siblings = siblings
+        .iter()
+        .filter(|sibling| {
+            trade_builder_is_stop_loss_child(sibling)
+                && trade_builder_is_hard_exit_child(sibling)
+                && !trade_builder_is_terminal_status(&sibling.status)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let staged_stop_loss_siblings = siblings
+        .iter()
+        .filter(|sibling| {
+            trade_builder_is_stop_loss_child(sibling)
+                && !trade_builder_is_hard_exit_child(sibling)
+                && !trade_builder_is_terminal_status(&sibling.status)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let _ = trade_builder_sync_hard_exit_remaining_qty(
+        repo,
+        &hard_stop_loss_siblings,
+        current_parent_qty,
+        "sl_priority_preempted",
     )
     .await?;
-    repo.append_trade_builder_order_event(
-        order.id,
-        "sibling_resized_after_partial_fill",
-        &json!({
-            "triggered_by_order_id": triggered_by_order_id,
-            "reason": reason,
-            "status_after": &order.status,
-            "previous_target_qty": order.target_qty,
-            "previous_remaining_qty": order.remaining_qty,
-            "next_target_qty": next_qty,
-            "next_remaining_qty": next_qty,
-        }),
+    let _ = trade_builder_sync_ladder_family_remaining_qty(
+        repo,
+        &staged_stop_loss_siblings,
+        current_parent_qty,
+        "sl_priority_preempted",
     )
     .await?;
-    Ok(true)
+
+    Ok(plan)
 }
 
 async fn request_trade_builder_oco_cancel_for_siblings(
@@ -177,7 +230,6 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
     let siblings = repo
         .list_trade_builder_child_orders_by_parent(parent_order_id, Some(order.id))
         .await?;
-    let remaining_qty = trade_builder_share_remaining_qty(order);
     let mut stop_loss_sibling_ids = Vec::new();
     let mut stop_loss_current_price = None;
 
@@ -233,13 +285,41 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
             )
             .await?;
         }
-        if let Some(remaining_qty) = remaining_qty {
-            let _ = maybe_resize_trade_builder_pending_exit_order(
-                repo,
-                sibling,
-                remaining_qty,
-                order.id,
-                "sl_priority_preempted",
+    }
+
+    if stop_loss_sibling_ids.is_empty() {
+        return Ok(preemption);
+    }
+
+    let inventory_plan =
+        sync_trade_builder_preempted_stop_loss_inventory(repo, parent_order_id, &siblings).await?;
+
+    let hard_stop_loss_sibling_ids = siblings
+        .iter()
+        .filter(|sibling| {
+            stop_loss_sibling_ids.contains(&sibling.id) && trade_builder_is_hard_exit_child(sibling)
+        })
+        .map(|sibling| sibling.id)
+        .collect::<Vec<_>>();
+
+    for sibling in siblings
+        .iter()
+        .filter(|sibling| stop_loss_sibling_ids.contains(&sibling.id))
+    {
+        let remaining_qty = inventory_plan
+            .remaining_qty_for(sibling.id)
+            .or_else(|| trade_builder_share_remaining_qty(sibling));
+        if inventory_plan.current_parent_qty.is_none() {
+            repo.append_trade_builder_order_event(
+                sibling.id,
+                "sl_inventory_sync_skipped",
+                &json!({
+                    "reason": "parent_exit_inventory_unavailable",
+                    "preempted_tp_order_id": order.id,
+                    "family": trade_builder_exit_family(sibling),
+                    "exit_mode": trade_builder_exit_mode(sibling),
+                    "sibling_policy": trade_builder_exit_sibling_policy(sibling),
+                }),
             )
             .await?;
         }
@@ -253,8 +333,13 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
             event_type,
             &json!({
                 "preempted_tp_order_id": order.id,
-                "current_price": decision.current_price,
+                "current_price": trade_builder_trigger_eval_price_for_order(sibling, runtime_price),
                 "remaining_qty": remaining_qty,
+                "remaining_qty_source": if inventory_plan.current_parent_qty.is_some() {
+                    "parent_inventory_sync"
+                } else {
+                    "existing_sibling_qty"
+                },
                 "family": trade_builder_exit_family(sibling),
                 "exit_mode": trade_builder_exit_mode(sibling),
                 "sibling_policy": trade_builder_exit_sibling_policy(sibling),
@@ -263,17 +348,6 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
         .await?;
     }
 
-    if stop_loss_sibling_ids.is_empty() {
-        return Ok(preemption);
-    }
-
-    let hard_stop_loss_sibling_ids = siblings
-        .iter()
-        .filter(|sibling| {
-            stop_loss_sibling_ids.contains(&sibling.id) && trade_builder_is_hard_exit_child(sibling)
-        })
-        .map(|sibling| sibling.id)
-        .collect::<Vec<_>>();
     if hard_stop_loss_sibling_ids.is_empty() {
         repo.append_trade_builder_order_event(
             order.id,
@@ -283,7 +357,9 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
                 "current_price": stop_loss_current_price
                     .unwrap_or_else(|| trade_builder_trigger_eval_price_for_order(order, runtime_price)),
                 "status_before": &order.status,
-                "remaining_qty": remaining_qty,
+                "remaining_qty": inventory_plan
+                    .current_parent_qty
+                    .or_else(|| trade_builder_share_remaining_qty(order)),
                 "family": trade_builder_exit_family(order),
                 "exit_mode": trade_builder_exit_mode(order),
                 "sibling_policy": trade_builder_exit_sibling_policy(order),
@@ -350,7 +426,9 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
                 .unwrap_or_else(|| trade_builder_trigger_eval_price_for_order(order, runtime_price)),
             "status_before": status_before,
             "status_after": status_after,
-            "remaining_qty": remaining_qty,
+            "remaining_qty": inventory_plan
+                .current_parent_qty
+                .or_else(|| trade_builder_share_remaining_qty(order)),
             "active_exchange_order_id": order.active_exchange_order_id,
         }),
     )

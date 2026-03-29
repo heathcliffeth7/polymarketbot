@@ -159,6 +159,122 @@ async fn append_trade_builder_guard_diagnostics_event(
     .await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TradeBuilderResolvedSellSubmitPrice {
+    desired_price: f64,
+    uncapped_desired_price: f64,
+    source: &'static str,
+    depth_levels_used: Option<usize>,
+    visible_bid_qty: Option<f64>,
+    requested_qty: Option<f64>,
+}
+
+fn normalize_trade_builder_visible_qty(value: Option<f64>) -> Option<f64> {
+    let value = value?;
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    Some(round_trade_builder_share_qty(value))
+}
+
+fn trade_builder_order_book_visible_bid_qty(snapshot: &OrderBookSnapshot) -> Option<f64> {
+    let visible_qty = snapshot
+        .bids
+        .iter()
+        .map(|level| level.size)
+        .filter(|size| size.is_finite() && *size > 0.0)
+        .sum::<f64>();
+    normalize_trade_builder_visible_qty(Some(visible_qty))
+}
+
+fn trade_builder_order_book_sweep_sell_price(
+    snapshot: &OrderBookSnapshot,
+    requested_qty: f64,
+) -> Option<(f64, usize)> {
+    let requested_qty = normalize_trade_builder_visible_qty(Some(requested_qty))?;
+    let mut cumulative_qty = 0.0;
+    let mut depth_levels_used = 0usize;
+
+    for level in snapshot.bids.iter().rev() {
+        if !level.price.is_finite() || !level.size.is_finite() || level.price <= 0.0 || level.size <= 0.0
+        {
+            continue;
+        }
+        cumulative_qty = round_trade_builder_share_qty(cumulative_qty + level.size);
+        depth_levels_used += 1;
+        if cumulative_qty + TRADE_BUILDER_EXIT_QTY_TOLERANCE >= requested_qty {
+            return Some((clamp_probability(level.price), depth_levels_used));
+        }
+    }
+
+    None
+}
+
+async fn resolve_trade_builder_sell_submit_price(
+    client: &dyn OrderExecutor,
+    order: &TradeBuilderOrder,
+    current_price: f64,
+    runtime_best_bid: Option<f64>,
+    runtime_last_trade_price: Option<f64>,
+    requested_qty: Option<f64>,
+) -> TradeBuilderResolvedSellSubmitPrice {
+    let order_book = client.order_book(&order.token_id).await.ok().flatten();
+    resolve_trade_builder_sell_submit_price_with_book(
+        order,
+        current_price,
+        runtime_best_bid,
+        runtime_last_trade_price,
+        requested_qty,
+        order_book.as_ref(),
+    )
+}
+
+fn resolve_trade_builder_sell_submit_price_with_book(
+    order: &TradeBuilderOrder,
+    current_price: f64,
+    runtime_best_bid: Option<f64>,
+    runtime_last_trade_price: Option<f64>,
+    requested_qty: Option<f64>,
+    order_book: Option<&OrderBookSnapshot>,
+) -> TradeBuilderResolvedSellSubmitPrice {
+    let requested_qty = normalize_trade_builder_visible_qty(requested_qty);
+    let visible_bid_qty = order_book.and_then(trade_builder_order_book_visible_bid_qty);
+
+    if let (Some(snapshot), Some(requested_qty)) = (order_book, requested_qty) {
+        if let Some((sweep_price, depth_levels_used)) =
+            trade_builder_order_book_sweep_sell_price(snapshot, requested_qty)
+        {
+            return TradeBuilderResolvedSellSubmitPrice {
+                desired_price: trade_builder_cap_exit_sell_price(order, sweep_price),
+                uncapped_desired_price: sweep_price,
+                source: "orderbook_depth",
+                depth_levels_used: Some(depth_levels_used),
+                visible_bid_qty,
+                requested_qty: Some(requested_qty),
+            };
+        }
+    }
+
+    let (uncapped_desired_price, source) = runtime_best_bid
+        .and_then(|value| normalize_trade_builder_reference_price(Some(value)))
+        .map(|value| (clamp_probability(value), "best_bid_fallback"))
+        .or_else(|| {
+            runtime_last_trade_price
+                .and_then(|value| normalize_trade_builder_reference_price(Some(value)))
+                .map(|value| (clamp_probability(value), "last_trade_fallback"))
+        })
+        .unwrap_or((clamp_probability(current_price), "price_fallback"));
+
+    TradeBuilderResolvedSellSubmitPrice {
+        desired_price: trade_builder_cap_exit_sell_price(order, uncapped_desired_price),
+        uncapped_desired_price,
+        source,
+        depth_levels_used: None,
+        visible_bid_qty,
+        requested_qty,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn submit_trade_builder_trigger_order(
     repo: &PostgresRepository,
@@ -170,21 +286,43 @@ async fn submit_trade_builder_trigger_order(
     ws: &ClobWsClient,
     order: &mut TradeBuilderOrder,
     current_price: f64,
+    best_bid: Option<f64>,
     best_ask: Option<f64>,
+    last_trade_price: Option<f64>,
     fee_rate_bps: u64,
     resolved_size_usdc: f64,
     trigger_size_mode: Option<String>,
     trigger_size_value: Option<f64>,
     trigger_size_index: usize,
+    submit_context: &TradeBuilderSubmitAttemptContext,
 ) -> Result<()> {
+    let submit_started_at = Utc::now();
     let size_basis = normalize_trade_builder_size_basis(&order.size_basis);
+    let submit_price_requested_qty = if size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES {
+        trade_builder_share_request_qty(order)
+    } else {
+        None
+    };
     let immediate_buy_execution_price =
         trade_builder_immediate_buy_notional_execution_price(order, current_price, best_ask);
-    let desired_price = immediate_buy_execution_price
-        .map(|resolution| resolution.price)
+    let (sell_submit_price, prefetched_available_qty) = prefetch_trade_builder_sell_submit_inputs(
+        client,
+        order,
+        run_id,
+        current_price,
+        best_bid,
+        last_trade_price,
+        submit_price_requested_qty,
+        size_basis,
+    )
+    .await;
+    let desired_price = sell_submit_price
+        .map(|resolution| resolution.desired_price)
+        .or_else(|| immediate_buy_execution_price.map(|resolution| resolution.price))
         .unwrap_or_else(|| trade_builder_submit_desired_price(order, current_price));
-    let uncapped_desired_price = immediate_buy_execution_price
-        .map(|resolution| resolution.price)
+    let uncapped_desired_price = sell_submit_price
+        .map(|resolution| resolution.uncapped_desired_price)
+        .or_else(|| immediate_buy_execution_price.map(|resolution| resolution.price))
         .unwrap_or_else(|| {
             aggressive_price_for_side(&order.side, current_price, order.min_price_distance_cent)
         });
@@ -220,8 +358,12 @@ async fn submit_trade_builder_trigger_order(
     anyhow::ensure!(size > 0.0, "computed builder order size is zero");
 
     let trigger_price_guard_configured = order.side == "buy" && order.guard_trigger_price.is_some();
+    let guard_eval_started = Instant::now();
+    let (trigger_guard_reference_price, trigger_guard_reference_source) =
+        trade_builder_resolve_trigger_guard_reference_price(order, current_price, best_ask);
     let trigger_price_guard_blocked =
-        trigger_price_guard_configured && trade_builder_price_below_guard_trigger(order, current_price);
+        trigger_price_guard_configured
+            && trade_builder_price_below_guard_trigger(order, trigger_guard_reference_price);
     let trigger_price_guard_payload = if trigger_price_guard_blocked {
         trade_builder_guard_diagnostic_payload(
             true,
@@ -234,6 +376,8 @@ async fn submit_trade_builder_trigger_order(
             json!({
                 "guard_trigger_price": order.guard_trigger_price,
                 "current_price": current_price,
+                "trigger_guard_reference_price": trigger_guard_reference_price,
+                "trigger_guard_reference_source": trigger_guard_reference_source,
             }),
         )
     } else if trigger_price_guard_configured {
@@ -244,6 +388,8 @@ async fn submit_trade_builder_trigger_order(
             json!({
                 "guard_trigger_price": order.guard_trigger_price,
                 "current_price": current_price,
+                "trigger_guard_reference_price": trigger_guard_reference_price,
+                "trigger_guard_reference_source": trigger_guard_reference_source,
             }),
         )
     } else {
@@ -347,7 +493,13 @@ async fn submit_trade_builder_trigger_order(
         if order.retry_on_trigger_guard_block {
             let notification_message = order
                 .notify_on_trigger_guard_blocked
-                .then(|| build_trigger_guard_waiting_notification_message(order, current_price));
+                .then(|| {
+                    build_trigger_guard_waiting_notification_message(
+                        order,
+                        trigger_guard_reference_price,
+                        trigger_guard_reference_source,
+                    )
+                });
             transition_trade_builder_order_to_guard_waiting(
                 repo,
                 order,
@@ -362,6 +514,8 @@ async fn submit_trade_builder_trigger_order(
                     "trigger_price": order.trigger_price,
                     "guard_trigger_price": order.guard_trigger_price,
                     "current_price": current_price,
+                    "trigger_guard_reference_price": trigger_guard_reference_price,
+                    "trigger_guard_reference_source": trigger_guard_reference_source,
                     "desired_price": desired_price,
                     "status_before": &order.status,
                     "status_after": TRADE_BUILDER_GUARD_BLOCKED_STATUS
@@ -394,13 +548,19 @@ async fn submit_trade_builder_trigger_order(
                     "trigger_price": order.trigger_price,
                     "guard_trigger_price": order.guard_trigger_price,
                     "current_price": current_price,
+                    "trigger_guard_reference_price": trigger_guard_reference_price,
+                    "trigger_guard_reference_source": trigger_guard_reference_source,
                     "desired_price": desired_price,
                     "status_before": &order.status,
                     "status_after": "canceled"
                 }),
             )
             .await?;
-            let message = build_trigger_guard_blocked_notification_message(order, current_price);
+            let message = build_trigger_guard_blocked_notification_message(
+                order,
+                trigger_guard_reference_price,
+                trigger_guard_reference_source,
+            );
             maybe_send_guard_transition_notification(
                 repo,
                 order,
@@ -417,6 +577,8 @@ async fn submit_trade_builder_trigger_order(
             market = %order.market_slug,
             token_id = %order.token_id,
             current_price,
+            trigger_guard_reference_price,
+            trigger_guard_reference_source,
             desired_price,
             guard_trigger_price = ?order.guard_trigger_price,
             waiting = order.retry_on_trigger_guard_block,
@@ -662,6 +824,7 @@ async fn submit_trade_builder_trigger_order(
         "guards_passed",
     )
     .await?;
+    let guard_eval_ms = guard_eval_started.elapsed().as_millis() as i64;
 
     let risk = risk_gate_manual_order(
         repo,
@@ -714,7 +877,7 @@ async fn submit_trade_builder_trigger_order(
         && trade_builder_should_use_optimistic_exit_submit(order);
     let optimistic_exit_stage =
         optimistic_exit_submit.then(|| trade_builder_current_exit_submit_stage(order));
-    let mut available_qty = None;
+    let mut available_qty = prefetched_available_qty;
     let mut submit_partial_visible_inventory = false;
     let mut submit_size = size;
     let mut submit_remaining_usdc = remaining_usdc;
@@ -750,18 +913,20 @@ async fn submit_trade_builder_trigger_order(
         && size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES
         && !optimistic_exit_submit
     {
-        match client.available_token_qty(&order.token_id).await {
-            Ok(quantity) => {
-                available_qty = quantity;
-            }
-            Err(err) => {
-                warn!(
-                    run_id,
-                    builder_order_id = order.id,
-                    token_id = %order.token_id,
-                    error = %err,
-                    "TRADE_BUILDER_EXIT_INVENTORY_CHECK_FAILED"
-                );
+        if available_qty.is_none() {
+            match client.available_token_qty(&order.token_id).await {
+                Ok(quantity) => {
+                    available_qty = quantity;
+                }
+                Err(err) => {
+                    warn!(
+                        run_id,
+                        builder_order_id = order.id,
+                        token_id = %order.token_id,
+                        error = %err,
+                        "TRADE_BUILDER_EXIT_INVENTORY_CHECK_FAILED"
+                    );
+                }
             }
         }
         let Some(inventory_resolution) =
@@ -821,18 +986,20 @@ async fn submit_trade_builder_trigger_order(
         && size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES
         && optimistic_exit_stage == Some(TradeBuilderExitSubmitStage::VisibleInventory)
     {
-        match client.available_token_qty(&order.token_id).await {
-            Ok(quantity) => {
-                available_qty = quantity;
-            }
-            Err(err) => {
-                warn!(
-                    run_id,
-                    builder_order_id = order.id,
-                    token_id = %order.token_id,
-                    error = %err,
-                    "TRADE_BUILDER_EXIT_INVENTORY_CHECK_FAILED"
-                );
+        if available_qty.is_none() {
+            match client.available_token_qty(&order.token_id).await {
+                Ok(quantity) => {
+                    available_qty = quantity;
+                }
+                Err(err) => {
+                    warn!(
+                        run_id,
+                        builder_order_id = order.id,
+                        token_id = %order.token_id,
+                        error = %err,
+                        "TRADE_BUILDER_EXIT_INVENTORY_CHECK_FAILED"
+                    );
+                }
             }
         }
         let Some(visible_inventory_resolution) =
@@ -871,7 +1038,10 @@ async fn submit_trade_builder_trigger_order(
     let normalized_execution_mode = normalize_trade_builder_execution_mode(&order.execution_mode);
     let order_type = clob_order_type_for_execution_mode(normalized_execution_mode);
     let client_order_id = format!("tb-{}", Uuid::new_v4());
-    let market_spec = resolve_trade_builder_market_spec(cfg, &order.market_slug, &order.token_id).await;
+    let market_spec = trade_builder_runtime_snapshot_from_order(order)
+        .filter(|snapshot| trade_builder_runtime_snapshot_is_fresh(snapshot, submit_started_at))
+        .and_then(|snapshot| trade_builder_market_spec_from_runtime_snapshot(&snapshot))
+        .or(resolve_trade_builder_market_spec(cfg, &order.market_slug, &order.token_id).await);
     let req = PlaceOrderRequest {
         market: order.market_slug.clone(),
         token_id: Some(order.token_id.clone()),
@@ -910,6 +1080,10 @@ async fn submit_trade_builder_trigger_order(
                 "size_basis": size_basis,
                 "available_qty": available_qty,
                 "precheck_skipped": optimistic_exit_stage != Some(TradeBuilderExitSubmitStage::VisibleInventory),
+                "submit_price_source": sell_submit_price.map(|resolution| resolution.source),
+                "submit_price_depth_levels_used": sell_submit_price.and_then(|resolution| resolution.depth_levels_used),
+                "submit_price_visible_bid_qty": sell_submit_price.and_then(|resolution| resolution.visible_bid_qty),
+                "submit_price_requested_qty": sell_submit_price.and_then(|resolution| resolution.requested_qty),
             }),
         )
         .await?;
@@ -936,6 +1110,10 @@ async fn submit_trade_builder_trigger_order(
                         "neg_risk": req.neg_risk,
                         "order_price_min_tick_size": market_spec.and_then(|spec| spec.order_price_min_tick_size),
                         "order_min_size": market_spec.and_then(|spec| spec.order_min_size),
+                        "submit_price_source": sell_submit_price.map(|resolution| resolution.source),
+                        "submit_price_depth_levels_used": sell_submit_price.and_then(|resolution| resolution.depth_levels_used),
+                        "submit_price_visible_bid_qty": sell_submit_price.and_then(|resolution| resolution.visible_bid_qty),
+                        "submit_price_requested_qty": sell_submit_price.and_then(|resolution| resolution.requested_qty),
                     }),
                 )
                 .await?;
@@ -1069,13 +1247,14 @@ async fn submit_trade_builder_trigger_order(
             return Err(err);
         }
     };
+    let submit_finished_at = Utc::now();
 
     let exchange_order_id = ack
         .exchange_order_id
         .clone()
         .unwrap_or_else(|| ack.client_order_id.clone());
     let normalized_status = normalize_exchange_status(&ack.status);
-    let raw = json!({
+    let mut raw = json!({
         "builder_order_id": order.id,
         "client_order_id": ack.client_order_id,
         "exchange_order_id": exchange_order_id,
@@ -1090,9 +1269,13 @@ async fn submit_trade_builder_trigger_order(
         "execution_price": desired_price,
         "execution_price_source": immediate_buy_execution_price
             .map(|resolution| resolution.source)
-            .unwrap_or("runtime_price"),
+            .unwrap_or_else(|| sell_submit_price.map(|resolution| resolution.source).unwrap_or("runtime_price")),
         "trigger_reference_price": immediate_buy_execution_price
             .and_then(|resolution| resolution.trigger_reference_price),
+        "submit_price_source": sell_submit_price.map(|resolution| resolution.source),
+        "submit_price_depth_levels_used": sell_submit_price.and_then(|resolution| resolution.depth_levels_used),
+        "submit_price_visible_bid_qty": sell_submit_price.and_then(|resolution| resolution.visible_bid_qty),
+        "submit_price_requested_qty": sell_submit_price.and_then(|resolution| resolution.requested_qty),
         "execution_mode": normalized_execution_mode,
         "order_type": order_type,
         "size_basis": size_basis,
@@ -1113,6 +1296,16 @@ async fn submit_trade_builder_trigger_order(
         "raw_status": ack.raw_status,
         "exchange_ts": ack.exchange_ts
     });
+    append_trade_builder_submit_telemetry(
+        raw.as_object_mut().expect("submitted payload"),
+        submit_context,
+        &TradeBuilderSubmitTiming {
+            submit_started_at,
+            submit_finished_at,
+            guard_eval_ms,
+        },
+        Some(&ack),
+    );
 
     repo.upsert_order_by_exchange_id(
         order.trade_id,

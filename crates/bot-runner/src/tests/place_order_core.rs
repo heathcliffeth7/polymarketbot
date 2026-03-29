@@ -658,6 +658,56 @@ fn place_order_reentry_guard_resolution_rejects_inverted_band() {
 }
 
 #[test]
+fn reentry_attempts_stay_scoped_to_same_market() {
+    let context = json!({
+        "nodeState": {
+            "action_1": {
+                "reentry_attempts_used": 2,
+                "reentry_market_slug": "btc-updown-5m-1772296200"
+            }
+        }
+    });
+
+    let (attempts_used, stored_reentry_market_slug) =
+        resolve_trade_flow_reentry_attempts_for_market(
+            &context,
+            "action_1",
+            "btc-updown-5m-1772296200",
+        );
+
+    assert_eq!(attempts_used, 2);
+    assert_eq!(
+        stored_reentry_market_slug.as_deref(),
+        Some("btc-updown-5m-1772296200")
+    );
+}
+
+#[test]
+fn reentry_attempts_reset_when_market_changes() {
+    let context = json!({
+        "nodeState": {
+            "action_1": {
+                "reentry_attempts_used": 2,
+                "reentry_market_slug": "btc-updown-5m-1772296200"
+            }
+        }
+    });
+
+    let (attempts_used, stored_reentry_market_slug) =
+        resolve_trade_flow_reentry_attempts_for_market(
+            &context,
+            "action_1",
+            "btc-updown-5m-1772296500",
+        );
+
+    assert_eq!(attempts_used, 0);
+    assert_eq!(
+        stored_reentry_market_slug.as_deref(),
+        Some("btc-updown-5m-1772296200")
+    );
+}
+
+#[test]
 fn place_order_inherits_trigger_max_price_via_step_input() {
     let trigger_output = json!({
         "market_slug": "btc-updown-5m-1",
@@ -1029,7 +1079,34 @@ fn best_ask_above_max_price_blocks_guard() {
 }
 
 #[test]
-fn current_price_below_guard_trigger_is_blocked_for_buys_only() {
+fn trigger_guard_reference_prefers_best_ask_for_buy_orders() {
+    let order = test_builder_order("buy", None);
+    assert_eq!(
+        trade_builder_resolve_trigger_guard_reference_price(&order, 0.23, Some(0.99)),
+        (0.99, "best_ask")
+    );
+}
+
+#[test]
+fn trigger_guard_reference_falls_back_to_current_price_when_best_ask_missing() {
+    let order = test_builder_order("buy", None);
+    assert_eq!(
+        trade_builder_resolve_trigger_guard_reference_price(&order, 0.23, None),
+        (0.23, "current_price_fallback")
+    );
+}
+
+#[test]
+fn trigger_guard_reference_uses_current_price_for_non_buy_orders() {
+    let order = test_builder_order("sell", Some(9));
+    assert_eq!(
+        trade_builder_resolve_trigger_guard_reference_price(&order, 0.23, Some(0.99)),
+        (0.23, "current_price")
+    );
+}
+
+#[test]
+fn reference_price_below_guard_trigger_is_blocked_for_buys_only() {
     let mut buy_order = test_builder_order("buy", None);
     buy_order.guard_trigger_price = Some(0.77);
     assert!(trade_builder_price_below_guard_trigger(&buy_order, 0.76));

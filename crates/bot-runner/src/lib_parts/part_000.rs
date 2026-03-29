@@ -13,15 +13,17 @@ use bot_infra::config::{AppConfig, TelegramConfig};
 use bot_infra::contracts::{OrderExecutor, StateRepository};
 use bot_infra::db::{
     ActiveTradeFlowRunOrderPeer, PendingTradeBuilderFirstVisibleInventoryObservation,
-    PostgresRepository, TradeBuilderInventoryObservationInput, TradeBuilderOrder,
+    PostgresRepository, TradeBuilderExchangeFillSummary,
+    TradeBuilderInventoryObservationInput, TradeBuilderOrder, TradeBuilderOrderEventRecord,
     TradeBuilderParentPosition, TradeBuilderParentPositionInput,
     TradeBuilderParentPositionSeed, TradeBuilderPriceExitRule, TradeBuilderTimeExitRule,
-    TradeBuilderWorkflow, TradeBuilderWorkflowLeg, TradeFlowDefinitionRuntime, TradeFlowRun,
-    TradeFlowRunStep, TradeFlowVersionRuntime,
+    TradeBuilderWorkflow, TradeBuilderWorkflowLeg, TradeFlowAutoScopeAnalysisRowInput,
+    TradeFlowDefinitionRuntime, TradeFlowEventRecord, TradeFlowRun, TradeFlowRunStep,
+    TradeFlowVersionRuntime,
 };
 use bot_infra::exchange::{
-    ClobHttpClient, ClobRestClient, FillInfo, GammaClient, GammaHttpClient, GammaMarket, OrderInfo,
-    PlaceOrderRequest,
+    ClobHttpClient, ClobRestClient, FillInfo, GammaClient, GammaHttpClient, GammaMarket,
+    OrderBookSnapshot, OrderInfo, PlaceOrderRequest,
 };
 use bot_infra::market_data::{MarketDataProvider, MockMarketDataProvider};
 use bot_infra::reconcile::reconcile_tick_and_snapshot;
@@ -125,6 +127,7 @@ const FLOW_NODE_STATE_ONCE_FIRED_MARKET_SLUG: &str = "once_fired_market_slug";
 const FLOW_NODE_STATE_ONCE_BLOCK_LOGGED: &str = "once_blocked_logged";
 const FLOW_NODE_STATE_REENTRY_GENERATION: &str = "reentry_generation";
 const FLOW_NODE_STATE_REENTRY_ATTEMPTS_USED: &str = "reentry_attempts_used";
+const FLOW_NODE_STATE_REENTRY_MARKET_SLUG: &str = "reentry_market_slug";
 const FLOW_NODE_STATE_CYCLE_WINDOW_BOUNDARY_MARKER_PREFIX: &str = "cycle_window_boundary_marker_";
 const FLOW_NODE_STATE_CYCLE_WINDOW_END_SELL_MARKER_PREFIX: &str = "cycle_window_end_sell_marker_";
 const FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG: &str =
