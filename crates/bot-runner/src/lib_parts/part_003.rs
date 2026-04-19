@@ -81,6 +81,7 @@ struct WsOpenPositionPriceNodeSpec {
     node_type: String,
     once_mode: bool,
     once_scope_market: bool,
+    pair_lock_only_monitor: bool,
     auto_scope: bool,
     price_mode: WsPriceMode,
     market_slug: Option<String>,

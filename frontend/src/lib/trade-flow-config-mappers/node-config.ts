@@ -1,31 +1,12 @@
 import { BOOLEAN_KEYS, NUMERIC_KEYS, RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME } from './constants';
 import { buildObjectFromKeyValueDrafts, buildExpression, nestedExprGroupToJsonLogic, objectToRows, parseExpressionDraft, parseNumberArrayToStringRows } from './expressions';
-import {
-  createEmptyDrawdownRuleRow,
-  createEmptyExitLadderRuleRow,
-  createEmptyKeyValueDraft,
-  createEmptyTimeExitRuleRow,
-} from './drafts';
+import { createEmptyDrawdownRuleRow, createEmptyExitLadderRuleRow, createEmptyKeyValueDraft, createEmptyPtbStopLossRuleRow, createEmptyTimeExitRuleRow } from './drafts';
 import { NODE_FIELD_SCHEMAS } from './schemas';
-import {
-  isPresetBuySellPlaceOrderMarker,
-  isPresetPlaceOrderMarker,
-  normalizeResolveMarketScope,
-  resolveTriggerMarketOnceScope,
-  toResolveMarketScope,
-} from './presets';
-import {
-  normalizeTriggerMarketPriceCycleWindowConfig,
-  readTriggerMarketPriceCycleWindowFields,
-} from './cycle-window';
+import { isPresetBuySellPlaceOrderMarker, isPresetPlaceOrderMarker, normalizeResolveMarketScope, resolveTriggerMarketOnceScope, toResolveMarketScope } from './presets';
+import { applyPairLockFormDefaults, normalizePairLockBuildConfig, normalizePairLockStopLossBuildConfig, PAIR_LOCK_CONFIG_KEYS } from './pair-lock';
+import { normalizeTriggerMarketPriceCycleWindowConfig, readTriggerMarketPriceCycleWindowFields } from './cycle-window';
 import { TRIGGER_MARKET_ONCE_SCOPE_VERSION } from './constants';
-import type {
-  DrawdownRuleRow,
-  ExitLadderRuleRow,
-  NodeConfigFormState,
-  OutcomeConditionRow,
-  TimeExitRuleRow,
-} from './types';
+import type { DrawdownRuleRow, ExitLadderRuleRow, NodeConfigFormState, OutcomeConditionRow, PtbStopLossRuleRow, TimeExitRuleRow } from './types';
 import {
   createId,
   isRecord,
@@ -42,6 +23,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
   let triggerSizeRows: string[] = [];
   const tpRuleRows: ExitLadderRuleRow[] = [];
   const slRuleRows: ExitLadderRuleRow[] = [];
+  const ptbStopLossRuleRows: PtbStopLossRuleRow[] = [];
   const timeExitRuleRows: TimeExitRuleRow[] = [];
   for (const field of NODE_FIELD_SCHEMAS[nodeType] || []) {
     fields[field.key] =
@@ -76,7 +58,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
     if (
       (fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
-      !['manual', 'auto_last_3_avg_excursion'].includes(
+      !['manual', 'auto_last_3_avg_excursion', 'auto_vol_pct'].includes(
         (fields.priceToBeatMode ?? '').trim().toLowerCase()
       )
     ) {
@@ -95,9 +77,79 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     ) {
       fields.priceToBeatMaxDiffUnit = 'usd';
     }
+    if (
+      (fields.counterLegPriceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
+      !['manual', 'auto_last_3_avg_excursion', 'auto_vol_pct'].includes((fields.counterLegPriceToBeatMode ?? '').trim().toLowerCase())
+    ) {
+      fields.counterLegPriceToBeatMode = 'manual';
+    }
+    if (
+      (fields.counterLegPriceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
+      (fields.counterLegPriceToBeatMode ?? '').trim().toLowerCase() === 'manual' &&
+      !['usd', 'cent'].includes((fields.counterLegPriceToBeatMaxDiffUnit ?? '').trim().toLowerCase())
+    ) {
+      fields.counterLegPriceToBeatMaxDiffUnit = 'usd';
+    }
+    if (
+      (fields.priceToBeatStopLossBumpEnabled ?? '').trim().toLowerCase() === 'true' &&
+      !['usd', 'cent'].includes((fields.priceToBeatStopLossBumpUnit ?? '').trim().toLowerCase())
+    ) {
+      fields.priceToBeatStopLossBumpUnit = ['usd', 'cent'].includes(
+        (fields.priceToBeatMaxDiffUnit ?? '').trim().toLowerCase()
+      )
+        ? fields.priceToBeatMaxDiffUnit
+        : 'cent';
+    }
+    if ((fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true') {
+      if (!(fields.priceToBeatMaxPriceRelaxMissCount ?? '').trim()) {
+        fields.priceToBeatMaxPriceRelaxMissCount = '5';
+      }
+      if (!(fields.priceToBeatMaxPriceRelaxHistoryCount ?? '').trim()) {
+        fields.priceToBeatMaxPriceRelaxHistoryCount = '5';
+      }
+      if (!(fields.priceToBeatMaxPriceRelaxMinDepthUsd ?? '').trim()) {
+        fields.priceToBeatMaxPriceRelaxMinDepthUsd = '5';
+      }
+      if (!(fields.priceToBeatMaxPriceRelaxStepMode ?? '').trim()) {
+        fields.priceToBeatMaxPriceRelaxStepMode = 'percent';
+      }
+      if (!(fields.priceToBeatMaxPriceRelaxStepValue ?? '').trim()) {
+        fields.priceToBeatMaxPriceRelaxStepValue = '25';
+      }
+      if (
+        (fields.priceToBeatMaxPriceRelaxMinValue ?? '').trim() &&
+        !['usd', 'cent'].includes((fields.priceToBeatMaxPriceRelaxMinUnit ?? '').trim().toLowerCase())
+      ) {
+        fields.priceToBeatMaxPriceRelaxMinUnit = 'usd';
+      }
+      if (
+        (fields.priceToBeatMaxPriceRelaxStepMode ?? '').trim().toLowerCase() === 'absolute' &&
+        !['usd', 'cent'].includes((fields.priceToBeatMaxPriceRelaxStepUnit ?? '').trim().toLowerCase())
+      ) {
+        fields.priceToBeatMaxPriceRelaxStepUnit = 'usd';
+      }
+    }
+    if (
+      (fields.priceToBeatStopLossBumpEnabled ?? '').trim().toLowerCase() === 'true' &&
+      !['global', 'per_scope'].includes(
+        (fields.priceToBeatStopLossBumpScope ?? '').trim().toLowerCase()
+      )
+    ) {
+      fields.priceToBeatStopLossBumpScope = 'per_scope';
+    }
+    if (
+      (fields.ptbStopLossEnabled ?? '').trim().toLowerCase() === 'true' &&
+      !['none', 'tighten', 'relax'].includes(
+        (fields.ptbStopLossTimeDecayMode ?? '').trim().toLowerCase()
+      )
+    ) {
+      fields.ptbStopLossTimeDecayMode = 'tighten';
+    }
     if (!fields.sizePct.trim()) {
       fields.sizePct = toStringValue(cfg.sizePercent);
     }
+    applyPairLockFormDefaults(fields, cfg);
+    const pairLockMode = fields.mode === 'pair_lock';
     if (Array.isArray(cfg.tpRules)) {
       for (const item of cfg.tpRules as Record<string, unknown>[]) {
         if (!isRecord(item)) continue;
@@ -124,6 +176,40 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
     if (slRuleRows.length > 0) {
       fields.slEnabled = 'true';
+    }
+
+    if (Array.isArray(cfg.ptbStopLossRules)) {
+      for (const item of cfg.ptbStopLossRules as Record<string, unknown>[]) {
+        if (!isRecord(item)) continue;
+        ptbStopLossRuleRows.push({
+          ...createEmptyPtbStopLossRuleRow(),
+          gapUsd: toStringValue(item.gapUsd),
+          sizePct: toStringValue(item.sizePct),
+        });
+      }
+    }
+    if (
+      !pairLockMode &&
+      ptbStopLossRuleRows.length === 0 &&
+      (cfg.ptbStopLossEnabled === true ||
+        (typeof cfg.ptbStopLossGapUsd === 'number' &&
+          Number.isFinite(cfg.ptbStopLossGapUsd) &&
+          true))
+    ) {
+      const legacyGapUsd = Number(cfg.ptbStopLossGapUsd);
+      if (Number.isFinite(legacyGapUsd)) {
+        ptbStopLossRuleRows.push({
+          ...createEmptyPtbStopLossRuleRow(),
+          gapUsd: String(legacyGapUsd),
+          sizePct: '100',
+        });
+      }
+    }
+    if (
+      ptbStopLossRuleRows.length > 0 ||
+      toStringValue(cfg.ptbStopLossGapUsd).trim().length > 0
+    ) {
+      fields.ptbStopLossEnabled = 'true';
     }
 
     if (Array.isArray(cfg.timeExitRules)) {
@@ -276,6 +362,8 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     const repeatModeRaw = toStringValue(fields.repeatMode || cfg.repeatMode).trim().toLowerCase();
     fields.repeatMode = repeatModeRaw === 'once' ? 'once' : 'loop';
     fields.onceScope = resolveTriggerMarketOnceScope(cfg, marketMode, fields.repeatMode as 'once' | 'loop');
+    const bindingModeRaw = toStringValue(cfg.bindingMode).trim().toLowerCase();
+    fields.bindingMode = bindingModeRaw === 'pair_lock_only' ? 'pair_lock_only' : 'standard';
 
     const cycleWindowFields = readTriggerMarketPriceCycleWindowFields(cfg);
     fields.cycleWindowMode = cycleWindowFields.cycleWindowMode;
@@ -287,7 +375,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
     if (
       (fields.priceToBeatTriggerEnabled ?? '').trim().toLowerCase() === 'true' &&
-      !['manual', 'auto_last_3_avg_excursion'].includes(
+      !['manual', 'auto_last_3_avg_excursion', 'auto_vol_pct'].includes(
         (fields.priceToBeatMode ?? '').trim().toLowerCase()
       )
     ) {
@@ -310,7 +398,10 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
   const outcomeConditionRows: OutcomeConditionRow[] = [];
   let drawdownRuleRows: DrawdownRuleRow[] = [];
   if (nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') {
-    if (Array.isArray(cfg.outcomeConditions)) {
+    const pairLockOnlyTrigger =
+      nodeType === 'trigger.market_price' &&
+      toStringValue(cfg.bindingMode).trim().toLowerCase() === 'pair_lock_only';
+    if (Array.isArray(cfg.outcomeConditions) && !pairLockOnlyTrigger) {
       for (const item of cfg.outcomeConditions as Record<string, unknown>[]) {
         if (!isRecord(item)) continue;
         outcomeConditionRows.push({
@@ -323,6 +414,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
         });
       }
     } else if (
+      !pairLockOnlyTrigger &&
       toStringValue(cfg.tokenId).trim() &&
       (
         toStringValue(cfg.triggerCondition).trim() ||
@@ -396,6 +488,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     drawdownRuleRows,
     tpRuleRows,
     slRuleRows,
+    ptbStopLossRuleRows,
     timeExitRuleRows,
     expressionRows: expression.rows,
     expressionJoin: expression.join,
@@ -503,6 +596,7 @@ export function buildNodeConfigFromForm(
 
     const sideRaw = toStringValue(config.side).trim().toLowerCase();
     const isBuySide = sideRaw === 'buy';
+    const pairLockMode = toStringValue(config.mode).trim().toLowerCase() === 'pair_lock';
     const tpRules = (form.tpRuleRows || [])
       .map((row) => {
         const priceCent = Number(row.priceCent.trim());
@@ -521,6 +615,15 @@ export function buildNodeConfigFromForm(
         return { priceCent, sizePct };
       })
       .filter((item): item is { priceCent: number; sizePct: number } => item != null);
+    const ptbStopLossRules = (form.ptbStopLossRuleRows || [])
+      .map((row) => {
+        const gapUsd = Number(row.gapUsd.trim());
+        const sizePct = Number(row.sizePct.trim());
+        if (!Number.isFinite(gapUsd)) return null;
+        if (!Number.isFinite(sizePct) || sizePct <= 0 || sizePct > 100) return null;
+        return { gapUsd, sizePct };
+      })
+      .filter((item): item is { gapUsd: number; sizePct: number } => item != null);
     const timeExitRules = (form.timeExitRuleRows || [])
       .map((row) => {
         const elapsedMinutes = Number(row.elapsedMinutes.trim());
@@ -532,6 +635,14 @@ export function buildNodeConfigFromForm(
       .filter((item): item is { elapsedMinutes: number; remainingPct: number } => item != null);
     const tpEnabled = config.tpEnabled === true || tpRules.length > 0;
     const slEnabled = config.slEnabled === true || slRules.length > 0;
+    const ptbStopLossEnabled = config.ptbStopLossEnabled === true;
+    const anyStopLossEnabled = slEnabled || ptbStopLossEnabled || ptbStopLossRules.length > 0;
+    if (pairLockMode) {
+      normalizePairLockBuildConfig(config);
+    } else {
+      delete config.mode;
+      for (const key of PAIR_LOCK_CONFIG_KEYS) delete config[key];
+    }
     if (!isBuySide) {
       delete config.tpEnabled;
       delete config.tpPriceCent;
@@ -540,6 +651,9 @@ export function buildNodeConfigFromForm(
       delete config.slEnabled;
       delete config.slPriceCent;
       delete config.slPrice;
+      delete config.ptbStopLossEnabled;
+      delete config.ptbStopLossGapUsd;
+      delete config.ptbStopLossRules;
       delete config.slRules;
       delete config.slTriggerPriceMode;
       delete config.timeExitRules;
@@ -554,13 +668,35 @@ export function buildNodeConfigFromForm(
       delete config.priceToBeatGuardEnabled;
       delete config.priceToBeatMaxDiff;
       delete config.priceToBeatMaxDiffUnit;
+      delete config.priceToBeatStopLossBumpEnabled;
+      delete config.priceToBeatStopLossBumpAmount;
+      delete config.priceToBeatStopLossBumpUnit;
+      delete config.priceToBeatStopLossBumpScope;
+      delete config.priceToBeatStopLossBumpDecayWindows;
       delete config.notifyOnPriceToBeatGapBlocked;
+      delete config.priceToBeatMaxPriceRelaxMissCount;
+      delete config.priceToBeatMaxPriceRelaxHistoryCount;
+      delete config.priceToBeatMaxPriceRelaxMinValue;
+      delete config.priceToBeatMaxPriceRelaxMinUnit;
+      delete config.priceToBeatMaxPriceRelaxMinDepthUsd;
+      delete config.priceToBeatMaxPriceRelaxStepMode;
+      delete config.priceToBeatMaxPriceRelaxStepValue;
+      delete config.priceToBeatMaxPriceRelaxStepUnit;
       delete config.notifyOnTpHit;
       delete config.notifyOnSlHit;
       delete config.reenterOnSlHit;
       delete config.reentryMaxAttempts;
+      delete config.reentryCooldownSec;
+      delete config.reentrySkipCurrentWindow;
       delete config.reentryMinPriceCent;
       delete config.reentryMaxPriceCent;
+      delete config.reentryThresholdDecay;
+      delete config.reentryMaxPriceTightenBps;
+      delete config.reentryPriceToBeatMaxDiff;
+      delete config.reentryPriceToBeatMaxDiffUnit;
+      delete config.ptbStopLossTimeDecayMode;
+    } else if (pairLockMode) {
+      normalizePairLockStopLossBuildConfig(config);
     } else {
       if (config.triggerPriceGuardEnabled !== true) {
         delete config.notifyOnTriggerPriceBlocked;
@@ -575,6 +711,22 @@ export function buildNodeConfigFromForm(
         delete config.priceToBeatMode;
         delete config.priceToBeatMaxDiff;
         delete config.priceToBeatMaxDiffUnit;
+        delete config.priceToBeatStopLossBumpEnabled;
+        delete config.priceToBeatStopLossBumpAmount;
+        delete config.priceToBeatStopLossBumpUnit;
+        delete config.priceToBeatStopLossBumpScope;
+        delete config.priceToBeatStopLossBumpDecayWindows;
+        delete config.priceToBeatMaxPriceRelaxMissCount;
+        delete config.priceToBeatMaxPriceRelaxHistoryCount;
+        delete config.priceToBeatMaxPriceRelaxMinValue;
+        delete config.priceToBeatMaxPriceRelaxMinUnit;
+        delete config.priceToBeatMaxPriceRelaxMinDepthUsd;
+        delete config.priceToBeatMaxPriceRelaxStepMode;
+        delete config.priceToBeatMaxPriceRelaxStepValue;
+        delete config.priceToBeatMaxPriceRelaxStepUnit;
+        delete config.reentryPriceToBeatMaxDiff;
+        delete config.reentryPriceToBeatMaxDiffUnit;
+        delete config.reentryThresholdDecay;
         delete config.notifyOnPriceToBeatGapBlocked;
         delete config.retryOnPriceToBeatGuardBlock;
       } else {
@@ -582,6 +734,8 @@ export function buildNodeConfigFromForm(
         config.priceToBeatMode =
           priceToBeatModeRaw === 'auto_last_3_avg_excursion'
             ? 'auto_last_3_avg_excursion'
+            : priceToBeatModeRaw === 'auto_vol_pct'
+              ? 'auto_vol_pct'
             : 'manual';
         if (config.priceToBeatMode === 'manual') {
           const priceToBeatUnitRaw = toStringValue(config.priceToBeatMaxDiffUnit).trim().toLowerCase();
@@ -590,6 +744,125 @@ export function buildNodeConfigFromForm(
         } else {
           delete config.priceToBeatMaxDiff;
           delete config.priceToBeatMaxDiffUnit;
+        }
+        const relaxMissCount = Number(
+          toStringValue(config.priceToBeatMaxPriceRelaxMissCount).trim()
+        );
+        if (Number.isInteger(relaxMissCount) && relaxMissCount > 0) {
+          config.priceToBeatMaxPriceRelaxMissCount = relaxMissCount;
+        } else {
+          delete config.priceToBeatMaxPriceRelaxMissCount;
+        }
+        const relaxHistoryCount = Number(
+          toStringValue(config.priceToBeatMaxPriceRelaxHistoryCount).trim()
+        );
+        if (Number.isInteger(relaxHistoryCount) && relaxHistoryCount > 0) {
+          config.priceToBeatMaxPriceRelaxHistoryCount = relaxHistoryCount;
+        } else {
+          delete config.priceToBeatMaxPriceRelaxHistoryCount;
+        }
+        const relaxMinValue = Number(
+          toStringValue(config.priceToBeatMaxPriceRelaxMinValue).trim()
+        );
+        if (Number.isFinite(relaxMinValue) && relaxMinValue > 0) {
+          config.priceToBeatMaxPriceRelaxMinValue = relaxMinValue;
+          const relaxMinUnitRaw = toStringValue(config.priceToBeatMaxPriceRelaxMinUnit)
+            .trim()
+            .toLowerCase();
+          config.priceToBeatMaxPriceRelaxMinUnit =
+            relaxMinUnitRaw === 'usd' || relaxMinUnitRaw === 'cent'
+              ? relaxMinUnitRaw
+              : 'usd';
+        } else {
+          delete config.priceToBeatMaxPriceRelaxMinValue;
+          delete config.priceToBeatMaxPriceRelaxMinUnit;
+        }
+        const relaxMinDepthUsd = Number(
+          toStringValue(config.priceToBeatMaxPriceRelaxMinDepthUsd).trim()
+        );
+        if (Number.isFinite(relaxMinDepthUsd) && relaxMinDepthUsd > 0) {
+          config.priceToBeatMaxPriceRelaxMinDepthUsd = relaxMinDepthUsd;
+        } else {
+          delete config.priceToBeatMaxPriceRelaxMinDepthUsd;
+        }
+        const relaxStepModeRaw = toStringValue(config.priceToBeatMaxPriceRelaxStepMode)
+          .trim()
+          .toLowerCase();
+        config.priceToBeatMaxPriceRelaxStepMode =
+          relaxStepModeRaw === 'absolute' ? 'absolute' : 'percent';
+        const relaxStepValue = Number(
+          toStringValue(config.priceToBeatMaxPriceRelaxStepValue).trim()
+        );
+        if (
+          Number.isFinite(relaxStepValue) &&
+          relaxStepValue > 0 &&
+          (config.priceToBeatMaxPriceRelaxStepMode !== 'percent' || relaxStepValue <= 100)
+        ) {
+          config.priceToBeatMaxPriceRelaxStepValue = relaxStepValue;
+        } else {
+          config.priceToBeatMaxPriceRelaxStepMode = 'percent';
+          config.priceToBeatMaxPriceRelaxStepValue = 25;
+        }
+        if (config.priceToBeatMaxPriceRelaxStepMode === 'absolute') {
+          const relaxStepUnitRaw = toStringValue(config.priceToBeatMaxPriceRelaxStepUnit)
+            .trim()
+            .toLowerCase();
+          config.priceToBeatMaxPriceRelaxStepUnit =
+            relaxStepUnitRaw === 'cent' ? 'cent' : 'usd';
+        } else {
+          delete config.priceToBeatMaxPriceRelaxStepUnit;
+        }
+        if (config.priceToBeatStopLossBumpEnabled === true) {
+          const bumpAmount = Number(
+            toStringValue(config.priceToBeatStopLossBumpAmount).trim()
+          );
+          if (Number.isFinite(bumpAmount) && bumpAmount > 0) {
+            config.priceToBeatStopLossBumpAmount = bumpAmount;
+          } else {
+            delete config.priceToBeatStopLossBumpAmount;
+          }
+          const bumpMaxValue = Number(
+            toStringValue(config.priceToBeatStopLossBumpMaxValue).trim()
+          );
+          if (Number.isFinite(bumpMaxValue) && bumpMaxValue > 0) {
+            config.priceToBeatStopLossBumpMaxValue = bumpMaxValue;
+          } else {
+            delete config.priceToBeatStopLossBumpMaxValue;
+          }
+          const bumpUnitRaw = toStringValue(config.priceToBeatStopLossBumpUnit)
+            .trim()
+            .toLowerCase();
+          config.priceToBeatStopLossBumpUnit =
+            bumpUnitRaw === 'usd' || bumpUnitRaw === 'cent'
+              ? bumpUnitRaw
+              : config.priceToBeatMode === 'manual' &&
+                  (config.priceToBeatMaxDiffUnit === 'usd' ||
+                    config.priceToBeatMaxDiffUnit === 'cent')
+                ? config.priceToBeatMaxDiffUnit
+                : 'usd';
+          const bumpScopeRaw = toStringValue(config.priceToBeatStopLossBumpScope)
+            .trim()
+            .toLowerCase();
+          config.priceToBeatStopLossBumpScope =
+            bumpScopeRaw === 'global' ? 'global' : 'per_scope';
+          const bumpDecayWindows = Number(
+            toStringValue(config.priceToBeatStopLossBumpDecayWindows).trim()
+          );
+          if (Number.isInteger(bumpDecayWindows) && bumpDecayWindows > 0) {
+            config.priceToBeatStopLossBumpDecayWindows = bumpDecayWindows;
+          } else {
+            delete config.priceToBeatStopLossBumpDecayWindows;
+          }
+        } else {
+          delete config.priceToBeatStopLossBumpEnabled;
+          delete config.priceToBeatStopLossBumpAmount;
+          delete config.priceToBeatStopLossBumpMaxValue;
+          delete config.priceToBeatStopLossBumpUnit;
+          delete config.priceToBeatStopLossBumpScope;
+          delete config.priceToBeatStopLossBumpDecayWindows;
+        }
+        if (config.priceToBeatMode !== 'manual') {
+          delete config.priceToBeatStopLossBumpMaxValue;
         }
       }
       if (config.maxPriceCent == null) {
@@ -612,27 +885,126 @@ export function buildNodeConfigFromForm(
       } else {
         delete config.slRules;
       }
+      if (ptbStopLossRules.length > 0) {
+        config.ptbStopLossRules = ptbStopLossRules;
+      } else {
+        delete config.ptbStopLossRules;
+      }
+      if (config.ptbStopLossEnabled !== true) {
+        delete config.ptbStopLossEnabled;
+        delete config.ptbStopLossGapUsd;
+        delete config.ptbStopLossRules;
+        delete config.ptbStopLossTimeDecayMode;
+      } else {
+        delete config.ptbStopLossGapUsd;
+        const ptbStopLossTimeDecayModeRaw = toStringValue(config.ptbStopLossTimeDecayMode)
+          .trim()
+          .toLowerCase();
+        config.ptbStopLossTimeDecayMode =
+          ptbStopLossTimeDecayModeRaw === 'none' ||
+          ptbStopLossTimeDecayModeRaw === 'relax'
+            ? ptbStopLossTimeDecayModeRaw
+            : 'tighten';
+      }
       if (!slEnabled) {
         delete config.slEnabled;
         delete config.slPriceCent;
         delete config.slPrice;
         delete config.slRules;
         delete config.slTriggerPriceMode;
+      }
+      if (!anyStopLossEnabled) {
         delete config.notifyOnSlHit;
         delete config.reenterOnSlHit;
         delete config.reentryMaxAttempts;
+        delete config.reentryCooldownSec;
+        delete config.reentrySkipCurrentWindow;
         delete config.reentryMinPriceCent;
         delete config.reentryMaxPriceCent;
+        delete config.reentryThresholdDecay;
+        delete config.reentryMaxPriceTightenBps;
+        delete config.reentryPriceToBeatMaxDiff;
+        delete config.reentryPriceToBeatMaxDiffUnit;
       }
       if (timeExitRules.length > 0) {
         config.timeExitRules = timeExitRules;
       } else {
         delete config.timeExitRules;
       }
+      if (slRules.length === 0 && ptbStopLossRules.length === 0) {
+        delete config.stagedSlReentryOnlyAfterAllStages;
+      }
       if (config.reenterOnSlHit !== true) {
         delete config.reentryMaxAttempts;
+        delete config.reentryCooldownSec;
+        delete config.reentrySkipCurrentWindow;
         delete config.reentryMinPriceCent;
         delete config.reentryMaxPriceCent;
+        delete config.reentryThresholdDecay;
+        delete config.reentryMaxPriceTightenBps;
+        delete config.reentryPriceToBeatMaxDiff;
+        delete config.reentryPriceToBeatMaxDiffUnit;
+        delete config.stagedSlReentryOnlyAfterAllStages;
+      } else if (config.priceToBeatGuardEnabled === true) {
+        const reentryPriceToBeatMaxDiff = Number(
+          toStringValue(config.reentryPriceToBeatMaxDiff).trim()
+        );
+        if (
+          Number.isFinite(reentryPriceToBeatMaxDiff) &&
+          reentryPriceToBeatMaxDiff > 0
+        ) {
+          config.reentryPriceToBeatMaxDiff = reentryPriceToBeatMaxDiff;
+          const reentryPriceToBeatUnitRaw = toStringValue(
+            config.reentryPriceToBeatMaxDiffUnit
+          )
+            .trim()
+            .toLowerCase();
+          if (reentryPriceToBeatUnitRaw === 'usd' || reentryPriceToBeatUnitRaw === 'cent') {
+            config.reentryPriceToBeatMaxDiffUnit = reentryPriceToBeatUnitRaw;
+          } else {
+            delete config.reentryPriceToBeatMaxDiffUnit;
+          }
+        } else {
+          delete config.reentryPriceToBeatMaxDiff;
+          delete config.reentryPriceToBeatMaxDiffUnit;
+        }
+        const reentryThresholdDecay = Number(
+          toStringValue(config.reentryThresholdDecay).trim()
+        );
+        if (
+          Number.isFinite(reentryThresholdDecay) &&
+          reentryThresholdDecay > 0 &&
+          reentryThresholdDecay <= 1
+        ) {
+          config.reentryThresholdDecay = reentryThresholdDecay;
+        } else {
+          delete config.reentryThresholdDecay;
+        }
+      } else {
+        delete config.reentryPriceToBeatMaxDiff;
+        delete config.reentryPriceToBeatMaxDiffUnit;
+        delete config.reentryThresholdDecay;
+      }
+      const reentryCooldownSec = Number(toStringValue(config.reentryCooldownSec).trim());
+      if (Number.isInteger(reentryCooldownSec) && reentryCooldownSec >= 0) {
+        config.reentryCooldownSec = reentryCooldownSec;
+      } else {
+        delete config.reentryCooldownSec;
+      }
+      if (config.reentrySkipCurrentWindow !== true) {
+        delete config.reentrySkipCurrentWindow;
+      }
+      const reentryMaxPriceTightenBps = Number(
+        toStringValue(config.reentryMaxPriceTightenBps).trim()
+      );
+      if (
+        Number.isInteger(reentryMaxPriceTightenBps) &&
+        reentryMaxPriceTightenBps >= 0 &&
+        reentryMaxPriceTightenBps <= 10_000
+      ) {
+        config.reentryMaxPriceTightenBps = reentryMaxPriceTightenBps;
+      } else {
+        delete config.reentryMaxPriceTightenBps;
       }
     }
   }
@@ -799,6 +1171,8 @@ export function buildNodeConfigFromForm(
         config.priceToBeatMode =
           priceToBeatModeRaw === 'auto_last_3_avg_excursion'
             ? 'auto_last_3_avg_excursion'
+            : priceToBeatModeRaw === 'auto_vol_pct'
+              ? 'auto_vol_pct'
             : 'manual';
         if (config.priceToBeatMode === 'manual') {
           const ptbUnitRaw = toStringValue(config.priceToBeatTriggerUnit).trim().toLowerCase();
@@ -833,6 +1207,21 @@ export function buildNodeConfigFromForm(
         delete config.priceToBeatTriggerUnit;
         delete config.priceToBeatTriggerMinGap;
         delete config.priceToBeatTriggerMaxGap;
+      }
+      if (toStringValue(config.bindingMode).trim().toLowerCase() === 'pair_lock_only') {
+        delete config.priceToBeatTriggerEnabled;
+        delete config.priceToBeatMode;
+        delete config.priceToBeatTriggerUnit;
+        delete config.priceToBeatTriggerMinGap;
+        delete config.priceToBeatTriggerMaxGap;
+        delete config.outcomeConditions;
+        delete config.tokenId;
+        delete config.outcomeLabel;
+        delete config.triggerCondition;
+        delete config.triggerPriceCent;
+        delete config.triggerPrice;
+        delete config.maxPriceCent;
+        delete config.maxPrice;
       }
     } else {
       delete config.marketScope;
@@ -921,7 +1310,14 @@ export function buildNodeConfigFromForm(
     delete config.maxPrice;
   }
 
-  if ((nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') && form.outcomeConditionRows.length > 0) {
+  if (
+    (nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') &&
+    form.outcomeConditionRows.length > 0 &&
+    !(
+      nodeType === 'trigger.market_price' &&
+      toStringValue(config.bindingMode).trim().toLowerCase() === 'pair_lock_only'
+    )
+  ) {
     const ptbTriggerEnabled = nodeType === 'trigger.market_price' && config.priceToBeatTriggerEnabled === true;
     const conditions = form.outcomeConditionRows
       .map((row) => ({

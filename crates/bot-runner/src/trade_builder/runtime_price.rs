@@ -112,6 +112,22 @@ fn trade_builder_runtime_price_fallback(
     None
 }
 
+fn trade_builder_requires_book_aware_runtime_price(order: &TradeBuilderOrder) -> bool {
+    if trade_builder_uses_fast_runtime_pricing(order) {
+        return true;
+    }
+
+    order.side == "buy"
+        && order.kind == "immediate"
+        && (order.max_price.is_some()
+            || order.best_ask_floor_price.is_some()
+            || order.guard_trigger_price.is_some()
+            || matches!(
+                order.last_error.as_deref(),
+                Some("pair_primary_best_ask_unavailable" | "pair_counter_best_ask_unavailable")
+            ))
+}
+
 fn trade_builder_runtime_warning(errors: Vec<String>) -> Option<String> {
     let errors: Vec<String> = errors
         .into_iter()

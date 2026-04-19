@@ -301,6 +301,7 @@ export function FlowCanvasEditorBody({
     upstreamTriggerPrice: selectedNodeUpstreamTriggerPrice,
     upstreamMaxPriceResolution: selectedNodeUpstreamMaxPriceResolution,
     upstreamFixedMarketResolution: selectedNodeUpstreamFixedMarketResolution,
+    upstreamPairLockTrigger: selectedNodeUpstreamPairLockTrigger,
   } = useSelectedNodeUpstream({ selectedNodeId: inspectedNodeId, canvasNodes, canvasEdges });
   useEffect(() => {
     if (graphFingerprint === lastSeenPropGraphFingerprintRef.current) return;
@@ -559,6 +560,7 @@ export function FlowCanvasEditorBody({
   const { marketOutcomes, marketOutcomeTokenIdSet, outcomesLoading } = useMarketOutcomes({
     nodeTypeDraft,
     nodeForm,
+    upstreamPairLockTrigger: selectedNodeUpstreamPairLockTrigger,
   });
   const addOutcomeCondition = (tokenId: string, outcomeLabel: string) => {
     setHasPendingNodeDraft(true);
@@ -1027,6 +1029,7 @@ export function FlowCanvasEditorBody({
       selectedNodeUpstreamAutoScope={selectedNodeUpstreamAutoScope}
       selectedNodeUpstreamTriggerPrice={selectedNodeUpstreamTriggerPrice}
       selectedNodeUpstreamMaxPriceResolution={selectedNodeUpstreamMaxPriceResolution}
+      selectedNodeUpstreamPairLockTrigger={selectedNodeUpstreamPairLockTrigger}
       userTelegramBotTokenMasked={userTelegramBotTokenMasked ?? null}
       userTelegramDefaultChatId={userTelegramDefaultChatId ?? null}
       nodeInspectorActions={nodeInspectorActions}

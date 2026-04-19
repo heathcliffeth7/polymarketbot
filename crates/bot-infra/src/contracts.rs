@@ -1,7 +1,7 @@
 use crate::db::PostgresRepository;
 use crate::exchange::{
     ClobRestClient, FillInfo, OrderAck, OrderBookSnapshot, OrderInfo, PlaceOrderRequest,
-    PriceSnapshot,
+    PriceHistoryPoint, PriceSnapshot,
 };
 pub use crate::market_data::MarketDataProvider;
 use anyhow::Result;
@@ -19,6 +19,15 @@ pub trait OrderExecutor: Send + Sync {
     }
     async fn last_trade_price(&self, _token_id: &str) -> Result<Option<f64>> {
         Ok(None)
+    }
+    async fn price_history(
+        &self,
+        _token_id: &str,
+        _start_ts: i64,
+        _end_ts: i64,
+        _fidelity: i64,
+    ) -> Result<Vec<PriceHistoryPoint>> {
+        Ok(Vec::new())
     }
     async fn fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>>;
     async fn place(&self, req: &PlaceOrderRequest) -> Result<OrderAck>;
@@ -53,6 +62,16 @@ where
 
     async fn last_trade_price(&self, token_id: &str) -> Result<Option<f64>> {
         ClobRestClient::get_last_trade_price(self, token_id).await
+    }
+
+    async fn price_history(
+        &self,
+        token_id: &str,
+        start_ts: i64,
+        end_ts: i64,
+        fidelity: i64,
+    ) -> Result<Vec<PriceHistoryPoint>> {
+        ClobRestClient::get_price_history(self, token_id, start_ts, end_ts, fidelity).await
     }
 
     async fn place(&self, req: &PlaceOrderRequest) -> Result<OrderAck> {

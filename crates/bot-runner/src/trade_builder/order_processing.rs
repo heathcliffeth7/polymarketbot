@@ -110,6 +110,12 @@ async fn maybe_handle_trade_builder_order_eligibility_window(
                 "Eligible penceresi kapandigi icin emir icra edilemeden expire oldu.",
             )
             .await;
+            maybe_abort_trade_builder_pair_session_for_terminal_order(
+                repo,
+                order,
+                "pair_counter_expired",
+            )
+            .await?;
             Ok(true)
         }
         TradeBuilderEligibilityWindowState::Allow => Ok(false),
@@ -328,6 +334,12 @@ async fn process_trade_builder_order(
                     "Sure asildi, emir icra edilemeden expire oldu.",
                 )
                 .await;
+                maybe_abort_trade_builder_pair_session_for_terminal_order(
+                    repo,
+                    &order,
+                    "pair_counter_ttl_expired",
+                )
+                .await?;
             }
             return Ok(());
         }
@@ -338,6 +350,16 @@ async fn process_trade_builder_order(
     }
 
     if maybe_expire_trade_builder_stale_order(repo, gamma, &order).await? {
+        maybe_abort_trade_builder_pair_session_for_terminal_order(
+            repo,
+            &order,
+            "pair_counter_stale_market_cycle",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    if maybe_apply_trade_builder_pair_lock_runtime(repo, &mut order, now).await? {
         return Ok(());
     }
 
@@ -348,15 +370,16 @@ async fn process_trade_builder_order(
     let snapshot_age_ms = fresh_runtime_snapshot
         .as_ref()
         .map(|snapshot| trade_builder_runtime_snapshot_age_ms(snapshot, now));
+    let use_book_aware_runtime_price = trade_builder_requires_book_aware_runtime_price(&order);
     let runtime_price_fetch = if let Some(snapshot) = fresh_runtime_snapshot.as_ref() {
         if let Some(runtime_price) = trade_builder_runtime_price_from_snapshot(snapshot) {
             TradeBuilderRuntimePriceFetch::Resolved(runtime_price)
-        } else if trade_builder_uses_fast_runtime_pricing(&order) {
+        } else if use_book_aware_runtime_price {
             resolve_trade_builder_fast_runtime_price(ws, client, &order).await?
         } else {
             resolve_trade_builder_runtime_price(ws, client, &order).await?
         }
-    } else if trade_builder_uses_fast_runtime_pricing(&order) {
+    } else if use_book_aware_runtime_price {
         resolve_trade_builder_fast_runtime_price(ws, client, &order).await?
     } else {
         resolve_trade_builder_runtime_price(ws, client, &order).await?
@@ -408,6 +431,19 @@ async fn process_trade_builder_order(
     let execution_price = trade_builder_execution_price_for_order(&order, &runtime_price);
     let persisted_last_seen_price =
         trade_builder_last_seen_price_for_order(&order, trigger_eval_price, execution_price);
+    let ptb_stop_loss_evaluation = trade_builder_evaluate_ptb_stop_loss(&order);
+    if let Some(reference_price) = ptb_stop_loss_evaluation
+        .as_ref()
+        .and_then(|evaluation| trade_builder_ptb_reference_price_persist_candidate(&order, evaluation))
+    {
+        repo.set_trade_builder_order_ptb_reference_price(order.id, reference_price)
+            .await?;
+        order.ptb_reference_price = Some(reference_price);
+    }
+    let effective_trigger_current_price = ptb_stop_loss_evaluation
+        .as_ref()
+        .and_then(|evaluation| evaluation.current_chainlink_price)
+        .unwrap_or(trigger_eval_price);
     if let Some(runtime_warning) = runtime_price.runtime_warning.as_deref() {
         repo.append_trade_builder_order_event(
             order.id,
@@ -428,7 +464,7 @@ async fn process_trade_builder_order(
         .await?;
     }
     let sl_preemption =
-        maybe_preempt_trade_builder_take_profit_for_stop_loss(repo, &mut order, &runtime_price)
+        maybe_preempt_trade_builder_take_profit_for_stop_loss(repo, cfg, &mut order, &runtime_price)
             .await?;
     if sl_preemption.tp_preempted {
         let mut ready_sl_futures = sl_preemption
@@ -527,8 +563,14 @@ async fn process_trade_builder_order(
         }
     }
 
-    let trigger_evaluation =
-        evaluate_trade_builder_order_trigger(&order, previous_price, trigger_eval_price);
+    let trigger_evaluation = if let Some(evaluation) = ptb_stop_loss_evaluation.as_ref() {
+        TradeBuilderTriggerEvaluation {
+            should_trigger: evaluation.should_trigger,
+            first_tick_threshold_used: evaluation.should_trigger && previous_price.is_none(),
+        }
+    } else {
+        evaluate_trade_builder_order_trigger(&order, previous_price, trigger_eval_price)
+    };
     if !trigger_evaluation.should_trigger {
         if order.kind == "conditional"
             && order.last_error.as_deref() == Some("composite_bid_confirmation_waiting")
@@ -559,7 +601,7 @@ async fn process_trade_builder_order(
                 trigger_condition = ?order.trigger_condition,
                 trigger_price = ?order.trigger_price,
                 previous_price = ?previous_price,
-                current_price = trigger_eval_price,
+                current_price = effective_trigger_current_price,
                 execution_price,
                 sl_trigger_price_mode = ?order.sl_trigger_price_mode,
                 order_status = %order.status,
@@ -624,29 +666,36 @@ async fn process_trade_builder_order(
             return Ok(());
         }
         if order.kind == "conditional" && order.status == "pending" {
+            let mut trigger_not_met_payload = json!({
+                "reason_code": "trigger_not_crossed",
+                "reason_message": "Trigger condition has not crossed yet.",
+                "side": &order.side,
+                "market_slug": &order.market_slug,
+                "token_id": &order.token_id,
+                "trigger_condition": order.trigger_condition.as_deref(),
+                "trigger_price": order.trigger_price,
+                "previous_price": previous_price,
+                "current_price": effective_trigger_current_price,
+                "execution_price": execution_price,
+                "trigger_eval_price": trigger_eval_price,
+                "sl_trigger_price_mode": order.sl_trigger_price_mode.as_deref(),
+                "best_bid": runtime_price.best_bid,
+                "last_trade_price": runtime_price.last_trade_price,
+                "status_before": &order.status,
+                "status_after": "armed"
+            });
+            if let (Some(payload), Some(evaluation)) = (
+                trigger_not_met_payload.as_object_mut(),
+                ptb_stop_loss_evaluation.as_ref(),
+            ) {
+                append_trade_builder_ptb_stop_loss_payload(payload, evaluation);
+            }
             repo.set_trade_builder_order_status(order.id, "armed", None)
                 .await?;
             repo.append_trade_builder_order_event(
                 order.id,
                 "trigger_not_met",
-                &json!({
-                    "reason_code": "trigger_not_crossed",
-                    "reason_message": "Trigger condition has not crossed yet.",
-                    "side": &order.side,
-                    "market_slug": &order.market_slug,
-                    "token_id": &order.token_id,
-                    "trigger_condition": order.trigger_condition.as_deref(),
-                    "trigger_price": order.trigger_price,
-                    "previous_price": previous_price,
-                    "current_price": trigger_eval_price,
-                    "execution_price": execution_price,
-                    "trigger_eval_price": trigger_eval_price,
-                    "sl_trigger_price_mode": order.sl_trigger_price_mode.as_deref(),
-                    "best_bid": runtime_price.best_bid,
-                    "last_trade_price": runtime_price.last_trade_price,
-                    "status_before": &order.status,
-                    "status_after": "armed"
-                }),
+                &trigger_not_met_payload,
             )
             .await?;
         }
@@ -668,7 +717,7 @@ async fn process_trade_builder_order(
                 "trigger_condition": order.trigger_condition.as_deref(),
                 "trigger_price": order.trigger_price,
                 "previous_price": previous_price,
-                "current_price": trigger_eval_price,
+                "current_price": effective_trigger_current_price,
                 "execution_price": execution_price
             }),
         )
@@ -685,7 +734,7 @@ async fn process_trade_builder_order(
         trigger_condition = ?order.trigger_condition,
         trigger_price = ?order.trigger_price,
         previous_price = ?previous_price,
-        current_price = trigger_eval_price,
+        current_price = effective_trigger_current_price,
         execution_price,
         sl_trigger_price_mode = ?order.sl_trigger_price_mode,
         order_status = %order.status,
@@ -751,7 +800,13 @@ async fn process_trade_builder_order(
             "SL_BID_CONFIRMATION_CONFIRMED"
         );
     }
-    maybe_latch_trade_builder_stop_loss(repo, &mut order, trigger_eval_price).await?;
+    maybe_latch_trade_builder_stop_loss(
+        repo,
+        &mut order,
+        effective_trigger_current_price,
+        ptb_stop_loss_evaluation.as_ref(),
+    )
+    .await?;
     if order.active_exchange_order_id.is_none() {
         let _ = maybe_dispatch_trade_builder_parallel_exit_batch(
             repo,
@@ -887,6 +942,8 @@ mod eligibility_window_tests {
             origin_flow_definition_id: None,
             origin_flow_run_id: None,
             origin_flow_node_key: None,
+            pair_session_id: None,
+            pair_leg_role: None,
             tp_enabled: false,
             tp_price: None,
             tp_rules_json: Vec::new(),
@@ -908,6 +965,15 @@ mod eligibility_window_tests {
             retry_on_trigger_guard_block: false,
             retry_on_execution_floor_guard_block: false,
             retry_on_max_price_block: false,
+            ptb_stop_loss_gap_usd: None,
+            ptb_reference_price: None,
+            ptb_stop_loss_rules_json: Vec::new(),
+            ptb_stop_loss_time_decay_mode: None,
+            staged_sl_retry_only_dust: false,
+            staged_sl_retry_dust_metric: None,
+            staged_sl_retry_dust_value: None,
+            staged_sl_reentry_use_sold_notional: false,
+            staged_sl_reentry_only_after_all_stages: false,
             sl_trigger_price_mode: None,
             reenter_on_sl_hit: false,
             reentry_max_attempts: 0,

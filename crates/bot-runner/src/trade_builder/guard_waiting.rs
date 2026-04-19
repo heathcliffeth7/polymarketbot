@@ -47,6 +47,7 @@ async fn transition_trade_builder_order_to_guard_waiting(
 #[allow(clippy::too_many_arguments)]
 async fn maybe_handle_open_order_trigger_guard_cancel(
     repo: &PostgresRepository,
+    cfg: &AppConfig,
     ws: &ClobWsClient,
     client: &dyn OrderExecutor,
     order: &TradeBuilderOrder,
@@ -129,6 +130,7 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
                 .await?;
                 finalize_builder_fill(
                     repo,
+                    cfg,
                     ws,
                     order,
                     exchange_order_id,
@@ -173,6 +175,7 @@ async fn maybe_handle_open_order_trigger_guard_cancel(
             })?;
         finalize_builder_fill(
             repo,
+            cfg,
             ws,
             order,
             exchange_order_id,

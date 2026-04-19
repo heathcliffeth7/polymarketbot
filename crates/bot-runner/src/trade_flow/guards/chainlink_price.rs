@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -12,6 +12,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::Message;
 
 const WS_URL_DEFAULT: &str = "wss://ws-live-data.polymarket.com";
@@ -84,6 +85,8 @@ struct ChainlinkPriceService {
     state: RwLock<HashMap<String, SymbolPriceState>>,
     last_error: RwLock<Option<String>>,
     warned_unexpected_symbols: RwLock<HashSet<String>>,
+    dirty_assets: Mutex<HashSet<String>>,
+    dirty_update_notify: Notify,
     started: AtomicBool,
     reconnect_requested: AtomicBool,
     last_reconnect_request_at_ms: AtomicI64,
@@ -114,6 +117,8 @@ impl ChainlinkPriceService {
             state: RwLock::new(HashMap::new()),
             last_error: RwLock::new(None),
             warned_unexpected_symbols: RwLock::new(HashSet::new()),
+            dirty_assets: Mutex::new(HashSet::new()),
+            dirty_update_notify: Notify::new(),
             started: AtomicBool::new(false),
             reconnect_requested: AtomicBool::new(false),
             last_reconnect_request_at_ms: AtomicI64::new(0),
@@ -424,6 +429,28 @@ impl ChainlinkPriceService {
         }
     }
 
+    fn mark_dirty_asset(&self, symbol: &str) {
+        let Some(asset) = symbol_to_asset(symbol) else {
+            return;
+        };
+        self.dirty_assets.lock().insert(asset.to_string());
+        self.dirty_update_notify.notify_one();
+    }
+
+    fn take_dirty_assets(&self) -> Vec<String> {
+        self.dirty_assets.lock().iter().cloned().collect()
+    }
+
+    fn clear_dirty_assets(&self, assets: &[String]) {
+        if assets.is_empty() {
+            return;
+        }
+        let asset_set: HashSet<&str> = assets.iter().map(String::as_str).collect();
+        self.dirty_assets
+            .lock()
+            .retain(|asset| !asset_set.contains(asset.as_str()));
+    }
+
     fn update_price(&self, payload: PricePayload, session_id: u64) {
         let received_at_ms = Utc::now().timestamp_millis();
         let provider_age_ms = diff_ms(received_at_ms, payload.timestamp);
@@ -490,6 +517,7 @@ impl ChainlinkPriceService {
             provider_age_ms,
             "CHAINLINK_LIVE_DATA_WS_TICK"
         );
+        self.mark_dirty_asset(&payload.symbol);
         if should_warn_stale_on_arrival {
             tracing::warn!(
                 session_id,
@@ -569,6 +597,16 @@ fn asset_to_symbol(asset: &str) -> Option<&'static str> {
         "eth" => Some("eth/usd"),
         "sol" => Some("sol/usd"),
         "xrp" => Some("xrp/usd"),
+        _ => None,
+    }
+}
+
+fn symbol_to_asset(symbol: &str) -> Option<&'static str> {
+    match symbol.trim().to_ascii_lowercase().as_str() {
+        "btc/usd" => Some("btc"),
+        "eth/usd" => Some("eth"),
+        "sol/usd" => Some("sol"),
+        "xrp/usd" => Some("xrp"),
         _ => None,
     }
 }
@@ -752,6 +790,19 @@ pub(crate) fn ensure_chainlink_price_stream_started() {
     SERVICE.ensure_started();
 }
 
+pub(crate) async fn wait_for_chainlink_dirty_asset_update() {
+    SERVICE.ensure_started();
+    SERVICE.dirty_update_notify.notified().await;
+}
+
+pub(crate) fn take_chainlink_dirty_assets() -> Vec<String> {
+    SERVICE.take_dirty_assets()
+}
+
+pub(crate) fn clear_chainlink_dirty_assets(assets: &[String]) {
+    SERVICE.clear_dirty_assets(assets);
+}
+
 pub(crate) fn get_chainlink_price_start_tick(
     asset: &str,
     target_ms: i64,
@@ -763,6 +814,14 @@ pub(crate) fn get_chainlink_price_start_tick(
         PTB_START_TICK_MAX_PAST_TOLERANCE_MS,
         PTB_START_TICK_MAX_FUTURE_TOLERANCE_MS,
     )
+}
+
+pub(crate) fn get_chainlink_price_near_timestamp(
+    asset: &str,
+    target_ms: i64,
+) -> Result<ChainlinkPriceTimestampSnapshot> {
+    SERVICE.ensure_started();
+    SERVICE.get_price_near_timestamp_with_tolerance(asset, target_ms, 60_000, 2_000)
 }
 
 pub(crate) fn get_chainlink_price_window_stats(
@@ -811,6 +870,24 @@ mod tests {
         assert_eq!(asset_to_symbol(" sol "), Some("sol/usd"));
         assert_eq!(asset_to_symbol("xrp"), Some("xrp/usd"));
         assert_eq!(asset_to_symbol("doge"), None);
+    }
+
+    #[test]
+    fn update_price_marks_dirty_asset_and_clear_removes_it() {
+        let service = ChainlinkPriceService::new();
+
+        service.update_price(
+            PricePayload {
+                symbol: "btc/usd".to_string(),
+                value: 70_505.34,
+                timestamp: Utc::now().timestamp_millis(),
+            },
+            99,
+        );
+
+        assert_eq!(service.take_dirty_assets(), vec!["btc".to_string()]);
+        service.clear_dirty_assets(&["btc".to_string()]);
+        assert!(service.take_dirty_assets().is_empty());
     }
 
     #[test]
@@ -1179,10 +1256,13 @@ mod tests {
 
         let err = service
             .get_window_stats("eth", 100_000, 200_000)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("resolving chainlink window close tick"));
-        assert!(err.contains("closest past tick is"));
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("resolving chainlink window close tick"));
+        assert!(err
+            .chain()
+            .any(|source| source.to_string().contains("closest past tick is")));
     }
 
     #[test]

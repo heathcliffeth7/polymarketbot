@@ -18,8 +18,8 @@ mod validate;
 pub(crate) use crypto::decrypt_config_string_if_needed;
 pub(crate) use defaults::*;
 pub(crate) use load::{
-    load_json_or_default, load_json_or_toml, load_json_or_toml_or_default, load_toml,
-    load_toml_or_default,
+    load_json_merged_with_toml, load_json_or_default, load_json_or_toml,
+    load_json_or_toml_or_default, load_toml, load_toml_or_default,
 };
 pub use models::{
     AppConfig, BotConfig, ClaimConfig, ClaimExecutionMode, ExchangeConfig, ExecutionConfig,

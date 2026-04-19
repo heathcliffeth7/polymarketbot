@@ -658,8 +658,18 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
     let ws = ClobWsClient::new(cfg.exchange.clob_ws_url.clone());
     let (tick_trigger_tx, mut tick_trigger_rx) =
         tokio::sync::mpsc::unbounded_channel::<TickTrigger>();
-    ws.set_tick_callback(build_tick_trigger_callback(tick_trigger_tx))
-        .await;
+    let (snapshot_tx, snapshot_rx) =
+        tokio::sync::mpsc::unbounded_channel::<MarketSecondSnapshotTick>();
+    tokio::spawn(run_market_second_snapshot_recorder(
+        repo.clone(),
+        client.clone(),
+        snapshot_rx,
+    ));
+    ws.set_tick_callback(build_combined_market_tick_callback(vec![
+        build_tick_trigger_callback(tick_trigger_tx),
+        build_market_second_snapshot_callback(snapshot_tx),
+    ]))
+    .await;
     let mut auto_claim_runtimes: HashMap<i64, FlowAutoClaimRuntime> = HashMap::new();
     let mut flow_runtime_caches = FlowRuntimeCaches::default();
 
@@ -859,6 +869,17 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                             warn!(run_id, error = %e, "GUARD_BLOCKED_BUY_WS_EVAL_FAILED");
                         }
                     }
+                    _ = wait_for_trade_builder_ptb_stop_loss_dirty_update() => {
+                        if let Err(e) = process_trade_builder_ptb_fast_path_dirty_context(
+                            repo,
+                            run_id,
+                            &ws,
+                        )
+                        .await
+                        {
+                            warn!(run_id, error = %e, "ARMED_ORDER_PTB_DIRTY_EVAL_FAILED");
+                        }
+                    }
                     _ = FLOW_PROCESS_NOTIFY.notified() => {
                         if let Err(e) = process_trade_flow_ready_steps(
                             repo,
@@ -948,6 +969,17 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                             warn!(run_id, error = %e, "GUARD_BLOCKED_BUY_WS_EVAL_FAILED");
                         }
                     }
+                    _ = wait_for_trade_builder_ptb_stop_loss_dirty_update() => {
+                        if let Err(e) = process_trade_builder_ptb_fast_path_dirty_context(
+                            repo,
+                            run_id,
+                            &ws,
+                        )
+                        .await
+                        {
+                            warn!(run_id, error = %e, "ARMED_ORDER_PTB_DIRTY_EVAL_FAILED");
+                        }
+                    }
                     _ = FLOW_PROCESS_NOTIFY.notified() => {
                         if let Err(e) = process_trade_flow_ready_steps(
                             repo,
@@ -1030,6 +1062,17 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                         warn!(run_id, error = %e, "GUARD_BLOCKED_BUY_WS_EVAL_FAILED");
                     }
                 }
+                _ = wait_for_trade_builder_ptb_stop_loss_dirty_update() => {
+                    if let Err(e) = process_trade_builder_ptb_fast_path_dirty_context(
+                        repo,
+                        run_id,
+                        &ws,
+                    )
+                    .await
+                    {
+                        warn!(run_id, error = %e, "ARMED_ORDER_PTB_DIRTY_EVAL_FAILED");
+                    }
+                }
                 _ = FLOW_PROCESS_NOTIFY.notified() => {
                     if let Err(e) = process_trade_flow_ready_steps(
                         repo,
@@ -1100,6 +1143,17 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
                         warn!(run_id, error = %e, "GUARD_BLOCKED_BUY_WS_EVAL_FAILED");
                     }
                 }
+                _ = wait_for_trade_builder_ptb_stop_loss_dirty_update() => {
+                    if let Err(e) = process_trade_builder_ptb_fast_path_dirty_context(
+                        repo,
+                        run_id,
+                        &ws,
+                    )
+                    .await
+                    {
+                        warn!(run_id, error = %e, "ARMED_ORDER_PTB_DIRTY_EVAL_FAILED");
+                    }
+                }
                 _ = FLOW_PROCESS_NOTIFY.notified() => {
                     if let Err(e) = process_trade_flow_ready_steps(
                         repo,
@@ -1114,6 +1168,35 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
             }
         }
     }
+}
+
+async fn wait_for_trade_builder_ptb_stop_loss_dirty_update() {
+    tokio::select! {
+        _ = crate::trade_flow::guards::chainlink_price::wait_for_chainlink_dirty_asset_update() => {}
+        _ = crate::trade_flow::guards::polymarket_price_to_beat::wait_for_price_to_beat_dirty_market_update() => {}
+    }
+}
+
+async fn process_trade_builder_ptb_fast_path_dirty_context(
+    repo: &PostgresRepository,
+    run_id: i64,
+    ws: &ClobWsClient,
+) -> Result<()> {
+    let dirty_assets = crate::trade_flow::guards::chainlink_price::take_chainlink_dirty_assets();
+    crate::trade_flow::guards::chainlink_price::clear_chainlink_dirty_assets(&dirty_assets);
+    let dirty_market_slugs =
+        crate::trade_flow::guards::polymarket_price_to_beat::take_price_to_beat_dirty_market_slugs();
+    crate::trade_flow::guards::polymarket_price_to_beat::clear_price_to_beat_dirty_market_slugs(
+        &dirty_market_slugs,
+    );
+    evaluate_armed_builder_ptb_orders_for_dirty_context(
+        repo,
+        run_id,
+        ws,
+        &dirty_assets,
+        &dirty_market_slugs,
+    )
+    .await
 }
 
 async fn handle_tick_trigger(

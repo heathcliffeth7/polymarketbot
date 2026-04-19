@@ -515,6 +515,7 @@ fn trade_builder_execution_floor_block_reason(
     }
 }
 
+#[cfg(test)]
 fn trade_builder_execution_floor_missing_best_ask(
     order: &TradeBuilderOrder,
     best_ask: Option<f64>,

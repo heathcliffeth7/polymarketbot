@@ -666,6 +666,7 @@ fn cycle_window_first_boundary_requires_real_cross() {
         node_type: "trigger.market_price".to_string(),
         once_mode: true,
         once_scope_market: true,
+        pair_lock_only_monitor: false,
         auto_scope: true,
         price_mode: WsPriceMode::Composite,
         market_slug: Some("btc-updown-5m-1773498600".to_string()),
@@ -712,6 +713,7 @@ fn auto_scope_market_boundary_delay_returns_remaining_time_before_market_end() {
         node_type: "trigger.market_price".to_string(),
         once_mode: true,
         once_scope_market: false,
+        pair_lock_only_monitor: false,
         auto_scope: true,
         price_mode: WsPriceMode::SiteDisplay,
         market_slug: Some("sol-updown-5m-1773079500".to_string()),
@@ -752,6 +754,7 @@ fn auto_scope_market_boundary_delay_returns_zero_after_market_end() {
         node_type: "trigger.market_price".to_string(),
         once_mode: true,
         once_scope_market: false,
+        pair_lock_only_monitor: false,
         auto_scope: true,
         price_mode: WsPriceMode::SiteDisplay,
         market_slug: Some("sol-updown-5m-1773079500".to_string()),
@@ -814,6 +817,7 @@ fn cycle_window_boundary_due_target_only_fires_once_per_market_window() {
         node_type: "trigger.market_price".to_string(),
         once_mode: true,
         once_scope_market: false,
+        pair_lock_only_monitor: false,
         auto_scope: false,
         price_mode: WsPriceMode::SiteDisplay,
         market_slug: Some("sol-updown-5m-1773079500".to_string()),
@@ -879,6 +883,7 @@ fn cycle_window_last_eval_state_payload_captures_boundary_diagnostics() {
         node_type: "trigger.market_price".to_string(),
         once_mode: true,
         once_scope_market: false,
+        pair_lock_only_monitor: false,
         auto_scope: false,
         price_mode: WsPriceMode::SiteDisplay,
         market_slug: Some("sol-updown-5m-1773079500".to_string()),
@@ -1043,6 +1048,7 @@ fn auto_scope_market_rollover_updates_last_ws_slug_and_clears_transient_state() 
         node_type: "trigger.market_price".to_string(),
         once_mode: true,
         once_scope_market: true,
+        pair_lock_only_monitor: false,
         auto_scope: true,
         price_mode: WsPriceMode::SiteDisplay,
         market_slug: Some("btc-updown-5m-1773084000".to_string()),
@@ -1121,7 +1127,12 @@ fn auto_scope_market_rollover_updates_last_ws_slug_and_clears_transient_state() 
         );
     }
     assert!(
-        flow_node_state(&context, "trigger_market", FLOW_NODE_STATE_REENTRY_GENERATION).is_none(),
+        flow_node_state(
+            &context,
+            "trigger_market",
+            FLOW_NODE_STATE_REENTRY_GENERATION
+        )
+        .is_none(),
         "reentry_generation should be cleared on market rollover"
     );
 }
@@ -1148,6 +1159,7 @@ fn auto_scope_market_rollover_ignores_non_market_price_nodes() {
         node_type: "trigger.open_positions".to_string(),
         once_mode: false,
         once_scope_market: false,
+        pair_lock_only_monitor: false,
         auto_scope: true,
         price_mode: WsPriceMode::Raw,
         market_slug: Some("btc-updown-5m-1773084000".to_string()),

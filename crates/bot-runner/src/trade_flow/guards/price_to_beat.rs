@@ -9,27 +9,45 @@ use serde_json::{json, Value};
 
 mod auto_threshold;
 mod current_price;
+mod max_price_relax;
 mod notification;
+mod notification_state;
+#[cfg(test)]
+mod notification_tests;
+mod resolution;
 #[cfg(test)]
 mod tests;
-
-use self::auto_threshold::resolve_auto_price_to_beat_threshold;
+use self::auto_threshold::{
+    resolve_auto_price_to_beat_threshold, AutoPriceToBeatThresholdResolution,
+    AutoPriceToBeatThresholdStrategy,
+};
 #[cfg(test)]
 use self::current_price::{map_current_price_error, resolve_current_price_result};
 use self::current_price::{resolve_price_to_beat_current_price, CURRENT_PRICE_SOURCE_CHAINLINK};
+pub(crate) use self::max_price_relax::note_max_price_relax_fill_market;
+pub(crate) use self::notification::{
+    build_price_to_beat_bump_increased_notification_message,
+    build_price_to_beat_bump_max_reached_notification_message,
+};
 use self::notification::{
     build_price_to_beat_guard_blocked_notification_message,
     build_price_to_beat_guard_recovered_notification_message,
     build_price_to_beat_guard_waiting_notification_message,
 };
-
-const PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY: &str = "lastGuardNotificationSeed";
-const PRICE_TO_BEAT_GUARD_NOTIFICATION_STATE_KEY: &str = "priceToBeatGuardNotificationState";
+pub(crate) use self::notification_state::take_price_to_beat_guard_notification_seed;
+use self::notification_state::{
+    clear_price_to_beat_guard_waiting_context, price_to_beat_guard_notification_phase,
+    price_to_beat_guard_waiting_state, set_price_to_beat_guard_notification_phase,
+    set_price_to_beat_guard_notification_seed, set_price_to_beat_guard_waiting_state,
+    PriceToBeatGuardNotificationPhase,
+};
+pub(crate) use self::resolution::resolve_action_place_order_price_to_beat_guard_resolution;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PriceToBeatMode {
     Manual,
     AutoLast3AvgExcursion,
+    AutoVolPct,
 }
 
 impl PriceToBeatMode {
@@ -42,6 +60,7 @@ impl PriceToBeatMode {
         {
             "" | "manual" => Some(Self::Manual),
             "auto_last_3_avg_excursion" => Some(Self::AutoLast3AvgExcursion),
+            "auto_vol_pct" => Some(Self::AutoVolPct),
             _ => None,
         }
     }
@@ -50,6 +69,7 @@ impl PriceToBeatMode {
         match self {
             Self::Manual => "manual",
             Self::AutoLast3AvgExcursion => "auto_last_3_avg_excursion",
+            Self::AutoVolPct => "auto_vol_pct",
         }
     }
 }
@@ -102,19 +122,49 @@ pub(crate) struct PriceToBeatGuardEvaluation {
     pub(crate) directional_gap: Option<f64>,
     pub(crate) gap_abs: Option<f64>,
     pub(crate) threshold_mode: String,
+    pub(crate) configured_threshold_mode: Option<String>,
+    pub(crate) base_threshold_value: Option<f64>,
+    pub(crate) base_threshold_unit: Option<String>,
+    pub(crate) base_threshold_usd: Option<f64>,
     pub(crate) threshold_value: f64,
     pub(crate) threshold_unit: String,
     pub(crate) threshold_usd: f64,
+    pub(crate) stop_loss_bump_count: i64,
+    pub(crate) stop_loss_bump_applied_count: i64,
+    pub(crate) stop_loss_bump_amount: Option<f64>,
+    pub(crate) stop_loss_bump_max_value: Option<f64>,
+    pub(crate) stop_loss_bump_unit: Option<String>,
+    pub(crate) stop_loss_bump_raw_usd: f64,
+    pub(crate) stop_loss_bump_usd: f64,
+    pub(crate) stop_loss_bump_capped: bool,
+    pub(crate) stop_loss_bump_max_reached: bool,
+    pub(crate) stop_loss_bump_current_market_excluded: bool,
+    pub(crate) stop_loss_bump_increment_usd: f64,
+    pub(crate) reentry_generation: i64,
+    pub(crate) reentry_override_active: bool,
+    pub(crate) reentry_override_value: Option<f64>,
+    pub(crate) reentry_override_unit: Option<String>,
+    pub(crate) max_price_relax: Option<Value>,
     pub(crate) auto_threshold_usd: Option<f64>,
     pub(crate) lookback_windows_used: Option<usize>,
+    pub(crate) current_windows_used: Option<usize>,
     pub(crate) avg_up_excursion_usd: Option<f64>,
     pub(crate) avg_down_excursion_usd: Option<f64>,
     pub(crate) lookback_market_slugs: Option<Vec<String>>,
+    pub(crate) lookback_window_snapshots: Option<Vec<Value>>,
+    pub(crate) baseline_pct: Option<f64>,
+    pub(crate) current_pct: Option<f64>,
+    pub(crate) vol_factor: Option<f64>,
+    pub(crate) threshold_pct: Option<f64>,
+    pub(crate) base_pct: Option<f64>,
+    pub(crate) floor_usd: Option<f64>,
+    pub(crate) ceiling_usd: Option<f64>,
+    pub(crate) threshold_was_clamped: Option<bool>,
 }
 
 impl PriceToBeatGuardEvaluation {
     pub(crate) fn to_value(&self) -> Value {
-        json!({
+        let mut value = json!({
             "passed": self.passed,
             "reason_code": self.reason_code,
             "reason_detail": self.reason_detail,
@@ -133,176 +183,96 @@ impl PriceToBeatGuardEvaluation {
             "directional_gap": self.directional_gap,
             "gap_abs": self.gap_abs,
             "threshold_mode": self.threshold_mode,
+            "configured_threshold_mode": self.configured_threshold_mode,
             "threshold_value": self.threshold_value,
             "threshold_unit": self.threshold_unit,
             "threshold_usd": self.threshold_usd,
+            "reentry_generation": self.reentry_generation,
+            "reentry_override_active": self.reentry_override_active,
+            "reentry_override_value": self.reentry_override_value,
+            "reentry_override_unit": self.reentry_override_unit,
             "auto_threshold_usd": self.auto_threshold_usd,
             "lookback_windows_used": self.lookback_windows_used,
+            "current_windows_used": self.current_windows_used,
             "avg_up_excursion_usd": self.avg_up_excursion_usd,
             "avg_down_excursion_usd": self.avg_down_excursion_usd,
             "lookback_market_slugs": self.lookback_market_slugs,
-        })
-    }
-}
-
-fn clear_price_to_beat_guard_waiting_context(context: &mut Value) {
-    crate::set_flow_context(context, "priceToBeatGuardWaiting", Value::Null);
-    // Legacy key cleanup
-    crate::set_flow_context(context, "priceToBeatGuardWaitingReason", Value::Null);
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PriceToBeatGuardNotificationPhase {
-    BlockedNotified,
-    PassedNotified,
-}
-
-impl PriceToBeatGuardNotificationPhase {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::BlockedNotified => "blocked_notified",
-            Self::PassedNotified => "passed_notified",
+            "lookback_window_snapshots": self.lookback_window_snapshots,
+            "baseline_pct": self.baseline_pct,
+            "current_pct": self.current_pct,
+            "vol_factor": self.vol_factor,
+            "threshold_pct": self.threshold_pct,
+            "base_pct": self.base_pct,
+            "floor_usd": self.floor_usd,
+            "ceiling_usd": self.ceiling_usd,
+            "threshold_was_clamped": self.threshold_was_clamped,
+        });
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "base_threshold_value".to_string(),
+                json!(self.base_threshold_value),
+            );
+            obj.insert(
+                "base_threshold_unit".to_string(),
+                json!(self.base_threshold_unit),
+            );
+            obj.insert(
+                "base_threshold_usd".to_string(),
+                json!(self.base_threshold_usd),
+            );
+            obj.insert(
+                "stop_loss_bump_count".to_string(),
+                json!(self.stop_loss_bump_count),
+            );
+            obj.insert(
+                "stop_loss_bump_applied_count".to_string(),
+                json!(self.stop_loss_bump_applied_count),
+            );
+            obj.insert(
+                "stop_loss_bump_amount".to_string(),
+                json!(self.stop_loss_bump_amount),
+            );
+            obj.insert(
+                "stop_loss_bump_max_value".to_string(),
+                json!(self.stop_loss_bump_max_value),
+            );
+            obj.insert(
+                "stop_loss_bump_unit".to_string(),
+                json!(self.stop_loss_bump_unit),
+            );
+            obj.insert(
+                "stop_loss_bump_raw_usd".to_string(),
+                json!(self.stop_loss_bump_raw_usd),
+            );
+            obj.insert(
+                "stop_loss_bump_usd".to_string(),
+                json!(self.stop_loss_bump_usd),
+            );
+            obj.insert(
+                "stop_loss_bump_capped".to_string(),
+                json!(self.stop_loss_bump_capped),
+            );
+            obj.insert(
+                "stop_loss_bump_max_reached".to_string(),
+                json!(self.stop_loss_bump_max_reached),
+            );
+            obj.insert(
+                "stop_loss_bump_current_market_excluded".to_string(),
+                json!(self.stop_loss_bump_current_market_excluded),
+            );
+            obj.insert(
+                "stop_loss_bump_increment_usd".to_string(),
+                json!(self.stop_loss_bump_increment_usd),
+            );
+            if let Some(max_price_relax) = self.max_price_relax.as_ref().and_then(Value::as_object)
+            {
+                for (key, value) in max_price_relax {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
         }
+        value
     }
-
-    fn parse(raw: &str) -> Option<Self> {
-        match raw {
-            "blocked_notified" => Some(Self::BlockedNotified),
-            "passed_notified" => Some(Self::PassedNotified),
-            _ => None,
-        }
-    }
-}
-
-fn price_to_beat_guard_notification_identity(
-    node_key: &str,
-    market_slug: &str,
-    token_id: &str,
-) -> String {
-    format!("{node_key}:{market_slug}:{token_id}")
-}
-
-fn price_to_beat_guard_notification_phase(
-    context: &Value,
-    node_key: &str,
-    market_slug: &str,
-    token_id: &str,
-) -> Option<PriceToBeatGuardNotificationPhase> {
-    let state = crate::flow_context_value(context, PRICE_TO_BEAT_GUARD_NOTIFICATION_STATE_KEY)?;
-    let identity = price_to_beat_guard_notification_identity(node_key, market_slug, token_id);
-    let entry = state.get(&identity)?;
-    let phase = entry.get("phase")?.as_str()?;
-    PriceToBeatGuardNotificationPhase::parse(phase)
-}
-
-fn set_price_to_beat_guard_notification_phase(
-    context: &mut Value,
-    node_key: &str,
-    market_slug: &str,
-    token_id: &str,
-    phase: PriceToBeatGuardNotificationPhase,
-    reason_code: &str,
-) {
-    let identity = price_to_beat_guard_notification_identity(node_key, market_slug, token_id);
-    let mut state = crate::flow_context_value(context, PRICE_TO_BEAT_GUARD_NOTIFICATION_STATE_KEY)
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    state.insert(
-        identity,
-        json!({
-            "phase": phase.as_str(),
-            "reasonCode": reason_code,
-        }),
-    );
-    crate::set_flow_context(
-        context,
-        PRICE_TO_BEAT_GUARD_NOTIFICATION_STATE_KEY,
-        Value::Object(state),
-    );
-}
-
-fn price_to_beat_guard_notification_seed_reason(
-    context: &Value,
-    node_key: &str,
-    market_slug: &str,
-    token_id: &str,
-) -> Option<String> {
-    let seed = crate::flow_context_value(context, PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY)?;
-    let seed_node_key = seed.get("nodeKey")?.as_str()?;
-    let seed_market_slug = seed.get("marketSlug")?.as_str()?;
-    let seed_token_id = seed.get("tokenId")?.as_str()?;
-    let reason = seed.get("reason")?.as_str()?;
-    if seed_node_key != node_key || seed_market_slug != market_slug || seed_token_id != token_id {
-        return None;
-    }
-    Some(reason.to_string())
-}
-
-fn set_price_to_beat_guard_notification_seed(
-    context: &mut Value,
-    node_key: &str,
-    market_slug: &str,
-    token_id: &str,
-    reason: &str,
-) {
-    crate::set_flow_context(
-        context,
-        PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY,
-        json!({
-            "nodeKey": node_key,
-            "marketSlug": market_slug,
-            "tokenId": token_id,
-            "reason": reason,
-        }),
-    );
-}
-
-pub(crate) fn take_price_to_beat_guard_notification_seed(
-    context: &mut Value,
-    node_key: &str,
-    market_slug: &str,
-    token_id: &str,
-) -> Option<String> {
-    let reason =
-        price_to_beat_guard_notification_seed_reason(context, node_key, market_slug, token_id)?;
-    crate::set_flow_context(
-        context,
-        PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY,
-        Value::Null,
-    );
-    Some(reason)
-}
-
-struct PriceToBeatGuardWaitingState {
-    market_slug: String,
-    reason_code: String,
-}
-
-fn price_to_beat_guard_waiting_state(context: &Value) -> Option<PriceToBeatGuardWaitingState> {
-    let obj = crate::flow_context_value(context, "priceToBeatGuardWaiting")?;
-    let market_slug = obj.get("marketSlug")?.as_str()?.to_string();
-    let reason_code = obj.get("reasonCode")?.as_str()?.to_string();
-    if market_slug.is_empty() || reason_code.is_empty() {
-        return None;
-    }
-    Some(PriceToBeatGuardWaitingState {
-        market_slug,
-        reason_code,
-    })
-}
-
-fn set_price_to_beat_guard_waiting_state(
-    context: &mut Value,
-    market_slug: &str,
-    reason_code: &str,
-) {
-    crate::set_flow_context(
-        context,
-        "priceToBeatGuardWaiting",
-        json!({ "marketSlug": market_slug, "reasonCode": reason_code }),
-    );
-    // Clear legacy key if present
-    crate::set_flow_context(context, "priceToBeatGuardWaitingReason", Value::Null);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -354,9 +324,19 @@ pub(crate) struct PriceToBeatTriggerGateResult {
     pub(crate) max_gap: Option<f64>,
     pub(crate) auto_threshold_usd: Option<f64>,
     pub(crate) lookback_windows_used: Option<usize>,
+    pub(crate) current_windows_used: Option<usize>,
     pub(crate) avg_up_excursion_usd: Option<f64>,
     pub(crate) avg_down_excursion_usd: Option<f64>,
     pub(crate) lookback_market_slugs: Option<Vec<String>>,
+    pub(crate) lookback_window_snapshots: Option<Vec<Value>>,
+    pub(crate) baseline_pct: Option<f64>,
+    pub(crate) current_pct: Option<f64>,
+    pub(crate) vol_factor: Option<f64>,
+    pub(crate) threshold_pct: Option<f64>,
+    pub(crate) base_pct: Option<f64>,
+    pub(crate) floor_usd: Option<f64>,
+    pub(crate) ceiling_usd: Option<f64>,
+    pub(crate) threshold_was_clamped: Option<bool>,
 }
 
 impl PriceToBeatTriggerGateResult {
@@ -373,9 +353,19 @@ impl PriceToBeatTriggerGateResult {
             "max_gap": self.max_gap,
             "auto_threshold_usd": self.auto_threshold_usd,
             "lookback_windows_used": self.lookback_windows_used,
+            "current_windows_used": self.current_windows_used,
             "avg_up_excursion_usd": self.avg_up_excursion_usd,
             "avg_down_excursion_usd": self.avg_down_excursion_usd,
             "lookback_market_slugs": self.lookback_market_slugs,
+            "lookback_window_snapshots": self.lookback_window_snapshots,
+            "baseline_pct": self.baseline_pct,
+            "current_pct": self.current_pct,
+            "vol_factor": self.vol_factor,
+            "threshold_pct": self.threshold_pct,
+            "base_pct": self.base_pct,
+            "floor_usd": self.floor_usd,
+            "ceiling_usd": self.ceiling_usd,
+            "threshold_was_clamped": self.threshold_was_clamped,
         })
     }
 }
@@ -388,119 +378,130 @@ pub(crate) fn evaluate_price_to_beat_trigger_gate(
     max_gap: Option<f64>,
     unit: PriceToBeatDiffUnit,
 ) -> PriceToBeatTriggerGateResult {
-    let (min_gap_usd, max_gap_usd, auto_threshold_usd, lookback_windows_used, avg_up_excursion_usd, avg_down_excursion_usd, lookback_market_slugs, pending_reason) =
-        match mode {
-            PriceToBeatMode::Manual => {
-                let Some(min_gap) = min_gap else {
-                    return PriceToBeatTriggerGateResult {
-                        passed: false,
-                        reason: "invalid_manual_threshold",
-                        directional_gap: None,
-                        price_to_beat: None,
-                        price_to_beat_status: None,
-                        current_price: None,
-                        threshold_mode: mode.as_str().to_string(),
-                        min_gap: 0.0,
-                        max_gap: None,
-                        auto_threshold_usd: None,
-                        lookback_windows_used: None,
-                        avg_up_excursion_usd: None,
-                        avg_down_excursion_usd: None,
-                        lookback_market_slugs: None,
-                    };
-                };
-                (
-                    normalize_price_to_beat_threshold_usd(min_gap, unit),
-                    max_gap.map(|value| normalize_price_to_beat_threshold_usd(value, unit)),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            }
-            PriceToBeatMode::AutoLast3AvgExcursion => match resolve_auto_price_to_beat_threshold(
-                market_slug,
-                outcome_label,
-            ) {
-                Ok(snapshot) => (
-                    snapshot.threshold_usd,
-                    None,
-                    Some(snapshot.threshold_usd),
-                    Some(snapshot.lookback_windows_used),
-                    Some(snapshot.avg_up_excursion_usd),
-                    Some(snapshot.avg_down_excursion_usd),
-                    Some(snapshot.lookback_market_slugs),
-                    None,
-                ),
-                Err(err) => (
-                    0.0,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(err),
-                ),
-            },
-        };
-    if pending_reason.is_some() {
-        return PriceToBeatTriggerGateResult {
-            passed: false,
-            reason: "auto_threshold_pending",
-            directional_gap: None,
-            price_to_beat: None,
-            price_to_beat_status: None,
-            current_price: None,
-            threshold_mode: mode.as_str().to_string(),
-            min_gap: min_gap_usd,
-            max_gap: max_gap_usd,
-            auto_threshold_usd,
-            lookback_windows_used,
-            avg_up_excursion_usd,
-            avg_down_excursion_usd,
-            lookback_market_slugs,
-        };
-    }
-    let Some(snapshot) = get_price_to_beat_cached(market_slug) else {
-        return PriceToBeatTriggerGateResult {
-            passed: false,
-            reason: "price_to_beat_pending",
-            directional_gap: None,
-            price_to_beat: None,
-            price_to_beat_status: None,
-            current_price: None,
-            threshold_mode: mode.as_str().to_string(),
-            min_gap: min_gap_usd,
-            max_gap: max_gap_usd,
-            auto_threshold_usd,
-            lookback_windows_used,
-            avg_up_excursion_usd,
-            avg_down_excursion_usd,
-            lookback_market_slugs,
-        };
-    };
-    let current_price = match get_chainlink_price_cached(&snapshot.asset) {
-        Ok(price) => price,
-        Err(_) => {
-            return PriceToBeatTriggerGateResult {
-                passed: true,
-                reason: "chainlink_unavailable",
-                directional_gap: None,
-                price_to_beat: Some(snapshot.price_to_beat),
-                price_to_beat_status: Some(snapshot.status().to_string()),
-                current_price: None,
+    let mut min_gap_usd = 0.0;
+    let mut max_gap_usd = None;
+    let mut auto_threshold_usd = None;
+    let mut lookback_windows_used = None;
+    let mut current_windows_used = None;
+    let mut avg_up_excursion_usd = None;
+    let mut avg_down_excursion_usd = None;
+    let mut lookback_market_slugs = None;
+    let mut lookback_window_snapshots = None;
+    let mut baseline_pct = None;
+    let mut current_pct = None;
+    let mut vol_factor = None;
+    let mut threshold_pct = None;
+    let mut base_pct = None;
+    let mut floor_usd = None;
+    let mut ceiling_usd = None;
+    let mut threshold_was_clamped = None;
+    let mut auto_threshold_snapshot = None;
+
+    macro_rules! build_result {
+        ($passed:expr, $reason:expr, $directional_gap:expr, $price_to_beat:expr, $price_to_beat_status:expr, $current_price:expr $(,)?) => {
+            PriceToBeatTriggerGateResult {
+                passed: $passed,
+                reason: $reason,
+                directional_gap: $directional_gap,
+                price_to_beat: $price_to_beat,
+                price_to_beat_status: $price_to_beat_status,
+                current_price: $current_price,
                 threshold_mode: mode.as_str().to_string(),
                 min_gap: min_gap_usd,
                 max_gap: max_gap_usd,
                 auto_threshold_usd,
                 lookback_windows_used,
+                current_windows_used,
                 avg_up_excursion_usd,
                 avg_down_excursion_usd,
-                lookback_market_slugs,
+                lookback_market_slugs: lookback_market_slugs.clone(),
+                lookback_window_snapshots: lookback_window_snapshots.clone(),
+                baseline_pct,
+                current_pct,
+                vol_factor,
+                threshold_pct,
+                base_pct,
+                floor_usd,
+                ceiling_usd,
+                threshold_was_clamped,
+            }
+        };
+    }
+
+    match mode {
+        PriceToBeatMode::Manual => {
+            let Some(min_gap) = min_gap else {
+                return build_result!(false, "invalid_manual_threshold", None, None, None, None,);
             };
+            min_gap_usd = normalize_price_to_beat_threshold_usd(min_gap, unit);
+            max_gap_usd = max_gap.map(|value| normalize_price_to_beat_threshold_usd(value, unit));
+        }
+        PriceToBeatMode::AutoLast3AvgExcursion | PriceToBeatMode::AutoVolPct => {
+            let strategy = match mode {
+                PriceToBeatMode::AutoLast3AvgExcursion => {
+                    AutoPriceToBeatThresholdStrategy::Last3AvgExcursion
+                }
+                PriceToBeatMode::AutoVolPct => AutoPriceToBeatThresholdStrategy::VolPct,
+                PriceToBeatMode::Manual => unreachable!(),
+            };
+            match resolve_auto_price_to_beat_threshold(strategy, market_slug, outcome_label) {
+                AutoPriceToBeatThresholdResolution::Ready(snapshot) => {
+                    lookback_windows_used = Some(snapshot.lookback_windows_used);
+                    current_windows_used = snapshot.current_windows_used;
+                    avg_up_excursion_usd = snapshot.avg_up_excursion_usd;
+                    avg_down_excursion_usd = snapshot.avg_down_excursion_usd;
+                    lookback_market_slugs = Some(snapshot.lookback_market_slugs.clone());
+                    lookback_window_snapshots = Some(snapshot.lookback_window_snapshots.clone());
+                    baseline_pct = snapshot.baseline_pct;
+                    current_pct = snapshot.current_pct;
+                    vol_factor = snapshot.vol_factor;
+                    threshold_pct = snapshot.threshold_pct;
+                    base_pct = snapshot.base_pct;
+                    floor_usd = snapshot.floor_usd;
+                    ceiling_usd = snapshot.ceiling_usd;
+                    if let Some(threshold) = snapshot.threshold_usd {
+                        min_gap_usd = threshold;
+                        auto_threshold_usd = Some(threshold);
+                    }
+                    auto_threshold_snapshot = Some(snapshot);
+                }
+                AutoPriceToBeatThresholdResolution::Pending(_) => {
+                    return build_result!(false, "auto_threshold_pending", None, None, None, None);
+                }
+                AutoPriceToBeatThresholdResolution::Unsupported(detail) => {
+                    lookback_market_slugs = Some(vec![market_slug.to_string()]);
+                    let _ = detail;
+                    return build_result!(false, "unsupported_market", None, None, None, None);
+                }
+            }
+        }
+    }
+
+    let Some(snapshot) = get_price_to_beat_cached(market_slug) else {
+        return build_result!(false, "price_to_beat_pending", None, None, None, None);
+    };
+    if let Some(auto_snapshot) = auto_threshold_snapshot.as_ref() {
+        if auto_snapshot.threshold_usd.is_none() {
+            if let Some((resolved_threshold_usd, was_clamped)) =
+                auto_snapshot.resolved_threshold_usd(snapshot.price_to_beat)
+            {
+                min_gap_usd = resolved_threshold_usd;
+                auto_threshold_usd = Some(resolved_threshold_usd);
+                threshold_was_clamped = Some(was_clamped);
+            }
+        }
+    }
+    let current_price = match get_chainlink_price_cached(&snapshot.asset) {
+        Ok(price) => price,
+        Err(_) => {
+            return build_result!(
+                true,
+                "chainlink_unavailable",
+                None,
+                Some(snapshot.price_to_beat),
+                Some(snapshot.status().to_string()),
+                None,
+            );
         }
     };
     let Some(directional) = evaluate_directional_gap(
@@ -509,22 +510,14 @@ pub(crate) fn evaluate_price_to_beat_trigger_gate(
         min_gap_usd,
         outcome_label,
     ) else {
-        return PriceToBeatTriggerGateResult {
-            passed: false,
-            reason: "unsupported_outcome_label",
-            directional_gap: None,
-            price_to_beat: Some(snapshot.price_to_beat),
-            price_to_beat_status: Some(snapshot.status().to_string()),
-            current_price: Some(current_price),
-            threshold_mode: mode.as_str().to_string(),
-            min_gap: min_gap_usd,
-            max_gap: max_gap_usd,
-            auto_threshold_usd,
-            lookback_windows_used,
-            avg_up_excursion_usd,
-            avg_down_excursion_usd,
-            lookback_market_slugs,
-        };
+        return build_result!(
+            false,
+            "unsupported_outcome_label",
+            None,
+            Some(snapshot.price_to_beat),
+            Some(snapshot.status().to_string()),
+            Some(current_price),
+        );
     };
 
     let passed = directional.directional_gap >= min_gap_usd
@@ -542,26 +535,20 @@ pub(crate) fn evaluate_price_to_beat_trigger_gate(
         "in_range"
     };
 
-    PriceToBeatTriggerGateResult {
+    build_result!(
         passed,
         reason,
-        directional_gap: Some(directional.directional_gap),
-        price_to_beat: Some(snapshot.price_to_beat),
-        price_to_beat_status: Some(snapshot.status().to_string()),
-        current_price: Some(current_price),
-        threshold_mode: mode.as_str().to_string(),
-        min_gap: min_gap_usd,
-        max_gap: max_gap_usd,
-        auto_threshold_usd,
-        lookback_windows_used,
-        avg_up_excursion_usd,
-        avg_down_excursion_usd,
-        lookback_market_slugs,
-    }
+        Some(directional.directional_gap),
+        Some(snapshot.price_to_beat),
+        Some(snapshot.status().to_string()),
+        Some(current_price),
+    )
 }
 
 pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
     repo: &crate::PostgresRepository,
+    cfg: &crate::AppConfig,
+    client: Option<&dyn crate::OrderExecutor>,
     run: &crate::TradeFlowRun,
     node: &crate::TradeFlowNode,
     context: &mut Value,
@@ -583,33 +570,36 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
         clear_price_to_beat_guard_waiting_context(context);
         return Ok(None);
     }
+    max_price_relax::ensure_max_price_relax_tracking_market(context, &node.key, market_slug);
     let retry_on_guard_block =
         crate::node_config_bool(node, "retryOnPriceToBeatGuardBlock").unwrap_or(true);
-    let mode = PriceToBeatMode::parse(crate::node_config_string(node, "priceToBeatMode").as_deref())
-        .unwrap_or(PriceToBeatMode::Manual);
-    let (threshold_value, threshold_unit) = match mode {
-        PriceToBeatMode::Manual => {
-            let threshold_value = crate::node_config_f64(node, "priceToBeatMaxDiff").unwrap_or(0.0);
-            anyhow::ensure!(
-                threshold_value.is_finite() && threshold_value > 0.0,
-                "action.place_order priceToBeatMaxDiff must be > 0 when guard is enabled"
-            );
-            let threshold_unit = PriceToBeatDiffUnit::parse(
-                crate::node_config_string(node, "priceToBeatMaxDiffUnit").as_deref(),
-            )
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "action.place_order priceToBeatMaxDiffUnit must be one of: usd, cent"
-                )
-            })?;
-            (Some(threshold_value), threshold_unit)
-        }
-        PriceToBeatMode::AutoLast3AvgExcursion => (None, PriceToBeatDiffUnit::Usd),
-    };
-
-    let evaluation =
-        evaluate_price_to_beat_guard(market_slug, mode, threshold_value, threshold_unit, outcome_label)
-            .await;
+    let resolution =
+        resolve_action_place_order_price_to_beat_guard_resolution(node, context, market_slug)?;
+    let mut evaluation = evaluate_price_to_beat_guard(
+        market_slug,
+        resolution.effective_mode,
+        resolution.threshold_value,
+        resolution.threshold_unit,
+        outcome_label,
+    )
+    .await;
+    resolution.apply_metadata(&mut evaluation);
+    if resolution.effective_mode != PriceToBeatMode::Manual {
+        apply_price_to_beat_risk_penalty(&mut evaluation, resolution.stop_loss_bump_usd);
+    }
+    max_price_relax::maybe_apply_action_place_order_max_price_relaxation(
+        repo,
+        run.user_id,
+        context,
+        node,
+        run.id,
+        market_slug,
+        outcome_label,
+        cfg,
+        client,
+        &mut evaluation,
+    )
+    .await?;
     let evaluation_output = evaluation.to_value();
     crate::set_flow_context(context, "priceToBeatGuard", evaluation_output.clone());
     let should_notify =
@@ -784,89 +774,150 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
     }))
 }
 
-async fn evaluate_price_to_beat_guard(
+pub(crate) async fn evaluate_price_to_beat_guard(
     market_slug: &str,
     mode: PriceToBeatMode,
     threshold_value: Option<f64>,
     threshold_unit: PriceToBeatDiffUnit,
     outcome_label: &str,
 ) -> PriceToBeatGuardEvaluation {
-    let (threshold_value, threshold_unit, threshold_usd, auto_threshold_usd, lookback_windows_used, avg_up_excursion_usd, avg_down_excursion_usd, lookback_market_slugs, auto_threshold_pending_detail) =
-        match mode {
-            PriceToBeatMode::Manual => {
-                let threshold_value = threshold_value.unwrap_or_default();
-                (
-                    threshold_value,
-                    threshold_unit,
-                    normalize_price_to_beat_threshold_usd(threshold_value, threshold_unit),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            }
-            PriceToBeatMode::AutoLast3AvgExcursion => match resolve_auto_price_to_beat_threshold(
-                market_slug,
-                outcome_label,
-            ) {
-                Ok(snapshot) => (
-                    snapshot.threshold_usd,
-                    PriceToBeatDiffUnit::Usd,
-                    snapshot.threshold_usd,
-                    Some(snapshot.threshold_usd),
-                    Some(snapshot.lookback_windows_used),
-                    Some(snapshot.avg_up_excursion_usd),
-                    Some(snapshot.avg_down_excursion_usd),
-                    Some(snapshot.lookback_market_slugs),
-                    None,
-                ),
-                Err(err) => (
-                    0.0,
-                    PriceToBeatDiffUnit::Usd,
-                    0.0,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(err.to_string()),
-                ),
-            },
-        };
+    let mut resolved_threshold_value = threshold_value.unwrap_or_default();
+    let mut resolved_threshold_unit = threshold_unit;
+    let mut threshold_usd =
+        normalize_price_to_beat_threshold_usd(resolved_threshold_value, resolved_threshold_unit);
+    let mut auto_threshold_usd = None;
+    let mut lookback_windows_used = None;
+    let mut current_windows_used = None;
+    let mut avg_up_excursion_usd = None;
+    let mut avg_down_excursion_usd = None;
+    let mut lookback_market_slugs = None;
+    let mut lookback_window_snapshots = None;
+    let mut baseline_pct = None;
+    let mut current_pct = None;
+    let mut vol_factor = None;
+    let mut threshold_pct = None;
+    let mut base_pct = None;
+    let mut floor_usd = None;
+    let mut ceiling_usd = None;
+    let mut threshold_was_clamped = None;
+    let mut auto_threshold_snapshot = None;
+
     let event_url = format!("https://polymarket.com/event/{market_slug}");
-    if let Some(detail) = auto_threshold_pending_detail {
-        return blocked_price_to_beat_guard_evaluation(
-            market_slug,
-            event_url,
-            mode,
-            threshold_value,
-            threshold_unit,
-            threshold_usd,
-            "auto_threshold_pending",
-            Some(detail),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            auto_threshold_usd,
-            lookback_windows_used,
-            avg_up_excursion_usd,
-            avg_down_excursion_usd,
-            lookback_market_slugs,
-        );
+    match mode {
+        PriceToBeatMode::Manual => {}
+        PriceToBeatMode::AutoLast3AvgExcursion | PriceToBeatMode::AutoVolPct => {
+            let strategy = match mode {
+                PriceToBeatMode::AutoLast3AvgExcursion => {
+                    AutoPriceToBeatThresholdStrategy::Last3AvgExcursion
+                }
+                PriceToBeatMode::AutoVolPct => AutoPriceToBeatThresholdStrategy::VolPct,
+                PriceToBeatMode::Manual => unreachable!(),
+            };
+            match resolve_auto_price_to_beat_threshold(strategy, market_slug, outcome_label) {
+                AutoPriceToBeatThresholdResolution::Ready(snapshot) => {
+                    lookback_windows_used = Some(snapshot.lookback_windows_used);
+                    current_windows_used = snapshot.current_windows_used;
+                    avg_up_excursion_usd = snapshot.avg_up_excursion_usd;
+                    avg_down_excursion_usd = snapshot.avg_down_excursion_usd;
+                    lookback_market_slugs = Some(snapshot.lookback_market_slugs.clone());
+                    lookback_window_snapshots = Some(snapshot.lookback_window_snapshots.clone());
+                    baseline_pct = snapshot.baseline_pct;
+                    current_pct = snapshot.current_pct;
+                    vol_factor = snapshot.vol_factor;
+                    threshold_pct = snapshot.threshold_pct;
+                    base_pct = snapshot.base_pct;
+                    floor_usd = snapshot.floor_usd;
+                    ceiling_usd = snapshot.ceiling_usd;
+                    if let Some(snapshot_threshold_usd) = snapshot.threshold_usd {
+                        resolved_threshold_value = snapshot_threshold_usd;
+                        resolved_threshold_unit = PriceToBeatDiffUnit::Usd;
+                        threshold_usd = snapshot_threshold_usd;
+                        auto_threshold_usd = Some(snapshot_threshold_usd);
+                    } else {
+                        resolved_threshold_value = 0.0;
+                        resolved_threshold_unit = PriceToBeatDiffUnit::Usd;
+                        threshold_usd = 0.0;
+                    }
+                    auto_threshold_snapshot = Some(snapshot);
+                }
+                AutoPriceToBeatThresholdResolution::Pending(detail) => {
+                    return blocked_price_to_beat_guard_evaluation(
+                        market_slug,
+                        event_url,
+                        mode,
+                        resolved_threshold_value,
+                        resolved_threshold_unit,
+                        threshold_usd,
+                        "auto_threshold_pending",
+                        Some(detail),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        auto_threshold_usd,
+                        lookback_windows_used,
+                        current_windows_used,
+                        avg_up_excursion_usd,
+                        avg_down_excursion_usd,
+                        lookback_market_slugs,
+                        lookback_window_snapshots,
+                        baseline_pct,
+                        current_pct,
+                        vol_factor,
+                        threshold_pct,
+                        base_pct,
+                        floor_usd,
+                        ceiling_usd,
+                        threshold_was_clamped,
+                    );
+                }
+                AutoPriceToBeatThresholdResolution::Unsupported(detail) => {
+                    return blocked_price_to_beat_guard_evaluation(
+                        market_slug,
+                        event_url,
+                        mode,
+                        resolved_threshold_value,
+                        resolved_threshold_unit,
+                        threshold_usd,
+                        "unsupported_market",
+                        Some(detail),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        auto_threshold_usd,
+                        lookback_windows_used,
+                        current_windows_used,
+                        avg_up_excursion_usd,
+                        avg_down_excursion_usd,
+                        lookback_market_slugs,
+                        lookback_window_snapshots,
+                        baseline_pct,
+                        current_pct,
+                        vol_factor,
+                        threshold_pct,
+                        base_pct,
+                        floor_usd,
+                        ceiling_usd,
+                        threshold_was_clamped,
+                    );
+                }
+            }
+        }
     }
     let Some(scope) = crate::find_updown_scope_by_slug(market_slug) else {
         return blocked_price_to_beat_guard_evaluation(
             market_slug,
             event_url,
             mode,
-            threshold_value,
-            threshold_unit,
+            resolved_threshold_value,
+            resolved_threshold_unit,
             threshold_usd,
             "unsupported_market",
             Some("market slug is not a supported 5m/15m updown scope".to_string()),
@@ -879,9 +930,19 @@ async fn evaluate_price_to_beat_guard(
             None,
             auto_threshold_usd,
             lookback_windows_used,
+            current_windows_used,
             avg_up_excursion_usd,
             avg_down_excursion_usd,
             lookback_market_slugs,
+            lookback_window_snapshots,
+            baseline_pct,
+            current_pct,
+            vol_factor,
+            threshold_pct,
+            base_pct,
+            floor_usd,
+            ceiling_usd,
+            threshold_was_clamped,
         );
     };
     if !matches!(scope.timeframe, "5m" | "15m") {
@@ -889,8 +950,8 @@ async fn evaluate_price_to_beat_guard(
             market_slug,
             event_url,
             mode,
-            threshold_value,
-            threshold_unit,
+            resolved_threshold_value,
+            resolved_threshold_unit,
             threshold_usd,
             "unsupported_market",
             Some(format!("unsupported timeframe: {}", scope.timeframe)),
@@ -903,9 +964,19 @@ async fn evaluate_price_to_beat_guard(
             None,
             auto_threshold_usd,
             lookback_windows_used,
+            current_windows_used,
             avg_up_excursion_usd,
             avg_down_excursion_usd,
             lookback_market_slugs,
+            lookback_window_snapshots,
+            baseline_pct,
+            current_pct,
+            vol_factor,
+            threshold_pct,
+            base_pct,
+            floor_usd,
+            ceiling_usd,
+            threshold_was_clamped,
         );
     }
 
@@ -916,8 +987,8 @@ async fn evaluate_price_to_beat_guard(
                 market_slug,
                 event_url,
                 mode,
-                threshold_value,
-                threshold_unit,
+                resolved_threshold_value,
+                resolved_threshold_unit,
                 threshold_usd,
                 "price_to_beat_pending",
                 None,
@@ -930,9 +1001,19 @@ async fn evaluate_price_to_beat_guard(
                 None,
                 auto_threshold_usd,
                 lookback_windows_used,
+                current_windows_used,
                 avg_up_excursion_usd,
                 avg_down_excursion_usd,
                 lookback_market_slugs,
+                lookback_window_snapshots,
+                baseline_pct,
+                current_pct,
+                vol_factor,
+                threshold_pct,
+                base_pct,
+                floor_usd,
+                ceiling_usd,
+                threshold_was_clamped,
             );
         }
         PriceToBeatLookup::Unavailable(detail) => {
@@ -940,8 +1021,8 @@ async fn evaluate_price_to_beat_guard(
                 market_slug,
                 event_url,
                 mode,
-                threshold_value,
-                threshold_unit,
+                resolved_threshold_value,
+                resolved_threshold_unit,
                 threshold_usd,
                 "price_to_beat_unavailable",
                 Some(detail),
@@ -954,12 +1035,35 @@ async fn evaluate_price_to_beat_guard(
                 None,
                 auto_threshold_usd,
                 lookback_windows_used,
+                current_windows_used,
                 avg_up_excursion_usd,
                 avg_down_excursion_usd,
                 lookback_market_slugs,
+                lookback_window_snapshots,
+                baseline_pct,
+                current_pct,
+                vol_factor,
+                threshold_pct,
+                base_pct,
+                floor_usd,
+                ceiling_usd,
+                threshold_was_clamped,
             );
         }
     };
+    if let Some(auto_snapshot) = auto_threshold_snapshot.as_ref() {
+        if auto_snapshot.threshold_usd.is_none() {
+            if let Some((resolved_auto_threshold_usd, was_clamped)) =
+                auto_snapshot.resolved_threshold_usd(snapshot.price_to_beat)
+            {
+                resolved_threshold_value = resolved_auto_threshold_usd;
+                resolved_threshold_unit = PriceToBeatDiffUnit::Usd;
+                threshold_usd = resolved_auto_threshold_usd;
+                auto_threshold_usd = Some(resolved_auto_threshold_usd);
+                threshold_was_clamped = Some(was_clamped);
+            }
+        }
+    }
 
     let (current_price, current_price_source) = match resolve_price_to_beat_current_price(
         snapshot.source,
@@ -975,8 +1079,8 @@ async fn evaluate_price_to_beat_guard(
                 market_slug,
                 snapshot.event_url.clone(),
                 mode,
-                threshold_value,
-                threshold_unit,
+                resolved_threshold_value,
+                resolved_threshold_unit,
                 threshold_usd,
                 reason_code,
                 Some(reason_detail),
@@ -989,9 +1093,19 @@ async fn evaluate_price_to_beat_guard(
                 None,
                 auto_threshold_usd,
                 lookback_windows_used,
+                current_windows_used,
                 avg_up_excursion_usd,
                 avg_down_excursion_usd,
                 lookback_market_slugs,
+                lookback_window_snapshots,
+                baseline_pct,
+                current_pct,
+                vol_factor,
+                threshold_pct,
+                base_pct,
+                floor_usd,
+                ceiling_usd,
+                threshold_was_clamped,
             );
         }
     };
@@ -1009,8 +1123,8 @@ async fn evaluate_price_to_beat_guard(
                 market_slug,
                 snapshot.event_url.clone(),
                 mode,
-                threshold_value,
-                threshold_unit,
+                resolved_threshold_value,
+                resolved_threshold_unit,
                 threshold_usd,
                 "unsupported_outcome_label",
                 Some(format!(
@@ -1025,9 +1139,19 @@ async fn evaluate_price_to_beat_guard(
                 Some(current_price),
                 auto_threshold_usd,
                 lookback_windows_used,
+                current_windows_used,
                 avg_up_excursion_usd,
                 avg_down_excursion_usd,
                 lookback_market_slugs,
+                lookback_window_snapshots,
+                baseline_pct,
+                current_pct,
+                vol_factor,
+                threshold_pct,
+                base_pct,
+                floor_usd,
+                ceiling_usd,
+                threshold_was_clamped,
             );
         }
     };
@@ -1046,8 +1170,8 @@ async fn evaluate_price_to_beat_guard(
                 "directional gap {:.8} (direction={}) is below threshold {:.8} {} (~{:.8} usd)",
                 directional.directional_gap,
                 directional.direction,
-                threshold_value,
-                threshold_unit.as_str(),
+                resolved_threshold_value,
+                resolved_threshold_unit.as_str(),
                 threshold_usd
             )
         }),
@@ -1066,14 +1190,44 @@ async fn evaluate_price_to_beat_guard(
         directional_gap: Some(directional.directional_gap),
         gap_abs: Some(gap_abs),
         threshold_mode: mode.as_str().to_string(),
-        threshold_value,
-        threshold_unit: threshold_unit.as_str().to_string(),
+        configured_threshold_mode: None,
+        base_threshold_value: None,
+        base_threshold_unit: None,
+        base_threshold_usd: None,
+        threshold_value: resolved_threshold_value,
+        threshold_unit: resolved_threshold_unit.as_str().to_string(),
         threshold_usd,
+        stop_loss_bump_count: 0,
+        stop_loss_bump_applied_count: 0,
+        stop_loss_bump_amount: None,
+        stop_loss_bump_max_value: None,
+        stop_loss_bump_unit: None,
+        stop_loss_bump_raw_usd: 0.0,
+        stop_loss_bump_usd: 0.0,
+        stop_loss_bump_capped: false,
+        stop_loss_bump_max_reached: false,
+        stop_loss_bump_current_market_excluded: false,
+        stop_loss_bump_increment_usd: 0.0,
+        reentry_generation: 0,
+        reentry_override_active: false,
+        reentry_override_value: None,
+        reentry_override_unit: None,
+        max_price_relax: None,
         auto_threshold_usd,
         lookback_windows_used,
+        current_windows_used,
         avg_up_excursion_usd,
         avg_down_excursion_usd,
         lookback_market_slugs,
+        lookback_window_snapshots,
+        baseline_pct,
+        current_pct,
+        vol_factor,
+        threshold_pct,
+        base_pct,
+        floor_usd,
+        ceiling_usd,
+        threshold_was_clamped,
     }
 }
 
@@ -1095,9 +1249,19 @@ fn blocked_price_to_beat_guard_evaluation(
     current_price: Option<f64>,
     auto_threshold_usd: Option<f64>,
     lookback_windows_used: Option<usize>,
+    current_windows_used: Option<usize>,
     avg_up_excursion_usd: Option<f64>,
     avg_down_excursion_usd: Option<f64>,
     lookback_market_slugs: Option<Vec<String>>,
+    lookback_window_snapshots: Option<Vec<Value>>,
+    baseline_pct: Option<f64>,
+    current_pct: Option<f64>,
+    vol_factor: Option<f64>,
+    threshold_pct: Option<f64>,
+    base_pct: Option<f64>,
+    floor_usd: Option<f64>,
+    ceiling_usd: Option<f64>,
+    threshold_was_clamped: Option<bool>,
 ) -> PriceToBeatGuardEvaluation {
     PriceToBeatGuardEvaluation {
         passed: false,
@@ -1118,18 +1282,94 @@ fn blocked_price_to_beat_guard_evaluation(
         directional_gap: None,
         gap_abs: None,
         threshold_mode: mode.as_str().to_string(),
+        configured_threshold_mode: None,
+        base_threshold_value: None,
+        base_threshold_unit: None,
+        base_threshold_usd: None,
         threshold_value,
         threshold_unit: threshold_unit.as_str().to_string(),
         threshold_usd,
+        stop_loss_bump_count: 0,
+        stop_loss_bump_applied_count: 0,
+        stop_loss_bump_amount: None,
+        stop_loss_bump_max_value: None,
+        stop_loss_bump_unit: None,
+        stop_loss_bump_raw_usd: 0.0,
+        stop_loss_bump_usd: 0.0,
+        stop_loss_bump_capped: false,
+        stop_loss_bump_max_reached: false,
+        stop_loss_bump_current_market_excluded: false,
+        stop_loss_bump_increment_usd: 0.0,
+        reentry_generation: 0,
+        reentry_override_active: false,
+        reentry_override_value: None,
+        reentry_override_unit: None,
+        max_price_relax: None,
         auto_threshold_usd,
         lookback_windows_used,
+        current_windows_used,
         avg_up_excursion_usd,
         avg_down_excursion_usd,
         lookback_market_slugs,
+        lookback_window_snapshots,
+        baseline_pct,
+        current_pct,
+        vol_factor,
+        threshold_pct,
+        base_pct,
+        floor_usd,
+        ceiling_usd,
+        threshold_was_clamped,
     }
 }
 
-fn normalize_price_to_beat_threshold_usd(
+pub(crate) fn apply_price_to_beat_risk_penalty(
+    evaluation: &mut PriceToBeatGuardEvaluation,
+    risk_penalty_usd: f64,
+) {
+    if !risk_penalty_usd.is_finite() || risk_penalty_usd <= 0.0 {
+        return;
+    }
+    evaluation.threshold_usd += risk_penalty_usd;
+    evaluation.threshold_value = if evaluation.threshold_unit == "cent" {
+        evaluation.threshold_usd * 100.0
+    } else {
+        evaluation.threshold_usd
+    };
+    if let (Some(current_price), Some(price_to_beat), Some(outcome_label)) = (
+        evaluation.current_price,
+        evaluation.price_to_beat,
+        evaluation.normalized_outcome_label.as_deref(),
+    ) {
+        if let Some(direction_evaluation) = evaluate_directional_gap(
+            current_price,
+            price_to_beat,
+            evaluation.threshold_usd,
+            outcome_label,
+        ) {
+            evaluation.passed = direction_evaluation.passed;
+            evaluation.directional_gap = Some(direction_evaluation.directional_gap);
+            evaluation.gap_abs = Some((current_price - price_to_beat).abs());
+            evaluation.reason_code = if direction_evaluation.passed {
+                "passed".to_string()
+            } else {
+                "price_to_beat_gap_below_threshold".to_string()
+            };
+            evaluation.reason_detail = (!direction_evaluation.passed).then(|| {
+                format!(
+                    "directional gap {:.8} (direction={}) is below threshold {:.8} {} (~{:.8} usd)",
+                    direction_evaluation.directional_gap,
+                    direction_evaluation.direction,
+                    evaluation.threshold_value,
+                    evaluation.threshold_unit,
+                    evaluation.threshold_usd
+                )
+            });
+        }
+    }
+}
+
+pub(crate) fn normalize_price_to_beat_threshold_usd(
     threshold_value: f64,
     threshold_unit: PriceToBeatDiffUnit,
 ) -> f64 {
@@ -1139,7 +1379,7 @@ fn normalize_price_to_beat_threshold_usd(
     }
 }
 
-async fn send_price_to_beat_guard_notification(
+pub(crate) async fn send_price_to_beat_guard_notification(
     repo: &crate::PostgresRepository,
     user_id: i64,
     message: &str,

@@ -11,7 +11,7 @@ use ethers::middleware::{NonceManagerMiddleware, SignerMiddleware};
 use ethers::providers::{Http, Middleware, Provider};
 use ethers::signers::{LocalWallet, Signer};
 use ethers::types::{Address, BlockNumber, H256, U256};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::HashMap, str::FromStr, sync::Arc};
@@ -719,42 +719,12 @@ impl AutoClaimService {
 
         if !status.is_success() {
             let parsed = serde_json::from_str::<ClaimRelayerAdapterErrorBody>(&body).ok();
-            let retryable = parsed
-                .as_ref()
-                .and_then(|value| value.retryable)
-                .unwrap_or_else(|| status.as_u16() == 429 || status.is_server_error());
-            let code = parsed
-                .as_ref()
-                .map(|value| value.code.trim())
-                .filter(|value| !value.is_empty())
-                .unwrap_or("claim_relayer_adapter_error");
-            let message = parsed
-                .as_ref()
-                .map(|value| value.message.trim())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| body.trim());
-            let fallback = format!(
-                "claim relayer adapter returned HTTP {} for {condition_id}",
-                status.as_u16()
-            );
+            let (retryable, code, message) =
+                claim_relayer_adapter_error_details(status, parsed.as_ref(), &body);
             return Err(if retryable {
-                ClaimSubmitFailure::retryable(format!(
-                    "{code}: {}",
-                    if message.is_empty() {
-                        fallback
-                    } else {
-                        message.to_string()
-                    }
-                ))
+                ClaimSubmitFailure::retryable(format!("{code}: {message}"))
             } else {
-                ClaimSubmitFailure::non_retryable(format!(
-                    "{code}: {}",
-                    if message.is_empty() {
-                        fallback
-                    } else {
-                        message.to_string()
-                    }
-                ))
+                ClaimSubmitFailure::non_retryable(format!("{code}: {message}"))
             });
         }
 
@@ -835,6 +805,60 @@ fn parse_tx_hash(raw: &str) -> Result<H256> {
 
 fn normalize_tx_hash(raw: &str) -> Result<String> {
     Ok(format!("{:#x}", parse_tx_hash(raw)?))
+}
+
+fn claim_relayer_adapter_error_details(
+    status: StatusCode,
+    parsed: Option<&ClaimRelayerAdapterErrorBody>,
+    body: &str,
+) -> (bool, String, String) {
+    let retryable = parsed
+        .and_then(|value| value.retryable)
+        .unwrap_or_else(|| status.as_u16() == 429 || status.is_server_error());
+    let message = parsed
+        .map(|value| value.message.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback_relayer_adapter_message(status, body));
+    let code = parsed
+        .map(|value| value.code.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if looks_like_html_document(body) {
+                "claim_relayer_adapter_invalid_html".to_string()
+            } else {
+                "claim_relayer_adapter_error".to_string()
+            }
+        });
+    (retryable, code, message)
+}
+
+fn fallback_relayer_adapter_message(status: StatusCode, body: &str) -> String {
+    if looks_like_html_document(body) {
+        return format!("HTTP {} from internal adapter", status.as_u16());
+    }
+
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return format!("HTTP {} from claim relayer adapter", status.as_u16());
+    }
+
+    compact_error(anyhow::anyhow!(trimmed.to_string()))
+}
+
+fn looks_like_html_document(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let prefix = trimmed
+        .chars()
+        .take(256)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    prefix.starts_with("<!doctype html") || prefix.starts_with("<html") || prefix.contains("<html")
 }
 
 #[cfg(test)]

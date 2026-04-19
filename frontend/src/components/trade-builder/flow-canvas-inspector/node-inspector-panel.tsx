@@ -3,185 +3,32 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import {
-  NODE_FIELD_SCHEMAS,
-  createEmptyExitLadderRuleRow,
-  createEmptyTimeExitRuleRow,
-  type ExitLadderRuleRow,
-  isPresetBuySellPlaceOrderMarker,
-  isPresetPlaceOrderMarker,
-  type TimeExitRuleRow,
-} from '@/lib/trade-flow-config-mappers';
-import {
-  NODE_FIELD_HELP_CONTENT,
-  NODE_TYPE_OPTIONS,
-} from '../flow-canvas-constants';
+import { NODE_FIELD_SCHEMAS, createEmptyExitLadderRuleRow, createEmptyPtbStopLossRuleRow, createEmptyTimeExitRuleRow, type ExitLadderRuleRow, isPresetBuySellPlaceOrderMarker, isPresetPlaceOrderMarker, type PtbStopLossRuleRow, type TimeExitRuleRow } from '@/lib/trade-flow-config-mappers';
+import { NODE_FIELD_HELP_CONTENT, NODE_TYPE_OPTIONS } from '../flow-canvas-constants';
 import { normalizeDateTimeInput } from '../flow-canvas-utils';
 import { Settings2, Trash2, Plus, Zap } from 'lucide-react';
 import { EMPTY_SELECT_SENTINEL } from './shared';
+import { ExitLadderSection, PtbStopLossRuleSection } from './exit-sections';
 import { ExecutionFloorProtectionSection } from './execution-floor-protection-section';
 import { MaxPriceProtectionSection } from './max-price-protection-section';
+import { PairLockAutoPreviewSection } from './pair-lock-auto-preview-section';
+import { PriceToBeatMaxPriceRelaxSection } from './price-to-beat-max-price-relax-section';
+import { PriceToBeatStopLossBumpSection } from './price-to-beat-stop-loss-bump-section';
+import { TimeExitRulesSection } from './time-exit-rules-section';
+import { PairLockSummarySection, TriggerPairLockHint } from './pair-lock-binding-section';
+import { PairLockStaleConfigSection } from './pair-lock-stale-config-section';
 import {
-  DrawdownRulesSection,
-  ExpressionSection,
-  OpenPositionsSection,
-  OutcomeConditionsSection,
-  StatePatchSection,
-} from './sections';
+  isPairLockField,
+  isPairLockIncompatibleField,
+  resolvePairLockCounterPtbVisibility,
+  resolvePairLockSizingFieldVisibility,
+  resolvePairLockStopLossFieldVisibility,
+  resolvePairLockUiState,
+} from './pair-lock-inspector';
+import { DrawdownRulesSection, ExpressionSection, OpenPositionsSection, OutcomeConditionsSection, StatePatchSection } from './sections';
 import type { NodeInspectorPanelProps } from './types';
-
-interface ExitLadderSectionProps {
-  title: string;
-  description: string;
-  rows: ExitLadderRuleRow[];
-  addLabel: string;
-  onAdd: () => void;
-  onUpdate: (rowId: string, patch: Partial<ExitLadderRuleRow>) => void;
-  onRemove: (rowId: string) => void;
-}
-
-function ExitLadderSection({
-  title,
-  description,
-  rows,
-  addLabel,
-  onAdd,
-  onUpdate,
-  onRemove,
-}: ExitLadderSectionProps) {
-  return (
-    <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
-      <div className="flex items-center gap-1.5">
-        <Zap className="h-3.5 w-3.5 text-sky-500" />
-        <p className="text-[11px] font-semibold text-slate-700">{title}</p>
-      </div>
-      <p className="text-[10px] leading-relaxed text-slate-400 italic">{description}</p>
-      {rows.length === 0 ? (
-        <p className="text-[10px] text-slate-400 italic">Henüz kademe eklenmedi.</p>
-      ) : (
-        <div className="space-y-2">
-          {rows.map((row, index) => (
-            <div key={row.id} className="space-y-1.5 rounded-md border border-slate-200 bg-white p-2.5">
-              <div className="flex items-center justify-between">
-                <p className="text-[10px] font-medium text-slate-600">Kademe #{index + 1}</p>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 w-6 p-0 text-red-400 hover:text-red-600"
-                  onClick={() => onRemove(row.id)}
-                >
-                  <Trash2 className="h-3 w-3" />
-                </Button>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-0.5">
-                  <Label className="text-[10px] font-medium text-slate-600">Fiyat (cent)</Label>
-                  <Input
-                    type="number"
-                    value={row.priceCent}
-                    onChange={(e) => onUpdate(row.id, { priceCent: e.target.value })}
-                    placeholder="ör: 72"
-                    className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
-                  />
-                </div>
-                <div className="space-y-0.5">
-                  <Label className="text-[10px] font-medium text-slate-600">Boyut (%)</Label>
-                  <Input
-                    type="number"
-                    value={row.sizePct}
-                    onChange={(e) => onUpdate(row.id, { sizePct: e.target.value })}
-                    placeholder="ör: 35"
-                    className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
-                  />
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-      <Button size="sm" variant="outline" className="h-7 border-slate-300 px-2 text-[11px] text-slate-700" onClick={onAdd}>
-        <Plus className="mr-1 h-3 w-3" />
-        {addLabel}
-      </Button>
-    </div>
-  );
-}
-
-interface TimeExitRulesSectionProps {
-  rows: TimeExitRuleRow[];
-  onAdd: () => void;
-  onUpdate: (rowId: string, patch: Partial<TimeExitRuleRow>) => void;
-  onRemove: (rowId: string) => void;
-}
-
-function TimeExitRulesSection({ rows, onAdd, onUpdate, onRemove }: TimeExitRulesSectionProps) {
-  return (
-    <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
-      <div className="flex items-center gap-1.5">
-        <Settings2 className="h-3.5 w-3.5 text-amber-500" />
-        <p className="text-[11px] font-semibold text-slate-700">Zaman Bazli Cikis</p>
-      </div>
-      <p className="text-[10px] leading-relaxed text-slate-400 italic">
-        Sayaç buy fill anında başlar. Her kural, tetiklendiği andaki kalan pozisyonun belirli bir yüzdesini satar.
-      </p>
-      {rows.length === 0 ? (
-        <p className="text-[10px] text-slate-400 italic">Henüz süre kademesi eklenmedi.</p>
-      ) : (
-        <div className="space-y-2">
-          {rows.map((row, index) => (
-            <div key={row.id} className="space-y-1.5 rounded-md border border-slate-200 bg-white p-2.5">
-              <div className="flex items-center justify-between">
-                <p className="text-[10px] font-medium text-slate-600">Sure #{index + 1}</p>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 w-6 p-0 text-red-400 hover:text-red-600"
-                  onClick={() => onRemove(row.id)}
-                >
-                  <Trash2 className="h-3 w-3" />
-                </Button>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-0.5">
-                  <Label className="text-[10px] font-medium text-slate-600">Dakika</Label>
-                  <Input
-                    type="number"
-                    value={row.elapsedMinutes}
-                    onChange={(e) => onUpdate(row.id, { elapsedMinutes: e.target.value })}
-                    placeholder="ör: 12"
-                    className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
-                  />
-                </div>
-                <div className="space-y-0.5">
-                  <Label className="text-[10px] font-medium text-slate-600">Kalan (%)</Label>
-                  <Input
-                    type="number"
-                    value={row.remainingPct}
-                    onChange={(e) => onUpdate(row.id, { remainingPct: e.target.value })}
-                    placeholder="ör: 30"
-                    className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900"
-                  />
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-      <Button size="sm" variant="outline" className="h-7 border-slate-300 px-2 text-[11px] text-slate-700" onClick={onAdd}>
-        <Plus className="mr-1 h-3 w-3" />
-        Sure Kademesi Ekle
-      </Button>
-    </div>
-  );
-}
 
 export function NodeInspectorPanel({
   form,
@@ -198,6 +45,7 @@ export function NodeInspectorPanel({
   upstreamAutoScope,
   upstreamHasTriggerPrice,
   upstreamMaxPriceResolution,
+  upstreamPairLockTrigger,
   userTelegramBotTokenMasked,
   userTelegramDefaultChatId,
   actions,
@@ -208,20 +56,15 @@ export function NodeInspectorPanel({
   const placeOrderSizeMode = (form.fields.sizeMode ?? '').trim().toLowerCase();
   const dualDcaBaseSizing = (form.fields.baseSizing ?? '').trim().toLowerCase();
   const triggerMarketMode = (form.fields.marketMode ?? '').trim().toLowerCase();
+  const { triggerBindingMode, placeOrderPairLockEnabled, placeOrderCounterOutcomePreview } =
+    resolvePairLockUiState(nodeTypeDraft, form.fields);
   const triggerRepeatMode = (form.fields.repeatMode ?? '').trim().toLowerCase();
   const triggerCycleWindowMode = (form.fields.cycleWindowMode ?? '').trim().toLowerCase();
-  const triggerPriceToBeatEnabled =
-    (form.fields.priceToBeatTriggerEnabled ?? '').toString().trim().toLowerCase() === 'true';
-  const triggerPriceToBeatMode =
-    (form.fields.priceToBeatMode ?? '').toString().trim().toLowerCase() ===
-    'auto_last_3_avg_excursion'
-      ? 'auto_last_3_avg_excursion'
-      : 'manual';
+  const triggerPriceToBeatEnabled = (form.fields.priceToBeatTriggerEnabled ?? '').toString().trim().toLowerCase() === 'true';
+  const triggerPriceToBeatModeRaw = (form.fields.priceToBeatMode ?? '').toString().trim().toLowerCase();
+  const triggerPriceToBeatMode = triggerPriceToBeatModeRaw === 'auto_last_3_avg_excursion' || triggerPriceToBeatModeRaw === 'auto_vol_pct' ? triggerPriceToBeatModeRaw : 'manual';
   const placeOrderMaxTriggersRaw = Number(form.fields.maxTriggers ?? '');
-  const placeOrderMaxTriggers =
-    Number.isFinite(placeOrderMaxTriggersRaw) && placeOrderMaxTriggersRaw > 0
-      ? Math.min(20, Math.floor(placeOrderMaxTriggersRaw))
-      : 1;
+  const placeOrderMaxTriggers = Number.isFinite(placeOrderMaxTriggersRaw) && placeOrderMaxTriggersRaw > 0 ? Math.min(20, Math.floor(placeOrderMaxTriggersRaw)) : 1;
   const placeOrderTriggerRows = form.triggerSizeRows || [];
   const placeOrderTriggerNumericRows = placeOrderTriggerRows.map((raw) => {
     const trimmed = raw.trim();
@@ -255,37 +98,24 @@ export function NodeInspectorPanel({
       form.fields.presetKind,
       form.fields.refKey
     );
-  const placeOrderSide =
-    nodeTypeDraft === 'action.place_order'
-      ? (form.fields.side ?? '').toString().trim().toLowerCase()
-      : '';
-  const placeOrderTpEnabled =
-    nodeTypeDraft === 'action.place_order'
-      ? (form.fields.tpEnabled ?? '').toString().trim().toLowerCase() === 'true'
-      : false;
-  const placeOrderSlEnabled =
-    nodeTypeDraft === 'action.place_order'
-      ? (form.fields.slEnabled ?? '').toString().trim().toLowerCase() === 'true'
-      : false;
-  const placeOrderTpRuleRows = form.tpRuleRows || [];
-  const placeOrderSlRuleRows = form.slRuleRows || [];
-  const placeOrderTimeExitRuleRows = form.timeExitRuleRows || [];
-  const showTpLadderSection =
+  const placeOrderSide = nodeTypeDraft === 'action.place_order' ? (form.fields.side ?? '').toString().trim().toLowerCase() : '';
+  const placeOrderTpEnabled = nodeTypeDraft === 'action.place_order' ? (form.fields.tpEnabled ?? '').toString().trim().toLowerCase() === 'true' : false;
+  const placeOrderSlEnabled = nodeTypeDraft === 'action.place_order' ? (form.fields.slEnabled ?? '').toString().trim().toLowerCase() === 'true' : false;
+  const placeOrderTpRuleRows = form.tpRuleRows || [], placeOrderSlRuleRows = form.slRuleRows || [], placeOrderPtbStopLossRuleRows = form.ptbStopLossRuleRows || [], placeOrderTimeExitRuleRows = form.timeExitRuleRows || [];
+  const ptbStopLossChecked = nodeTypeDraft === 'action.place_order' ? (form.fields.ptbStopLossEnabled ?? '').toString().trim().toLowerCase() === 'true' : false;
+  const placeOrderHasAnyStopLossProtection =
     nodeTypeDraft === 'action.place_order' &&
     placeOrderSide === 'buy' &&
-    (placeOrderTpEnabled || placeOrderTpRuleRows.length > 0);
-  const showSlLadderSection =
-    nodeTypeDraft === 'action.place_order' &&
-    placeOrderSide === 'buy' &&
-    (placeOrderSlEnabled || placeOrderSlRuleRows.length > 0);
-  const showTimeExitSection =
-    nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy';
+    (placeOrderSlEnabled ||
+      ptbStopLossChecked ||
+      placeOrderPtbStopLossRuleRows.length > 0);
+  const showTpLadderSection = nodeTypeDraft === 'action.place_order' && !placeOrderPairLockEnabled && placeOrderSide === 'buy' && (placeOrderTpEnabled || placeOrderTpRuleRows.length > 0);
+  const showSlLadderSection = nodeTypeDraft === 'action.place_order' && !placeOrderPairLockEnabled && placeOrderSide === 'buy' && (placeOrderSlEnabled || placeOrderSlRuleRows.length > 0);
+  const showPtbStopLossSection = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && !placeOrderPairLockEnabled;
+  const showTimeExitSection = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && !placeOrderPairLockEnabled;
   const placeOrderMaxPriceCentValue =
     nodeTypeDraft === 'action.place_order' ? (form.fields.maxPriceCent ?? '').toString().trim() : '';
-  const placeOrderExecutionFloorPriceCentValue =
-    nodeTypeDraft === 'action.place_order'
-      ? (form.fields.executionFloorPriceCent ?? '').toString().trim()
-      : '';
+  const placeOrderExecutionFloorPriceCentValue = nodeTypeDraft === 'action.place_order' ? (form.fields.executionFloorPriceCent ?? '').toString().trim() : '';
   const placeOrderMaxPriceUi = form.placeOrderMaxPriceUi;
   const placeOrderMarketSeedUi = form.placeOrderMarketSeedUi;
   const placeOrderHasInheritedMaxPrice = placeOrderMaxPriceUi?.isInheritedValue === true;
@@ -301,6 +131,7 @@ export function NodeInspectorPanel({
     nodeTypeDraft === 'action.place_order'
       ? (form.fields.reentryMaxPriceCent ?? '').toString().trim()
       : '';
+  const placeOrderReentryPriceToBeatMaxDiffValue = nodeTypeDraft === 'action.place_order' ? (form.fields.reentryPriceToBeatMaxDiff ?? '').toString().trim() : '';
   const placeOrderTriggerGuardChecked =
     (form.fields.triggerPriceGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
   const reentryTriggerGuardActive =
@@ -317,11 +148,7 @@ export function NodeInspectorPanel({
   const executionFloorRetryChecked =
     (form.fields.retryOnExecutionFloorGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
   const parsedExecutionFloorPriceCent = Number(placeOrderExecutionFloorPriceCentValue);
-  const hasManualExecutionFloorPrice =
-    nodeTypeDraft === 'action.place_order' &&
-    Number.isFinite(parsedExecutionFloorPriceCent) &&
-    parsedExecutionFloorPriceCent > 0 &&
-    parsedExecutionFloorPriceCent <= 100;
+  const hasManualExecutionFloorPrice = nodeTypeDraft === 'action.place_order' && Number.isFinite(parsedExecutionFloorPriceCent) && parsedExecutionFloorPriceCent > 0 && parsedExecutionFloorPriceCent <= 100;
   const reentryMaxPriceProtectionActive =
     nodeTypeDraft === 'action.place_order' &&
     placeOrderSide === 'buy' &&
@@ -336,23 +163,62 @@ export function NodeInspectorPanel({
     (form.fields.priceToBeatGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
   const priceToBeatRetryChecked =
     (form.fields.retryOnPriceToBeatGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
+  const priceToBeatGuardModeRaw = (form.fields.priceToBeatMode ?? '').toString().trim().toLowerCase();
   const priceToBeatGuardMode =
-    (form.fields.priceToBeatMode ?? '').toString().trim().toLowerCase() ===
-    'auto_last_3_avg_excursion'
-      ? 'auto_last_3_avg_excursion'
+    priceToBeatGuardModeRaw === 'auto_last_3_avg_excursion' ||
+    priceToBeatGuardModeRaw === 'auto_vol_pct'
+      ? priceToBeatGuardModeRaw
       : 'manual';
   const priceToBeatGuardUnit =
     (form.fields.priceToBeatMaxDiffUnit ?? '').toString().trim().toLowerCase() === 'cent'
       ? 'cent'
       : 'usd';
+  const priceToBeatStopLossBumpChecked =
+    (form.fields.priceToBeatStopLossBumpEnabled ?? '').toString().trim().toLowerCase() === 'true';
+  const priceToBeatStopLossBumpUnitRaw =
+    (form.fields.priceToBeatStopLossBumpUnit ?? '').toString().trim().toLowerCase();
+  const priceToBeatStopLossBumpUnit =
+    priceToBeatStopLossBumpUnitRaw === 'usd' || priceToBeatStopLossBumpUnitRaw === 'cent'
+      ? priceToBeatStopLossBumpUnitRaw
+      : priceToBeatGuardUnit;
+  const priceToBeatStopLossBumpScope =
+    (form.fields.priceToBeatStopLossBumpScope ?? '').toString().trim().toLowerCase() === 'global'
+      ? 'global'
+      : 'per_scope';
+  const priceToBeatMaxPriceRelaxMinUnitRaw =
+    (form.fields.priceToBeatMaxPriceRelaxMinUnit ?? '').toString().trim().toLowerCase();
+  const priceToBeatMaxPriceRelaxMinUnit =
+    priceToBeatMaxPriceRelaxMinUnitRaw === 'usd' || priceToBeatMaxPriceRelaxMinUnitRaw === 'cent'
+      ? priceToBeatMaxPriceRelaxMinUnitRaw
+      : 'usd';
+  const priceToBeatMaxPriceRelaxStepModeRaw =
+    (form.fields.priceToBeatMaxPriceRelaxStepMode ?? '').toString().trim().toLowerCase();
+  const priceToBeatMaxPriceRelaxStepMode =
+    priceToBeatMaxPriceRelaxStepModeRaw === 'absolute' ? 'absolute' : 'percent';
+  const priceToBeatMaxPriceRelaxStepUnitRaw =
+    (form.fields.priceToBeatMaxPriceRelaxStepUnit ?? '').toString().trim().toLowerCase();
+  const priceToBeatMaxPriceRelaxStepUnit =
+    priceToBeatMaxPriceRelaxStepUnitRaw === 'cent' ? 'cent' : 'usd';
+  const ptbStopLossTimeDecayModeRaw =
+    (form.fields.ptbStopLossTimeDecayMode ?? '').toString().trim().toLowerCase();
+  const ptbStopLossTimeDecayMode =
+    ptbStopLossTimeDecayModeRaw === 'none' || ptbStopLossTimeDecayModeRaw === 'relax'
+      ? ptbStopLossTimeDecayModeRaw
+      : 'tighten';
+  const reentryPriceToBeatOverrideUnitRaw = nodeTypeDraft === 'action.place_order'
+    ? (form.fields.reentryPriceToBeatMaxDiffUnit ?? '').toString().trim().toLowerCase()
+    : '';
+  const reentryPriceToBeatOverrideUnit =
+    reentryPriceToBeatOverrideUnitRaw === 'usd' || reentryPriceToBeatOverrideUnitRaw === 'cent'
+      ? reentryPriceToBeatOverrideUnitRaw
+      : priceToBeatGuardMode === 'manual'
+        ? priceToBeatGuardUnit
+        : '';
   const showDedicatedTriggerGuard =
     nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy';
   const triggerGuardDisabled =
     !upstreamHasTriggerPrice && !placeOrderTriggerGuardChecked;
-  const executionFloorGuardDisabled =
-    !upstreamHasTriggerPrice &&
-    !hasManualExecutionFloorPrice &&
-    !executionFloorGuardChecked;
+  const executionFloorGuardDisabled = !upstreamHasTriggerPrice && !hasManualExecutionFloorPrice && !executionFloorGuardChecked;
   const hideAutoScopePlaceOrderOutcomeFields =
     isPresetPlaceOrder && upstreamAutoScope && placeOrderSide === 'buy';
   const supportsOpenPositionPicker =
@@ -389,6 +255,18 @@ export function NodeInspectorPanel({
         : prev
     );
   };
+  const updatePtbStopLossRuleRows = (
+    updater: (rows: PtbStopLossRuleRow[]) => PtbStopLossRuleRow[]
+  ) => {
+    actions.onFormChange((prev) =>
+      prev
+        ? {
+            ...prev,
+            ptbStopLossRuleRows: updater([...(prev.ptbStopLossRuleRows || [])]),
+          }
+        : prev
+    );
+  };
   const updateTimeExitRuleRows = (updater: (rows: TimeExitRuleRow[]) => TimeExitRuleRow[]) => {
     actions.onFormChange((prev) =>
       prev
@@ -401,9 +279,34 @@ export function NodeInspectorPanel({
   };
   const visibleNodeSchema = nodeSchema.filter((field) => {
     if (nodeTypeDraft === 'action.place_order') {
-      if (field.key === 'sizePct') return placeOrderSizeMode === 'pct';
+      if (field.key === 'sizeMode') return !placeOrderPairLockEnabled;
+      if (field.key === 'sizePct') return !placeOrderPairLockEnabled && placeOrderSizeMode === 'pct';
       if (field.key === 'sizeUsdc') {
-        return placeOrderSizeMode !== 'pct';
+        return placeOrderPairLockEnabled || placeOrderSizeMode !== 'pct';
+      }
+      const pairLockSizingVisibility = resolvePairLockSizingFieldVisibility(
+        field.key,
+        placeOrderPairLockEnabled,
+        form.fields
+      );
+      if (pairLockSizingVisibility != null) {
+        return pairLockSizingVisibility;
+      }
+      const pairLockCounterPtbVisibility = resolvePairLockCounterPtbVisibility(
+        field.key,
+        placeOrderPairLockEnabled,
+        form.fields
+      );
+      if (pairLockCounterPtbVisibility != null) {
+        return pairLockCounterPtbVisibility;
+      }
+      const pairLockStopLossVisibility = resolvePairLockStopLossFieldVisibility(field.key, placeOrderPairLockEnabled, form.fields);
+      if (pairLockStopLossVisibility != null) return pairLockStopLossVisibility;
+      if (isPairLockField(field.key)) {
+        return placeOrderPairLockEnabled;
+      }
+      if (placeOrderPairLockEnabled && isPairLockIncompatibleField(field.key)) {
+        return false;
       }
       if (
         isPresetPlaceOrder &&
@@ -439,18 +342,23 @@ export function NodeInspectorPanel({
         return placeOrderSide === 'buy' && slEnabled === 'true';
       }
       if (field.key === 'reenterOnSlHit') {
-        const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
-        return placeOrderSide === 'buy' && slEnabled === 'true';
+        return placeOrderHasAnyStopLossProtection;
+      }
+      if (field.key === 'stagedSlReentryOnlyAfterAllStages') {
+        return (
+          placeOrderSide === 'buy' &&
+          (placeOrderSlRuleRows.length > 0 ||
+            placeOrderPtbStopLossRuleRows.length > 0) &&
+          placeOrderReentryChecked
+        );
       }
       if (field.key === 'reentryMaxAttempts') {
-        const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
         const reenterOnSlHit = (form.fields.reenterOnSlHit ?? '').toString().trim().toLowerCase();
-        return placeOrderSide === 'buy' && slEnabled === 'true' && reenterOnSlHit === 'true';
+        return placeOrderHasAnyStopLossProtection && reenterOnSlHit === 'true';
       }
       if (field.key === 'reentryMinPriceCent' || field.key === 'reentryMaxPriceCent') {
-        const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
         const reenterOnSlHit = (form.fields.reenterOnSlHit ?? '').toString().trim().toLowerCase();
-        return placeOrderSide === 'buy' && slEnabled === 'true' && reenterOnSlHit === 'true';
+        return placeOrderHasAnyStopLossProtection && reenterOnSlHit === 'true';
       }
       if (field.key === 'notifyOnTriggerPriceBlocked') {
         return placeOrderSide === 'buy' && triggerGuardProtectionActive;
@@ -466,10 +374,11 @@ export function NodeInspectorPanel({
         return placeOrderSide === 'buy' && tpEnabled === 'true';
       }
       if (field.key === 'notifyOnSlHit') {
-        const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
-        return placeOrderSide === 'buy' && slEnabled === 'true';
+        return placeOrderHasAnyStopLossProtection;
       }
       if (
+        field.key === 'ptbStopLossEnabled' ||
+        field.key === 'ptbStopLossGapUsd' ||
         field.key === 'triggerPriceGuardEnabled' ||
         field.key === 'retryOnTriggerPriceGuardBlock' ||
         field.key === 'executionFloorGuardEnabled' ||
@@ -479,6 +388,26 @@ export function NodeInspectorPanel({
         field.key === 'priceToBeatMode' ||
         field.key === 'priceToBeatMaxDiff' ||
         field.key === 'priceToBeatMaxDiffUnit' ||
+        field.key === 'priceToBeatStopLossBumpEnabled' ||
+        field.key === 'priceToBeatStopLossBumpAmount' ||
+        field.key === 'priceToBeatStopLossBumpUnit' ||
+        field.key === 'priceToBeatStopLossBumpScope' ||
+        field.key === 'priceToBeatStopLossBumpDecayWindows' ||
+        field.key === 'priceToBeatMaxPriceRelaxMissCount' ||
+        field.key === 'priceToBeatMaxPriceRelaxHistoryCount' ||
+        field.key === 'priceToBeatMaxPriceRelaxMinValue' ||
+        field.key === 'priceToBeatMaxPriceRelaxMinUnit' ||
+        field.key === 'priceToBeatMaxPriceRelaxMinDepthUsd' ||
+        field.key === 'priceToBeatMaxPriceRelaxStepMode' ||
+        field.key === 'priceToBeatMaxPriceRelaxStepValue' ||
+        field.key === 'priceToBeatMaxPriceRelaxStepUnit' ||
+        field.key === 'reentryCooldownSec' ||
+        field.key === 'reentrySkipCurrentWindow' ||
+        field.key === 'reentryThresholdDecay' ||
+        field.key === 'reentryMaxPriceTightenBps' ||
+        field.key === 'reentryPriceToBeatMaxDiff' ||
+        field.key === 'reentryPriceToBeatMaxDiffUnit' ||
+        field.key === 'ptbStopLossTimeDecayMode' ||
         field.key === 'notifyOnPriceToBeatGapBlocked' ||
         field.key === 'retryOnPriceToBeatGuardBlock'
       ) {
@@ -505,6 +434,21 @@ export function NodeInspectorPanel({
       }
       if (field.key === 'onceScope') {
         return triggerRepeatMode === 'once';
+      }
+      if (field.key === 'bindingMode') {
+        return true;
+      }
+      if (
+        triggerBindingMode === 'pair_lock_only' &&
+        (
+          field.key === 'priceToBeatTriggerEnabled' ||
+          field.key === 'priceToBeatMode' ||
+          field.key === 'priceToBeatTriggerUnit' ||
+          field.key === 'priceToBeatTriggerMinGap' ||
+          field.key === 'priceToBeatTriggerMaxGap'
+        )
+      ) {
+        return false;
       }
       if (field.key === 'cycleWindowMode') {
         return triggerMarketMode === 'auto_scope';
@@ -632,16 +576,12 @@ export function NodeInspectorPanel({
 
             {visibleNodeSchema.map((field) => {
               const selectOptions = field.input === 'select'
-                ? (
-                  isPresetBuySellPlaceOrder && field.key === 'executionMode'
-                      ? [{ label: 'market (IOC)', value: 'market' }]
-                      : (field.options || [])
-                )
+                ? isPresetBuySellPlaceOrder && field.key === 'executionMode'
+                  ? [{ label: 'market (IOC)', value: 'market' }]
+                  : (field.options || [])
                 : [];
               const selectValue =
-                isPresetBuySellPlaceOrder && field.key === 'executionMode'
-                    ? 'market'
-                    : (form.fields[field.key] ?? '');
+                isPresetBuySellPlaceOrder && field.key === 'executionMode' ? 'market' : (form.fields[field.key] ?? '');
               return (
                 <div key={field.key} className="space-y-1">
                 <div className="flex items-center gap-1">
@@ -714,7 +654,7 @@ export function NodeInspectorPanel({
                       if (
                         field.key === 'priceToBeatTriggerEnabled' &&
                         e.target.checked &&
-                        !['manual', 'auto_last_3_avg_excursion'].includes(
+                        !['manual', 'auto_last_3_avg_excursion', 'auto_vol_pct'].includes(
                           (form.fields.priceToBeatMode ?? '')
                             .toString()
                             .trim()
@@ -852,6 +792,30 @@ export function NodeInspectorPanel({
                 {field.help && (
                   <p className="text-[10px] leading-relaxed text-slate-400 italic">{field.help}</p>
                 )}
+                <TriggerPairLockHint
+                  visible={
+                    field.key === 'bindingMode' &&
+                    nodeTypeDraft === 'trigger.market_price' &&
+                    triggerBindingMode === 'pair_lock_only'
+                  }
+                />
+                <PairLockSummarySection
+                  visible={field.key === 'mode' && placeOrderPairLockEnabled}
+                  primaryOutcomeLabel={(form.fields.outcomeLabel ?? '').trim()}
+                  counterOutcomePreview={placeOrderCounterOutcomePreview}
+                  upstreamPairLockTrigger={upstreamPairLockTrigger}
+                />
+                <PairLockStaleConfigSection
+                  visible={field.key === 'mode' && placeOrderPairLockEnabled}
+                  form={form}
+                  onFormChange={actions.onFormChange}
+                />
+                <PairLockAutoPreviewSection
+                  visible={field.key === 'pairTotalBudgetUsdc' && placeOrderPairLockEnabled}
+                  fields={form.fields}
+                  marketOutcomes={marketOutcomes}
+                  marketOutcomesLoading={marketOutcomesLoading}
+                />
                 {field.key === 'marketSlug' && placeOrderMarketSeedUi?.isInheritedMarketSlug && <p className="text-[10px] leading-relaxed text-sky-600">Bagli upstream `trigger.market_price` bilgisinden otomatik dolduruldu. Config&apos;e yazmak icin `Node Guncelle` kullan.</p>}
                 {field.key === 'marketSlug' && placeOrderMarketSeedUi?.upstreamKind === 'multiple' && <p className="text-[10px] leading-relaxed text-amber-600">Birden fazla bagli upstream fixed market bulundu{placeOrderMarketSeedUi.distinctUpstreamMarketSlugs.length > 0 ? ` (${placeOrderMarketSeedUi.distinctUpstreamMarketSlugs.join(', ')})` : ''}. Bu yuzden otomatik doldurma yapilmadi.</p>}
                 {field.key === 'tokenId' && placeOrderMarketSeedUi?.upstreamKind === 'single' && placeOrderMarketSeedUi.upstreamOutcomeKind === 'multiple' && <p className="text-[10px] leading-relaxed text-amber-600">Bagli upstream market bulundu ama outcome belirsiz{placeOrderMarketSeedUi.distinctUpstreamOutcomeLabels.length > 0 ? ` (${placeOrderMarketSeedUi.distinctUpstreamOutcomeLabels.join(', ')})` : ''}. Bu yuzden sadece market slug dolduruldu.</p>}
@@ -975,7 +939,7 @@ export function NodeInspectorPanel({
                             );
                             if (
                               e.target.checked &&
-                              !['manual', 'auto_last_3_avg_excursion'].includes(
+                              !['manual', 'auto_last_3_avg_excursion', 'auto_vol_pct'].includes(
                                 (form.fields.priceToBeatMode ?? '')
                                   .toString()
                                   .trim()
@@ -1036,6 +1000,9 @@ export function NodeInspectorPanel({
                               <SelectItem value="auto_last_3_avg_excursion">
                                 Auto: son 3 market excursion ort.
                               </SelectItem>
+                              <SelectItem value="auto_vol_pct">
+                                Auto: volatility bazli yuzde
+                              </SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
@@ -1088,7 +1055,80 @@ export function NodeInspectorPanel({
                           <p className="text-[10px] leading-relaxed text-slate-400 italic">
                             Dinamik modda esik elle girilmez. Ayni asset/timeframe icin son 3
                             tamamlanmis marketin yonlu excursion ortalamasi otomatik kullanilir.
+                            Asagidaki relax ayariyla miss esigi gecildikten sonra maxPrice altinda
+                            gorulen uygun gap seviyesine kademeli olarak gevseyebilir.
                           </p>
+                        )}
+                        <PriceToBeatStopLossBumpSection
+                          enabled={priceToBeatStopLossBumpChecked}
+                          amount={form.fields.priceToBeatStopLossBumpAmount ?? ''}
+                          maxValue={form.fields.priceToBeatStopLossBumpMaxValue ?? ''}
+                          decayWindows={form.fields.priceToBeatStopLossBumpDecayWindows ?? ''}
+                          scopeMode={priceToBeatStopLossBumpScope}
+                          unit={priceToBeatStopLossBumpUnit}
+                          defaultUnit={priceToBeatGuardMode === 'manual' ? priceToBeatGuardUnit : 'usd'}
+                          onUpdateField={actions.onUpdateField}
+                        />
+                        <PriceToBeatMaxPriceRelaxSection
+                          missCount={form.fields.priceToBeatMaxPriceRelaxMissCount ?? ''}
+                          historyCount={form.fields.priceToBeatMaxPriceRelaxHistoryCount ?? ''}
+                          minValue={form.fields.priceToBeatMaxPriceRelaxMinValue ?? ''}
+                          minDepthUsd={form.fields.priceToBeatMaxPriceRelaxMinDepthUsd ?? ''}
+                          minUnit={priceToBeatMaxPriceRelaxMinUnit}
+                          stepMode={priceToBeatMaxPriceRelaxStepMode}
+                          stepValue={form.fields.priceToBeatMaxPriceRelaxStepValue ?? ''}
+                          stepUnit={priceToBeatMaxPriceRelaxStepUnit}
+                          onUpdateField={actions.onUpdateField}
+                        />
+                        {placeOrderReentryChecked && (
+                          <div className="space-y-2 rounded-md border border-slate-200/80 bg-slate-50/70 p-2">
+                            <div className="space-y-1">
+                              <Label className="text-[11px] font-medium text-slate-600">Re-entry PTB Min Fark</Label>
+                              <Input
+                                type="number"
+                                step="any"
+                                value={placeOrderReentryPriceToBeatMaxDiffValue}
+                                onChange={(event) => actions.onUpdateField('reentryPriceToBeatMaxDiff', event.target.value)}
+                                placeholder={priceToBeatGuardMode === 'manual' ? '2' : 'bos birak'}
+                                className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300"
+                              />
+                            </div>
+                            <div className="space-y-1">
+                              <Label className="text-[11px] font-medium text-slate-600">Re-entry PTB Birimi</Label>
+                              <Select value={reentryPriceToBeatOverrideUnit || undefined} onValueChange={(value) => actions.onUpdateField('reentryPriceToBeatMaxDiffUnit', value)}>
+                                <SelectTrigger className="h-8 w-full border-slate-200 bg-white text-xs text-slate-900" size="sm">
+                                  <SelectValue placeholder="Birim sec" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="usd">USD</SelectItem>
+                                  <SelectItem value="cent">Cent</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            {priceToBeatGuardMode === 'manual' ? (
+                              <p className="text-[10px] leading-relaxed text-slate-400 italic">Bu override yalniz re-entry denemelerinde uygulanir. Birim secilmezse ana PTB birimi kullanilir: `{priceToBeatGuardUnit}`.</p>
+                            ) : (
+                              <p className="text-[10px] leading-relaxed text-slate-400 italic">Ana PTB auto modda kalsa bile re-entry denemesinde bu deger manual override olarak kullanilir. Bu modda birim secimi zorunludur.</p>
+                            )}
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="space-y-1">
+                                <Label className="text-[11px] font-medium text-slate-600">Cooldown (sn)</Label>
+                                <Input type="number" step="1" min="0" value={form.fields.reentryCooldownSec ?? ''} onChange={(event) => actions.onUpdateField('reentryCooldownSec', event.target.value)} placeholder="0" className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300" />
+                              </div>
+                              <div className="space-y-1">
+                                <Label className="text-[11px] font-medium text-slate-600">PTB Decay</Label>
+                                <Input type="number" step="any" value={form.fields.reentryThresholdDecay ?? ''} onChange={(event) => actions.onUpdateField('reentryThresholdDecay', event.target.value)} placeholder="0.8" className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300" />
+                              </div>
+                              <div className="space-y-1">
+                                <Label className="text-[11px] font-medium text-slate-600">MaxPrice Tighten (bps)</Label>
+                                <Input type="number" step="1" min="0" value={form.fields.reentryMaxPriceTightenBps ?? ''} onChange={(event) => actions.onUpdateField('reentryMaxPriceTightenBps', event.target.value)} placeholder="500" className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300" />
+                              </div>
+                              <div className="flex items-center justify-between gap-2 rounded-md border border-slate-200 bg-white px-2 py-2">
+                                <Label className="text-[11px] font-medium text-slate-600">Ayni pencereyi atla</Label>
+                                <input type="checkbox" checked={(form.fields.reentrySkipCurrentWindow ?? '').toString().trim().toLowerCase() === 'true'} onChange={(event) => actions.onUpdateField('reentrySkipCurrentWindow', event.target.checked ? 'true' : 'false')} className="h-4 w-4 rounded border-slate-300" />
+                              </div>
+                            </div>
+                          </div>
                         )}
                         <div className="flex items-center justify-between gap-2">
                           <Label className="text-[11px] font-medium text-slate-600">
@@ -1270,6 +1310,75 @@ export function NodeInspectorPanel({
               />
             )}
 
+            {showPtbStopLossSection && (
+              <div className="space-y-2 rounded-md border border-slate-200/80 bg-slate-50/80 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="space-y-1">
+                    <Label className="text-[11px] font-medium text-slate-600">
+                      PTB Gap Stop-Loss
+                    </Label>
+                    <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                      Master PTB toggle. Hard gap ve kademeli PTB satirlari bu ana switch ile
+                      acilip kapanir.
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={ptbStopLossChecked}
+                    onChange={(e) =>
+                      actions.onUpdateField(
+                        'ptbStopLossEnabled',
+                        e.target.checked ? 'true' : 'false'
+                      )
+                    }
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                </div>
+                {ptbStopLossChecked && (
+                  <>
+                    <p className="text-[10px] leading-relaxed text-slate-400 italic">
+                      Underlying directional gap izlenir. Up/Yes icin `current Chainlink - PTB`,
+                      Down/No icin `PTB - current Chainlink`. Buradan staged PTB satirlari
+                      tanimlanir; `0 / 100` tek satir, eski hard PTB ile ayni kapanis mantigini verir.
+                      Negatif gap, karsi yone ek overshoot bekler. Negatif esiklerde zaman decay uygulanmaz.
+                    </p>
+                    <div className="space-y-1">
+                      <Label className="text-[11px] font-medium text-slate-600">PTB SL Zaman Modu</Label>
+                      <Select value={ptbStopLossTimeDecayMode} onValueChange={(value) => actions.onUpdateField('ptbStopLossTimeDecayMode', value)}>
+                        <SelectTrigger className="h-8 w-full border-slate-200 bg-white text-xs text-slate-900" size="sm">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="tighten">tighten</SelectItem>
+                          <SelectItem value="relax">relax</SelectItem>
+                          <SelectItem value="none">none</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <PtbStopLossRuleSection
+                      rows={placeOrderPtbStopLossRuleRows}
+                      onAdd={() =>
+                        updatePtbStopLossRuleRows((rows) => [
+                          ...rows,
+                          createEmptyPtbStopLossRuleRow(),
+                        ])
+                      }
+                      onUpdate={(rowId, patch) =>
+                        updatePtbStopLossRuleRows((rows) =>
+                          rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row))
+                        )
+                      }
+                      onRemove={(rowId) =>
+                        updatePtbStopLossRuleRows((rows) =>
+                          rows.filter((row) => row.id !== rowId)
+                        )
+                      }
+                    />
+                  </>
+                )}
+              </div>
+            )}
+
             {showTimeExitSection && (
               <TimeExitRulesSection
                 rows={placeOrderTimeExitRuleRows}
@@ -1288,7 +1397,8 @@ export function NodeInspectorPanel({
             )}
 
             {(nodeTypeDraft === 'trigger.open_positions' ||
-              nodeTypeDraft === 'trigger.market_price') && (
+              (nodeTypeDraft === 'trigger.market_price' &&
+                triggerBindingMode !== 'pair_lock_only')) && (
               <OutcomeConditionsSection
                 rows={form.outcomeConditionRows}
                 marketOutcomes={marketOutcomes}
@@ -1296,6 +1406,11 @@ export function NodeInspectorPanel({
                 actions={actions}
                 nodeType={nodeTypeDraft}
               />
+            )}
+            {nodeTypeDraft === 'trigger.market_price' && triggerBindingMode === 'pair_lock_only' && (
+              <div className="rounded-lg border border-sky-200/80 bg-sky-50/80 p-3 text-[10px] leading-relaxed text-sky-700">
+                Bu modda trigger outcome secmez; marketi pair_lock node’una baglar. Up/Down secimi ve fiyat/PTB/max price mantigi pair_lock node’unda kalir.
+              </div>
             )}
 
             {(nodeTypeDraft === 'logic.if' || nodeTypeDraft === 'logic.switch') && (

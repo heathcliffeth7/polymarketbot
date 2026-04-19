@@ -141,6 +141,26 @@ impl ClobHttpClient {
     }
 }
 
+fn parse_price_history_point(raw: &Value) -> Option<PriceHistoryPoint> {
+    let ts = raw
+        .get("t")
+        .or_else(|| raw.get("timestamp"))
+        .or_else(|| raw.get("ts"))
+        .and_then(|value| match value {
+            Value::Number(number) => number.as_i64(),
+            Value::String(text) => text.parse::<i64>().ok(),
+            _ => None,
+        })?;
+    let price = raw
+        .get("p")
+        .or_else(|| raw.get("price"))
+        .and_then(parse_f64_value)?;
+    if !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+    Some(PriceHistoryPoint { ts, price })
+}
+
 fn parse_fee_rate_bps_value(value: &Value) -> Option<u64> {
     match value {
         Value::Number(v) => v.as_u64(),
@@ -281,6 +301,37 @@ impl ClobRestClient for ClobHttpClient {
             .or_else(|| raw.get("last"))
             .or_else(|| raw.get("last_trade_price"))
             .and_then(parse_f64_value))
+    }
+
+    async fn get_price_history(
+        &self,
+        token_id: &str,
+        start_ts: i64,
+        end_ts: i64,
+        fidelity: i64,
+    ) -> Result<Vec<PriceHistoryPoint>> {
+        if token_id.trim().is_empty() || start_ts <= 0 || end_ts <= start_ts {
+            return Ok(Vec::new());
+        }
+
+        let fidelity = fidelity.max(1);
+        let request_path = format!(
+            "/prices-history?market={token_id}&startTs={start_ts}&endTs={end_ts}&fidelity={fidelity}"
+        );
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), request_path);
+        let response = self.http.get(url).send().await?;
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+
+        let raw: serde_json::Value = response.json().await?;
+        Ok(raw
+            .get("history")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(parse_price_history_point)
+            .collect())
     }
 
     async fn get_fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>> {

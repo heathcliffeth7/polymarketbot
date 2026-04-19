@@ -598,99 +598,87 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
         let allow_first_tick_threshold =
             allow_first_tick_threshold_for_ws_node(&node_spec, previous_price);
         let ptb_config = trigger_market_price_ptb_config_from_spec(&node_spec);
-        let Some(gate_mode) =
-            trigger_market_price_gate_mode(&node_spec.trigger_condition, ptb_config)
-        else {
-            log_trigger_ws_target_skipped(
-                run_id,
-                run_spec.run_id,
-                "missing_gate_mode",
-                &target_log_fields,
-            );
+        let gate_mode = trigger_market_price_gate_mode(&node_spec.trigger_condition, ptb_config);
+        let (crossed, evaluation_mode) = if node_spec.pair_lock_only_monitor {
+            (true, "pair_lock_only")
+        } else if let Some(gate_mode) = gate_mode {
+            if matches!(
+                gate_mode,
+                TriggerMarketPriceGateMode::StandardOnly | TriggerMarketPriceGateMode::StandardAndPtb
+            ) {
+                let (crossed, evaluation_mode) = evaluate_trigger_market_price_condition(
+                    previous_price,
+                    current_price,
+                    node_spec.trigger_price,
+                    &node_spec.trigger_condition,
+                    allow_first_tick_threshold,
+                    node_spec.max_price,
+                );
+
+                if !crossed && evaluation_mode == "no_previous" {
+                    debug!(
+                        run_id,
+                        flow_run_id = run_spec.run_id,
+                        node_key = %node_spec.node_key,
+                        price = current_price,
+                        trigger_price = node_spec.trigger_price,
+                        trigger_condition = %node_spec.trigger_condition,
+                        once_mode = node_spec.once_mode,
+                        token_id = %node_spec.token_id,
+                        dirty_token_id = ?selected_target.dirty_token_id,
+                        ws_reevaluation_reason = selected_target.reevaluation_reason,
+                        resolved_market_slug = ?node_spec.market_slug,
+                        market = ?node_spec.market_slug,
+                        "TRIGGER_WS_NO_PREVIOUS_PRICE"
+                    );
+                }
+                if !crossed && evaluation_mode != "no_previous" {
+                    log_trigger_ws_condition_not_met(
+                        run_id,
+                        run_spec.run_id,
+                        build_trigger_ws_condition_not_met_log_fields(
+                            &node_spec,
+                            current_price,
+                            previous_price,
+                            evaluation_mode,
+                            gate_mode,
+                            &price_source,
+                            &price_source_detail,
+                            price_best_bid,
+                            price_best_ask,
+                            price_last_trade,
+                            price_snapshot_age_ms,
+                            selected_target.dirty_token_id.as_deref(),
+                            selected_target.reevaluation_reason,
+                            resolved_market_slug.as_deref(),
+                        ),
+                    );
+                }
+                (crossed, evaluation_mode)
+            } else {
+                (false, "ptb_only")
+            }
+        } else {
+            log_trigger_ws_target_skipped(run_id, run_spec.run_id, "missing_gate_mode", &target_log_fields);
             continue;
         };
-        let (crossed, evaluation_mode) = if matches!(
-            gate_mode,
-            TriggerMarketPriceGateMode::StandardOnly | TriggerMarketPriceGateMode::StandardAndPtb
-        ) {
-            let (crossed, evaluation_mode) = evaluate_trigger_market_price_condition(
-                previous_price,
-                current_price,
-                node_spec.trigger_price,
-                &node_spec.trigger_condition,
-                allow_first_tick_threshold,
-                node_spec.max_price,
-            );
 
-            if !crossed && evaluation_mode == "no_previous" {
-                debug!(
-                    run_id,
-                    flow_run_id = run_spec.run_id,
-                    node_key = %node_spec.node_key,
-                    price = current_price,
-                    trigger_price = node_spec.trigger_price,
-                    trigger_condition = %node_spec.trigger_condition,
-                    once_mode = node_spec.once_mode,
-                    token_id = %node_spec.token_id,
-                    dirty_token_id = ?selected_target.dirty_token_id,
-                    ws_reevaluation_reason = selected_target.reevaluation_reason,
-                    resolved_market_slug = ?node_spec.market_slug,
-                    market = ?node_spec.market_slug,
-                    "TRIGGER_WS_NO_PREVIOUS_PRICE"
-                );
-            }
-            if !crossed && evaluation_mode != "no_previous" {
-                log_trigger_ws_condition_not_met(
-                    run_id,
-                    run_spec.run_id,
-                    build_trigger_ws_condition_not_met_log_fields(
-                        &node_spec,
-                        current_price,
-                        previous_price,
-                        evaluation_mode,
-                        gate_mode,
-                        &price_source,
-                        &price_source_detail,
-                        price_best_bid,
-                        price_best_ask,
-                        price_last_trade,
-                        price_snapshot_age_ms,
-                        selected_target.dirty_token_id.as_deref(),
-                        selected_target.reevaluation_reason,
-                        resolved_market_slug.as_deref(),
-                    ),
-                );
-            }
-            (crossed, evaluation_mode)
-        } else {
-            (false, "ptb_only")
-        };
-
-        set_flow_node_state(
-            &mut run_spec.context,
-            &node_spec.node_key,
-            "last_price",
-            json!(current_price),
-        );
-        set_flow_node_state(
-            &mut run_spec.context,
-            &node_spec.node_key,
-            &prev_key,
-            json!(current_price),
-        );
+        set_flow_node_state(&mut run_spec.context, &node_spec.node_key, "last_price", json!(current_price));
+        set_flow_node_state(&mut run_spec.context, &node_spec.node_key, &prev_key, json!(current_price));
         run_spec.context_dirty = true;
 
         let confirmation_ms = market_price_confirmation_ms(&node_spec);
-        let mut should_enqueue = matches!(gate_mode, TriggerMarketPriceGateMode::PtbOnly)
+        let mut should_enqueue = node_spec.pair_lock_only_monitor
+            || matches!(gate_mode, Some(TriggerMarketPriceGateMode::PtbOnly))
             || should_enqueue_market_price_without_confirmation(
-                gate_mode,
+                gate_mode.unwrap_or(TriggerMarketPriceGateMode::StandardOnly),
                 crossed,
                 confirmation_ms,
             );
         let mut final_eval_mode: &str = evaluation_mode;
         let mut ptb_gate_output = Value::Null;
 
-        if matches!(gate_mode, TriggerMarketPriceGateMode::PtbOnly) {
+        if matches!(gate_mode, Some(TriggerMarketPriceGateMode::PtbOnly)) {
             if let Some(ptb_gate) = evaluate_trigger_market_price_ptb_gate_for_spec(&node_spec) {
                 ptb_gate_output = ptb_gate.to_value();
                 should_enqueue = ptb_gate.passed;
@@ -733,10 +721,15 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
             }
         }
 
-        if matches!(
-            gate_mode,
-            TriggerMarketPriceGateMode::StandardOnly | TriggerMarketPriceGateMode::StandardAndPtb
-        ) {
+        if !node_spec.pair_lock_only_monitor
+            && matches!(
+                gate_mode,
+                Some(
+                    TriggerMarketPriceGateMode::StandardOnly
+                        | TriggerMarketPriceGateMode::StandardAndPtb
+                )
+            )
+        {
             if let Some(confirmation_ms) = confirmation_ms {
                 let cpend_at_key = format!("cross_pending_at_{}", node_spec.token_id);
                 let cpend_price_key = format!("cross_pending_price_{}", node_spec.token_id);
@@ -855,7 +848,9 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
             }
         }
 
-        if should_enqueue && matches!(gate_mode, TriggerMarketPriceGateMode::StandardAndPtb) {
+        if should_enqueue
+            && matches!(gate_mode, Some(TriggerMarketPriceGateMode::StandardAndPtb))
+        {
             if let Some(ptb_gate) = evaluate_trigger_market_price_ptb_gate_for_spec(&node_spec) {
                 ptb_gate_output = ptb_gate.to_value();
                 if !ptb_gate.passed {
@@ -913,6 +908,14 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
             final_eval_mode,
             "first_tick_threshold" | "first_tick_in_range"
         );
+        let pair_lock_candidate_quotes = build_pair_lock_trigger_candidate_quotes(
+            &*run_spec,
+            &node_spec,
+            &market_snapshots,
+            client,
+            queued_at,
+        )
+        .await;
         let mut input_json = json!({
             "triggerSource": "ws_market_price",
             "tokenId": selected_token_id.clone(),
@@ -937,6 +940,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
             "resolvedMarketSlug": resolved_market_slug.clone(),
             "queuedAt": queued_at_rfc3339
         });
+        if !pair_lock_candidate_quotes.is_null() { input_json[PAIR_LOCK_TRIGGER_CANDIDATE_QUOTES_KEY] = pair_lock_candidate_quotes; }
         if !ptb_gate_output.is_null() {
             append_trigger_market_price_ptb_gate(&mut input_json, &ptb_gate_output);
         }

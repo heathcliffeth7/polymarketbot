@@ -299,3 +299,51 @@ test('normalizeTradeFlowGraph preserves trigger.market_price custom_range values
   assert.equal(config.cycleWindowEndSec, 285);
   assert.equal(config.autoSellOnWindowEnd, true);
 });
+
+test('normalizeTradeFlowGraph preserves pair_lock_only trigger.market_price custom_range values', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      {
+        key: 'trigger_market',
+        type: 'trigger.market_price',
+        positionX: 0,
+        positionY: 0,
+        config: {
+          marketMode: 'auto_scope',
+          marketScope: 'btc_5m_updown',
+          marketSelection: 'latest_by_slug',
+          priceMode: 'composite',
+          repeatMode: 'once',
+          bindingMode: 'pair_lock_only',
+          cycleWindowMode: 'custom_range',
+          cycleWindowStartSec: 230,
+          cycleWindowEndSec: 290,
+          outcomeConditions: [],
+        },
+      },
+      {
+        key: 'pair_buy',
+        type: 'action.place_order',
+        positionX: 220,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 5,
+          pairMaxTotalCent: 90,
+          counterLegEnabled: true,
+        },
+      },
+    ],
+    edges: [{ key: 'edge_pair', source: 'trigger_market', target: 'pair_buy', type: 'default', condition: null }],
+  });
+
+  const config = getNodeConfig(graph, 'trigger_market');
+  assert.equal(config.bindingMode, 'pair_lock_only');
+  assert.equal(config.cycleWindowMode, 'custom_range');
+  assert.equal(config.cycleWindowStartSec, 230);
+  assert.equal(config.cycleWindowEndSec, 290);
+});

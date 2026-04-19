@@ -24,6 +24,14 @@ async fn process_trade_flows(
             &mut flow_runtime_caches.user_cfg,
         )
         .await?;
+        maybe_tick_flow_auto_claims(
+            repo,
+            run_id,
+            &definitions,
+            &mut flow_runtime_caches.user_cfg,
+            auto_claim_runtimes,
+        )
+        .await;
         return Ok(());
     }
 

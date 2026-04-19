@@ -11,6 +11,29 @@ import {
 } from './shared';
 import { pushNodeError } from './validation-core';
 
+function directOutgoingNodes(nodeKey: string, graph: TradeFlowGraph): TradeFlowNode[] {
+  const nodeMap = new Map(graph.nodes.map((candidate) => [candidate.key, candidate]));
+  return graph.edges
+    .filter((edge) => edge.source === nodeKey)
+    .map((edge) => nodeMap.get(edge.target))
+    .filter((candidate): candidate is TradeFlowNode => !!candidate);
+}
+
+const PAIR_LOCK_ALLOWED_NOTIFICATION_ACTIONS = new Set([
+  'action.notify',
+  'action.telegram_notify',
+]);
+
+function isPairLockDownstreamNode(node: TradeFlowNode): boolean {
+  const downstreamConfig = isRecord(node.config) ? node.config : {};
+  const downstreamMode = toTrimmedString(downstreamConfig.mode).toLowerCase() || 'single';
+  return node.type === 'action.place_order' && downstreamMode === 'pair_lock';
+}
+
+function isPairLockAllowedNotificationNode(node: TradeFlowNode): boolean {
+  return PAIR_LOCK_ALLOWED_NOTIFICATION_ACTIONS.has(node.type);
+}
+
 export function validateTriggerMarketPriceNodeConfig(
   issues: TradeFlowValidationIssue[],
   node: TradeFlowNode,
@@ -22,6 +45,16 @@ export function validateTriggerMarketPriceNodeConfig(
   const autoScope = marketMode === 'auto_scope';
   const protectionMode = toTrimmedString(config.protectionMode).toLowerCase();
   const protectionPreset = toTrimmedString(config.protectionPreset).toLowerCase();
+  const bindingMode = toTrimmedString(config.bindingMode).toLowerCase() || 'standard';
+  const pairLockOnly = bindingMode === 'pair_lock_only';
+  if (bindingMode !== 'standard' && bindingMode !== 'pair_lock_only') {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_binding_mode',
+      'trigger.market_price bindingMode must be standard or pair_lock_only.'
+    );
+  }
 
   if (autoScope) {
     const marketScope = toTrimmedString(config.marketScope).toLowerCase();
@@ -148,9 +181,16 @@ export function validateTriggerMarketPriceNodeConfig(
     );
   }
   if (priceToBeatTriggerEnabled === true) {
+    const ptbMarketScope = toTrimmedString(config.marketScope).toLowerCase();
+    const ptbMarketScopeResolved = ptbMarketScope
+      ? RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[ptbMarketScope] || null
+      : null;
     const ptbMode = toTrimmedString(config.priceToBeatMode).toLowerCase();
     const normalizedPtbMode =
-      !ptbMode || ptbMode === 'manual' || ptbMode === 'auto_last_3_avg_excursion'
+      !ptbMode ||
+      ptbMode === 'manual' ||
+      ptbMode === 'auto_last_3_avg_excursion' ||
+      ptbMode === 'auto_vol_pct'
         ? ptbMode || 'manual'
         : null;
     if (normalizedPtbMode == null) {
@@ -158,12 +198,20 @@ export function validateTriggerMarketPriceNodeConfig(
         issues,
         node,
         'invalid_price_to_beat_mode',
-        'trigger.market_price priceToBeatMode must be manual or auto_last_3_avg_excursion.'
+        'trigger.market_price priceToBeatMode must be manual, auto_last_3_avg_excursion, or auto_vol_pct.'
+      );
+    }
+    if (normalizedPtbMode === 'auto_vol_pct' && ptbMarketScopeResolved?.asset === 'xrp') {
+      pushNodeError(
+        issues,
+        node,
+        'unsupported_price_to_beat_auto_vol_pct_asset',
+        'trigger.market_price auto_vol_pct supports only BTC, ETH, and SOL auto_scope markets.'
       );
     }
     if (normalizedPtbMode !== 'auto_last_3_avg_excursion') {
       const minGap = toFiniteNumber(config.priceToBeatTriggerMinGap);
-      if (minGap == null || minGap <= 0) {
+      if (normalizedPtbMode === 'manual' && (minGap == null || minGap <= 0)) {
         pushNodeError(
           issues,
           node,
@@ -171,7 +219,7 @@ export function validateTriggerMarketPriceNodeConfig(
           'trigger.market_price priceToBeatTriggerMinGap must be > 0 when gate is enabled.'
         );
       }
-      if (hasProvidedValue(config.priceToBeatTriggerMaxGap)) {
+      if (normalizedPtbMode === 'manual' && hasProvidedValue(config.priceToBeatTriggerMaxGap)) {
         const maxGap = toFiniteNumber(config.priceToBeatTriggerMaxGap);
         if (maxGap == null || maxGap <= 0 || (minGap != null && maxGap < minGap)) {
           pushNodeError(
@@ -183,7 +231,7 @@ export function validateTriggerMarketPriceNodeConfig(
         }
       }
       const unit = toTrimmedString(config.priceToBeatTriggerUnit).toLowerCase();
-      if (unit && unit !== 'usd' && unit !== 'cent') {
+      if (normalizedPtbMode === 'manual' && unit && unit !== 'usd' && unit !== 'cent') {
         pushNodeError(
           issues,
           node,
@@ -194,7 +242,7 @@ export function validateTriggerMarketPriceNodeConfig(
     }
   }
 
-  if (Array.isArray(config.outcomeConditions)) {
+  if (Array.isArray(config.outcomeConditions) && !pairLockOnly) {
     for (const item of config.outcomeConditions) {
       if (!isRecord(item)) continue;
       const triggerCondition = toTrimmedString(item.triggerCondition).toLowerCase();
@@ -239,13 +287,57 @@ export function validateTriggerMarketPriceNodeConfig(
     }
   }
 
-  if (countValidMarketPriceOutcomeConditions(config) <= 0) {
+  if (!pairLockOnly && countValidMarketPriceOutcomeConditions(config) <= 0) {
     pushNodeError(
       issues,
       node,
       'missing_outcome_conditions',
       'trigger.market_price requires at least one valid outcome condition or PTB-only outcome row.'
     );
+  }
+
+  if (bindingMode === 'pair_lock_only') {
+    const hasOutcomeRows =
+      Array.isArray(config.outcomeConditions) && config.outcomeConditions.length > 0;
+    if (hasOutcomeRows) {
+      pushNodeError(
+        issues,
+        node,
+        'pair_lock_only_disallows_outcome_conditions',
+        'trigger.market_price bindingMode=pair_lock_only does not allow outcomeConditions.'
+      );
+    }
+    if (priceToBeatTriggerEnabled === true) {
+      pushNodeError(
+        issues,
+        node,
+        'pair_lock_only_disallows_ptb_trigger',
+        'trigger.market_price bindingMode=pair_lock_only does not allow priceToBeatTrigger* fields.'
+      );
+    }
+    const downstreamNodes = directOutgoingNodes(node.key, graph);
+    const pairLockNodes = downstreamNodes.filter(isPairLockDownstreamNode);
+    const invalidNodes = downstreamNodes.filter(
+      (downstreamNode) =>
+        !isPairLockDownstreamNode(downstreamNode) &&
+        !isPairLockAllowedNotificationNode(downstreamNode)
+    );
+    if (pairLockNodes.length !== 1) {
+      pushNodeError(
+        issues,
+        node,
+        'pair_lock_only_requires_single_pair_lock_downstream',
+        'trigger.market_price bindingMode=pair_lock_only requires exactly one downstream action.place_order mode=pair_lock.'
+      );
+    }
+    if (invalidNodes.length > 0) {
+      pushNodeError(
+        issues,
+        node,
+        'pair_lock_only_disallows_non_notification_downstream',
+        'trigger.market_price bindingMode=pair_lock_only allows only one action.place_order mode=pair_lock plus optional action.notify/action.telegram_notify nodes.'
+      );
+    }
   }
 
   if (autoScope) {

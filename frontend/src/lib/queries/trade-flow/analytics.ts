@@ -5,6 +5,10 @@ import type {
   AutoScopeTradeAnalysisRow,
   AutoScopeTradeAnalysisSortBy,
   AutoScopeTradeAnalysisSortDirection,
+  TradeFlowNodeRuntimeResponse,
+  TradeFlowNodeRuntimeRow,
+  TradeFlowPtbStateResponse,
+  TradeFlowPtbStateRow,
 } from '@/lib/types';
 
 interface AutoScopeTradeAnalysisFilters {
@@ -39,6 +43,42 @@ interface AutoScopeTradeAnalysisRowDb {
   row_qty: number;
   remaining_qty_after_exit: number;
   row_pnl_usdc: number;
+  updated_at: string;
+}
+
+interface TradeFlowPtbStateRowDb {
+  builder_order_id: number;
+  run_id: number | null;
+  node_key: string | null;
+  market_slug: string;
+  outcome_label: string;
+  base_threshold_usd: number | null;
+  bump_usd: number | null;
+  bump_increment_usd: number | null;
+  relax_credit_usd: number | null;
+  effective_threshold_usd: number | null;
+  guard_miss_reason: string | null;
+  max_price_miss: boolean | null;
+  first_tradable_second: string | null;
+  first_tradable_gap_usd: number | null;
+  tradable_seconds_count: number | null;
+  price_ok_depth_fail_count: number | null;
+  max_fillability_score: number | null;
+  quality_score: number | null;
+  refreshed_at: string;
+}
+
+interface TradeFlowNodeRuntimeRowDb {
+  run_id: number;
+  definition_id: number;
+  version_id: number | null;
+  node_key: string;
+  node_type: string;
+  status: string;
+  state_kind: string;
+  market_slug: string | null;
+  token_id: string | null;
+  snapshot_json: Record<string, unknown>;
   updated_at: string;
 }
 
@@ -214,6 +254,211 @@ export async function getAutoScopeTradeAnalysis(
     sortDirection,
     refreshedAt:
       refreshedAtRes.rows[0]?.refreshed_at ?? new Date().toISOString(),
+  };
+}
+
+function mapPtbStateRow(row: TradeFlowPtbStateRowDb): TradeFlowPtbStateRow {
+  return {
+    builderOrderId: Number(row.builder_order_id),
+    runId: row.run_id == null ? null : Number(row.run_id),
+    nodeKey: row.node_key,
+    marketSlug: row.market_slug,
+    outcomeLabel: row.outcome_label,
+    baseThresholdUsd:
+      row.base_threshold_usd == null ? null : Number(row.base_threshold_usd),
+    bumpUsd: row.bump_usd == null ? null : Number(row.bump_usd),
+    bumpIncrementUsd:
+      row.bump_increment_usd == null ? null : Number(row.bump_increment_usd),
+    relaxCreditUsd:
+      row.relax_credit_usd == null ? null : Number(row.relax_credit_usd),
+    effectiveThresholdUsd:
+      row.effective_threshold_usd == null ? null : Number(row.effective_threshold_usd),
+    guardMissReason: row.guard_miss_reason,
+    maxPriceMiss: row.max_price_miss === true,
+    firstTradableSecond: row.first_tradable_second,
+    firstTradableGapUsd:
+      row.first_tradable_gap_usd == null ? null : Number(row.first_tradable_gap_usd),
+    tradableSecondsCount: Number(row.tradable_seconds_count || 0),
+    priceOkDepthFailCount: Number(row.price_ok_depth_fail_count || 0),
+    maxFillabilityScore:
+      row.max_fillability_score == null ? null : Number(row.max_fillability_score),
+    qualityScore: row.quality_score == null ? null : Number(row.quality_score),
+    refreshedAt: row.refreshed_at,
+  };
+}
+
+export async function getTradeFlowPtbState(params: {
+  userId: number;
+  runId?: number | null;
+  page?: number;
+  limit?: number;
+}): Promise<TradeFlowPtbStateResponse> {
+  const page = Math.max(1, params.page || 1);
+  const limit = Math.min(Math.max(1, params.limit || 50), 100);
+  const offset = (page - 1) * limit;
+  const runId = params.runId ?? null;
+
+  const [countRes, dataRes] = await Promise.all([
+    pool.query<{ total: number }>(
+      `WITH latest AS (
+         SELECT DISTINCT ON (e.builder_order_id)
+           e.builder_order_id,
+           o.origin_flow_run_id AS run_id,
+           o.origin_flow_node_key AS node_key,
+           o.market_slug,
+           o.outcome_label,
+           e.payload_json,
+           e.created_at
+         FROM trade_builder_order_events e
+         JOIN trade_builder_orders o ON o.id = e.builder_order_id
+         WHERE o.user_id = $1
+           AND ($2::bigint IS NULL OR o.origin_flow_run_id = $2)
+           AND e.event_type IN ('flow_created', 'flow_rearmed')
+         ORDER BY e.builder_order_id, e.created_at DESC, e.id DESC
+       )
+       SELECT COUNT(*)::int AS total FROM latest`,
+      [params.userId, runId]
+    ),
+    pool.query<TradeFlowPtbStateRowDb>(
+      `WITH latest AS (
+         SELECT DISTINCT ON (e.builder_order_id)
+           e.builder_order_id,
+           o.origin_flow_run_id AS run_id,
+           o.origin_flow_node_key AS node_key,
+           o.market_slug,
+           o.outcome_label,
+           e.payload_json,
+           e.created_at
+         FROM trade_builder_order_events e
+         JOIN trade_builder_orders o ON o.id = e.builder_order_id
+         WHERE o.user_id = $1
+           AND ($2::bigint IS NULL OR o.origin_flow_run_id = $2)
+           AND e.event_type IN ('flow_created', 'flow_rearmed')
+         ORDER BY e.builder_order_id, e.created_at DESC, e.id DESC
+       )
+       SELECT
+         builder_order_id,
+         run_id,
+         node_key,
+         market_slug,
+         outcome_label,
+         NULLIF(payload_json->'price_to_beat_guard'->>'base_threshold_usd', '')::double precision AS base_threshold_usd,
+         NULLIF(payload_json->'price_to_beat_guard'->>'stop_loss_bump_usd', '')::double precision AS bump_usd,
+         NULLIF(payload_json->'price_to_beat_guard'->>'stop_loss_bump_increment_usd', '')::double precision AS bump_increment_usd,
+         NULLIF(payload_json->'price_to_beat_guard'->'max_price_relax'->>'max_price_relax_relax_credit_usd', '')::double precision AS relax_credit_usd,
+         NULLIF(payload_json->'price_to_beat_guard'->>'threshold_usd', '')::double precision AS effective_threshold_usd,
+         COALESCE(
+           payload_json->'price_to_beat_guard'->'max_price_relax'->>'max_price_relax_miss_reason',
+           payload_json->'price_to_beat_guard'->>'reason_code'
+         ) AS guard_miss_reason,
+         COALESCE(
+           payload_json->'price_to_beat_guard'->'max_price_relax'->>'max_price_relax_miss_reason' = 'max_price_miss',
+           false
+         ) AS max_price_miss,
+         payload_json->'price_to_beat_guard'->'max_price_relax'->>'max_price_relax_first_tradable_second_ts' AS first_tradable_second,
+         NULLIF(payload_json->'price_to_beat_guard'->'max_price_relax'->>'max_price_relax_selected_gap_usd', '')::double precision AS first_tradable_gap_usd,
+         COALESCE((payload_json->'price_to_beat_guard'->'max_price_relax'->>'max_price_relax_tradable_seconds_count')::int, 0) AS tradable_seconds_count,
+         COALESCE((payload_json->'price_to_beat_guard'->'max_price_relax'->>'max_price_relax_price_ok_depth_fail_count')::int, 0) AS price_ok_depth_fail_count,
+         NULLIF(payload_json->'price_to_beat_guard'->'max_price_relax'->>'max_price_relax_max_fillability_score', '')::double precision AS max_fillability_score,
+         NULLIF(payload_json->'price_to_beat_guard'->'max_price_relax'->>'max_price_relax_quality_score', '')::double precision AS quality_score,
+         created_at::text AS refreshed_at
+       FROM latest
+       ORDER BY created_at DESC, builder_order_id DESC
+       LIMIT $3 OFFSET $4`,
+      [params.userId, runId, limit, offset]
+    ),
+  ]);
+
+  const total = Number(countRes.rows[0]?.total || 0);
+  return {
+    data: dataRes.rows.map(mapPtbStateRow),
+    total,
+    page,
+    limit,
+    totalPages: Math.ceil(total / limit),
+    refreshedAt: dataRes.rows[0]?.refreshed_at ?? new Date().toISOString(),
+  };
+}
+
+function mapNodeRuntimeRow(row: TradeFlowNodeRuntimeRowDb): TradeFlowNodeRuntimeRow {
+  return {
+    runId: Number(row.run_id),
+    definitionId: Number(row.definition_id),
+    versionId: row.version_id == null ? null : Number(row.version_id),
+    nodeKey: row.node_key,
+    nodeType: row.node_type,
+    status: row.status,
+    stateKind: row.state_kind,
+    marketSlug: row.market_slug,
+    tokenId: row.token_id,
+    snapshotJson: row.snapshot_json ?? {},
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function getTradeFlowNodeRuntime(params: {
+  userId: number;
+  runId: number;
+  nodeKey?: string;
+  nodeType?: string;
+  page?: number;
+  limit?: number;
+}): Promise<TradeFlowNodeRuntimeResponse> {
+  const page = Math.max(1, params.page || 1);
+  const limit = Math.min(Math.max(1, params.limit || 50), 100);
+  const offset = (page - 1) * limit;
+
+  const [countRes, dataRes] = await Promise.all([
+    pool.query<{ total: number }>(
+      `SELECT COUNT(*)::int AS total
+       FROM trade_flow_node_runtime_snapshots s
+       JOIN trade_flow_runs r ON r.id = s.run_id
+       WHERE r.user_id = $1
+         AND s.run_id = $2
+         AND ($3::text IS NULL OR s.node_key = $3)
+         AND ($4::text IS NULL OR s.node_type = $4)`,
+      [params.userId, params.runId, params.nodeKey ?? null, params.nodeType ?? null]
+    ),
+    pool.query<TradeFlowNodeRuntimeRowDb>(
+      `SELECT
+         s.run_id,
+         s.definition_id,
+         s.version_id,
+         s.node_key,
+         s.node_type,
+         s.status,
+         s.state_kind,
+         s.market_slug,
+         s.token_id,
+         s.snapshot_json,
+         s.updated_at::text
+       FROM trade_flow_node_runtime_snapshots s
+       JOIN trade_flow_runs r ON r.id = s.run_id
+       WHERE r.user_id = $1
+         AND s.run_id = $2
+         AND ($3::text IS NULL OR s.node_key = $3)
+         AND ($4::text IS NULL OR s.node_type = $4)
+       ORDER BY s.updated_at DESC, s.node_key ASC
+       LIMIT $5 OFFSET $6`,
+      [
+        params.userId,
+        params.runId,
+        params.nodeKey ?? null,
+        params.nodeType ?? null,
+        limit,
+        offset,
+      ]
+    ),
+  ]);
+
+  const total = Number(countRes.rows[0]?.total || 0);
+  return {
+    data: dataRes.rows.map(mapNodeRuntimeRow),
+    total,
+    page,
+    limit,
+    totalPages: Math.ceil(total / limit),
+    refreshedAt: dataRes.rows[0]?.updated_at ?? new Date().toISOString(),
   };
 }
 

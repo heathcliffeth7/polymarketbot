@@ -536,6 +536,8 @@ async fn enqueue_cycle_window_prevalidated_step(
     run_spec: &WsOpenPositionPriceRunSpec,
     node_spec: &WsOpenPositionPriceNodeSpec,
     resolved_price: &ResolvedTriggerPrice,
+    boundary_snapshots: &HashMap<String, MarketDataSnapshot>,
+    client: Option<&dyn OrderExecutor>,
     evaluation_mode: &str,
     window_mode: &str,
     diagnostics: Option<&CycleWindowEvalDiagnostics>,
@@ -565,6 +567,14 @@ async fn enqueue_cycle_window_prevalidated_step(
             node_spec.token_id
         )
     };
+    let pair_lock_candidate_quotes = build_pair_lock_trigger_candidate_quotes(
+        run_spec,
+        node_spec,
+        boundary_snapshots,
+        client,
+        queued_at,
+    )
+    .await;
     let mut input_json = json!({
         "triggerSource": "ws_market_price",
         "tokenId": node_spec.token_id,
@@ -590,6 +600,9 @@ async fn enqueue_cycle_window_prevalidated_step(
         "versionNo": run_spec.version_no,
         "queuedAt": queued_at_rfc3339
     });
+    if !pair_lock_candidate_quotes.is_null() {
+        input_json[PAIR_LOCK_TRIGGER_CANDIDATE_QUOTES_KEY] = pair_lock_candidate_quotes;
+    }
     if let Some(diagnostics) = diagnostics {
         let mut diag_json = json!({
             "cycleWindowSecs": diagnostics.cycle_window_secs,
@@ -851,17 +864,17 @@ async fn process_trade_flow_trigger_market_price_timers(
         run_spec.context_dirty = true;
 
         let ptb_config = trigger_market_price_ptb_config_from_spec(&node_spec);
-        let Some(gate_mode) =
-            trigger_market_price_gate_mode(&node_spec.trigger_condition, ptb_config)
-        else {
-            continue;
-        };
+        let gate_mode = trigger_market_price_gate_mode(&node_spec.trigger_condition, ptb_config);
         let allow_first_tick_at_boundary =
             target.window_mode == "last" || target.window_mode == "custom_range";
-        let (matched, evaluation_mode) = if matches!(
+        let (matched, evaluation_mode) = if node_spec.pair_lock_only_monitor {
+            (true, "pair_lock_only")
+        } else if matches!(
             gate_mode,
-            TriggerMarketPriceGateMode::StandardOnly
-                | TriggerMarketPriceGateMode::StandardAndPtb
+            Some(
+                TriggerMarketPriceGateMode::StandardOnly
+                    | TriggerMarketPriceGateMode::StandardAndPtb
+            )
         ) {
             evaluate_trigger_market_price_condition(
                 None,
@@ -871,8 +884,10 @@ async fn process_trade_flow_trigger_market_price_timers(
                 allow_first_tick_at_boundary,
                 node_spec.max_price,
             )
-        } else {
+        } else if matches!(gate_mode, Some(TriggerMarketPriceGateMode::PtbOnly)) {
             (true, "ptb_only")
+        } else {
+            continue;
         };
 
         if !matched {
@@ -937,11 +952,15 @@ async fn process_trade_flow_trigger_market_price_timers(
             run_spec.context_dirty = true;
         }
 
-        if matches!(
-            gate_mode,
-            TriggerMarketPriceGateMode::StandardOnly
-                | TriggerMarketPriceGateMode::StandardAndPtb
-        ) {
+        if !node_spec.pair_lock_only_monitor
+            && matches!(
+                gate_mode,
+                Some(
+                    TriggerMarketPriceGateMode::StandardOnly
+                        | TriggerMarketPriceGateMode::StandardAndPtb
+                )
+            )
+        {
             if let Some(confirmation_ms) = market_price_confirmation_ms(&node_spec) {
             let cpend_at_key = format!("cross_pending_at_{}", node_spec.token_id);
             let cpend_price_key = format!("cross_pending_price_{}", node_spec.token_id);
@@ -998,7 +1017,10 @@ async fn process_trade_flow_trigger_market_price_timers(
         let mut ptb_gate_output = Value::Null;
         if matches!(
             gate_mode,
-            TriggerMarketPriceGateMode::PtbOnly | TriggerMarketPriceGateMode::StandardAndPtb
+            Some(
+                TriggerMarketPriceGateMode::PtbOnly
+                    | TriggerMarketPriceGateMode::StandardAndPtb
+            )
         ) {
             if let Some(ptb_gate) = evaluate_trigger_market_price_ptb_gate_for_spec(&node_spec) {
                 ptb_gate_output = ptb_gate.to_value();
@@ -1051,6 +1073,8 @@ async fn process_trade_flow_trigger_market_price_timers(
             run_spec,
             &node_spec,
             &resolved_price,
+            &boundary_snapshots,
+            client,
             evaluation_mode,
             &target.window_mode,
             diagnostics.as_ref(),

@@ -1,6 +1,21 @@
 use super::*;
 
 impl PostgresRepository {
+    pub async fn list_auto_claim_candidate_user_ids(&self) -> Result<Vec<i64>> {
+        let user_ids = sqlx::query_scalar::<_, i64>(
+            "SELECT DISTINCT us.user_id \
+             FROM user_settings us \
+             JOIN app_users u ON u.id = us.user_id \
+             WHERE us.config_name = 'claim' \
+               AND LOWER(COALESCE(us.payload_json ->> 'enabled', 'false')) IN ('true', '1', 'yes', 'on') \
+             ORDER BY us.user_id ASC",
+        )
+        .fetch_all(self.pool())
+        .await?;
+
+        Ok(user_ids)
+    }
+
     pub async fn upsert_auto_claim_job(
         &self,
         owner_address: &str,

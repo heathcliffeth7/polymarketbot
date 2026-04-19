@@ -200,10 +200,11 @@ export async function readPositionWalletAddress(
 export async function readClaimRelayerConfigForServer(
   context: UserConfigContext
 ): Promise<ClaimRelayerConfigForServer> {
-  const storedClaim = await readStoredUserConfig(context.userId, 'claim');
-  const claimSource = storedClaim ?? (await readFallbackFileConfig('claim').catch(() => ({})));
+  const claimSource = await readMergedConfigForServer('claim', context);
   const claim = normalizeClaimShape(claimSource);
-  const exchange = normalizeExchangeShape(await readRawConfig('exchange', context));
+  const exchange = normalizeExchangeShape(
+    await readMergedConfigForServer('exchange', context)
+  );
 
   return {
     executionMode: normalizeClaimExecutionMode(claim.execution_mode),
@@ -253,12 +254,13 @@ export async function readTelegramChatIdForServer(
 export async function readEffectiveClaimConfigForServer(
   context: UserConfigContext
 ): Promise<ClaimRuntimeValidationState> {
-  // Runtime loads stored claim JSON when present, otherwise falls back to claim.toml.
-  // Do not use buildDefaultUserConfig here because it intentionally forces enabled=false.
-  const stored = await readStoredUserConfig(context.userId, 'claim');
-  const source = stored ?? (await readFallbackFileConfig('claim').catch(() => ({})));
+  // DB-stored seeded config overrides TOML with enabled=false and empty sensitive fields.
+  // Merge: prefer non-empty DB values (explicit user settings), fall back to TOML.
+  const source = await readMergedConfigForServer('claim', context);
   const raw = normalizeClaimShape(source);
-  const exchange = normalizeExchangeShape(await readRawConfig('exchange', context));
+  const exchange = normalizeExchangeShape(
+    await readMergedConfigForServer('exchange', context)
+  );
 
   return {
     enabled: raw.enabled === true,
@@ -336,6 +338,37 @@ async function readFallbackFileConfig(name: string): Promise<Record<string, unkn
     }
     throw err;
   }
+}
+
+/**
+ * DB-stored config ile TOML fallback'i merge eder.
+ * Seeded config'ler sensitive alanları boş bırakır, bu durumda
+ * TOML dosyasındaki gerçek değerler kullanılır.
+ * DB değeri non-empty ise (kullanıcı bilerek değiştirmiş) tercih edilir.
+ */
+function mergeWithTomlFallback(
+  stored: Record<string, unknown> | null,
+  tomlFallback: Record<string, unknown>
+): Record<string, unknown> {
+  if (!stored) return tomlFallback;
+  const merged = { ...tomlFallback };
+  for (const [key, value] of Object.entries(stored)) {
+    if (value !== '' && value !== false && value != null) {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+async function readMergedConfigForServer(
+  name: string,
+  context: UserConfigContext
+): Promise<Record<string, unknown>> {
+  const [stored, toml] = await Promise.all([
+    readStoredUserConfig(context.userId, name),
+    readFallbackFileConfig(name).catch(() => ({} as Record<string, unknown>)),
+  ]);
+  return mergeWithTomlFallback(stored, toml);
 }
 
 async function writeRawConfig(

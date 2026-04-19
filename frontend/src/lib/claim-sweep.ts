@@ -8,7 +8,6 @@ import {
 import {
   getClaimSweepQueueStatus,
   getLatestClaimSweepError,
-  hasPublishedAutoClaimEnabledFlow,
   queueClaimSweepJobs,
 } from '@/lib/queries/claim-sweep';
 import type { ClaimSweepQueueStatus, ClaimSweepRunResult, ClaimSweepStatus } from '@/lib/types';
@@ -90,7 +89,6 @@ export function buildEmptyClaimSweepStatus(
     walletAddress: null,
     executionMode: 'direct',
     claimEnabled: false,
-    publishedAutoClaimFlow: false,
     canSweep: false,
     disabledReasonCode: null,
     disabledReason: null,
@@ -110,7 +108,6 @@ export async function getClaimSweepStatus(
   const claimState = await readEffectiveClaimConfigForServer(context);
   const relayerConfig = await readClaimRelayerConfigForServer(context);
   const walletAddress = normalizeAddress(await readPositionWalletAddress(context));
-  const publishedAutoClaimFlow = await hasPublishedAutoClaimEnabledFlow(context.userId);
   const configuredOwnerAddresses = uniqueAddresses([
     walletAddress,
     normalizeAddress(relayerConfig.userAddress),
@@ -148,7 +145,6 @@ export async function getClaimSweepStatus(
     claimState,
     walletAddress,
     serviceActive: options.serviceActive,
-    publishedAutoClaimFlow,
     positionsFetchFailed,
     eligibleCount: snapshot?.eligibleCount ?? 0,
   });
@@ -157,7 +153,6 @@ export async function getClaimSweepStatus(
     walletAddress,
     executionMode: relayerConfig.executionMode,
     claimEnabled: claimState.enabled,
-    publishedAutoClaimFlow,
     canSweep: disabledReason == null,
     disabledReasonCode: disabledReason?.code ?? null,
     disabledReason: disabledReason?.message ?? null,
@@ -346,18 +341,10 @@ function resolveDisabledReason(params: {
   claimState: Awaited<ReturnType<typeof readEffectiveClaimConfigForServer>>;
   walletAddress: string | null;
   serviceActive: boolean;
-  publishedAutoClaimFlow: boolean;
   positionsFetchFailed: boolean;
   eligibleCount: number;
 }): { code: string; message: string } | null {
-  const {
-    claimState,
-    walletAddress,
-    serviceActive,
-    publishedAutoClaimFlow,
-    positionsFetchFailed,
-    eligibleCount,
-  } = params;
+  const { claimState, walletAddress, serviceActive, positionsFetchFailed, eligibleCount } = params;
 
   if (!claimState.enabled) {
     return {
@@ -395,8 +382,6 @@ function resolveDisabledReason(params: {
       message: 'Claim sweep icin position wallet adresi bulunamadi.',
     };
   }
-  // publishedAutoClaimFlow kontrolü kaldırıldı — auto-sweep instrumentation
-  // ile çalışıyor, canvas flow zorunlu değil.
   if (!serviceActive) {
     return {
       code: 'bot_inactive',

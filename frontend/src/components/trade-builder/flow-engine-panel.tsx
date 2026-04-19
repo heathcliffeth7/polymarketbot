@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { FlowCanvasEditor } from '@/components/trade-builder/flow-canvas-editor';
+import { FlowNodeRuntimePanel } from '@/components/trade-builder/flow-node-runtime-panel';
 import { useFlowEngineController } from '@/hooks/use-flow-engine-controller';
 import type { FlowEnginePanelProps } from './flow-engine-types';
 import {
@@ -273,6 +274,10 @@ export function FlowEnginePanel({
           detail={data.detail}
           autoSaveError={state.autoSaveError}
         />
+
+        {state.selectedDefinitionId != null && (
+          <FlowNodeRuntimePanel definitionId={state.selectedDefinitionId} />
+        )}
       </CardContent>
     </Card>
   );

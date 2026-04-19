@@ -25,7 +25,11 @@ export {
   getTradeFlowRunEvents,
   getRecentTradeFlowEvents,
 } from './definitions';
-export { getAutoScopeTradeAnalysis } from './analytics';
+export {
+  getAutoScopeTradeAnalysis,
+  getTradeFlowNodeRuntime,
+  getTradeFlowPtbState,
+} from './analytics';
 export {
   FLOW_DEFINITION_BUSY_CODE,
   FLOW_DEFINITION_BUSY_MESSAGE,

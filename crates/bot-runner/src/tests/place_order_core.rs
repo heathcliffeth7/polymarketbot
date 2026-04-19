@@ -40,6 +40,65 @@ fn place_order_existing_order_reuses_guard_blocked_matching_order() {
 }
 
 #[test]
+fn pair_lock_config_resolves_manual_counter_budget() {
+    let node = test_node(json!({
+        "mode": "pair_lock",
+        "sizeUsdc": 5,
+        "pairMaxTotalCent": 90,
+        "counterLegSizeUsdc": 9,
+    }));
+
+    let pair_lock = resolve_action_place_order_pair_lock_config(&node)
+        .expect("pair lock config parse")
+        .expect("pair lock config");
+
+    assert_eq!(pair_lock.sizing_mode, ActionPlaceOrderPairLockSizingMode::Manual);
+    assert_eq!(pair_lock.primary_leg_size_usdc, 5.0);
+    assert_eq!(pair_lock.total_budget_usdc, None);
+    assert_eq!(pair_lock.counter_leg_size_usdc, Some(9.0));
+}
+
+#[test]
+fn pair_lock_config_resolves_auto_remaining_budget() {
+    let node = test_node(json!({
+        "mode": "pair_lock",
+        "sizeUsdc": 5,
+        "pairMaxTotalCent": 90,
+        "pairSizingMode": "auto_remaining_budget",
+        "pairTotalBudgetUsdc": 14,
+    }));
+
+    let pair_lock = resolve_action_place_order_pair_lock_config(&node)
+        .expect("pair lock config parse")
+        .expect("pair lock config");
+
+    assert_eq!(
+        pair_lock.sizing_mode,
+        ActionPlaceOrderPairLockSizingMode::AutoRemainingBudget
+    );
+    assert_eq!(pair_lock.primary_leg_size_usdc, 5.0);
+    assert_eq!(pair_lock.total_budget_usdc, Some(14.0));
+    assert_eq!(pair_lock.counter_leg_size_usdc, Some(9.0));
+}
+
+#[test]
+fn pair_lock_config_allows_market_execution_in_validation_contract() {
+    let node = test_node(json!({
+        "mode": "pair_lock",
+        "executionMode": "market",
+        "sizeUsdc": 5,
+        "pairMaxTotalCent": 90,
+        "counterLegSizeUsdc": 9,
+    }));
+
+    let pair_lock = resolve_action_place_order_pair_lock_config(&node)
+        .expect("pair lock config parse")
+        .expect("pair lock config");
+
+    assert_eq!(pair_lock.sizing_mode, ActionPlaceOrderPairLockSizingMode::Manual);
+}
+
+#[test]
 fn place_order_existing_order_rearms_matching_sell_error() {
     let mut order = test_builder_order("sell", Some(9));
     order.status = "error".to_string();
@@ -705,6 +764,179 @@ fn reentry_attempts_reset_when_market_changes() {
         stored_reentry_market_slug.as_deref(),
         Some("btc-updown-5m-1772296200")
     );
+}
+
+#[test]
+fn ptb_stop_loss_bump_state_increments_once_per_market() {
+    let mut context = json!({
+        "flowContext": {},
+        "vars": {},
+        "state": {},
+        "refs": {},
+        "nodeState": {}
+    });
+    let now = Utc::now();
+    let node = test_node(json!({
+        "priceToBeatGuardEnabled": true,
+        "priceToBeatStopLossBumpEnabled": true,
+        "priceToBeatStopLossBumpAmount": 10,
+        "priceToBeatStopLossBumpUnit": "cent",
+        "outcomeLabel": "Up",
+    }));
+
+    let first = apply_action_place_order_ptb_stop_loss_bump_state(
+        &mut context,
+        &node,
+        "action_1",
+        "btc-updown-5m-1772296200",
+        "Up",
+        101,
+        0.1,
+        now,
+    );
+    let second = apply_action_place_order_ptb_stop_loss_bump_state(
+        &mut context,
+        &node,
+        "action_1",
+        "btc-updown-5m-1772296200",
+        "Up",
+        102,
+        0.1,
+        now,
+    );
+
+    assert!(first.applied);
+    assert_eq!(first.next_count, 1);
+    assert!(!second.applied);
+    assert_eq!(second.next_count, 1);
+    assert_eq!(
+        resolve_action_place_order_ptb_stop_loss_bump_state(
+            &context,
+            &node,
+            "action_1",
+            "btc-updown-5m-1772296500",
+            "Up",
+        )
+        .applied_count,
+        1
+    );
+    assert_eq!(
+        resolve_action_place_order_ptb_stop_loss_bump_state(
+            &context,
+            &node,
+            "action_1",
+            "btc-updown-5m-1772296200",
+            "Up",
+        )
+        .applied_count,
+        0
+    );
+}
+
+#[test]
+fn ptb_stop_loss_bump_current_ptb_uses_matching_guard_snapshot() {
+    let context = json!({
+        "flowContext": {
+            "priceToBeatGuard": {
+                "market_slug": "eth-updown-5m-1776200100",
+                "threshold_value": 150.0,
+                "threshold_unit": "cent",
+                "threshold_usd": 1.5
+            }
+        }
+    });
+
+    let snapshot = resolve_action_place_order_ptb_stop_loss_bump_current_ptb_snapshot(
+        &context,
+        "eth-updown-5m-1776200100",
+    )
+    .expect("matching ptb snapshot");
+
+    assert_eq!(snapshot.unit, "cent");
+    assert_eq!(snapshot.value, 150.0);
+    assert_eq!(snapshot.usd, 1.5);
+}
+
+#[test]
+fn ptb_stop_loss_bump_current_ptb_ignores_missing_or_mismatched_snapshot() {
+    let missing = json!({
+        "flowContext": {}
+    });
+    assert!(
+        resolve_action_place_order_ptb_stop_loss_bump_current_ptb_snapshot(
+            &missing,
+            "eth-updown-5m-1776200100",
+        )
+        .is_none()
+    );
+
+    let mismatched = json!({
+        "flowContext": {
+            "priceToBeatGuard": {
+                "market_slug": "eth-updown-5m-1776200400",
+                "threshold_value": 150.0,
+                "threshold_unit": "cent",
+                "threshold_usd": 1.5
+            }
+        }
+    });
+    assert!(
+        resolve_action_place_order_ptb_stop_loss_bump_current_ptb_snapshot(
+            &mismatched,
+            "eth-updown-5m-1776200100",
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn ptb_stop_loss_bump_notification_message_formats_current_ptb_cent() {
+    let message =
+        trade_flow::guards::price_to_beat::build_price_to_beat_bump_increased_notification_message(
+            "eth-updown-5m-1776200100",
+            25.0,
+            "cent",
+            2,
+            0.25,
+            0.5,
+            Some(150.0),
+            Some("cent"),
+            Some(1.5),
+        );
+
+    assert!(message.contains("Uygulanan Toplam Artis: 0.25000000 USD -> 0.50000000 USD"));
+    assert!(message.contains("Guncel PTB: 150.00000000 cent (~1.50000000 USD)"));
+}
+
+#[test]
+fn ptb_stop_loss_bump_notification_message_formats_current_ptb_usd_and_na() {
+    let usd_message =
+        trade_flow::guards::price_to_beat::build_price_to_beat_bump_increased_notification_message(
+            "eth-updown-5m-1776200100",
+            0.25,
+            "usd",
+            2,
+            0.25,
+            0.5,
+            Some(1.5),
+            Some("usd"),
+            Some(1.5),
+        );
+    assert!(usd_message.contains("Guncel PTB: 1.50000000 USD"));
+
+    let na_message =
+        trade_flow::guards::price_to_beat::build_price_to_beat_bump_increased_notification_message(
+            "eth-updown-5m-1776200100",
+            25.0,
+            "cent",
+            2,
+            0.25,
+            0.5,
+            None,
+            None,
+            None,
+        );
+    assert!(na_message.contains("Guncel PTB: N/A"));
 }
 
 #[test]

@@ -1,19 +1,23 @@
 import { useMemo } from 'react';
 import { useTradeBuilderOutcomes } from '@/hooks/use-trade-builder';
 import type { NodeConfigFormState } from '@/lib/trade-flow-config-mappers';
+import type { PairLockUpstreamTriggerSummary } from '../flow-canvas-utils';
 
 interface UseMarketOutcomesArgs {
   nodeTypeDraft: string;
   nodeForm: NodeConfigFormState | null;
+  upstreamPairLockTrigger: PairLockUpstreamTriggerSummary | null;
 }
 
 export function useMarketOutcomes({
   nodeTypeDraft,
   nodeForm,
+  upstreamPairLockTrigger,
 }: UseMarketOutcomesArgs) {
   const outcomeSource = useMemo(() => {
     const marketSlug = (nodeForm?.fields.marketSlug ?? '').trim();
     const marketScope = (nodeForm?.fields.marketScope ?? '').trim();
+    const placeOrderMode = (nodeForm?.fields.mode ?? '').trim().toLowerCase();
 
     if (
       nodeTypeDraft === 'trigger.open_positions' ||
@@ -24,6 +28,10 @@ export function useMarketOutcomes({
     }
 
     if (nodeTypeDraft !== 'trigger.market_price') {
+      if (nodeTypeDraft === 'action.place_order' && placeOrderMode === 'pair_lock') {
+        if (marketSlug) return marketSlug;
+        return upstreamPairLockTrigger?.marketSource?.trim() || null;
+      }
       return null;
     }
 
@@ -37,7 +45,9 @@ export function useMarketOutcomes({
     nodeForm?.fields.marketMode,
     nodeForm?.fields.marketScope,
     nodeForm?.fields.marketSlug,
+    nodeForm?.fields.mode,
     nodeTypeDraft,
+    upstreamPairLockTrigger?.marketSource,
   ]);
 
   const { data: outcomeData, isLoading: outcomesLoading } =

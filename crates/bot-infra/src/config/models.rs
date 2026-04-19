@@ -498,9 +498,10 @@ impl AppConfig {
         let risk: RiskConfig = load_json_or_toml(settings.get("risk"), &dir.join("risk.toml"))?;
         let execution: ExecutionConfig =
             load_json_or_toml(settings.get("execution"), &dir.join("execution.toml"))?;
-        let exchange: ExchangeConfig = load_json_or_default(settings.get("exchange"))?;
+        let exchange: ExchangeConfig =
+            load_json_merged_with_toml(settings.get("exchange"), &dir.join("exchange.toml"))?;
         let claim: ClaimConfig =
-            load_json_or_toml_or_default(settings.get("claim"), &dir.join("claim.toml"))?;
+            load_json_merged_with_toml(settings.get("claim"), &dir.join("claim.toml"))?;
         let telegram: TelegramConfig = load_json_or_default(settings.get("telegram"))?;
 
         validate(

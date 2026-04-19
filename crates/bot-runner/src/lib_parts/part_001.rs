@@ -36,52 +36,23 @@ impl FlowRuntimeCaches {
 async fn maybe_tick_flow_auto_claims(
     repo: &PostgresRepository,
     run_id: i64,
-    definitions: &[TradeFlowDefinitionRuntime],
+    _definitions: &[TradeFlowDefinitionRuntime],
     user_cfg_cache: &mut HashMap<i64, AppConfig>,
     auto_claim_runtimes: &mut HashMap<i64, FlowAutoClaimRuntime>,
 ) {
-    let mut enabled_user_ids = HashSet::new();
-
-    for definition in definitions {
-        let Some(version_id) = definition.published_version_id else {
-            continue;
-        };
-        let version = match repo.get_trade_flow_version(version_id).await {
-            Ok(Some(version)) => version,
-            Ok(None) => continue,
-            Err(err) => {
-                warn!(
-                    run_id,
-                    definition_id = definition.id,
-                    user_id = definition.user_id,
-                    error = %err,
-                    "AUTO_CLAIM_FLOW_VERSION_LOAD_FAILED"
-                );
-                continue;
-            }
-        };
-        let graph = match parse_trade_flow_graph(&version) {
-            Ok(graph) => graph,
-            Err(err) => {
-                warn!(
-                    run_id,
-                    definition_id = definition.id,
-                    user_id = definition.user_id,
-                    error = %err,
-                    "AUTO_CLAIM_FLOW_GRAPH_PARSE_FAILED"
-                );
-                continue;
-            }
-        };
-        if graph
-            .context
-            .get("autoClaimEnabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            enabled_user_ids.insert(definition.user_id);
+    let enabled_user_ids = match repo.list_auto_claim_candidate_user_ids().await {
+        Ok(user_ids) => user_ids,
+        Err(err) => {
+            warn!(
+                run_id,
+                error = %err,
+                "AUTO_CLAIM_CANDIDATE_USERS_LOAD_FAILED"
+            );
+            return;
         }
-    }
+    };
+    let enabled_user_ids_set = enabled_user_ids.iter().copied().collect::<HashSet<_>>();
+    auto_claim_runtimes.retain(|user_id, _| enabled_user_ids_set.contains(user_id));
 
     for user_id in enabled_user_ids {
         let auto_claim = auto_claim_runtimes.entry(user_id).or_default();
@@ -106,21 +77,13 @@ async fn maybe_tick_flow_auto_claims(
             match AutoClaimService::from_app_config(user_id, &cfg) {
                 Ok(service) => {
                     if service.is_none() {
-                        warn!(
-                            run_id,
-                            user_id, "AUTO_CLAIM_FLOW_ENABLED_BUT_CLAIM_DISABLED"
-                        );
+                        warn!(run_id, user_id, "AUTO_CLAIM_DISABLED_FOR_USER");
                         auto_claim.last_init_failure_at = Some(Instant::now());
                     }
                     auto_claim.service = service;
                 }
                 Err(err) => {
-                    warn!(
-                        run_id,
-                        user_id,
-                        error = %err,
-                        "AUTO_CLAIM_FLOW_ENABLED_BUT_CONFIG_INVALID"
-                    );
+                    warn!(run_id, user_id, error = %err, "AUTO_CLAIM_CONFIG_INVALID");
                     auto_claim.last_init_failure_at = Some(Instant::now());
                     continue;
                 }

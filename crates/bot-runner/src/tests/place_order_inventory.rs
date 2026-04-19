@@ -1125,7 +1125,7 @@ fn preempted_staged_stop_loss_inventory_plan_ignores_take_profit_remaining_qty()
     sl.target_qty = Some(1.41);
     sl.remaining_qty = Some(1.41);
 
-    let plan = plan_trade_builder_preempted_stop_loss_inventory(&[tp, sl], Some(1.41));
+    let plan = plan_trade_builder_preempted_stop_loss_inventory(&[tp, sl], Some(1.41), None);
 
     assert_eq!(plan.current_parent_qty, Some(1.41));
     assert_eq!(plan.remaining_qty_for(32), Some(1.41));
@@ -1151,7 +1151,8 @@ fn staged_take_profit_last_stage_absorbs_rounding_remainder() {
     third_tp.exit_ladder_index = Some(2);
     third_tp.exit_ladder_size_pct = Some(33.34);
 
-    let targets = trade_builder_ladder_family_target_qtys(&[&first_tp, &second_tp, &third_tp], 1.0);
+    let targets =
+        trade_builder_ladder_family_target_qtys(&[&first_tp, &second_tp, &third_tp], 1.0, None);
 
     assert_eq!(targets, vec![(41, 0.33), (42, 0.33), (43, 0.34)]);
 }
@@ -1167,7 +1168,7 @@ fn single_live_take_profit_stage_becomes_full_close() {
     last_tp.exit_ladder_index = Some(1);
     last_tp.exit_ladder_size_pct = Some(50.0);
 
-    let targets = trade_builder_ladder_family_target_qtys(&[&last_tp], 1.41);
+    let targets = trade_builder_ladder_family_target_qtys(&[&last_tp], 1.41, None);
 
     assert_eq!(targets, vec![(52, 1.41)]);
 }
