@@ -156,3 +156,34 @@ fn relayer_rate_limit_cooldown_uses_minimum_and_backoff() {
     assert_eq!(elapsed_seconds_since(now, min_cooldown), 30);
     assert_eq!(elapsed_seconds_since(now, long_cooldown), 45);
 }
+
+#[test]
+fn claim_relayer_adapter_error_details_compacts_html_body() {
+    let (retryable, code, message) = claim_relayer_adapter_error_details(
+        StatusCode::BAD_GATEWAY,
+        None,
+        "<!DOCTYPE html><html><head><title>Oops</title></head><body>Broken</body></html>",
+    );
+
+    assert!(retryable);
+    assert_eq!(code, "claim_relayer_adapter_invalid_html");
+    assert_eq!(message, "HTTP 502 from internal adapter");
+}
+
+#[test]
+fn claim_relayer_adapter_error_details_prefers_parsed_json_payload() {
+    let parsed = ClaimRelayerAdapterErrorBody {
+        code: "unauthorized".to_string(),
+        retryable: Some(false),
+        message: "Unauthorized".to_string(),
+    };
+    let (retryable, code, message) = claim_relayer_adapter_error_details(
+        StatusCode::UNAUTHORIZED,
+        Some(&parsed),
+        r#"{"code":"unauthorized","message":"Unauthorized"}"#,
+    );
+
+    assert!(!retryable);
+    assert_eq!(code, "unauthorized");
+    assert_eq!(message, "Unauthorized");
+}

@@ -30,6 +30,65 @@ fn optimistic_exit_stage_parses_last_error_marker() {
 }
 
 #[test]
+fn share_submit_min_size_decision_retries_when_requested_qty_is_still_executable() {
+    assert_eq!(
+        trade_builder_share_submit_min_size_decision(Some(7.57), 3.78, Some(5.0)),
+        Some(TradeBuilderShareSubmitMinSizeDecision::Retry)
+    );
+}
+
+#[test]
+fn share_submit_min_size_decision_blocks_when_total_qty_is_below_market_minimum() {
+    assert_eq!(
+        trade_builder_share_submit_min_size_decision(Some(4.20), 4.20, Some(5.0)),
+        Some(TradeBuilderShareSubmitMinSizeDecision::Block)
+    );
+}
+
+#[test]
+fn share_submit_min_size_decision_ignores_valid_submit_qty() {
+    assert_eq!(
+        trade_builder_share_submit_min_size_decision(Some(7.57), 5.01, Some(5.0)),
+        None
+    );
+}
+
+#[test]
+fn visible_inventory_clamp_floors_submit_qty_to_available_balance() {
+    assert_eq!(
+        clamp_trade_builder_visible_share_qty(6.96, Some(6.94465)),
+        Some(6.94)
+    );
+}
+
+#[test]
+fn latched_stop_loss_terminal_outcome_retries_while_market_window_is_open() {
+    let now = DateTime::<Utc>::from_timestamp(1_775_487_599, 0).expect("timestamp");
+    assert_eq!(
+        trade_builder_latched_stop_loss_terminal_outcome("eth-updown-5m-1775487300", 0.0, now,),
+        Some(TradeBuilderLatchedStopLossTerminalOutcome::Retry)
+    );
+}
+
+#[test]
+fn latched_stop_loss_terminal_outcome_expires_after_market_window_closes() {
+    let now = DateTime::<Utc>::from_timestamp(1_775_487_600, 0).expect("timestamp");
+    assert_eq!(
+        trade_builder_latched_stop_loss_terminal_outcome("eth-updown-5m-1775487300", 0.0, now,),
+        Some(TradeBuilderLatchedStopLossTerminalOutcome::Expire)
+    );
+}
+
+#[test]
+fn latched_stop_loss_terminal_outcome_ignores_orders_with_real_fill_qty() {
+    let now = DateTime::<Utc>::from_timestamp(1_775_487_700, 0).expect("timestamp");
+    assert_eq!(
+        trade_builder_latched_stop_loss_terminal_outcome("eth-updown-5m-1775487300", 0.05, now,),
+        None
+    );
+}
+
+#[test]
 fn optimistic_exit_submit_scope_targets_child_share_sells() {
     let mut child_sell = test_builder_order("sell", Some(9));
     child_sell.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
@@ -256,7 +315,10 @@ fn runtime_snapshot_ttl_and_lease_share_same_window() {
         market_spec: None,
     };
 
-    assert!(trade_builder_runtime_snapshot_is_fresh(&snapshot, Utc::now()));
+    assert!(trade_builder_runtime_snapshot_is_fresh(
+        &snapshot,
+        Utc::now()
+    ));
     assert_eq!(
         trade_builder_runtime_snapshot_lease_until(&snapshot),
         captured_at + ChronoDuration::milliseconds(500)
@@ -284,6 +346,32 @@ fn runtime_price_from_snapshot_prefers_current_price_and_carries_book_fields() {
     assert_eq!(runtime_price.best_bid, Some(0.73));
     assert_eq!(runtime_price.best_ask, Some(0.75));
     assert_eq!(runtime_price.last_trade_price, Some(0.72));
+}
+
+#[test]
+fn immediate_buy_with_buy_guards_requires_book_aware_runtime_price() {
+    let mut order = test_builder_order("buy", None);
+    order.kind = "immediate".to_string();
+    order.max_price = Some(0.74);
+
+    assert!(trade_builder_requires_book_aware_runtime_price(&order));
+}
+
+#[test]
+fn pair_best_ask_waiting_retry_requires_book_aware_runtime_price() {
+    let mut order = test_builder_order("buy", None);
+    order.kind = "immediate".to_string();
+    order.last_error = Some("pair_primary_best_ask_unavailable".to_string());
+
+    assert!(trade_builder_requires_book_aware_runtime_price(&order));
+}
+
+#[test]
+fn guardless_immediate_buy_keeps_legacy_runtime_price_path() {
+    let mut order = test_builder_order("buy", None);
+    order.kind = "immediate".to_string();
+
+    assert!(!trade_builder_requires_book_aware_runtime_price(&order));
 }
 
 #[test]
@@ -617,5 +705,51 @@ fn inventory_pending_tp_trigger_price_applies_slack_only_to_tp_children() {
     assert_eq!(
         trade_builder_inventory_pending_tp_trigger_price(&sl_order),
         Some(0.60)
+    );
+}
+
+#[test]
+fn staged_sl_reentry_defers_when_other_stages_are_still_live() {
+    let mut parent = test_builder_order("buy", None);
+    parent.staged_sl_reentry_only_after_all_stages = true;
+
+    let mut filled_stage = test_builder_order("sell", Some(9));
+    filled_stage.id = 11;
+    filled_stage.trigger_condition = Some("cross_below".to_string());
+    filled_stage.exit_ladder_kind = Some("sl".to_string());
+    filled_stage.status = "completed".to_string();
+
+    let mut pending_stage = test_builder_order("sell", Some(9));
+    pending_stage.id = 12;
+    pending_stage.trigger_condition = Some("cross_below".to_string());
+    pending_stage.exit_ladder_kind = Some("sl".to_string());
+    pending_stage.status = "armed".to_string();
+
+    assert!(
+        trade_builder_should_defer_reentry_until_all_staged_sl_complete(
+            &parent,
+            &filled_stage,
+            &[filled_stage.clone(), pending_stage],
+        )
+    );
+}
+
+#[test]
+fn staged_sl_reentry_runs_when_last_stage_completes() {
+    let mut parent = test_builder_order("buy", None);
+    parent.staged_sl_reentry_only_after_all_stages = true;
+
+    let mut filled_stage = test_builder_order("sell", Some(9));
+    filled_stage.id = 11;
+    filled_stage.trigger_condition = Some("cross_below".to_string());
+    filled_stage.exit_ladder_kind = Some("sl".to_string());
+    filled_stage.status = "completed".to_string();
+
+    assert!(
+        !trade_builder_should_defer_reentry_until_all_staged_sl_complete(
+            &parent,
+            &filled_stage,
+            &[filled_stage.clone()],
+        )
     );
 }

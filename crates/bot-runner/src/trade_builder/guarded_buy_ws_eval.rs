@@ -71,6 +71,13 @@ fn trade_builder_guard_blocked_buy_ready_from_snapshot(
     order: &TradeBuilderOrder,
     runtime_price: &TradeBuilderRuntimePrice,
 ) -> bool {
+    if matches!(
+        order.last_error.as_deref(),
+        Some("pair_primary_best_ask_unavailable" | "pair_counter_best_ask_unavailable")
+    ) && runtime_price.best_ask.is_none()
+    {
+        return false;
+    }
     let current_price = trade_builder_execution_price_for_order(order, runtime_price);
     let desired_price = trade_builder_immediate_buy_notional_execution_price(
         order,

@@ -12,6 +12,7 @@ fn test_ws_fast_path_node(
         node_type: node_type.to_string(),
         once_mode: true,
         once_scope_market: true,
+        pair_lock_only_monitor: false,
         auto_scope: true,
         price_mode: WsPriceMode::Composite,
         market_slug: market_slug.map(str::to_string),
@@ -329,6 +330,63 @@ fn build_open_position_ws_price_node_specs_reports_missing_token_for_auto_scope_
         }]
     );
     assert!(open_position_ws_price_node_specs(&node, &context).is_empty());
+}
+
+#[test]
+fn build_open_position_ws_price_node_specs_creates_pair_lock_only_auto_scope_monitors() {
+    let node = test_market_price_flow_node(json!({
+        "repeatMode": "once",
+        "onceScope": "market",
+        "marketMode": "auto_scope",
+        "bindingMode": "pair_lock_only",
+        "priceMode": "composite"
+    }));
+    let context = json!({
+        "flowContext": {
+            "marketSlug": "btc-updown-5m-1776512400",
+            "yesTokenId": "yes-token",
+            "noTokenId": "no-token"
+        }
+    });
+
+    let result = build_open_position_ws_price_node_specs(&node, &context);
+    assert!(result.skip_reasons.is_empty());
+    assert_eq!(result.specs.len(), 2);
+    assert!(result
+        .specs
+        .iter()
+        .all(|spec| spec.pair_lock_only_monitor));
+    assert_eq!(result.specs[0].outcome_label, "Up");
+    assert_eq!(result.specs[0].token_id, "yes-token");
+    assert_eq!(result.specs[1].outcome_label, "Down");
+    assert_eq!(result.specs[1].token_id, "no-token");
+    assert!(result.specs.iter().all(|spec| spec.trigger_condition.is_empty()));
+}
+
+#[test]
+fn build_open_position_ws_price_node_specs_preserves_cycle_window_for_pair_lock_only_monitors() {
+    let node = test_market_price_flow_node(json!({
+        "repeatMode": "once",
+        "onceScope": "market",
+        "marketMode": "auto_scope",
+        "bindingMode": "pair_lock_only",
+        "cycleWindowMode": "custom_range",
+        "cycleWindowStartSec": 230,
+        "cycleWindowEndSec": 290
+    }));
+    let context = json!({
+        "flowContext": {
+            "marketSlug": "btc-updown-5m-1776512400",
+            "yesTokenId": "yes-token",
+            "noTokenId": "no-token"
+        }
+    });
+
+    let specs = open_position_ws_price_node_specs(&node, &context);
+    assert_eq!(specs.len(), 2);
+    assert!(specs.iter().all(|spec| spec.cycle_window_mode.as_deref() == Some("custom_range")));
+    assert!(specs.iter().all(|spec| spec.cycle_window_start_sec == Some(230)));
+    assert!(specs.iter().all(|spec| spec.cycle_window_end_sec == Some(290)));
 }
 
 #[test]

@@ -334,6 +334,24 @@ export function placeOrderNodeLabel(config: Record<string, unknown>): string {
     const slCent = typeof config.slPriceCent === 'number' ? config.slPriceCent : null;
     label += slCent != null ? ` | SL@${slCent}c` : ' | SL';
   }
+  if (
+    (config.ptbStopLossEnabled === true || config.ptbStopLossEnabled === 'true') &&
+    !Array.isArray(config.ptbStopLossRules)
+  ) {
+    const rawGap =
+      typeof config.ptbStopLossGapUsd === 'number'
+        ? config.ptbStopLossGapUsd
+        : typeof config.ptbStopLossGapUsd === 'string'
+          ? Number(config.ptbStopLossGapUsd)
+          : null;
+    label +=
+      rawGap != null && Number.isFinite(rawGap)
+        ? ` | PTB-SL<=${rawGap}`
+        : ' | PTB-SL';
+  }
+  if (Array.isArray(config.ptbStopLossRules) && config.ptbStopLossRules.length > 0) {
+    label += ` | PTB-Kademe x${config.ptbStopLossRules.length}`;
+  }
   return label;
 }
 
@@ -662,6 +680,17 @@ export interface UpstreamMaxPriceResolution {
   distinctMaxPriceCents: string[];
 }
 
+export interface PairLockUpstreamTriggerSummary {
+  nodeKey: string;
+  bindingMode: 'standard' | 'pair_lock_only';
+  marketMode: 'fixed' | 'auto_scope';
+  marketSource: string;
+  cycleWindowMode: string;
+  cycleWindowSecs: string;
+  cycleWindowStartSec: string;
+  cycleWindowEndSec: string;
+}
+
 export function resolveUpstreamTriggerMaxPrice(
   nodeId: string,
   nodes: FlowNode[],
@@ -720,6 +749,43 @@ export function resolveUpstreamTriggerMaxPrice(
     kind: 'multiple',
     maxPriceCent: null,
     distinctMaxPriceCents,
+  };
+}
+
+export function resolveDirectUpstreamPairLockTrigger(
+  nodeId: string,
+  nodes: FlowNode[],
+  edges: FlowEdge[],
+): PairLockUpstreamTriggerSummary | null {
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const incoming = edges.filter((edge) => edge.target === nodeId);
+  if (incoming.length !== 1) return null;
+  const sourceNode = nodeMap.get(incoming[0].source);
+  if (!sourceNode || sourceNode.data.nodeType !== 'trigger.market_price') return null;
+
+  const config = sourceNode.data.config;
+  const bindingMode =
+    toTrimmedStringValue(config.bindingMode).toLowerCase() === 'pair_lock_only'
+      ? 'pair_lock_only'
+      : 'standard';
+  const marketMode =
+    toTrimmedStringValue(config.marketMode).toLowerCase() === 'auto_scope'
+      ? 'auto_scope'
+      : 'fixed';
+  const marketSource =
+    marketMode === 'auto_scope'
+      ? toTrimmedStringValue(config.marketScope)
+      : toTrimmedStringValue(config.marketSlug);
+
+  return {
+    nodeKey: sourceNode.id,
+    bindingMode,
+    marketMode,
+    marketSource,
+    cycleWindowMode: toTrimmedStringValue(config.cycleWindowMode) || 'off',
+    cycleWindowSecs: toTrimmedStringValue(config.cycleWindowSecs),
+    cycleWindowStartSec: toTrimmedStringValue(config.cycleWindowStartSec),
+    cycleWindowEndSec: toTrimmedStringValue(config.cycleWindowEndSec),
   };
 }
 

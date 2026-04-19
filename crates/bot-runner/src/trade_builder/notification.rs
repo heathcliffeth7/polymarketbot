@@ -50,6 +50,32 @@ async fn build_trade_builder_flow_identity(
     ))
 }
 
+async fn build_trade_flow_notification_identity(
+    repo: &PostgresRepository,
+    run: &TradeFlowRun,
+    node_key: &str,
+) -> Option<(String, Value)> {
+    let definition_name = repo
+        .get_trade_flow_definition(run.definition_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|definition| definition.name)
+        .unwrap_or_else(|| "?".to_string());
+    let mut block = format!("\nFlow: {} (#{})", definition_name, run.definition_id);
+    block.push_str(&format!("\nRun: #{}", run.id));
+    block.push_str(&format!("\nNode: {node_key}"));
+    Some((
+        block,
+        json!({
+            "origin_flow_definition_id": run.definition_id,
+            "origin_flow_name": definition_name,
+            "origin_flow_run_id": run.id,
+            "origin_flow_node_key": node_key,
+        }),
+    ))
+}
+
 async fn send_trade_builder_notification(
     repo: &PostgresRepository,
     order: &TradeBuilderOrder,
@@ -133,6 +159,79 @@ async fn send_trade_builder_notification(
                 notification_type,
                 error = %err,
                 "TRADE_BUILDER_NOTIFICATION_FAILED"
+            );
+            false
+        }
+    }
+}
+
+async fn send_trade_flow_notification(
+    repo: &PostgresRepository,
+    run: &TradeFlowRun,
+    node_key: &str,
+    notification_type: &str,
+    message: &str,
+) -> bool {
+    let flow_identity = build_trade_flow_notification_identity(repo, run, node_key).await;
+    let message = if let Some((block, _)) = flow_identity.as_ref() {
+        format!("{message}{block}")
+    } else {
+        message.to_string()
+    };
+    let Ok(telegram) = load_user_telegram_config(repo, run.user_id).await else {
+        return false;
+    };
+    let bot_token = telegram.bot_token.trim();
+    let chat_id = telegram.chat_id.trim();
+    if bot_token.is_empty() || chat_id.is_empty() {
+        return false;
+    }
+
+    let Ok(bot_token) = decrypt_config_string_if_needed("telegram.bot_token", bot_token) else {
+        return false;
+    };
+    if bot_token.is_empty() {
+        return false;
+    }
+
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+    let result = TELEGRAM_HTTP_CLIENT
+        .post(&url)
+        .json(&serde_json::json!({
+            "chat_id": chat_id,
+            "text": message.as_str(),
+        }))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+
+    match result {
+        Ok(resp) if resp.status().is_success() => {
+            info!(
+                flow_run_id = run.id,
+                notification_type,
+                node_key,
+                "TRADE_FLOW_NOTIFICATION_SENT"
+            );
+            true
+        }
+        Ok(resp) => {
+            warn!(
+                flow_run_id = run.id,
+                notification_type,
+                node_key,
+                http_status = resp.status().as_u16(),
+                "TRADE_FLOW_NOTIFICATION_FAILED"
+            );
+            false
+        }
+        Err(err) => {
+            warn!(
+                flow_run_id = run.id,
+                notification_type,
+                node_key,
+                error = %err,
+                "TRADE_FLOW_NOTIFICATION_FAILED"
             );
             false
         }
@@ -282,15 +381,25 @@ fn build_max_price_waiting_notification_message(
     current_price: f64,
     reference_price: f64,
     reference_source: &str,
+    reason_code: Option<&str>,
 ) -> String {
+    let reason = match reason_code.unwrap_or(reference_source) {
+        "best_ask_unavailable"
+        | "pair_primary_best_ask_unavailable"
+        | "pair_counter_best_ask_unavailable" => {
+            "Best ask verisi bekleniyor. Max fiyat degerlendirmesi ask verisi gelince yeniden yapilacak."
+        }
+        _ => "Referans fiyat max fiyat limitini asiyor. Kosullar duzelince order yeniden denenecek.",
+    };
     format!(
         "Max Fiyat Korumasi Bekleme Modu
-Sebep: Referans fiyat max fiyat limitini asiyor. Kosullar duzelince order yeniden denenecek.
+Sebep: {}
 Market: {}
 Outcome: {}
 Guncel: {:.4}
 Referans ({}): {:.4}
 Max: {:.4}",
+        reason,
         order.market_slug,
         order.outcome_label,
         current_price,
@@ -363,13 +472,217 @@ fn build_execution_floor_waiting_notification_message(
     )
 }
 
+fn pair_lock_primary_candidate_outcome(candidate: &Value) -> &str {
+    candidate
+        .get("outcome_label")
+        .and_then(Value::as_str)
+        .unwrap_or("N/A")
+}
+
+fn pair_lock_primary_candidate_best_ask(candidate: &Value) -> Option<f64> {
+    candidate.get("best_ask").and_then(value_as_f64)
+}
+
+fn pair_lock_primary_candidate_current_price(candidate: &Value) -> Option<f64> {
+    candidate.get("current_price").and_then(value_as_f64)
+}
+
+fn pair_lock_primary_candidate_quote_source(candidate: &Value) -> &str {
+    candidate
+        .get("quote_source_detail")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+}
+
+fn pair_lock_primary_candidate_reason_summary(candidate: &Value) -> String {
+    format!(
+        "{} -> {}",
+        pair_lock_primary_candidate_outcome(candidate),
+        candidate
+            .get("reason_code")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    )
+}
+
+fn pair_lock_primary_secondary_reason_line(secondary_candidate: Option<&Value>) -> String {
+    secondary_candidate
+        .map(|candidate| format!("\nDiger Aday: {}", pair_lock_primary_candidate_reason_summary(candidate)))
+        .unwrap_or_default()
+}
+
+fn build_pair_lock_primary_trigger_guard_notification_message(
+    market_slug: &str,
+    candidate: &Value,
+    guard_trigger_price: Option<f64>,
+    waiting: bool,
+    secondary_candidate: Option<&Value>,
+) -> String {
+    let state_line = if waiting {
+        "Tetik Fiyat Korumasi Bekleme Modu\nDurum: Kosullar duzelince ilk bacak secimi yeniden denenecek."
+    } else {
+        "Tetik Fiyat Korumasi Engelledi\nDurum: Ilk bacak secimi tetik fiyat korumasina takildi."
+    };
+    format!(
+        "{state_line}\nMarket: {market_slug}\nOutcome: {}\nReferans ({}): {}\nGuard: {}{}",
+        pair_lock_primary_candidate_outcome(candidate),
+        pair_lock_primary_candidate_quote_source(candidate),
+        pair_lock_primary_candidate_current_price(candidate)
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        guard_trigger_price
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        pair_lock_primary_secondary_reason_line(secondary_candidate),
+    )
+}
+
+fn build_pair_lock_primary_execution_floor_notification_message(
+    market_slug: &str,
+    candidate: &Value,
+    best_ask_floor_price: Option<f64>,
+    waiting: bool,
+    secondary_candidate: Option<&Value>,
+) -> String {
+    let reason = match pair_lock_primary_candidate_best_ask(candidate) {
+        None => "Best ask verisi alinamadi.",
+        Some(best_ask) if best_ask_floor_price.is_some_and(|floor| best_ask < floor) => {
+            "Best ask floor seviyesinin altinda."
+        }
+        _ => "Execution floor korumasi aktif.",
+    };
+    let state_line = if waiting {
+        "Execution Floor Bekleme Modu\nDurum: Kosullar duzelince ilk bacak secimi yeniden denenecek."
+    } else {
+        "Execution Floor Engelledi\nDurum: Ilk bacak secimi execution floor korumasina takildi."
+    };
+    format!(
+        "{state_line}\nSebep: {reason}\nMarket: {market_slug}\nOutcome: {}\nBest Ask: {}\nFloor: {}{}",
+        pair_lock_primary_candidate_outcome(candidate),
+        pair_lock_primary_candidate_best_ask(candidate)
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        best_ask_floor_price
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        pair_lock_primary_secondary_reason_line(secondary_candidate),
+    )
+}
+
+fn build_pair_lock_primary_max_price_notification_message(
+    market_slug: &str,
+    candidate: &Value,
+    max_price: Option<f64>,
+    waiting: bool,
+    secondary_candidate: Option<&Value>,
+) -> String {
+    let reference_price = candidate
+        .pointer("/max_price_guard/details/reference_price")
+        .and_then(value_as_f64)
+        .or_else(|| pair_lock_primary_candidate_best_ask(candidate));
+    let reference_source = candidate
+        .pointer("/max_price_guard/details/reference_price_source")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let state_line = if waiting {
+        "Max Fiyat Korumasi Bekleme Modu\nDurum: Kosullar duzelince ilk bacak secimi yeniden denenecek."
+    } else {
+        "Max Fiyat Korumasi Engelledi\nDurum: Ilk bacak secimi max fiyat korumasina takildi."
+    };
+    format!(
+        "{state_line}\nMarket: {market_slug}\nOutcome: {}\nGuncel: {}\nReferans ({}): {}\nMax: {}{}",
+        pair_lock_primary_candidate_outcome(candidate),
+        pair_lock_primary_candidate_current_price(candidate)
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        reference_source,
+        reference_price
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        max_price
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        pair_lock_primary_secondary_reason_line(secondary_candidate),
+    )
+}
+
+fn build_pair_lock_primary_price_to_beat_notification_message(
+    market_slug: &str,
+    candidate: &Value,
+    waiting: bool,
+    secondary_candidate: Option<&Value>,
+) -> String {
+    let ptb_guard = candidate.get("price_to_beat_guard").unwrap_or(&Value::Null);
+    let reason_detail = ptb_guard
+        .get("reason_detail")
+        .and_then(Value::as_str)
+        .unwrap_or("Price to Beat guard bekleme durumunda.");
+    let current_price_source = ptb_guard
+        .get("current_price_source")
+        .and_then(Value::as_str)
+        .unwrap_or("N/A");
+    let state_line = if waiting {
+        "Price to Beat Korumasi Bekleme Modu\nDurum: Kosullar duzelince ilk bacak secimi yeniden denenecek."
+    } else {
+        "Price to Beat Korumasi Engelledi\nDurum: Ilk bacak secimi Price to Beat korumasina takildi."
+    };
+    format!(
+        "{state_line}\nSebep: {reason_detail}\nMarket: {market_slug}\nOutcome: {}\nPrice to Beat: {}\nCurrent ({}): {}\nYonsel Fark: {}\nLimit: {}{}",
+        pair_lock_primary_candidate_outcome(candidate),
+        ptb_guard
+            .get("price_to_beat")
+            .and_then(value_as_f64)
+            .map(|value| format!("{value:.8}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        current_price_source,
+        ptb_guard
+            .get("current_price")
+            .and_then(value_as_f64)
+            .map(|value| format!("{value:.8}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        ptb_guard
+            .get("directional_gap")
+            .and_then(value_as_f64)
+            .map(|value| format!("{value:.8}"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        ptb_guard
+            .get("threshold_usd")
+            .and_then(value_as_f64)
+            .map(|value| format!("{value:.8} USD"))
+            .unwrap_or_else(|| "N/A".to_string()),
+        pair_lock_primary_secondary_reason_line(secondary_candidate),
+    )
+}
+
+fn build_pair_lock_primary_guard_recovered_notification_message(
+    market_slug: &str,
+    scope: &str,
+    previous_reason_code: &str,
+) -> String {
+    let title = match scope {
+        "trigger_price" => "Tetik Fiyat Korumasi Gecti",
+        "execution_floor" => "Execution Floor Korumasi Gecti",
+        "max_price" => "Max Fiyat Korumasi Gecti",
+        "price_to_beat" => "Price to Beat Korumasi Gecti",
+        _ => "Pair Lock Ilk Bacak Korumasi Gecti",
+    };
+    format!(
+        "{title}\nDurum: Kosullar yeniden uygun hale geldi.\nMarket: {market_slug}\nOnceki Sebep: {previous_reason_code}"
+    )
+}
+
 fn build_order_not_filled_notification_message(
     order: &TradeBuilderOrder,
     reason_code: &str,
     reason_message: &str,
 ) -> String {
+    let title = if reason_code == "sl_submitted_but_unfilled_before_market_close" {
+        "Stop Loss Doldurulamadi"
+    } else {
+        "Emir Icra Edilemedi"
+    };
     format!(
-        "Emir Icra Edilemedi\nSebep Kodu: {}\nSebep: {}\nMarket: {}\nOutcome: {}\nSide: {}",
+        "{title}\nSebep Kodu: {}\nSebep: {}\nMarket: {}\nOutcome: {}\nSide: {}",
         reason_code, reason_message, order.market_slug, order.outcome_label, order.side
     )
 }

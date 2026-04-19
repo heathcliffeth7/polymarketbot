@@ -15,7 +15,7 @@ use bot_infra::db::{
     ActiveTradeFlowRunOrderPeer, PendingTradeBuilderFirstVisibleInventoryObservation,
     PostgresRepository, TradeBuilderExchangeFillSummary,
     TradeBuilderInventoryObservationInput, TradeBuilderOrder, TradeBuilderOrderEventRecord,
-    TradeBuilderParentPosition, TradeBuilderParentPositionInput,
+    TradeBuilderPairSession, TradeBuilderParentPosition, TradeBuilderParentPositionInput,
     TradeBuilderParentPositionSeed, TradeBuilderPriceExitRule, TradeBuilderTimeExitRule,
     TradeBuilderWorkflow, TradeBuilderWorkflowLeg, TradeFlowAutoScopeAnalysisRowInput,
     TradeFlowDefinitionRuntime, TradeFlowEventRecord, TradeFlowRun, TradeFlowRunStep,
@@ -29,7 +29,8 @@ use bot_infra::market_data::{MarketDataProvider, MockMarketDataProvider};
 use bot_infra::reconcile::reconcile_tick_and_snapshot;
 use bot_infra::signer::ApiCredentials;
 use bot_infra::ws::{
-    ClobWsClient, MarketDataSnapshot, MarketTickCallback, WsChannel, WsEvent, WsEventType,
+    ClobWsClient, MarketDataSnapshot, MarketSnapshotIntrospection, MarketSnapshotWsState,
+    MarketTickCallback, WsChannel, WsEvent, WsEventType,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ethers::{
@@ -128,6 +129,12 @@ const FLOW_NODE_STATE_ONCE_BLOCK_LOGGED: &str = "once_blocked_logged";
 const FLOW_NODE_STATE_REENTRY_GENERATION: &str = "reentry_generation";
 const FLOW_NODE_STATE_REENTRY_ATTEMPTS_USED: &str = "reentry_attempts_used";
 const FLOW_NODE_STATE_REENTRY_MARKET_SLUG: &str = "reentry_market_slug";
+const FLOW_NODE_STATE_PTB_SL_BUMP_COUNT: &str = "ptb_stop_loss_bump_count";
+const FLOW_NODE_STATE_PTB_SL_BUMP_LAST_MARKET_SLUG: &str =
+    "ptb_stop_loss_bump_last_market_slug";
+const FLOW_NODE_STATE_PTB_SL_BUMP_LAST_CHILD_ORDER_ID: &str =
+    "ptb_stop_loss_bump_last_child_order_id";
+const FLOW_NODE_STATE_PTB_SL_BUMP_UPDATED_AT: &str = "ptb_stop_loss_bump_updated_at";
 const FLOW_NODE_STATE_CYCLE_WINDOW_BOUNDARY_MARKER_PREFIX: &str = "cycle_window_boundary_marker_";
 const FLOW_NODE_STATE_CYCLE_WINDOW_END_SELL_MARKER_PREFIX: &str = "cycle_window_end_sell_marker_";
 const FLOW_NODE_STATE_PUBLISH_AUTO_SCOPE_LOCK_MARKET_SLUG: &str =

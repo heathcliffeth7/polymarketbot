@@ -111,10 +111,30 @@ pub async fn run() -> Result<()> {
 
     info!(run_id, mode, "BOT_STARTED");
 
+    let mut standalone_auto_claim = match AutoClaimService::from_app_config(1, &cfg) {
+        Ok(Some(service)) => {
+            info!(run_id, "STANDALONE_AUTO_CLAIM_INITIALIZED");
+            Some(service)
+        }
+        Ok(None) => {
+            info!(run_id, "STANDALONE_AUTO_CLAIM_DISABLED");
+            None
+        }
+        Err(err) => {
+            warn!(run_id, error = %err, "STANDALONE_AUTO_CLAIM_INIT_FAILED");
+            None
+        }
+    };
+
     let scopes = cfg.bot.resolve_scopes();
 
     if scopes.len() == 1 {
         loop {
+            if let Some(ref mut claim_service) = standalone_auto_claim {
+                if let Err(err) = claim_service.maybe_tick(&repo).await {
+                    warn!(run_id, error = %err, "STANDALONE_AUTO_CLAIM_TICK_FAILED");
+                }
+            }
             let result = match cfg.bot.mode {
                 ExecutionMode::Paper => run_paper_loop(run_id, &repo, &cfg).await,
                 ExecutionMode::Live => run_live_loop(run_id, &repo, &cfg).await,

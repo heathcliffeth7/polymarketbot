@@ -550,10 +550,24 @@ fn resolve_action_place_order_reentry_guard_resolution(
             "action.place_order reentryMinPriceCent must be lower than reentryMaxPriceCent"
         );
     }
+    let max_price_tighten_bps = node_config_i64(node, "reentryMaxPriceTightenBps")
+        .unwrap_or(0)
+        .clamp(0, 10_000);
 
     let generation = flow_node_reentry_generation(context, &node.key).max(0);
     let band_active = generation > 0
         && (configured_min_price.is_some() || configured_max_price.is_some());
+    let tightened_max_price = if generation > 0 {
+        configured_max_price
+            .or(max_price)
+            .map(|base| {
+                let tighten_ratio =
+                    ((max_price_tighten_bps as f64 / 10_000.0) * generation as f64).clamp(0.0, 0.95);
+                clamp_probability((base * (1.0 - tighten_ratio)).max(0.01))
+            })
+    } else {
+        max_price
+    };
 
     Ok(ActionPlaceOrderReentryGuardResolution {
         generation,
@@ -565,11 +579,7 @@ fn resolve_action_place_order_reentry_guard_resolution(
         } else {
             guard_trigger_price
         },
-        effective_max_price: if generation > 0 {
-            configured_max_price.or(max_price)
-        } else {
-            max_price
-        },
+        effective_max_price: tightened_max_price,
     })
 }
 

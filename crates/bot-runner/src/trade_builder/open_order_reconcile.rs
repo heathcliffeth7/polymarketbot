@@ -1,3 +1,138 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TradeBuilderLatchedStopLossTerminalOutcome {
+    Retry,
+    Expire,
+}
+
+async fn trade_builder_terminal_fill_qty_or_zero(
+    repo: &PostgresRepository,
+    client: &dyn OrderExecutor,
+    order: &TradeBuilderOrder,
+    exchange_order_id: &str,
+    order_info: &OrderInfo,
+) -> f64 {
+    if let Some(filled_size) =
+        normalize_trade_builder_terminal_fill_qty_candidate(order_info.filled_size)
+    {
+        return filled_size;
+    }
+    if let Some(filled_qty) =
+        normalize_trade_builder_terminal_fill_qty_candidate(Some(order.filled_qty))
+    {
+        return filled_qty;
+    }
+
+    let _ = sync_recent_trade_builder_fills(repo, client).await;
+    normalize_trade_builder_terminal_fill_qty_candidate(
+        Some(
+            repo.aggregate_fill_qty_by_exchange_order_id(exchange_order_id)
+                .await
+                .unwrap_or_default(),
+        ),
+    )
+    .unwrap_or_default()
+}
+
+fn trade_builder_market_cycle_closed(market_slug: &str, now: DateTime<Utc>) -> bool {
+    resolve_updown_market_cycle_bounds(market_slug)
+        .map(|(_, end, _)| now >= end)
+        .unwrap_or(false)
+}
+
+fn trade_builder_latched_stop_loss_terminal_outcome(
+    market_slug: &str,
+    fill_qty: f64,
+    now: DateTime<Utc>,
+) -> Option<TradeBuilderLatchedStopLossTerminalOutcome> {
+    if fill_qty > TRADE_BUILDER_EXIT_QTY_TOLERANCE {
+        return None;
+    }
+    Some(if trade_builder_market_cycle_closed(market_slug, now) {
+        TradeBuilderLatchedStopLossTerminalOutcome::Expire
+    } else {
+        TradeBuilderLatchedStopLossTerminalOutcome::Retry
+    })
+}
+
+async fn maybe_handle_latched_stop_loss_terminal_status(
+    repo: &PostgresRepository,
+    client: &dyn OrderExecutor,
+    order: &TradeBuilderOrder,
+    exchange_order_id: &str,
+    order_info: &OrderInfo,
+    normalized: &str,
+) -> Result<bool> {
+    if !trade_builder_stop_loss_latched(order) {
+        return Ok(false);
+    }
+
+    let fill_qty =
+        trade_builder_terminal_fill_qty_or_zero(repo, client, order, exchange_order_id, order_info)
+            .await;
+    if fill_qty > TRADE_BUILDER_EXIT_QTY_TOLERANCE {
+        return Ok(false);
+    }
+
+    let now = Utc::now();
+    match trade_builder_latched_stop_loss_terminal_outcome(&order.market_slug, fill_qty, now) {
+        Some(TradeBuilderLatchedStopLossTerminalOutcome::Expire) => {
+        let reason_code = "sl_submitted_but_unfilled_before_market_close";
+        let reason_message =
+            "Stop loss tetiklendi ve emir gonderildi, ancak market kapanana kadar dolmadi.";
+        repo.set_trade_builder_order_retry_state(
+            order.id,
+            "expired",
+            Some(reason_code),
+            order.remaining_size,
+            order.remaining_qty,
+        )
+        .await?;
+        repo.append_trade_builder_order_event(
+            order.id,
+            "sl_terminal_unfilled_before_close",
+            &json!({
+                "exchange_order_id": exchange_order_id,
+                "status": normalized,
+                "status_before": &order.status,
+                "status_after": "expired",
+                "fill_qty": fill_qty,
+                "reason_code": reason_code,
+                "reason_message": reason_message,
+                "market_closed_at_check": now.to_rfc3339(),
+            }),
+        )
+        .await?;
+        maybe_send_order_not_filled_notification(repo, order, reason_code, reason_message).await;
+        return Ok(true);
+        }
+        Some(TradeBuilderLatchedStopLossTerminalOutcome::Retry) => {
+            repo.set_trade_builder_order_retry_state(
+                order.id,
+                "triggered",
+                Some("sl_terminal_unfilled_retrying"),
+                order.remaining_size,
+                order.remaining_qty,
+            )
+            .await?;
+            repo.append_trade_builder_order_event(
+                order.id,
+                "sl_terminal_unfilled_retrying",
+                &json!({
+                    "exchange_order_id": exchange_order_id,
+                    "status": normalized,
+                    "status_before": &order.status,
+                    "status_after": "triggered",
+                    "fill_qty": fill_qty,
+                    "reason_code": "sl_terminal_unfilled_retrying",
+                }),
+            )
+            .await?;
+        }
+        None => return Ok(false),
+    }
+    Ok(true)
+}
+
 async fn reconcile_trade_builder_open_order(
     repo: &PostgresRepository,
     run_id: i64,
@@ -57,6 +192,7 @@ async fn reconcile_trade_builder_open_order(
         .unwrap_or(current_price);
         finalize_builder_fill(
             repo,
+            cfg,
             ws,
             &order,
             exchange_order_id,
@@ -72,6 +208,18 @@ async fn reconcile_trade_builder_open_order(
     }
 
     if matches!(normalized, "canceled" | "rejected" | "expired") {
+        if maybe_handle_latched_stop_loss_terminal_status(
+            repo,
+            client,
+            &order,
+            exchange_order_id,
+            &order_info,
+            normalized,
+        )
+        .await?
+        {
+            return Ok(());
+        }
         let next_status =
             if order.kind == "conditional" && order.triggers_fired < order.max_triggers {
                 "armed"
@@ -102,7 +250,12 @@ async fn reconcile_trade_builder_open_order(
         if let Some(parent_order_id) = order.parent_order_id {
             if let Some(parent_order) = repo.get_trade_builder_order(parent_order_id).await? {
                 if let Err(err) =
-                    trade_builder_sync_parent_exit_children(repo, &parent_order, "partial_fill")
+                    trade_builder_sync_parent_exit_children(
+                        repo,
+                        cfg,
+                        &parent_order,
+                        "partial_fill",
+                    )
                         .await
                 {
                     warn!(
@@ -204,6 +357,7 @@ async fn reconcile_trade_builder_open_order(
     }
     if maybe_handle_open_order_trigger_guard_cancel(
         repo,
+        cfg,
         ws,
         client,
         &order,
@@ -284,6 +438,7 @@ async fn reconcile_trade_builder_open_order(
                     .await?;
                     finalize_builder_fill(
                         repo,
+                        cfg,
                         ws,
                         &order,
                         exchange_order_id,
@@ -326,6 +481,7 @@ async fn reconcile_trade_builder_open_order(
                 })?;
             finalize_builder_fill(
                 repo,
+                cfg,
                 ws,
                 &order,
                 exchange_order_id,
@@ -346,6 +502,7 @@ async fn reconcile_trade_builder_open_order(
                     current_price,
                     desired_price,
                     "desired_price",
+                    Some("above_max_price"),
                 )
             });
             transition_trade_builder_order_to_guard_waiting(
@@ -391,6 +548,12 @@ async fn reconcile_trade_builder_open_order(
                 )
                 .await?;
             }
+            maybe_abort_trade_builder_pair_session_for_terminal_order(
+                repo,
+                &order,
+                "pair_counter_above_max_price",
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -532,12 +695,24 @@ async fn reconcile_trade_builder_open_order(
         size = visible_inventory_resolution.submit_qty;
     }
 
+    if order.side == "sell" && size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES {
+        if let Some(clamped_qty) = clamp_trade_builder_visible_share_qty(size, available_qty) {
+            if clamped_qty < size {
+                submit_partial_visible_inventory = true;
+                size = clamped_qty;
+                remaining_qty = Some(clamped_qty);
+                remaining_usdc = Some((clamped_qty * desired_price).max(0.0));
+            }
+        }
+    }
+
     match client.cancel(exchange_order_id).await {
         Ok(()) => {
             let mut cancel_recorded = false;
             if trade_builder_should_track_buy_inventory_observation(&order) {
                 match reconcile_trade_builder_post_cancel_buy_fill(
                     repo,
+                    cfg,
                     client,
                     ws,
                     &mut order,
@@ -611,6 +786,7 @@ async fn reconcile_trade_builder_open_order(
                 .await?;
                 finalize_builder_fill(
                     repo,
+                    cfg,
                     ws,
                     &order,
                     exchange_order_id,
@@ -631,6 +807,23 @@ async fn reconcile_trade_builder_open_order(
     }
 
     let market_spec = resolve_trade_builder_market_spec(cfg, &order.market_slug, &order.token_id).await;
+    if maybe_handle_trade_builder_share_submit_below_market_min(
+        repo,
+        &order,
+        "submit_deferred_below_market_min",
+        "reprice",
+        current_price,
+        desired_price,
+        requested_qty,
+        size,
+        available_qty,
+        trade_builder_market_min_size(market_spec),
+        optimistic_exit_stage,
+    )
+    .await?
+    {
+        return Ok(());
+    }
     let replace_req = PlaceOrderRequest {
         market: order.market_slug.clone(),
         token_id: Some(order.token_id.clone()),
@@ -973,6 +1166,7 @@ async fn reconcile_trade_builder_open_order(
         };
         finalize_builder_fill(
             repo,
+            cfg,
             ws,
             &order,
             &new_exchange_order_id,

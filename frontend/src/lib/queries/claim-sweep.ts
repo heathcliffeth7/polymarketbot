@@ -13,8 +13,6 @@ export interface ClaimSweepQueueUpsertResult {
   alreadyTrackedCount: number;
 }
 
-const ACTIVE_AUTO_CLAIM_VALUES = ['true', '1', 'yes', 'on'];
-
 function emptyQueue(): ClaimSweepQueueStatus {
   return {
     pending: 0,
@@ -24,22 +22,6 @@ function emptyQueue(): ClaimSweepQueueStatus {
     failed: 0,
     claimed: 0,
   };
-}
-
-export async function hasPublishedAutoClaimEnabledFlow(userId: number): Promise<boolean> {
-  const res = await pool.query<{ enabled: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1
-       FROM trade_flow_definitions d
-       JOIN trade_flow_versions v ON v.id = d.published_version_id
-       WHERE d.user_id = $1
-         AND d.status = 'published'
-         AND d.published_version_id IS NOT NULL
-         AND LOWER(COALESCE(v.graph_json #>> '{context,autoClaimEnabled}', 'false')) = ANY($2::text[])
-     ) AS enabled`,
-    [userId, ACTIVE_AUTO_CLAIM_VALUES]
-  );
-  return res.rows[0]?.enabled === true;
 }
 
 export async function getClaimSweepQueueStatus(

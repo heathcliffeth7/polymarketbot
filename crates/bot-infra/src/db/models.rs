@@ -42,6 +42,48 @@ pub struct TradeBuilderTimeExitRule {
     pub remaining_pct: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TradeBuilderPtbStopLossRule {
+    pub gap_usd: f64,
+    pub size_pct: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderMarketSecondSnapshotInput {
+    pub market_slug: String,
+    pub asset: String,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub second_ts: DateTime<Utc>,
+    pub ptb_ref_price: Option<f64>,
+    pub chainlink_price: Option<f64>,
+    pub yes_best_bid: Option<f64>,
+    pub yes_best_ask: Option<f64>,
+    pub yes_ask_depth_usdc: Option<f64>,
+    pub no_best_bid: Option<f64>,
+    pub no_best_ask: Option<f64>,
+    pub no_ask_depth_usdc: Option<f64>,
+    pub sample_count: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderMarketSecondSnapshot {
+    pub market_slug: String,
+    pub asset: String,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub second_ts: DateTime<Utc>,
+    pub ptb_ref_price: Option<f64>,
+    pub chainlink_price: Option<f64>,
+    pub yes_best_bid: Option<f64>,
+    pub yes_best_ask: Option<f64>,
+    pub yes_ask_depth_usdc: Option<f64>,
+    pub no_best_bid: Option<f64>,
+    pub no_best_ask: Option<f64>,
+    pub no_ask_depth_usdc: Option<f64>,
+    pub sample_count: i32,
+}
+
 #[derive(Debug, Clone)]
 pub struct TradeBuilderOrder {
     pub id: i64,
@@ -78,6 +120,8 @@ pub struct TradeBuilderOrder {
     pub origin_flow_definition_id: Option<i64>,
     pub origin_flow_run_id: Option<i64>,
     pub origin_flow_node_key: Option<String>,
+    pub pair_session_id: Option<i64>,
+    pub pair_leg_role: Option<String>,
     pub tp_enabled: bool,
     pub tp_price: Option<f64>,
     pub tp_rules_json: Vec<TradeBuilderPriceExitRule>,
@@ -99,6 +143,15 @@ pub struct TradeBuilderOrder {
     pub retry_on_trigger_guard_block: bool,
     pub retry_on_execution_floor_guard_block: bool,
     pub retry_on_max_price_block: bool,
+    pub ptb_stop_loss_gap_usd: Option<f64>,
+    pub ptb_reference_price: Option<f64>,
+    pub ptb_stop_loss_rules_json: Vec<TradeBuilderPtbStopLossRule>,
+    pub ptb_stop_loss_time_decay_mode: Option<String>,
+    pub staged_sl_retry_only_dust: bool,
+    pub staged_sl_retry_dust_metric: Option<String>,
+    pub staged_sl_retry_dust_value: Option<f64>,
+    pub staged_sl_reentry_use_sold_notional: bool,
+    pub staged_sl_reentry_only_after_all_stages: bool,
     pub sl_trigger_price_mode: Option<String>,
     pub reenter_on_sl_hit: bool,
     pub reentry_max_attempts: i32,
@@ -114,6 +167,41 @@ pub struct TradeBuilderOrder {
     pub exit_ladder_kind: Option<String>,
     pub exit_ladder_index: Option<i32>,
     pub exit_ladder_size_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderPairSession {
+    pub id: i64,
+    pub user_id: i64,
+    pub flow_definition_id: Option<i64>,
+    pub flow_run_id: Option<i64>,
+    pub flow_node_key: Option<String>,
+    pub market_slug: String,
+    pub status: String,
+    pub pair_target_total_cent: f64,
+    pub min_net_profit_usdc: f64,
+    pub profit_safety_buffer_usdc: f64,
+    pub orphan_grace_ms: i64,
+    pub notify_on_pair_locked: bool,
+    pub notify_on_pair_unwind: bool,
+    pub notify_on_pair_no_edge: bool,
+    pub primary_order_id: Option<i64>,
+    pub counter_order_id: Option<i64>,
+    pub lead_order_id: Option<i64>,
+    pub primary_fill_qty: Option<f64>,
+    pub primary_fill_fee_qty: Option<f64>,
+    pub primary_net_qty: Option<f64>,
+    pub primary_avg_fill_price: Option<f64>,
+    pub counter_fill_qty: Option<f64>,
+    pub counter_fill_fee_qty: Option<f64>,
+    pub counter_net_qty: Option<f64>,
+    pub counter_avg_fill_price: Option<f64>,
+    pub lead_filled_at: Option<DateTime<Utc>>,
+    pub locked_qty: Option<f64>,
+    pub projected_net_profit_usdc: Option<f64>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +448,35 @@ pub struct TradeFlowRunStep {
     pub parent_step_id: Option<i64>,
     pub idempotency_key: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeFlowNodeRuntimeSnapshotInput {
+    pub run_id: i64,
+    pub definition_id: i64,
+    pub version_id: Option<i64>,
+    pub node_key: String,
+    pub node_type: String,
+    pub status: String,
+    pub state_kind: String,
+    pub market_slug: Option<String>,
+    pub token_id: Option<String>,
+    pub snapshot_json: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeFlowNodeRuntimeSnapshotRecord {
+    pub run_id: i64,
+    pub definition_id: i64,
+    pub version_id: Option<i64>,
+    pub node_key: String,
+    pub node_type: String,
+    pub status: String,
+    pub state_kind: String,
+    pub market_slug: Option<String>,
+    pub token_id: Option<String>,
+    pub snapshot_json: Value,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]

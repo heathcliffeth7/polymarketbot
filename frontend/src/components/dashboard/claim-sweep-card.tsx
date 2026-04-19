@@ -102,11 +102,6 @@ export function ClaimSweepCard({
               </span>
             </p>
           )}
-          {!data.publishedAutoClaimFlow && (
-            <p className="text-amber-400">
-              Published auto-claim flow yok; queue islenmez.
-            </p>
-          )}
           {data.lastError && (
             <p className="text-amber-400">Last claim error: {data.lastError}</p>
           )}

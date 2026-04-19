@@ -35,6 +35,8 @@ async fn execute_trigger_market_price(
         WsPriceMode::Composite,
     );
     let node_ptb_config = trigger_market_price_ptb_config_from_node(node);
+    let pair_lock_only_mode = node_config_string(node, "bindingMode")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("pair_lock_only"));
     // --- Early WS-sourced detection for auto_scope guard ---
     let ws_sourced = step
         .input_json
@@ -332,6 +334,11 @@ async fn execute_trigger_market_price(
         .get("outcomeConditions")
         .and_then(|v| v.as_array())
         .cloned();
+    let pair_lock_only_path = pair_lock_only_mode
+        && outcome_conditions
+            .as_ref()
+            .map(|rows| rows.is_empty())
+            .unwrap_or(true);
 
     let mut triggered_token_id = String::new();
     let mut triggered_outcome_label = String::new();
@@ -349,6 +356,8 @@ async fn execute_trigger_market_price(
     let mut ws_hard_ignore_reason: Option<String> = None;
     let mut ws_soft_ignore_reason: Option<String> = None;
     let mut pass: bool;
+    let mut pair_lock_yes_token_id: Option<String> = None;
+    let mut pair_lock_no_token_id: Option<String> = None;
 
     if ws_sourced {
         match ws_market_slug_from_step.as_deref() {
@@ -375,6 +384,8 @@ async fn execute_trigger_market_price(
         ws_hard_ignore_reason.as_deref(),
     ) {
         "cross_confirm_short_circuit"
+    } else if pair_lock_only_path {
+        "pair_lock_only"
     } else if outcome_conditions.is_some() {
         "multi_outcome"
     } else {
@@ -400,7 +411,27 @@ async fn execute_trigger_market_price(
         );
     }
 
-    if ws_execution_path == "cross_confirm_short_circuit" {
+    if pair_lock_only_path {
+        pair_lock_yes_token_id = node_auto_scope_yes_token_id(context, &node.key)
+            .or_else(|| flow_context_string(context, "yesTokenId"));
+        pair_lock_no_token_id = node_auto_scope_no_token_id(context, &node.key)
+            .or_else(|| flow_context_string(context, "noTokenId"));
+        if !auto_scope_mode || pair_lock_yes_token_id.is_none() || pair_lock_no_token_id.is_none()
+        {
+            let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
+            if let Ok(Some(market)) = gamma.get_market_spec_by_slug(&market_slug).await {
+                if pair_lock_yes_token_id.is_none() {
+                    pair_lock_yes_token_id = market.yes_token_id;
+                }
+                if pair_lock_no_token_id.is_none() {
+                    pair_lock_no_token_id = market.no_token_id;
+                }
+            }
+        }
+        pass = ws_hard_ignore_reason.is_none();
+        current_price = ws_price_from_step;
+        trigger_evaluation_mode = "pair_lock_only";
+    } else if ws_execution_path == "cross_confirm_short_circuit" {
         let conf_token_id = ws_token_id_from_step.clone().unwrap_or_default();
         let conf_price = ws_price_from_step;
         let conf_prev = ws_previous_price_from_step;
@@ -692,24 +723,7 @@ async fn execute_trigger_market_price(
                             &market_slug,
                             &cond_outcome_label,
                         )
-                        .unwrap_or_else(|| {
-                            crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
-                                passed: false,
-                                reason: "unsupported_outcome_label",
-                                directional_gap: None,
-                                price_to_beat: None,
-                                price_to_beat_status: None,
-                                current_price: None,
-                                threshold_mode: "manual".to_string(),
-                                min_gap: 0.0,
-                                max_gap: None,
-                                auto_threshold_usd: None,
-                                lookback_windows_used: None,
-                                avg_up_excursion_usd: None,
-                                avg_down_excursion_usd: None,
-                                lookback_market_slugs: None,
-                            }
-                        });
+                        .unwrap_or_else(unsupported_price_to_beat_trigger_gate);
                         (ptb_gate.passed, eval_mode, ptb_gate.to_value())
                     }
                 }
@@ -733,24 +747,7 @@ async fn execute_trigger_market_price(
                             &market_slug,
                             &cond_outcome_label,
                         )
-                        .unwrap_or_else(|| {
-                            crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
-                                passed: false,
-                                reason: "unsupported_outcome_label",
-                                directional_gap: None,
-                                price_to_beat: None,
-                                price_to_beat_status: None,
-                                current_price: None,
-                                threshold_mode: "manual".to_string(),
-                                min_gap: 0.0,
-                                max_gap: None,
-                                auto_threshold_usd: None,
-                                lookback_windows_used: None,
-                                avg_up_excursion_usd: None,
-                                avg_down_excursion_usd: None,
-                                lookback_market_slugs: None,
-                            }
-                        });
+                        .unwrap_or_else(unsupported_price_to_beat_trigger_gate);
                         (ptb_gate.passed, "ptb_only", ptb_gate.to_value())
                     }
                 }
@@ -988,24 +985,7 @@ async fn execute_trigger_market_price(
                             &market_slug,
                             &legacy_outcome_label,
                         )
-                        .unwrap_or_else(|| {
-                            crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
-                                passed: false,
-                                reason: "unsupported_outcome_label",
-                                directional_gap: None,
-                                price_to_beat: None,
-                                price_to_beat_status: None,
-                                current_price: None,
-                                threshold_mode: "manual".to_string(),
-                                min_gap: 0.0,
-                                max_gap: None,
-                                auto_threshold_usd: None,
-                                lookback_windows_used: None,
-                                avg_up_excursion_usd: None,
-                                avg_down_excursion_usd: None,
-                                lookback_market_slugs: None,
-                            }
-                        });
+                        .unwrap_or_else(unsupported_price_to_beat_trigger_gate);
                         price_to_beat_trigger_gate_output = ptb_gate.to_value();
                         ptb_gate.passed
                     }
@@ -1024,24 +1004,7 @@ async fn execute_trigger_market_price(
                             &market_slug,
                             &legacy_outcome_label,
                         )
-                        .unwrap_or_else(|| {
-                            crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
-                                passed: false,
-                                reason: "unsupported_outcome_label",
-                                directional_gap: None,
-                                price_to_beat: None,
-                                price_to_beat_status: None,
-                                current_price: None,
-                                threshold_mode: "manual".to_string(),
-                                min_gap: 0.0,
-                                max_gap: None,
-                                auto_threshold_usd: None,
-                                lookback_windows_used: None,
-                                avg_up_excursion_usd: None,
-                                avg_down_excursion_usd: None,
-                                lookback_market_slugs: None,
-                            }
-                        });
+                        .unwrap_or_else(unsupported_price_to_beat_trigger_gate);
                         price_to_beat_trigger_gate_output = ptb_gate.to_value();
                         ptb_gate.passed
                     }
@@ -1216,6 +1179,22 @@ async fn execute_trigger_market_price(
         },
         _ => (None, None),
     };
+
+    if pair_lock_only_path && pass {
+        if let Some(scope) = find_updown_scope_by_slug(&market_slug) {
+            set_flow_context(context, "marketScope", json!(scope.scope));
+            set_flow_context(context, "marketAsset", json!(scope.asset));
+            set_flow_context(context, "marketTimeframe", json!(scope.timeframe));
+        }
+        if let Some(yes_token_id) = pair_lock_yes_token_id.as_deref() {
+            set_flow_context(context, "yesTokenId", json!(yes_token_id));
+            set_flow_var(context, &format!("{var_key}_yes_token_id"), json!(yes_token_id));
+        }
+        if let Some(no_token_id) = pair_lock_no_token_id.as_deref() {
+            set_flow_context(context, "noTokenId", json!(no_token_id));
+            set_flow_var(context, &format!("{var_key}_no_token_id"), json!(no_token_id));
+        }
+    }
 
     apply_trigger_market_price_context_updates(
         context,
@@ -1405,4 +1384,34 @@ async fn execute_trigger_market_price(
         cycle_window_end_at,
         interval_ms,
     ))
+}
+
+fn unsupported_price_to_beat_trigger_gate(
+) -> crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
+    crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
+        passed: false,
+        reason: "unsupported_outcome_label",
+        directional_gap: None,
+        price_to_beat: None,
+        price_to_beat_status: None,
+        current_price: None,
+        threshold_mode: "manual".to_string(),
+        min_gap: 0.0,
+        max_gap: None,
+        auto_threshold_usd: None,
+        lookback_windows_used: None,
+        current_windows_used: None,
+        avg_up_excursion_usd: None,
+        avg_down_excursion_usd: None,
+        lookback_market_slugs: None,
+        lookback_window_snapshots: None,
+        baseline_pct: None,
+        current_pct: None,
+        vol_factor: None,
+        threshold_pct: None,
+        base_pct: None,
+        floor_usd: None,
+        ceiling_usd: None,
+        threshold_was_clamped: None,
+    }
 }

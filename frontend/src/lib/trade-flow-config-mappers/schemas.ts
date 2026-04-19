@@ -109,6 +109,16 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       ],
       help: '`run` ilk basarili tetikten sonra workflow run boyunca tekrar almaz. `market` her yeni auto_scope markette bir kez daha tetikleyebilir. Auto-scope + once varsayilani markettir.',
     },
+    {
+      key: 'bindingMode',
+      label: 'Binding Modu',
+      input: 'select',
+      options: [
+        { label: 'standard', value: 'standard' },
+        { label: 'pair_lock_only', value: 'pair_lock_only' },
+      ],
+      help: 'pair_lock_only secildiginde bu trigger tam olarak bir downstream pair_lock node’una baglanmali; ek olarak action.notify ve action.telegram_notify node’lari baglanabilir.',
+    },
     { key: 'minIntervalMs', label: 'Kontrol Aralığı (ms)', input: 'number', help: 'Varsayılan: 10000 (10sn). Minimum: 250ms.' },
     { key: 'confirmationMs', label: 'Onay Süresi (ms)', input: 'number', help: 'Cross sonrası fiyatın eşikte kalması gereken süre. Boş = onay kapalı, 0 = anında tetik.' },
     {
@@ -124,8 +134,9 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       options: [
         { label: 'Manual', value: 'manual' },
         { label: 'Auto: son 3 market excursion ort.', value: 'auto_last_3_avg_excursion' },
+        { label: 'Auto: volatility bazli yuzde', value: 'auto_vol_pct' },
       ],
-      help: 'Manual modda fark alanlari kullanilir. Auto modda son 3 tamamlanmis marketin yonsel excursion ortalamasi otomatik esik olur.',
+      help: 'Manual modda fark alanlari kullanilir. Auto modda ya son 3 tamamlanmis marketin yonsel excursion ortalamasi ya da volatility bazli yuzde esigi kullanilir.',
     },
     {
       key: 'priceToBeatTriggerUnit',
@@ -383,6 +394,16 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
   'action.place_order': [
     { key: 'sourceTradeId', label: 'Source Trade ID', input: 'number' },
     {
+      key: 'mode',
+      label: 'Mod',
+      input: 'select',
+      options: [
+        { label: 'single', value: 'single' },
+        { label: 'pair_lock', value: 'pair_lock' },
+      ],
+      help: 'single mevcut tek-bacak davranisidir. pair_lock ayni node icinde karsi bacagi da yonetir.',
+    },
+    {
       key: 'side',
       label: 'Yön',
       input: 'select',
@@ -462,7 +483,30 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       ],
       help: 'Buy emri doldurulunca SL child sell acmaya izin verir. SL Fiyat alani hard full-close SL icin, kademe satirlari ise staged partial SL icin kullanilir; ikisi ayni anda aktif olabilir.',
     },
+    {
+      key: 'ptbStopLossEnabled',
+      label: 'PTB Gap Stop-Loss',
+      input: 'checkbox',
+      help: 'Underlying Chainlink/PTB directional gap belirtilen USD esigine indiginde ek bir hard full-close PTB stop-loss child sell orderi olusturur.',
+    },
     { key: 'slPriceCent', label: 'SL Fiyat (cent)', input: 'number', help: 'Hard full-close SL seviyesi. Tetiklenirse o andaki kalan pozisyonun tamami kapanir; staged SL satirlariyla birlikte kullanilabilir.' },
+    {
+      key: 'ptbStopLossGapUsd',
+      label: 'PTB Gap Esiği (USD)',
+      input: 'number',
+      help: 'Up/Yes icin current Chainlink - PTB, Down/No icin PTB - current Chainlink. Directional gap bu esige indiginde hard stop tetiklenir.',
+    },
+    {
+      key: 'ptbStopLossTimeDecayMode',
+      label: 'PTB SL Zaman Modu',
+      input: 'select',
+      options: [
+        { label: 'tighten', value: 'tighten' },
+        { label: 'relax', value: 'relax' },
+        { label: 'none', value: 'none' },
+      ],
+      help: 'tighten: pencere sonuna yaklastikca PTB gap kuculur. relax: buyur. none: sabit kalir.',
+    },
     {
       key: 'slTriggerPriceMode',
       label: 'SL Tetik Fiyat Modu',
@@ -483,10 +527,28 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       help: 'Yalniz upstream trigger.market_price repeatMode=once arkasindaki immediate buy node icin gecerli. SL ladder aktifse tum SL kademeleri icin ortak re-entry davranisini kontrol eder.',
     },
     {
+      key: 'stagedSlReentryOnlyAfterAllStages',
+      label: 'Tum SL Kademeleri Sonrasi Re-entry',
+      input: 'checkbox',
+      help: 'Aktifken staged SL veya staged PTB re-entry ancak tum stop-loss kademeleri tamamlandiginda tek sefer schedule edilir.',
+    },
+    {
       key: 'reentryMaxAttempts',
       label: 'Re-entry Deneme Limiti',
       input: 'number',
       help: 'SL sonrasi maksimum yeniden alis deneme sayisi. Gecerli aralik: 1-10.',
+    },
+    {
+      key: 'reentryCooldownSec',
+      label: 'Re-entry Cooldown (sn)',
+      input: 'number',
+      help: 'SL sonrasi trigger.market_price yeniden schedule edilmeden once beklenecek minimum sure.',
+    },
+    {
+      key: 'reentrySkipCurrentWindow',
+      label: 'Ayni Pencereyi Atla',
+      input: 'checkbox',
+      help: 'Aktifken re-entry mevcut market penceresinde tekrar denenmez; bir sonraki pencere beklenir.',
     },
     {
       key: 'reentryMinPriceCent',
@@ -499,6 +561,34 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       label: 'Re-entry Max Fiyat (cent)',
       input: 'number',
       help: 'Yalniz re-entry denemelerinde uygulanir. Best ask / desired reference bu seviyeyi asarsa mevcut max price guard semantigiyle bloklar.',
+    },
+    {
+      key: 'reentryPriceToBeatMaxDiff',
+      label: 'Re-entry PTB Min Fark',
+      input: 'number',
+      help: 'Yalniz SL sonrasi re-entry denemelerinde kullanilir. Ana PTB manual ise ayni birimi miras alir; ana PTB auto ise asagidaki override birimi ile manual threshold olarak uygulanir.',
+    },
+    {
+      key: 'reentryPriceToBeatMaxDiffUnit',
+      label: 'Re-entry PTB Birimi',
+      input: 'select',
+      options: [
+        { label: 'USD', value: 'usd' },
+        { label: 'Cent', value: 'cent' },
+      ],
+      help: 'Yalniz ana PTB modu auto iken gerekir. Re-entry override degerinin USD mi cent mi oldugunu belirler.',
+    },
+    {
+      key: 'reentryThresholdDecay',
+      label: 'Re-entry PTB Decay',
+      input: 'number',
+      help: 'Generation arttikca re-entry PTB override veya manual base threshold bu carpan kadar daralir. Ornek: 0.8',
+    },
+    {
+      key: 'reentryMaxPriceTightenBps',
+      label: 'Re-entry MaxPrice Tighten (bps)',
+      input: 'number',
+      help: 'Generation arttikca effective maxPrice bu basis point orani kadar sikilasir. Ornek: 500 = %5',
     },
     {
       key: 'maxPriceCent',
@@ -549,8 +639,9 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       options: [
         { label: 'Manual', value: 'manual' },
         { label: 'Auto: son 3 market excursion ort.', value: 'auto_last_3_avg_excursion' },
+        { label: 'Auto: volatility bazli yuzde', value: 'auto_vol_pct' },
       ],
-      help: 'Manual modda minimum fark elle girilir. Auto modda son 3 marketin yonsel excursion ortalamasi dinamik esik olur.',
+      help: 'Manual modda minimum fark elle girilir. Auto modda son 3 market excursion ortalamasi veya volatility bazli yuzde dinamik esik olur.',
     },
     {
       key: 'priceToBeatMaxDiff',
@@ -567,6 +658,110 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'Cent', value: 'cent' },
       ],
       help: 'USD veya cent sec. Cent modu 0.01 gibi decimal cent degerleri de destekler.',
+    },
+    {
+      key: 'priceToBeatStopLossBumpEnabled',
+      label: 'Auto/Manual PTB Ayari',
+      input: 'checkbox',
+      help: 'Manual modda SL sonrasi minimum farki artirir. Auto modda 5 miss market sonra maxPrice bazli PTB gevsemesinde tampon olarak kullanilir.',
+    },
+    {
+      key: 'priceToBeatStopLossBumpAmount',
+      label: 'PTB Tampon / Kademe',
+      input: 'number',
+      help: 'Manual modda her SL marketinden sonra eklenir. Auto modda gevseme hedefi icin tampon olur. Cent secersen 10 = $0.10.',
+    },
+    {
+      key: 'priceToBeatStopLossBumpDecayWindows',
+      label: 'PTB Bump Decay Pencere',
+      input: 'number',
+      help: 'Bu kadar problemsiz scope penceresi gecerse bump bir kademe azaltilir.',
+    },
+    {
+      key: 'priceToBeatStopLossBumpScope',
+      label: 'PTB Bump Scope',
+      input: 'select',
+      options: [
+        { label: 'per_scope', value: 'per_scope' },
+        { label: 'global', value: 'global' },
+      ],
+      help: 'per_scope: asset+timeframe+yon bazli. global: node geneli tek sayaç.',
+    },
+    {
+      key: 'priceToBeatStopLossBumpMaxValue',
+      label: 'PTB Max Limit',
+      input: 'number',
+      help: 'Yalniz manual bump icin toplam kümülatif artis bu degeri gecmez. Bossa limit yoktur.',
+    },
+    {
+      key: 'priceToBeatStopLossBumpUnit',
+      label: 'PTB Tampon Birimi',
+      input: 'select',
+      options: [
+        { label: 'USD', value: 'usd' },
+        { label: 'Cent', value: 'cent' },
+      ],
+      help: 'Artis miktarinin USD mi cent mi oldugunu belirler.',
+    },
+    {
+      key: 'priceToBeatMaxPriceRelaxMissCount',
+      label: 'Relax Miss Sayisi',
+      input: 'number',
+      help: 'Art arda buy fill gelmeyen kac completed marketten sonra relax devreye girecek.',
+    },
+    {
+      key: 'priceToBeatMaxPriceRelaxHistoryCount',
+      label: 'Relax History Sayisi',
+      input: 'number',
+      help: 'Relax hesabi icin gecmiste kac completed market taranacak.',
+    },
+    {
+      key: 'priceToBeatMaxPriceRelaxMinValue',
+      label: 'Relax Min Deger',
+      input: 'number',
+      help: 'Final PTB relax sonrasi bunun altina inmez. Bossa tampon fallback kullanilir.',
+    },
+    {
+      key: 'priceToBeatMaxPriceRelaxMinDepthUsd',
+      label: 'Relax Min Depth (USDC)',
+      input: 'number',
+      help: 'Historical saniyede best ask maxPrice altinda olsa bile ancak depth bu USDC esigini geciyorsa tradeable sayilir.',
+    },
+    {
+      key: 'priceToBeatMaxPriceRelaxMinUnit',
+      label: 'Relax Min Birimi',
+      input: 'select',
+      options: [
+        { label: 'USD', value: 'usd' },
+        { label: 'Cent', value: 'cent' },
+      ],
+      help: 'Relax min degerinin USD mi cent mi oldugunu belirler.',
+    },
+    {
+      key: 'priceToBeatMaxPriceRelaxStepMode',
+      label: 'Relax Step Modu',
+      input: 'select',
+      options: [
+        { label: 'Percent', value: 'percent' },
+        { label: 'Absolute', value: 'absolute' },
+      ],
+      help: 'Percent modunda her ekstra miss mevcut PTB-target farkinin yuzdesi kadar, absolute modda sabit USD/cent kadar ek gevsetir.',
+    },
+    {
+      key: 'priceToBeatMaxPriceRelaxStepValue',
+      label: 'Relax Step Degeri',
+      input: 'number',
+      help: 'Percent modunda 25 = her ekstra miss farkin %25i. Absolute modda USD/cent cinsinden sabit adim.',
+    },
+    {
+      key: 'priceToBeatMaxPriceRelaxStepUnit',
+      label: 'Relax Step Birimi',
+      input: 'select',
+      options: [
+        { label: 'USD', value: 'usd' },
+        { label: 'Cent', value: 'cent' },
+      ],
+      help: 'Sadece absolute modda kullanilir.',
     },
     {
       key: 'notifyOnPriceToBeatGapBlocked',
@@ -627,6 +822,146 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
       label: 'Stop Loss Bildirimi',
       input: 'checkbox',
       help: 'SL child emri doldurulunca bildirim gonder.',
+    },
+    {
+      key: 'pairMaxTotalCent',
+      label: 'Pair Max Toplam (cent)',
+      input: 'number',
+      help: 'Bu bir ust limit tir. Ilk bacak hangi fiyattan dolarsa karsi bacak izin verilen efektif tavan `pairMaxTotalCent - leadFillPrice` ile hesaplanir; daha ucuz kombinasyonlar dogrudan kabul edilir.',
+    },
+    {
+      key: 'pairSizingMode',
+      label: 'Pair Sizing Modu',
+      input: 'select',
+      options: [
+        { label: 'Manual', value: 'manual' },
+        { label: 'Auto: kalan butce', value: 'auto_remaining_budget' },
+      ],
+      help: 'Manual modda karsi bacak tutari elle girilir. Auto modda ilk bacak `sizeUsdc` ile gider, kalan butce otomatik karsi bacaga ayrilir.',
+    },
+    {
+      key: 'pairTotalBudgetUsdc',
+      label: 'Toplam Pair Butcesi (USDC)',
+      input: 'number',
+      help: 'Auto modda toplam ayrilacak butce. Ilk bacak gercek harcamasi dusulduktan sonra kalan kisim karsi bacaga gider.',
+    },
+    {
+      key: 'pairOrphanGraceMs',
+      label: 'Pair Orphan Grace (ms)',
+      input: 'number',
+      help: 'Ilk fill sonrasi karsi bacak bu sure icinde kilitlenmezse acik exposure unwind edilir.',
+    },
+    {
+      key: 'notifyOnPairLocked',
+      label: 'Pair Lock Bildirimi',
+      input: 'checkbox',
+      help: 'Iki bacak kar esigine oturup kilitlenince bildirim gonder.',
+    },
+    {
+      key: 'notifyOnPairUnwind',
+      label: 'Pair Unwind Bildirimi',
+      input: 'checkbox',
+      help: 'Orphan veya zorunlu unwind baslayinca bildirim gonder.',
+    },
+    {
+      key: 'counterLegSizeUsdc',
+      label: 'Karsi Bacak Tutar (USDC)',
+      input: 'number',
+      help: 'Counter bacak icin harcanacak USDC tutari. pair_lock modunda zorunludur.',
+    },
+    {
+      key: 'counterLegEnabled',
+      label: 'Karsi Bacak Aktif',
+      input: 'checkbox',
+      help: 'pair_lock modunda zorunludur.',
+    },
+    {
+      key: 'counterLegOutcomeLabel',
+      label: 'Karsi Bacak Outcome',
+      input: 'select',
+      options: [
+        { label: 'opposite', value: 'opposite' },
+        { label: 'Yes / Up', value: 'yes' },
+        { label: 'No / Down', value: 'no' },
+      ],
+      help: 'Varsayilan opposite, ana bacak ters outcome tokenini otomatik secer.',
+    },
+    {
+      key: 'counterLegTriggerCondition',
+      label: 'Karsi Bacak Tetik',
+      input: 'select',
+      options: [
+        { label: 'Yok', value: '' },
+        { label: 'cross_above', value: 'cross_above' },
+        { label: 'cross_below', value: 'cross_below' },
+        { label: 'level_above', value: 'level_above' },
+        { label: 'level_below', value: 'level_below' },
+      ],
+    },
+    {
+      key: 'counterLegTriggerPriceCent',
+      label: 'Karsi Bacak Tetik Fiyat (cent)',
+      input: 'number',
+    },
+    {
+      key: 'counterLegMaxPriceCent',
+      label: 'Karsi Bacak Max Fiyat (cent)',
+      input: 'number',
+      help: 'Opsiyonel statik ikinci bacak tavani. Gercek tavan `min(counterLegMaxPriceCent, pairMaxTotalCent - leadFillPrice)` olur.',
+    },
+    {
+      key: 'counterLegPriceToBeatGuardEnabled',
+      label: 'Karsi Bacak PTB Guard',
+      input: 'checkbox',
+    },
+    {
+      key: 'counterLegPriceToBeatMode',
+      label: 'Karsi Bacak PTB Modu',
+      input: 'select',
+      options: [
+        { label: 'Manual', value: 'manual' },
+        { label: 'Auto: son 3 market excursion ort.', value: 'auto_last_3_avg_excursion' },
+        { label: 'Auto: volatility bazli yuzde', value: 'auto_vol_pct' },
+      ],
+    },
+    {
+      key: 'counterLegPriceToBeatMaxDiff',
+      label: 'Karsi Bacak PTB Min Fark',
+      input: 'number',
+    },
+    {
+      key: 'counterLegPriceToBeatMaxDiffUnit',
+      label: 'Karsi Bacak PTB Birimi',
+      input: 'select',
+      options: [
+        { label: 'USD', value: 'usd' },
+        { label: 'Cent', value: 'cent' },
+      ],
+    },
+    {
+      key: 'counterLegExecutionFloorGuardEnabled',
+      label: 'Karsi Bacak Execution Floor',
+      input: 'checkbox',
+    },
+    {
+      key: 'counterLegExecutionFloorPriceCent',
+      label: 'Karsi Bacak Floor Fiyat (cent)',
+      input: 'number',
+    },
+    {
+      key: 'counterLegRetryOnPriceToBeatGuardBlock',
+      label: 'Karsi Bacak PTB Bekle',
+      input: 'checkbox',
+    },
+    {
+      key: 'counterLegRetryOnExecutionFloorGuardBlock',
+      label: 'Karsi Bacak Floor Bekle',
+      input: 'checkbox',
+    },
+    {
+      key: 'counterLegRetryOnMaxPriceBlock',
+      label: 'Karsi Bacak Max Bekle',
+      input: 'checkbox',
     },
     { key: 'refKey', label: 'Reference Key', input: 'text' },
   ],

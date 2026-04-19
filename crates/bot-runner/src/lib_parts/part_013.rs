@@ -32,8 +32,8 @@ async fn execute_trade_flow_node(
         "action.resolve_market" => execute_action_resolve_market(cfg, node, context).await,
         "action.dual_dca" => execute_action_dual_dca(repo, run, node, context).await,
         "action.place_order" => {
-            execute_action_place_order(
-                repo, run_id, cfg, limits, policy, client, run, step, node, graph, context,
+            execute_action_place_order_dispatch(
+                repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
             )
             .await
         }

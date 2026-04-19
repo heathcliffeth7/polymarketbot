@@ -9,17 +9,78 @@ import {
 } from './graph';
 import {
   isRecord,
+  RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME,
   isSupportedMarketPriceTriggerCondition,
   resolveConfiguredBinaryPrice,
   toBooleanish,
   toFiniteNumber,
+  toTrimmedString,
 } from './shared';
 import { validateActionPlaceOrderExecutionFloorConfig } from './validation-action-place-order-execution-floor';
+import { validateActionPlaceOrderPairLockConfig } from './validation-action-place-order-pair';
+import { validateActionPlaceOrderPtbStopLossBumpConfig } from './validation-action-place-order-ptb-bump';
+import { validateActionPlaceOrderPtbV2Config } from './validation-action-place-order-ptb-v2';
 import { pushNodeError } from './validation-core';
 
 interface ParsedExitLadderRule {
   priceCent: number;
   sizePct: number;
+}
+
+interface ParsedPtbStopLossRule {
+  gapUsd: number;
+  sizePct: number;
+}
+
+function collectUpstreamRuntimePtbAssets(nodeKey: string, graph: TradeFlowGraph): Set<string> {
+  const nodeMap = new Map(graph.nodes.map((candidate) => [candidate.key, candidate]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const incoming = incomingByTarget.get(edge.target) ?? [];
+    incoming.push(edge.source);
+    incomingByTarget.set(edge.target, incoming);
+  }
+
+  const assets = new Set<string>();
+  const visited = new Set<string>();
+  const queue = [nodeKey];
+  while (queue.length > 0) {
+    const current = queue.shift() as string;
+    if (visited.has(current)) continue;
+    visited.add(current);
+
+    for (const sourceKey of incomingByTarget.get(current) ?? []) {
+      const sourceNode = nodeMap.get(sourceKey);
+      if (!sourceNode) continue;
+      const config = isRecord(sourceNode.config) ? sourceNode.config : {};
+
+      if (
+        sourceNode.type === 'trigger.market_price' &&
+        toTrimmedString(config.marketMode).toLowerCase() === 'auto_scope'
+      ) {
+        const marketScope = toTrimmedString(config.marketScope).toLowerCase();
+        const resolvedScope =
+          marketScope && RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[marketScope]
+            ? RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[marketScope]
+            : null;
+        if (resolvedScope?.asset) assets.add(resolvedScope.asset);
+      }
+
+      if (sourceNode.type === 'action.resolve_market') {
+        const marketScope = toTrimmedString(config.marketScope).toLowerCase();
+        const resolvedScope =
+          marketScope && RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[marketScope]
+            ? RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[marketScope]
+            : null;
+        const asset = toTrimmedString(config.asset).toLowerCase() || resolvedScope?.asset || '';
+        if (asset) assets.add(asset);
+      }
+
+      queue.push(sourceKey);
+    }
+  }
+
+  return assets;
 }
 
 function parseExitLadderRules(raw: unknown): {
@@ -90,6 +151,43 @@ function parseTimeExitRules(raw: unknown): {
       continue;
     }
     validRules.push({ elapsedMinutes, remainingPct });
+  }
+
+  if (raw.length > 0 && validRules.length === 0) {
+    invalidItem = true;
+  }
+
+  return { isArray: true, validRules, invalidItem };
+}
+
+function parsePtbStopLossRules(raw: unknown): {
+  isArray: boolean;
+  validRules: ParsedPtbStopLossRule[];
+  invalidItem: boolean;
+} {
+  if (!Array.isArray(raw)) {
+    return { isArray: false, validRules: [], invalidItem: false };
+  }
+
+  const validRules: ParsedPtbStopLossRule[] = [];
+  let invalidItem = false;
+  for (const item of raw) {
+    if (!isRecord(item)) {
+      invalidItem = true;
+      continue;
+    }
+    const gapUsd = toFiniteNumber(item.gapUsd);
+    const sizePct = toFiniteNumber(item.sizePct);
+    if (
+      gapUsd == null ||
+      sizePct == null ||
+      sizePct <= 0 ||
+      sizePct > 100
+    ) {
+      invalidItem = true;
+      continue;
+    }
+    validRules.push({ gapUsd, sizePct });
   }
 
   if (raw.length > 0 && validRules.length === 0) {
@@ -188,6 +286,7 @@ export function validateActionPlaceOrderConfig(
       'action.place_order executionMode must be market or limit.'
     );
   }
+  validateActionPlaceOrderPairLockConfig(issues, node, graph, config, side, executionMode);
 
   const maxTriggers = toFiniteNumber(config.maxTriggers);
   if (maxTriggers != null && (maxTriggers < 1 || maxTriggers > 20)) {
@@ -324,15 +423,27 @@ export function validateActionPlaceOrderConfig(
 
   const tpEnabled = toBooleanish(config.tpEnabled);
   const slEnabled = toBooleanish(config.slEnabled);
+  const ptbStopLossEnabled = toBooleanish(config.ptbStopLossEnabled);
   const tpPrice = resolveConfiguredBinaryPrice(config.tpPriceCent, config.tpPrice);
   const slPrice = resolveConfiguredBinaryPrice(config.slPriceCent, config.slPrice);
   const parsedTpRules = parseExitLadderRules(config.tpRules);
   const parsedSlRules = parseExitLadderRules(config.slRules);
+  const parsedPtbStopLossRules = parsePtbStopLossRules(config.ptbStopLossRules);
   const parsedTimeExitRules = parseTimeExitRules(config.timeExitRules);
+  const ptbStopLossGapConfigured = config.ptbStopLossGapUsd != null;
+  const ptbStopLossRulesConfigured = config.ptbStopLossRules != null;
   const hasTpRules = parsedTpRules.validRules.length > 0;
   const hasSlRules = parsedSlRules.validRules.length > 0;
+  const hasPtbStopLossRules = parsedPtbStopLossRules.validRules.length > 0;
   const effectiveTpEnabled = tpEnabled === true || hasTpRules;
   const effectiveSlEnabled = slEnabled === true || hasSlRules;
+  const effectiveClassicSlEnabled =
+    hasSlRules || (slEnabled === true && (slPrice.provided || ptbStopLossEnabled !== true));
+  const effectiveAnyStopLossEnabled =
+    effectiveSlEnabled || ptbStopLossEnabled === true || hasPtbStopLossRules;
+  const stagedSlReentryOnlyAfterAllStages = toBooleanish(
+    config.stagedSlReentryOnlyAfterAllStages
+  );
 
   if (config.tpEnabled != null && tpEnabled == null) {
     pushNodeError(
@@ -350,6 +461,25 @@ export function validateActionPlaceOrderConfig(
       'action.place_order slEnabled must be boolean (true/false).'
     );
   }
+  if (config.ptbStopLossEnabled != null && ptbStopLossEnabled == null) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_ptb_stop_loss_enabled',
+      'action.place_order ptbStopLossEnabled must be boolean (true/false).'
+    );
+  }
+  if (
+    config.stagedSlReentryOnlyAfterAllStages != null &&
+    stagedSlReentryOnlyAfterAllStages == null
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_staged_sl_reentry_only_after_all_stages',
+      'action.place_order stagedSlReentryOnlyAfterAllStages must be boolean (true/false).'
+    );
+  }
   if (tpEnabled === true && side !== 'buy') {
     pushNodeError(
       issues,
@@ -364,6 +494,34 @@ export function validateActionPlaceOrderConfig(
       node,
       'invalid_sl_side',
       'action.place_order slEnabled is only valid for side=buy.'
+    );
+  }
+  if (ptbStopLossEnabled === true && side !== 'buy') {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_ptb_stop_loss_side',
+      'action.place_order ptbStopLossEnabled is only valid for side=buy.'
+    );
+  }
+  if (parsedPtbStopLossRules.isArray && side !== 'buy') {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_ptb_stop_loss_rules_side',
+      'action.place_order ptbStopLossRules is only valid for side=buy.'
+    );
+  }
+  if (
+    ptbStopLossEnabled !== true &&
+    side === 'buy' &&
+    (ptbStopLossGapConfigured || ptbStopLossRulesConfigured)
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'ptb_stop_loss_toggle_required',
+      'action.place_order PTB stop-loss config requires ptbStopLossEnabled=true.'
     );
   }
   if (parsedTpRules.isArray && side !== 'buy') {
@@ -406,6 +564,14 @@ export function validateActionPlaceOrderConfig(
       'action.place_order slRules cannot contain more than 5 entries.'
     );
   }
+  if (parsedPtbStopLossRules.isArray && parsedPtbStopLossRules.validRules.length > 5) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_ptb_stop_loss_rules_length',
+      'action.place_order ptbStopLossRules cannot contain more than 5 entries.'
+    );
+  }
   if (parsedTimeExitRules.isArray && parsedTimeExitRules.validRules.length > 5) {
     pushNodeError(
       issues,
@@ -429,6 +595,14 @@ export function validateActionPlaceOrderConfig(
       'invalid_sl_rules',
       'action.place_order slRules entries must provide priceCent in (0, 100] and sizePct in (0, 100].'
     );
+  }
+  if (parsedPtbStopLossRules.invalidItem) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_ptb_stop_loss_rules',
+        'action.place_order ptbStopLossRules entries must provide finite gapUsd and sizePct in (0, 100].'
+      );
   }
   if (parsedTimeExitRules.invalidItem) {
     pushNodeError(
@@ -482,6 +656,34 @@ export function validateActionPlaceOrderConfig(
       }
     }
   }
+  if (hasPtbStopLossRules) {
+    const ptbStopLossRulesSum = parsedPtbStopLossRules.validRules.reduce(
+      (sum, item) => sum + item.sizePct,
+      0
+    );
+    if (Math.abs(ptbStopLossRulesSum - 100) > 0.000001) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_ptb_stop_loss_rules_sum',
+        'action.place_order ptbStopLossRules total sizePct must equal 100.'
+      );
+    }
+    for (let index = 1; index < parsedPtbStopLossRules.validRules.length; index += 1) {
+      if (
+        parsedPtbStopLossRules.validRules[index - 1].gapUsd <=
+        parsedPtbStopLossRules.validRules[index].gapUsd
+      ) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_ptb_stop_loss_rules_order',
+          'action.place_order ptbStopLossRules gapUsd values must be strictly decreasing.'
+        );
+        break;
+      }
+    }
+  }
   if (parsedTimeExitRules.validRules.length > 0) {
     for (let index = 1; index < parsedTimeExitRules.validRules.length; index += 1) {
       if (
@@ -513,14 +715,14 @@ export function validateActionPlaceOrderConfig(
       'action.place_order tpPriceCent must be in (0, 100] or legacy tpPrice must be in (0, 1].'
     );
   }
-  if (slEnabled === true && !slPrice.provided && !hasSlRules) {
+  if (effectiveClassicSlEnabled && slEnabled === true && !slPrice.provided && !hasSlRules) {
     pushNodeError(
       issues,
       node,
       'missing_sl_price',
       'action.place_order slEnabled requires slPriceCent (or legacy slPrice).'
     );
-  } else if (!hasSlRules && slPrice.provided && slPrice.value == null) {
+  } else if (effectiveClassicSlEnabled && !hasSlRules && slPrice.provided && slPrice.value == null) {
     pushNodeError(
       issues,
       node,
@@ -528,9 +730,50 @@ export function validateActionPlaceOrderConfig(
       'action.place_order slPriceCent must be in (0, 100] or legacy slPrice must be in (0, 1].'
     );
   }
+  const ptbStopLossGapUsd = toFiniteNumber(config.ptbStopLossGapUsd);
+  if (ptbStopLossEnabled === true || hasPtbStopLossRules) {
+    if (ptbStopLossGapUsd == null && !hasPtbStopLossRules) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_ptb_stop_loss_config',
+        'action.place_order ptbStopLossEnabled=true requires ptbStopLossGapUsd or ptbStopLossRules.'
+      );
+    } else if (ptbStopLossGapUsd != null && ptbStopLossGapUsd < 0) {
+      // Negative gap is allowed to wait for overshoot past parity.
+    }
+
+    const effectiveMarketSlug = String(config.marketSlug ?? graphMarketSlug).trim().toLowerCase();
+    const hasSupportedRuntimeMarket = hasResolveMarketNode || hasUpstreamMarketPriceAutoScope;
+    const isSupportedExplicitMarket =
+      effectiveMarketSlug.length > 0 &&
+      /^(btc|eth|sol|xrp)-updown-(5m|15m)-/.test(effectiveMarketSlug);
+    if (effectiveMarketSlug.length > 0 && !isSupportedExplicitMarket) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_ptb_stop_loss_market',
+        'ptbStopLossEnabled and ptbStopLossRules only support 5m/15m updown market slugs.'
+      );
+    } else if (effectiveMarketSlug.length === 0 && !hasSupportedRuntimeMarket) {
+      pushNodeError(
+        issues,
+        node,
+        'missing_ptb_stop_loss_market',
+        'PTB stop-loss requires a 5m/15m updown market slug or an upstream trigger.market_price/runtime market resolver.'
+      );
+    }
+  } else if (config.ptbStopLossGapUsd != null && ptbStopLossGapUsd == null) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_ptb_stop_loss_gap_usd',
+      'action.place_order ptbStopLossGapUsd must be a finite number.'
+    );
+  }
   const slTriggerPriceMode =
     typeof config.slTriggerPriceMode === 'string' ? config.slTriggerPriceMode : null;
-  if (effectiveSlEnabled && slTriggerPriceMode != null) {
+  if (effectiveClassicSlEnabled && slTriggerPriceMode != null) {
     const validModes = ['best_bid', 'composite', 'composite_safe', 'composite_fast', 'last_trade'];
     if (!validModes.includes(slTriggerPriceMode)) {
       pushNodeError(
@@ -586,6 +829,26 @@ export function validateActionPlaceOrderConfig(
       'action.place_order reentryMaxPriceCent must be in (0, 100].'
     );
   }
+  const reentryPriceToBeatMaxDiff = toFiniteNumber(config.reentryPriceToBeatMaxDiff);
+  if (
+    config.reentryPriceToBeatMaxDiff != null &&
+    (reentryPriceToBeatMaxDiff == null || reentryPriceToBeatMaxDiff <= 0)
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_reentry_price_to_beat_max_diff',
+      'action.place_order reentryPriceToBeatMaxDiff must be > 0.'
+    );
+  }
+  const reentryPriceToBeatMaxDiffUnitRaw = String(config.reentryPriceToBeatMaxDiffUnit ?? '')
+    .trim()
+    .toLowerCase();
+  const hasReentryPriceToBeatMaxDiffUnit = reentryPriceToBeatMaxDiffUnitRaw.length > 0;
+  const hasInvalidReentryPriceToBeatMaxDiffUnit =
+    hasReentryPriceToBeatMaxDiffUnit &&
+    reentryPriceToBeatMaxDiffUnitRaw !== 'usd' &&
+    reentryPriceToBeatMaxDiffUnitRaw !== 'cent';
   if (reenterOnSlHit === true && side !== 'buy') {
     pushNodeError(
       issues,
@@ -594,12 +857,32 @@ export function validateActionPlaceOrderConfig(
       'action.place_order reenterOnSlHit is only valid for side=buy.'
     );
   }
-  if (reenterOnSlHit === true && !effectiveSlEnabled) {
+  if (reenterOnSlHit === true && !effectiveAnyStopLossEnabled) {
     pushNodeError(
       issues,
       node,
       'reenter_on_sl_hit_requires_sl',
-      'action.place_order reenterOnSlHit requires slEnabled=true.'
+      'action.place_order reenterOnSlHit requires slEnabled=true, slRules, ptbStopLossEnabled=true, or ptbStopLossRules.'
+    );
+  }
+  if (stagedSlReentryOnlyAfterAllStages === true && reenterOnSlHit !== true) {
+    pushNodeError(
+      issues,
+      node,
+      'staged_sl_reentry_only_after_all_stages_requires_reentry',
+      'action.place_order stagedSlReentryOnlyAfterAllStages requires reenterOnSlHit=true.'
+    );
+  }
+  if (
+    stagedSlReentryOnlyAfterAllStages === true &&
+    !hasSlRules &&
+    !hasPtbStopLossRules
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'staged_sl_reentry_only_after_all_stages_requires_sl_rules',
+      'action.place_order stagedSlReentryOnlyAfterAllStages requires staged slRules or ptbStopLossRules.'
     );
   }
   const explicitKind = String(config.kind ?? '').trim().toLowerCase();
@@ -632,6 +915,30 @@ export function validateActionPlaceOrderConfig(
       node,
       'reentry_max_price_requires_reentry',
       'action.place_order reentryMaxPriceCent requires reenterOnSlHit=true.'
+    );
+  }
+  if (config.reentryPriceToBeatMaxDiff != null && reenterOnSlHit !== true) {
+    pushNodeError(
+      issues,
+      node,
+      'reentry_price_to_beat_max_diff_requires_reentry',
+      'action.place_order reentryPriceToBeatMaxDiff requires reenterOnSlHit=true.'
+    );
+  }
+  if (hasReentryPriceToBeatMaxDiffUnit && reenterOnSlHit !== true) {
+    pushNodeError(
+      issues,
+      node,
+      'reentry_price_to_beat_max_diff_unit_requires_reentry',
+      'action.place_order reentryPriceToBeatMaxDiffUnit requires reenterOnSlHit=true.'
+    );
+  }
+  if (hasInvalidReentryPriceToBeatMaxDiffUnit) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_reentry_price_to_beat_max_diff_unit',
+      'action.place_order reentryPriceToBeatMaxDiffUnit must be usd or cent when provided.'
     );
   }
   if (reenterOnSlHit === true) {
@@ -755,6 +1062,8 @@ export function validateActionPlaceOrderConfig(
   validateActionPlaceOrderExecutionFloorConfig(issues, node, graph, side, config);
 
   const priceToBeatGuardEnabled = toBooleanish(config.priceToBeatGuardEnabled);
+  let normalizedPriceToBeatMode: 'manual' | 'auto_last_3_avg_excursion' | 'auto_vol_pct' | null =
+    null;
   if (config.priceToBeatGuardEnabled != null && priceToBeatGuardEnabled == null) {
     pushNodeError(
       issues,
@@ -773,19 +1082,44 @@ export function validateActionPlaceOrderConfig(
   }
   if (priceToBeatGuardEnabled === true) {
     const ptbMode = String(config.priceToBeatMode ?? '').trim().toLowerCase();
-    const normalizedPtbMode =
-      !ptbMode || ptbMode === 'manual' || ptbMode === 'auto_last_3_avg_excursion'
-        ? ptbMode || 'manual'
-        : null;
-    if (normalizedPtbMode == null) {
+    if (
+      !ptbMode ||
+      ptbMode === 'manual' ||
+      ptbMode === 'auto_last_3_avg_excursion' ||
+      ptbMode === 'auto_vol_pct'
+    ) {
+      normalizedPriceToBeatMode =
+        (ptbMode || 'manual') as 'manual' | 'auto_last_3_avg_excursion' | 'auto_vol_pct';
+    } else {
+      normalizedPriceToBeatMode = null;
+    }
+    if (normalizedPriceToBeatMode == null) {
       pushNodeError(
         issues,
         node,
         'invalid_price_to_beat_mode',
-        'action.place_order priceToBeatMode must be manual or auto_last_3_avg_excursion.'
+        'action.place_order priceToBeatMode must be manual, auto_last_3_avg_excursion, or auto_vol_pct.'
       );
     }
-    if (normalizedPtbMode !== 'auto_last_3_avg_excursion') {
+    const effectiveMarketSlug = String(config.marketSlug ?? graphMarketSlug).trim().toLowerCase();
+    const explicitAssetMatch =
+      effectiveMarketSlug.length > 0
+        ? /^(btc|eth|sol|xrp)-updown-(5m|15m)-/.exec(effectiveMarketSlug)
+        : null;
+    const explicitAsset = explicitAssetMatch?.[1] ?? '';
+    const upstreamRuntimeAssets = collectUpstreamRuntimePtbAssets(node.key, graph);
+    if (
+      normalizedPriceToBeatMode === 'auto_vol_pct' &&
+      (explicitAsset === 'xrp' || upstreamRuntimeAssets.has('xrp'))
+    ) {
+      pushNodeError(
+        issues,
+        node,
+        'unsupported_price_to_beat_auto_vol_pct_asset',
+        'action.place_order auto_vol_pct supports only BTC, ETH, and SOL markets.'
+      );
+    }
+    if (normalizedPriceToBeatMode === 'manual') {
       const priceToBeatMaxDiff = toFiniteNumber(config.priceToBeatMaxDiff);
       if (priceToBeatMaxDiff == null || priceToBeatMaxDiff <= 0) {
         pushNodeError(
@@ -808,7 +1142,6 @@ export function validateActionPlaceOrderConfig(
       }
     }
 
-    const effectiveMarketSlug = String(config.marketSlug ?? graphMarketSlug).trim().toLowerCase();
     const hasSupportedRuntimeMarket = hasResolveMarketNode || hasUpstreamMarketPriceAutoScope;
     const isSupportedExplicitMarket =
       effectiveMarketSlug.length > 0 &&
@@ -827,6 +1160,38 @@ export function validateActionPlaceOrderConfig(
         'missing_price_to_beat_market',
         'priceToBeatGuardEnabled requires a 5m/15m updown market slug or an upstream trigger.market_price/runtime market resolver.'
       );
+    }
+  }
+  if (config.reentryPriceToBeatMaxDiff != null && priceToBeatGuardEnabled !== true) {
+    pushNodeError(
+      issues,
+      node,
+      'reentry_price_to_beat_max_diff_requires_guard',
+      'action.place_order reentryPriceToBeatMaxDiff requires priceToBeatGuardEnabled=true.'
+    );
+  }
+  if (hasReentryPriceToBeatMaxDiffUnit && priceToBeatGuardEnabled !== true) {
+    pushNodeError(
+      issues,
+      node,
+      'reentry_price_to_beat_max_diff_unit_requires_guard',
+      'action.place_order reentryPriceToBeatMaxDiffUnit requires priceToBeatGuardEnabled=true.'
+    );
+  }
+  if (
+    reenterOnSlHit === true &&
+    priceToBeatGuardEnabled === true &&
+    config.reentryPriceToBeatMaxDiff != null
+  ) {
+    if (normalizedPriceToBeatMode !== 'manual') {
+      if (!hasReentryPriceToBeatMaxDiffUnit) {
+        pushNodeError(
+          issues,
+          node,
+          'missing_reentry_price_to_beat_max_diff_unit',
+          'action.place_order reentryPriceToBeatMaxDiffUnit must be usd or cent when reentryPriceToBeatMaxDiff overrides an auto PTB mode.'
+        );
+      }
     }
   }
   const retryOnPriceToBeatGuardBlock = toBooleanish(config.retryOnPriceToBeatGuardBlock);
@@ -849,6 +1214,23 @@ export function validateActionPlaceOrderConfig(
       'retryOnPriceToBeatGuardBlock requires priceToBeatGuardEnabled=true.'
     );
   }
+  validateActionPlaceOrderPtbStopLossBumpConfig(
+    issues,
+    node,
+    side,
+    config,
+    priceToBeatGuardEnabled
+  );
+  validateActionPlaceOrderPtbV2Config(
+    issues,
+    node,
+    graph,
+    side,
+    config,
+    priceToBeatGuardEnabled === true,
+    reenterOnSlHit === true,
+    ptbStopLossEnabled === true
+  );
 
   const notifyOnOrderPlaced = toBooleanish(config.notifyOnOrderPlaced);
   if (config.notifyOnOrderPlaced != null && notifyOnOrderPlaced == null) {
@@ -1027,12 +1409,12 @@ export function validateActionPlaceOrderConfig(
       'action.place_order notifyOnSlHit must be boolean (true/false).'
     );
   }
-  if (notifyOnSlHit === true && slEnabled !== true) {
+  if (notifyOnSlHit === true && !effectiveAnyStopLossEnabled) {
     pushNodeError(
       issues,
       node,
       'notify_on_sl_hit_requires_sl',
-      'notifyOnSlHit requires slEnabled=true.'
+      'notifyOnSlHit requires slEnabled=true, slRules, ptbStopLossEnabled=true, or ptbStopLossRules.'
     );
   }
 }

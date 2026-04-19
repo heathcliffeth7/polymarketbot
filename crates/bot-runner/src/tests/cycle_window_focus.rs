@@ -232,3 +232,24 @@ fn cycle_window_custom_range_15m_bounds() {
         DateTime::<Utc>::from_timestamp(1_773_320_100, 0).expect("end_at")
     );
 }
+
+#[test]
+fn cycle_window_custom_range_supports_pair_lock_style_last_minute_band() {
+    let (open_at, end_at) = resolve_cycle_window_absolute_bounds(
+        "btc-updown-5m-1773319200",
+        "custom_range",
+        0,
+        Some(230),
+        Some(290),
+    )
+    .expect("bounds");
+
+    assert_eq!(
+        open_at,
+        DateTime::<Utc>::from_timestamp(1_773_319_430, 0).expect("open_at")
+    );
+    assert_eq!(
+        end_at,
+        DateTime::<Utc>::from_timestamp(1_773_319_490, 0).expect("end_at")
+    );
+}

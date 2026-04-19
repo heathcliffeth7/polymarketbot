@@ -483,6 +483,7 @@ impl PostgresRepository {
         .bind(output_json)
         .execute(self.pool())
         .await?;
+        self.sync_trade_flow_node_runtime_snapshot_for_step(step_id).await?;
         Ok(())
     }
 
@@ -502,6 +503,7 @@ impl PostgresRepository {
         .bind(error_text)
         .execute(self.pool())
         .await?;
+        self.sync_trade_flow_node_runtime_snapshot_for_step(step_id).await?;
         Ok(())
     }
 
@@ -519,6 +521,7 @@ impl PostgresRepository {
         .bind(output_json)
         .execute(self.pool())
         .await?;
+        self.sync_trade_flow_node_runtime_snapshot_for_step(step_id).await?;
         Ok(())
     }
 

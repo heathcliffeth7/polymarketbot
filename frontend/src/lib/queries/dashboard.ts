@@ -44,7 +44,6 @@ export async function getDashboardData(
       walletAddress: null,
       executionMode: 'direct',
       claimEnabled: false,
-      publishedAutoClaimFlow: false,
       canSweep: false,
       disabledReasonCode: null,
       disabledReason: null,

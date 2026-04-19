@@ -340,7 +340,10 @@ fn trade_builder_analysis_exit_reason(
     if order.exit_ladder_kind.as_deref() == Some(TRADE_BUILDER_EXIT_LADDER_KIND_TP) {
         return "tp";
     }
-    if order.exit_ladder_kind.as_deref() == Some(TRADE_BUILDER_EXIT_LADDER_KIND_SL) {
+    if matches!(
+        order.exit_ladder_kind.as_deref(),
+        Some(TRADE_BUILDER_EXIT_LADDER_KIND_SL | TRADE_BUILDER_EXIT_LADDER_KIND_PTB_SL)
+    ) {
         return "sl";
     }
     match order.trigger_condition.as_deref() {

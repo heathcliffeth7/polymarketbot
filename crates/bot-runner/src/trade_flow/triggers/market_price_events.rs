@@ -952,9 +952,19 @@ fn build_trigger_market_price_output(
     cycle_window_open_at: Option<DateTime<Utc>>,
     cycle_window_end_at: Option<DateTime<Utc>>,
 ) -> Value {
+    let binding_mode = match node_config_string(node, "bindingMode")
+        .unwrap_or_else(|| "standard".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "pair_lock_only" => "pair_lock_only",
+        _ => "standard",
+    };
     let mut output = json!({
         "run_id": run.id,
         "node_key": node.key,
+        "binding_mode": binding_mode,
         "market_slug": market_slug,
         "price_mode": price_mode.as_str(),
         "triggered_token_id": triggered_token_id,
@@ -990,6 +1000,16 @@ fn build_trigger_market_price_output(
         "once_scope": if once_scope_market { "market" } else { "run" },
         "queued_at": queued_at_from_step,
     });
+    append_json_object_fields(
+        &mut output,
+        &json!({
+            "marketScope": flow_context_string(context, "marketScope"),
+            "marketAsset": flow_context_string(context, "marketAsset"),
+            "marketTimeframe": flow_context_string(context, "marketTimeframe"),
+            "yesTokenId": flow_context_string(context, "yesTokenId"),
+            "noTokenId": flow_context_string(context, "noTokenId"),
+        }),
+    );
     append_json_object_fields(
         &mut output,
         &json!({

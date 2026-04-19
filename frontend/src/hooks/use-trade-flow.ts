@@ -7,6 +7,8 @@ import type {
   AutoScopeTradeAnalysisSortBy,
   AutoScopeTradeAnalysisSortDirection,
   PaginatedResponse,
+  TradeFlowNodeRuntimeResponse,
+  TradeFlowPtbStateResponse,
   TradeFlowDefinition,
   TradeFlowDefinitionDetail,
   TradeFlowEnsureDualDcaSourceTradeRequest,
@@ -148,6 +150,40 @@ export function useTradeFlowAutoScopeAnalysis(
   });
   const endpoint = enabled ? `/api/trade-flow/analytics/auto-scope?${query}` : null;
   return usePolling<AutoScopeTradeAnalysisResponse>(endpoint, 10_000);
+}
+
+export function useTradeFlowPtbState(
+  runId: number | null,
+  page = 1,
+  limit = 50,
+  enabled = true
+) {
+  const query = buildSearchParams({
+    page: String(page),
+    limit: String(limit),
+    runId: runId != null ? String(runId) : undefined,
+  });
+  const endpoint = enabled ? `/api/trade-flow/analytics/ptb-state?${query}` : null;
+  return usePolling<TradeFlowPtbStateResponse>(endpoint, 10_000);
+}
+
+export function useTradeFlowNodeRuntime(
+  runId: number | null,
+  page = 1,
+  limit = 50,
+  nodeKey?: string,
+  nodeType?: string,
+  enabled = true
+) {
+  const query = buildSearchParams({
+    page: String(page),
+    limit: String(limit),
+    runId: runId != null ? String(runId) : undefined,
+    nodeKey,
+    nodeType,
+  });
+  const endpoint = enabled ? `/api/trade-flow/analytics/node-runtime?${query}` : null;
+  return usePolling<TradeFlowNodeRuntimeResponse>(endpoint, 10_000);
 }
 
 export async function createTradeFlowDefinition(payload: Record<string, unknown>) {

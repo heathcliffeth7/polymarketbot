@@ -81,7 +81,6 @@ async fn schedule_trade_builder_exit_sell_retry(
             .is_some_and(|(previous_qty, next_qty)| {
                 trade_builder_retry_qty_is_lower(previous_qty, next_qty)
             });
-
     repo.set_trade_builder_order_retry_state(
         order.id,
         "triggered",

@@ -39,6 +39,12 @@ export interface ExitLadderRuleRow {
   sizePct: string;
 }
 
+export interface PtbStopLossRuleRow {
+  id: string;
+  gapUsd: string;
+  sizePct: string;
+}
+
 export interface TimeExitRuleRow {
   id: string;
   elapsedMinutes: string;
@@ -72,6 +78,7 @@ export interface NodeConfigFormState {
   drawdownRuleRows: DrawdownRuleRow[];
   tpRuleRows: ExitLadderRuleRow[];
   slRuleRows: ExitLadderRuleRow[];
+  ptbStopLossRuleRows: PtbStopLossRuleRow[];
   timeExitRuleRows: TimeExitRuleRow[];
   expressionRows: ConditionDraft[];
   expressionJoin: ExpressionJoin;

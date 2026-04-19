@@ -43,6 +43,17 @@ function shouldResetDependentSelections(nodeType: string, key: string): boolean 
   return false;
 }
 
+function normalizePairLockCounterPtbMode(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  return normalized === 'auto_last_3_avg_excursion' || normalized === 'auto_vol_pct'
+    ? normalized
+    : 'manual';
+}
+
+function normalizePairLockCounterPtbUnit(value: string): 'usd' | 'cent' {
+  return value.trim().toLowerCase() === 'cent' ? 'cent' : 'usd';
+}
+
 export function updateNodeFieldState(
   prev: NodeConfigFormState | null,
   nodeType: string,
@@ -81,8 +92,93 @@ export function updateNodeFieldState(
       next = { ...next, placeOrderMarketSeedUi: nextUi };
     }
   }
-
   if (!shouldResetDependentSelections(nodeType, key)) {
+    if (nodeType === 'action.place_order' && key === 'mode' && value === 'pair_lock') {
+      const nextFields = {
+        ...next.fields,
+        mode: 'pair_lock',
+        pairSizingMode:
+          (next.fields.pairSizingMode ?? '').trim().toLowerCase() === 'auto_remaining_budget'
+            ? 'auto_remaining_budget'
+            : 'manual',
+        side: 'buy',
+        executionMode: 'limit',
+        kind: 'immediate',
+        sizeMode: 'usdc',
+        sizePct: '',
+        counterLegEnabled: 'true',
+        counterLegOutcomeLabel:
+          (next.fields.counterLegOutcomeLabel ?? '').trim() || 'opposite',
+      };
+      return { ...next, fields: nextFields };
+    }
+    if (
+      nodeType === 'action.place_order' &&
+      key === 'counterLegPriceToBeatGuardEnabled' &&
+      value === 'true'
+    ) {
+      const counterLegPriceToBeatMode = normalizePairLockCounterPtbMode(
+        next.fields.counterLegPriceToBeatMode ?? ''
+      );
+      return {
+        ...next,
+        fields: {
+          ...next.fields,
+          counterLegPriceToBeatMode,
+          ...(counterLegPriceToBeatMode === 'manual'
+            ? {
+                counterLegPriceToBeatMaxDiffUnit: normalizePairLockCounterPtbUnit(
+                  next.fields.counterLegPriceToBeatMaxDiffUnit ?? ''
+                ),
+              }
+            : {}),
+        },
+      };
+    }
+    if (nodeType === 'action.place_order' && key === 'counterLegPriceToBeatMode') {
+      const counterLegPriceToBeatMode = normalizePairLockCounterPtbMode(value);
+      return {
+        ...next,
+        fields: {
+          ...next.fields,
+          counterLegPriceToBeatMode,
+          ...(counterLegPriceToBeatMode === 'manual'
+            ? {
+                counterLegPriceToBeatMaxDiffUnit: normalizePairLockCounterPtbUnit(
+                  next.fields.counterLegPriceToBeatMaxDiffUnit ?? ''
+                ),
+              }
+            : {}),
+        },
+      };
+    }
+    if (nodeType === 'action.place_order' && key === 'pairSizingMode') {
+      const pairSizingMode =
+        value.trim().toLowerCase() === 'auto_remaining_budget'
+          ? 'auto_remaining_budget'
+          : 'manual';
+      const nextFields: Record<string, string> = {
+        ...next.fields,
+        pairSizingMode,
+      };
+      if (
+        pairSizingMode === 'auto_remaining_budget' &&
+        !(nextFields.pairTotalBudgetUsdc ?? '').trim()
+      ) {
+        const primaryBudgetUsdc = Number(nextFields.sizeUsdc ?? '');
+        const counterBudgetUsdc = Number(nextFields.counterLegSizeUsdc ?? '');
+        if (Number.isFinite(primaryBudgetUsdc) && primaryBudgetUsdc > 0) {
+          const totalBudgetUsdc =
+            primaryBudgetUsdc +
+            (Number.isFinite(counterBudgetUsdc) && counterBudgetUsdc > 0 ? counterBudgetUsdc : 0);
+          nextFields.pairTotalBudgetUsdc = String(totalBudgetUsdc);
+        }
+      }
+      return {
+        ...next,
+        fields: nextFields,
+      };
+    }
     return next;
   }
 

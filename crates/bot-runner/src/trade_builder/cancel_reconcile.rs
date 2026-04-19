@@ -63,6 +63,7 @@ enum TradeBuilderPostCancelBuyOutcome {
 #[allow(clippy::too_many_arguments)]
 async fn reconcile_trade_builder_post_cancel_buy_fill(
     repo: &PostgresRepository,
+    cfg: &AppConfig,
     client: &dyn OrderExecutor,
     ws: &ClobWsClient,
     order: &mut TradeBuilderOrder,
@@ -135,6 +136,7 @@ async fn reconcile_trade_builder_post_cancel_buy_fill(
         .await?;
         finalize_builder_fill(
             repo,
+            cfg,
             ws,
             order,
             exchange_order_id,
@@ -191,6 +193,7 @@ async fn reconcile_trade_builder_post_cancel_buy_fill(
             })?;
         finalize_builder_fill(
             repo,
+            cfg,
             ws,
             order,
             exchange_order_id,

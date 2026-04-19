@@ -21,6 +21,12 @@ pub struct PriceSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PriceHistoryPoint {
+    pub ts: i64,
+    pub price: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrderBookLevel {
     pub price: f64,
     pub size: f64,
@@ -108,6 +114,16 @@ pub trait ClobRestClient: Send + Sync {
 
     async fn get_last_trade_price(&self, _token_id: &str) -> Result<Option<f64>> {
         Ok(None)
+    }
+
+    async fn get_price_history(
+        &self,
+        _token_id: &str,
+        _start_ts: i64,
+        _end_ts: i64,
+        _fidelity: i64,
+    ) -> Result<Vec<PriceHistoryPoint>> {
+        Ok(Vec::new())
     }
 
     async fn get_fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>>;

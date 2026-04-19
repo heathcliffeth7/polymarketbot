@@ -32,12 +32,27 @@ fn parse_market_price_ptb_trigger_config(
         crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual => {
             enabled && min_gap.is_some()
         }
-        crate::trade_flow::guards::price_to_beat::PriceToBeatMode::AutoLast3AvgExcursion => {
+        crate::trade_flow::guards::price_to_beat::PriceToBeatMode::AutoLast3AvgExcursion
+        | crate::trade_flow::guards::price_to_beat::PriceToBeatMode::AutoVolPct => {
             enabled
         }
     };
 
     (trigger_enabled, mode, min_gap, max_gap, unit)
+}
+
+fn is_pair_lock_only_market_trigger(node: &TradeFlowNode) -> bool {
+    node.node_type == "trigger.market_price"
+        && node_config_string(node, "bindingMode")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("pair_lock_only"))
+}
+
+fn pair_lock_monitor_outcome_labels(market_slug: Option<&str>) -> (&'static str, &'static str) {
+    if market_slug.is_some_and(|slug| slug.contains("-updown-")) {
+        ("Up", "Down")
+    } else {
+        ("Yes", "No")
+    }
 }
 
 fn resolve_ws_market_price_trigger_fields(
@@ -189,6 +204,60 @@ fn build_open_position_ws_price_node_specs(
         } else {
             None
         };
+    if is_pair_lock_only_market_trigger(node) && is_auto_scope {
+        let (yes_label, no_label) = pair_lock_monitor_outcome_labels(market_slug.as_deref());
+        let candidates = [
+            (
+                node_auto_scope_yes_token_id(context, &node.key)
+                    .or_else(|| flow_context_string(context, "yesTokenId")),
+                yes_label,
+            ),
+            (
+                node_auto_scope_no_token_id(context, &node.key)
+                    .or_else(|| flow_context_string(context, "noTokenId")),
+                no_label,
+            ),
+        ];
+        for (token_id, outcome_label) in candidates {
+            let Some(token_id) = token_id.filter(|value| !value.trim().is_empty()) else {
+                push_ws_node_spec_skip_reason(
+                    &mut result.skip_reasons,
+                    WS_NODE_SPEC_SKIP_REASON_MISSING_TOKEN_ID,
+                    Some(outcome_label),
+                );
+                continue;
+            };
+            result.specs.push(WsOpenPositionPriceNodeSpec {
+                node_key: node.key.clone(),
+                node_type: node.node_type.clone(),
+                once_mode,
+                once_scope_market,
+                pair_lock_only_monitor: true,
+                auto_scope: is_auto_scope,
+                price_mode,
+                market_slug: market_slug.clone(),
+                token_id,
+                outcome_label: outcome_label.to_string(),
+                trigger_condition: String::new(),
+                trigger_price: 0.0,
+                max_price: None,
+                price_to_beat_trigger_enabled: false,
+                price_to_beat_mode,
+                price_to_beat_trigger_min_gap,
+                price_to_beat_trigger_max_gap,
+                price_to_beat_trigger_unit,
+                protection_mode: protection_mode.clone(),
+                protection_asset: protection_asset.clone(),
+                confirmation_ms,
+                cycle_window_mode: cycle_window_mode.clone(),
+                cycle_window_secs,
+                cycle_window_start_sec,
+                cycle_window_end_sec,
+                auto_sell_on_window_end,
+            });
+        }
+        return result;
+    }
     // Multi-outcome path
     if let Some(conditions) = node
         .config
@@ -262,6 +331,7 @@ fn build_open_position_ws_price_node_specs(
                 node_type: node.node_type.clone(),
                 once_mode,
                 once_scope_market,
+                pair_lock_only_monitor: false,
                 auto_scope: is_auto_scope,
                 price_mode,
                 market_slug: market_slug.clone(),
@@ -379,6 +449,7 @@ fn build_open_position_ws_price_node_specs(
         node_type: node.node_type.clone(),
         once_mode,
         once_scope_market,
+        pair_lock_only_monitor: false,
         auto_scope: is_auto_scope,
         price_mode,
         market_slug,

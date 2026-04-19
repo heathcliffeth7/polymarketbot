@@ -2,8 +2,10 @@ import { useMemo } from 'react';
 import type { FlowEdge, FlowNode } from '../flow-canvas-constants';
 import {
   hasUpstreamAutoScopeTrigger,
+  resolveDirectUpstreamPairLockTrigger,
   resolveUpstreamFixedTriggerMarket,
   resolveUpstreamTriggerMaxPrice,
+  type PairLockUpstreamTriggerSummary,
   type UpstreamFixedMarketResolution,
   type UpstreamMaxPriceResolution,
   hasUpstreamTriggerWithConfiguredPrice,
@@ -24,6 +26,8 @@ const EMPTY_UPSTREAM_FIXED_MARKET_RESOLUTION: UpstreamFixedMarketResolution = {
   distinctMarketSlugs: [],
   distinctOutcomeLabels: [],
 };
+
+const EMPTY_UPSTREAM_PAIR_LOCK_TRIGGER: PairLockUpstreamTriggerSummary | null = null;
 
 interface UseSelectedNodeUpstreamArgs {
   selectedNodeId: string | null;
@@ -56,10 +60,16 @@ export function useSelectedNodeUpstream({
     return resolveUpstreamFixedTriggerMarket(selectedNodeId, canvasNodes, canvasEdges);
   }, [selectedNodeId, canvasNodes, canvasEdges]);
 
+  const upstreamPairLockTrigger = useMemo(() => {
+    if (!selectedNodeId) return EMPTY_UPSTREAM_PAIR_LOCK_TRIGGER;
+    return resolveDirectUpstreamPairLockTrigger(selectedNodeId, canvasNodes, canvasEdges);
+  }, [selectedNodeId, canvasNodes, canvasEdges]);
+
   return {
     upstreamAutoScope,
     upstreamTriggerPrice,
     upstreamMaxPriceResolution,
     upstreamFixedMarketResolution,
+    upstreamPairLockTrigger,
   };
 }

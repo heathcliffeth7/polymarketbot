@@ -42,7 +42,7 @@ export type BuilderWorkflowStatus =
   | 'expired'
   | 'error';
 export type BuilderWorkflowLegType = 'sell' | 'buy';
-export type TradeBuilderExitLadderKind = 'tp' | 'sl';
+export type TradeBuilderExitLadderKind = 'tp' | 'sl' | 'ptb_sl';
 export type BuilderWorkflowLegStatus =
   | 'pending'
   | 'armed'
@@ -142,7 +142,6 @@ export interface ClaimSweepStatus {
   walletAddress: string | null;
   executionMode: 'direct' | 'builder_relayer' | 'relayer_api_key';
   claimEnabled: boolean;
-  publishedAutoClaimFlow: boolean;
   canSweep: boolean;
   disabledReasonCode: string | null;
   disabledReason: string | null;
@@ -313,6 +312,8 @@ export interface TradeBuilderOrder {
   origin_flow_definition_id: number | null;
   origin_flow_run_id: number | null;
   origin_flow_node_key: string | null;
+  pair_session_id?: number | null;
+  pair_leg_role?: 'lead_candidate' | 'counter_candidate' | 'completion_buy' | 'orphan_unwind_sell' | null;
   tp_enabled: boolean;
   tp_price: number | null;
   tp_rules_json?: Array<{
@@ -325,6 +326,15 @@ export interface TradeBuilderOrder {
     price: number;
     size_pct: number;
   }>;
+  ptb_stop_loss_rules_json?: Array<{
+    gap_usd: number;
+    size_pct: number;
+  }>;
+  staged_sl_retry_only_dust?: boolean;
+  staged_sl_retry_dust_metric?: 'notional' | 'qty' | null;
+  staged_sl_retry_dust_value?: number | null;
+  staged_sl_reentry_use_sold_notional?: boolean;
+  staged_sl_reentry_only_after_all_stages?: boolean;
   time_exit_rules_json?: Array<{
     elapsed_minutes: number;
     remaining_pct: number;
@@ -426,6 +436,7 @@ export interface TradeBuilderOutcome {
   label: string;
   price: number | null;
   legSide: 'yes' | 'no';
+  feeRateBps?: number | null;
 }
 
 export interface TradeFlowOpenPositionOption {
@@ -649,6 +660,51 @@ export interface AutoScopeTradeAnalysisResponse
   refreshedAt: string;
   sortBy: AutoScopeTradeAnalysisSortBy;
   sortDirection: AutoScopeTradeAnalysisSortDirection;
+}
+
+export interface TradeFlowPtbStateRow {
+  builderOrderId: number;
+  runId: number | null;
+  nodeKey: string | null;
+  marketSlug: string;
+  outcomeLabel: string;
+  baseThresholdUsd: number | null;
+  bumpUsd: number | null;
+  bumpIncrementUsd: number | null;
+  relaxCreditUsd: number | null;
+  effectiveThresholdUsd: number | null;
+  guardMissReason: string | null;
+  maxPriceMiss: boolean;
+  firstTradableSecond: string | null;
+  firstTradableGapUsd: number | null;
+  tradableSecondsCount: number;
+  priceOkDepthFailCount: number;
+  maxFillabilityScore: number | null;
+  qualityScore: number | null;
+  refreshedAt: string;
+}
+
+export interface TradeFlowPtbStateResponse extends PaginatedResponse<TradeFlowPtbStateRow> {
+  refreshedAt: string;
+}
+
+export interface TradeFlowNodeRuntimeRow {
+  runId: number;
+  definitionId: number;
+  versionId: number | null;
+  nodeKey: string;
+  nodeType: string;
+  status: string;
+  stateKind: string;
+  marketSlug: string | null;
+  tokenId: string | null;
+  snapshotJson: Record<string, unknown>;
+  updatedAt: string;
+}
+
+export interface TradeFlowNodeRuntimeResponse
+  extends PaginatedResponse<TradeFlowNodeRuntimeRow> {
+  refreshedAt: string;
 }
 
 export interface TradeFlowOverlapPeer {

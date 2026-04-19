@@ -13,6 +13,13 @@ use std::{
     sync::LazyLock,
 };
 
+#[path = "polymarket_price_to_beat/dirty_notify.rs"]
+mod dirty_notify;
+pub(crate) use dirty_notify::{
+    clear_price_to_beat_dirty_market_slugs, take_price_to_beat_dirty_market_slugs,
+    wait_for_price_to_beat_dirty_market_update,
+};
+
 const POLYMARKET_EVENT_BASE_URL: &str = "https://polymarket.com/event";
 const POLYMARKET_CRYPTO_PRICE_API_URL: &str = "https://polymarket.com/api/crypto/crypto-price";
 const POLYMARKET_PRICE_TO_BEAT_TIMEOUT_SECS: u64 = 10;
@@ -130,6 +137,8 @@ struct PolymarketPriceToBeatService {
     fetch_inflight: Mutex<HashSet<String>>,
     terminal_failures: Mutex<HashMap<String, String>>,
     promotion_inflight: Mutex<HashSet<String>>,
+    dirty_market_slugs: Mutex<HashSet<String>>,
+    dirty_update_notify: tokio::sync::Notify,
 }
 
 static POLYMARKET_PRICE_TO_BEAT_SERVICE: LazyLock<PolymarketPriceToBeatService> =
@@ -143,6 +152,8 @@ impl PolymarketPriceToBeatService {
             fetch_inflight: Mutex::new(HashSet::new()),
             terminal_failures: Mutex::new(HashMap::new()),
             promotion_inflight: Mutex::new(HashSet::new()),
+            dirty_market_slugs: Mutex::new(HashSet::new()),
+            dirty_update_notify: tokio::sync::Notify::new(),
         }
     }
 
@@ -205,6 +216,8 @@ impl PolymarketPriceToBeatService {
                 fetched_at: Utc::now(),
             },
         );
+        drop(cache);
+        self.mark_dirty_market_slug(market_slug);
         true
     }
 
@@ -417,30 +430,6 @@ impl PolymarketPriceToBeatService {
         );
         let _ = self.store_provisional_polymarket_snapshot(market_slug, snapshot.clone());
         Ok(snapshot)
-    }
-
-    fn store_verified_polymarket_snapshot(
-        &self,
-        market_slug: &str,
-        snapshot: PolymarketPriceToBeatSnapshot,
-    ) -> Option<PolymarketPriceToBeatSnapshot> {
-        self.cache.lock().insert(market_slug.to_string(), snapshot)
-    }
-
-    fn store_provisional_polymarket_snapshot(
-        &self,
-        market_slug: &str,
-        snapshot: PolymarketPriceToBeatSnapshot,
-    ) -> Option<PolymarketPriceToBeatSnapshot> {
-        let mut cache = self.cache.lock();
-        if cache
-            .get(market_slug)
-            .map(PolymarketPriceToBeatSnapshot::is_verified_polymarket)
-            .unwrap_or(false)
-        {
-            return None;
-        }
-        cache.insert(market_slug.to_string(), snapshot)
     }
 
     async fn fetch_crypto_price_window_from_api(

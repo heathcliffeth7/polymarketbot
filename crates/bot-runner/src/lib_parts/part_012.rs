@@ -305,10 +305,6 @@ async fn seed_trade_flow_trigger_steps(
     Ok(())
 }
 
-fn trade_flow_repeat_step_input(step: &TradeFlowRunStep) -> Option<&Value> {
-    step.input_json.as_ref()
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn process_trade_flow_step(
     repo: &PostgresRepository,
@@ -489,13 +485,14 @@ async fn process_trade_flow_step(
             }
 
             if let Some(repeat_at) = execution.repeat_at {
+                let repeat_input = build_trade_flow_repeat_step_input(step, &execution.output);
                 let enqueued = repo
                     .enqueue_trade_flow_step(
                         run.id,
                         &node.key,
                         &node.node_type,
                         step.attempt,
-                        trade_flow_repeat_step_input(step),
+                        repeat_input.as_ref(),
                         repeat_at,
                         Some(step.id),
                         execution.repeat_idempotency_key.as_deref(),
@@ -929,14 +926,20 @@ mod part_012_tests {
         });
         let step = test_repeat_step(Some(input_json.clone()));
 
-        assert_eq!(trade_flow_repeat_step_input(&step), Some(&input_json));
+        assert_eq!(
+            build_trade_flow_repeat_step_input(&step, &json!({ "reason": "other" })),
+            Some(input_json)
+        );
     }
 
     #[test]
     fn trade_flow_repeat_step_input_returns_none_without_original_payload() {
         let step = test_repeat_step(None);
 
-        assert_eq!(trade_flow_repeat_step_input(&step), None);
+        assert_eq!(
+            build_trade_flow_repeat_step_input(&step, &json!({ "reason": "other" })),
+            None
+        );
     }
 
     #[tokio::test]

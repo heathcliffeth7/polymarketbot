@@ -34,7 +34,7 @@ fn evaluate_tick_triggers_for_token(
     snapshot: &MarketDataSnapshot,
     cache: &ArmedBuilderOrderCache,
 ) -> Vec<TickTrigger> {
-    let Some(orders) = cache.by_token.get(token_id) else {
+    let Some(orders) = cache.price_by_token.get(token_id) else {
         return Vec::new();
     };
 
@@ -85,13 +85,13 @@ async fn take_armed_builder_order_from_cache(
 ) -> Option<TradeBuilderOrder> {
     let mut cache = ARMED_BUILDER_ORDER_CACHE.write().await;
     let (order, remove_bucket) = {
-        let bucket = cache.by_token.get_mut(token_id)?;
+        let bucket = cache.price_by_token.get_mut(token_id)?;
         let idx = bucket.iter().position(|order| order.id == order_id)?;
         let order = bucket.remove(idx);
         (order, bucket.is_empty())
     };
     if remove_bucket {
-        cache.by_token.remove(token_id);
+        cache.price_by_token.remove(token_id);
     }
     Some(order)
 }
@@ -136,6 +136,8 @@ mod tick_trigger_eval_tests {
             origin_flow_definition_id: None,
             origin_flow_run_id: None,
             origin_flow_node_key: None,
+            pair_session_id: None,
+            pair_leg_role: None,
             tp_enabled: false,
             tp_price: None,
             tp_rules_json: Vec::new(),
@@ -157,6 +159,15 @@ mod tick_trigger_eval_tests {
             retry_on_trigger_guard_block: false,
             retry_on_execution_floor_guard_block: false,
             retry_on_max_price_block: false,
+            ptb_stop_loss_gap_usd: None,
+            ptb_reference_price: None,
+            ptb_stop_loss_rules_json: Vec::new(),
+            ptb_stop_loss_time_decay_mode: None,
+            staged_sl_retry_only_dust: false,
+            staged_sl_retry_dust_metric: None,
+            staged_sl_retry_dust_value: None,
+            staged_sl_reentry_use_sold_notional: false,
+            staged_sl_reentry_only_after_all_stages: false,
             sl_trigger_price_mode: None,
             reenter_on_sl_hit: false,
             reentry_max_attempts: 0,
@@ -231,7 +242,7 @@ mod tick_trigger_eval_tests {
         sl_order.trigger_price = Some(0.60);
         sl_order.sl_trigger_price_mode = Some("composite".to_string());
 
-        cache.by_token.insert(
+        cache.price_by_token.insert(
             "tok-up".to_string(),
             vec![tp_order.clone(), sl_order.clone()],
         );
@@ -270,7 +281,7 @@ mod tick_trigger_eval_tests {
         let mut order = test_builder_order("sell", None);
         order.trigger_condition = Some("cross_above".to_string());
         order.trigger_price = Some(0.80);
-        cache.by_token.insert("tok-up".to_string(), vec![order]);
+        cache.price_by_token.insert("tok-up".to_string(), vec![order]);
 
         let snapshot = MarketDataSnapshot {
             best_bid: Some(0.81),

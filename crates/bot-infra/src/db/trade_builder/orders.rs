@@ -8,11 +8,14 @@ const TRADE_BUILDER_ORDER_SELECT_COLUMNS: &str =
      expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, \
      active_exchange_order_id, remaining_size, remaining_qty, working_price, last_seen_price, \
      last_error, created_at, updated_at, parent_order_id, origin_flow_definition_id, \
-     origin_flow_run_id, origin_flow_node_key, tp_enabled, tp_price, tp_rules_json, sl_enabled, \
+     origin_flow_run_id, origin_flow_node_key, pair_session_id, pair_leg_role, tp_enabled, tp_price, tp_rules_json, sl_enabled, \
      sl_price, sl_rules_json, time_exit_rules_json, filled_qty, fee_rate_bps, trigger_latched, \
      trigger_latched_reason, trigger_latched_at, submitted_dynamic_qty, submitted_dynamic_price, \
      runtime_snapshot_json, fresh_submit_lease_until, retry_on_trigger_guard_block, \
      retry_on_execution_floor_guard_block, retry_on_max_price_block, \
+     ptb_stop_loss_gap_usd, ptb_reference_price, ptb_stop_loss_rules_json, ptb_stop_loss_time_decay_mode, \
+     staged_sl_retry_only_dust, staged_sl_retry_dust_metric, staged_sl_retry_dust_value, \
+     staged_sl_reentry_use_sold_notional, staged_sl_reentry_only_after_all_stages, \
      sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, \
      notify_on_fill, notify_on_order_not_filled, notify_on_trigger_guard_blocked, \
      notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, \
@@ -27,12 +30,18 @@ const TRADE_BUILDER_ORDER_SELECT_COLUMNS_O_ALIAS: &str =
      o.max_triggers, o.triggers_fired, o.active_exchange_order_id, o.remaining_size, \
      o.remaining_qty, o.working_price, o.last_seen_price, o.last_error, o.created_at, \
      o.updated_at, o.parent_order_id, o.origin_flow_definition_id, o.origin_flow_run_id, \
-     o.origin_flow_node_key, o.tp_enabled, o.tp_price, o.tp_rules_json, o.sl_enabled, \
+     o.origin_flow_node_key, o.pair_session_id, o.pair_leg_role, o.tp_enabled, o.tp_price, o.tp_rules_json, o.sl_enabled, \
      o.sl_price, o.sl_rules_json, o.time_exit_rules_json, o.filled_qty, o.fee_rate_bps, \
      o.trigger_latched, o.trigger_latched_reason, o.trigger_latched_at, o.submitted_dynamic_qty, \
      o.submitted_dynamic_price, o.runtime_snapshot_json, o.fresh_submit_lease_until, \
      o.retry_on_trigger_guard_block, \
-     o.retry_on_execution_floor_guard_block, o.retry_on_max_price_block, o.sl_trigger_price_mode, \
+     o.retry_on_execution_floor_guard_block, o.retry_on_max_price_block, \
+     o.ptb_stop_loss_gap_usd, o.ptb_reference_price, o.ptb_stop_loss_rules_json, \
+     o.ptb_stop_loss_time_decay_mode, \
+     o.staged_sl_retry_only_dust, o.staged_sl_retry_dust_metric, \
+     o.staged_sl_retry_dust_value, o.staged_sl_reentry_use_sold_notional, \
+     o.staged_sl_reentry_only_after_all_stages, \
+     o.sl_trigger_price_mode, \
      o.reenter_on_sl_hit, o.reentry_max_attempts, o.reentry_trigger_node_key, o.notify_on_fill, \
      o.notify_on_order_not_filled, o.notify_on_trigger_guard_blocked, \
      o.notify_on_execution_floor_blocked, o.notify_on_tp_hit, o.notify_on_sl_hit, \
@@ -49,6 +58,17 @@ fn trade_builder_price_exit_rules_to_json(rules: Option<&[TradeBuilderPriceExitR
 }
 
 fn trade_builder_time_exit_rules_to_json(rules: Option<&[TradeBuilderTimeExitRule]>) -> Value {
+    rules
+        .map(serde_json::to_value)
+        .transpose()
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!([]))
+}
+
+fn trade_builder_ptb_stop_loss_rules_to_json(
+    rules: Option<&[TradeBuilderPtbStopLossRule]>,
+) -> Value {
     rules
         .map(serde_json::to_value)
         .transpose()
@@ -134,6 +154,8 @@ fn map_trade_builder_order_row(row: sqlx::postgres::PgRow) -> TradeBuilderOrder 
         origin_flow_definition_id: row.get("origin_flow_definition_id"),
         origin_flow_run_id: row.get("origin_flow_run_id"),
         origin_flow_node_key: row.get("origin_flow_node_key"),
+        pair_session_id: row.get("pair_session_id"),
+        pair_leg_role: row.get("pair_leg_role"),
         tp_enabled: row.get("tp_enabled"),
         tp_price: row.get("tp_price"),
         tp_rules_json: trade_builder_parse_rules(row.get("tp_rules_json")),
@@ -153,6 +175,15 @@ fn map_trade_builder_order_row(row: sqlx::postgres::PgRow) -> TradeBuilderOrder 
         retry_on_trigger_guard_block: row.get("retry_on_trigger_guard_block"),
         retry_on_execution_floor_guard_block: row.get("retry_on_execution_floor_guard_block"),
         retry_on_max_price_block: row.get("retry_on_max_price_block"),
+        ptb_stop_loss_gap_usd: row.get("ptb_stop_loss_gap_usd"),
+        ptb_reference_price: row.get("ptb_reference_price"),
+        ptb_stop_loss_rules_json: trade_builder_parse_rules(row.get("ptb_stop_loss_rules_json")),
+        ptb_stop_loss_time_decay_mode: row.get("ptb_stop_loss_time_decay_mode"),
+        staged_sl_retry_only_dust: row.get("staged_sl_retry_only_dust"),
+        staged_sl_retry_dust_metric: row.get("staged_sl_retry_dust_metric"),
+        staged_sl_retry_dust_value: row.get("staged_sl_retry_dust_value"),
+        staged_sl_reentry_use_sold_notional: row.get("staged_sl_reentry_use_sold_notional"),
+        staged_sl_reentry_only_after_all_stages: row.get("staged_sl_reentry_only_after_all_stages"),
         sl_trigger_price_mode: row.get("sl_trigger_price_mode"),
         reenter_on_sl_hit: row.get("reenter_on_sl_hit"),
         reentry_max_attempts: row.get("reentry_max_attempts"),
@@ -209,6 +240,15 @@ impl PostgresRepository {
         origin_flow_definition_id: Option<i64>,
         origin_flow_run_id: Option<i64>,
         origin_flow_node_key: Option<&str>,
+        ptb_stop_loss_gap_usd: Option<f64>,
+        ptb_reference_price: Option<f64>,
+        ptb_stop_loss_rules_json: Option<&[TradeBuilderPtbStopLossRule]>,
+        ptb_stop_loss_time_decay_mode: Option<&str>,
+        staged_sl_retry_only_dust: bool,
+        staged_sl_retry_dust_metric: Option<&str>,
+        staged_sl_retry_dust_value: Option<f64>,
+        staged_sl_reentry_use_sold_notional: bool,
+        staged_sl_reentry_only_after_all_stages: bool,
         sl_trigger_price_mode: Option<&str>,
         reenter_on_sl_hit: bool,
         reentry_max_attempts: i32,
@@ -231,16 +271,18 @@ impl PostgresRepository {
         let tp_rules_json = trade_builder_price_exit_rules_to_json(tp_rules_json);
         let sl_rules_json = trade_builder_price_exit_rules_to_json(sl_rules_json);
         let time_exit_rules_json = trade_builder_time_exit_rules_to_json(time_exit_rules_json);
+        let ptb_stop_loss_rules_json =
+            trade_builder_ptb_stop_loss_rules_to_json(ptb_stop_loss_rules_json);
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO trade_builder_orders \
-              (trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, remaining_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, parent_order_id, tp_enabled, tp_price, tp_rules_json, sl_enabled, sl_price, sl_rules_json, time_exit_rules_json, fee_rate_bps, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_fill, notify_on_order_not_filled, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked, last_guard_notification_reason, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, exit_ladder_kind, exit_ladder_index, exit_ladder_size_pct, created_at, updated_at) \
+              (trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, remaining_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, parent_order_id, tp_enabled, tp_price, tp_rules_json, sl_enabled, sl_price, sl_rules_json, time_exit_rules_json, fee_rate_bps, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, ptb_stop_loss_gap_usd, ptb_reference_price, ptb_stop_loss_rules_json, ptb_stop_loss_time_decay_mode, staged_sl_retry_only_dust, staged_sl_retry_dust_metric, staged_sl_retry_dust_value, staged_sl_reentry_use_sold_notional, staged_sl_reentry_only_after_all_stages, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_fill, notify_on_order_not_filled, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked, last_guard_notification_reason, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, exit_ladder_kind, exit_ladder_index, exit_ladder_size_pct, created_at, updated_at) \
              VALUES \
               ($1, (SELECT user_id FROM trades WHERE id = $1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 0, $23, $24, $25, $26, $27, $28, $29, $30, \
                $31, \
                COALESCE($32, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_definition_id FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
                COALESCE($33, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_run_id FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
                COALESCE($34, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_node_key FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
-               $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, \
+               $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, \
                NOW(), NOW()) \
              RETURNING id",
         )
@@ -278,6 +320,15 @@ impl PostgresRepository {
         .bind(origin_flow_definition_id)
         .bind(origin_flow_run_id)
         .bind(origin_flow_node_key)
+        .bind(ptb_stop_loss_gap_usd)
+        .bind(ptb_reference_price)
+        .bind(ptb_stop_loss_rules_json)
+        .bind(ptb_stop_loss_time_decay_mode)
+        .bind(staged_sl_retry_only_dust)
+        .bind(staged_sl_retry_dust_metric)
+        .bind(staged_sl_retry_dust_value)
+        .bind(staged_sl_reentry_use_sold_notional)
+        .bind(staged_sl_reentry_only_after_all_stages)
         .bind(sl_trigger_price_mode)
         .bind(reenter_on_sl_hit)
         .bind(reentry_max_attempts)
@@ -339,6 +390,7 @@ impl PostgresRepository {
         reenter_on_sl_hit: bool,
         reentry_max_attempts: i32,
         reentry_trigger_node_key: Option<&str>,
+        ptb_stop_loss_time_decay_mode: Option<&str>,
         notify_on_fill: bool,
         notify_on_order_not_filled: bool,
         notify_on_trigger_guard_blocked: bool,
@@ -386,6 +438,15 @@ impl PostgresRepository {
             origin_flow_definition_id,
             origin_flow_run_id,
             origin_flow_node_key,
+            None,
+            None,
+            None,
+            ptb_stop_loss_time_decay_mode,
+            false,
+            None,
+            None,
+            false,
+            false,
             sl_trigger_price_mode,
             reenter_on_sl_hit,
             reentry_max_attempts,
@@ -477,7 +538,7 @@ impl PostgresRepository {
                AND kind = 'conditional' \
                AND status IN ('armed', 'triggered') \
                AND trigger_condition IS NOT NULL \
-               AND trigger_price IS NOT NULL \
+               AND (trigger_price IS NOT NULL OR ptb_stop_loss_gap_usd IS NOT NULL) \
              ORDER BY created_at ASC"
         ))
         .fetch_all(self.pool())
@@ -767,6 +828,74 @@ impl PostgresRepository {
         Ok(())
     }
 
+    pub async fn set_trade_builder_order_staged_sl_behavior(
+        &self,
+        builder_order_id: i64,
+        staged_sl_reentry_only_after_all_stages: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders \
+             SET staged_sl_retry_only_dust = FALSE, \
+                 staged_sl_retry_dust_metric = NULL, \
+                 staged_sl_retry_dust_value = NULL, \
+                 staged_sl_reentry_use_sold_notional = FALSE, \
+                 staged_sl_reentry_only_after_all_stages = $2, \
+                 updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(staged_sl_reentry_only_after_all_stages)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_trade_builder_order_ptb_stop_loss(
+        &self,
+        builder_order_id: i64,
+        ptb_stop_loss_gap_usd: Option<f64>,
+        ptb_reference_price: Option<f64>,
+        ptb_stop_loss_rules_json: Option<&[TradeBuilderPtbStopLossRule]>,
+        ptb_stop_loss_time_decay_mode: Option<&str>,
+    ) -> Result<()> {
+        let ptb_stop_loss_rules_json =
+            trade_builder_ptb_stop_loss_rules_to_json(ptb_stop_loss_rules_json);
+        sqlx::query(
+            "UPDATE trade_builder_orders \
+             SET ptb_stop_loss_gap_usd = $2, \
+                 ptb_reference_price = $3, \
+                 ptb_stop_loss_rules_json = $4, \
+                 ptb_stop_loss_time_decay_mode = $5, \
+                 updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(ptb_stop_loss_gap_usd)
+        .bind(ptb_reference_price)
+        .bind(ptb_stop_loss_rules_json)
+        .bind(ptb_stop_loss_time_decay_mode)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_trade_builder_order_ptb_reference_price(
+        &self,
+        builder_order_id: i64,
+        ptb_reference_price: f64,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders \
+             SET ptb_reference_price = $2, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(ptb_reference_price)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_guard_blocked_immediate_buy_builder_orders(
         &self,
     ) -> Result<Vec<TradeBuilderOrder>> {
@@ -1018,6 +1147,23 @@ impl PostgresRepository {
         Ok(rows.into_iter().map(map_trade_builder_order_row).collect())
     }
 
+    pub async fn list_trade_builder_orders_by_pair_session(
+        &self,
+        pair_session_id: i64,
+    ) -> Result<Vec<TradeBuilderOrder>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {TRADE_BUILDER_ORDER_SELECT_COLUMNS} \
+             FROM trade_builder_orders \
+             WHERE pair_session_id = $1
+             ORDER BY id ASC"
+        ))
+        .bind(pair_session_id)
+        .fetch_all(self.pool())
+        .await?;
+
+        Ok(rows.into_iter().map(map_trade_builder_order_row).collect())
+    }
+
     pub async fn cancel_child_orders_by_parent(&self, parent_id: i64) -> Result<u64> {
         let result = sqlx::query(
             "UPDATE trade_builder_orders SET status = 'canceled', updated_at = NOW() \
@@ -1045,6 +1191,25 @@ impl PostgresRepository {
         .bind(builder_order_id)
         .bind(min_price_distance_cent)
         .bind(max_triggers)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_trade_builder_order_pair_session(
+        &self,
+        builder_order_id: i64,
+        pair_session_id: Option<i64>,
+        pair_leg_role: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders \
+             SET pair_session_id = $2, pair_leg_role = $3, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(pair_session_id)
+        .bind(pair_leg_role)
         .execute(self.pool())
         .await?;
         Ok(())
@@ -1094,6 +1259,8 @@ mod tests {
             origin_flow_definition_id: None,
             origin_flow_run_id: None,
             origin_flow_node_key: None,
+            pair_session_id: None,
+            pair_leg_role: None,
             tp_enabled: false,
             tp_price: None,
             tp_rules_json: Vec::new(),
@@ -1113,6 +1280,15 @@ mod tests {
             retry_on_trigger_guard_block: false,
             retry_on_execution_floor_guard_block: false,
             retry_on_max_price_block: false,
+            ptb_stop_loss_gap_usd: None,
+            ptb_reference_price: None,
+            ptb_stop_loss_rules_json: Vec::new(),
+            ptb_stop_loss_time_decay_mode: None,
+            staged_sl_retry_only_dust: false,
+            staged_sl_retry_dust_metric: None,
+            staged_sl_retry_dust_value: None,
+            staged_sl_reentry_use_sold_notional: false,
+            staged_sl_reentry_only_after_all_stages: false,
             sl_trigger_price_mode: None,
             reenter_on_sl_hit: false,
             reentry_max_attempts: 0,

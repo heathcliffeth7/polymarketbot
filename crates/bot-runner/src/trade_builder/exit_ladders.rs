@@ -2,6 +2,7 @@ use serde::Deserialize;
 
 const TRADE_BUILDER_EXIT_LADDER_KIND_TP: &str = "tp";
 const TRADE_BUILDER_EXIT_LADDER_KIND_SL: &str = "sl";
+const TRADE_BUILDER_EXIT_LADDER_KIND_PTB_SL: &str = "ptb_sl";
 const TRADE_BUILDER_EXIT_LADDER_MAX_RULES: usize = 5;
 const TRADE_BUILDER_EXIT_MODE_HARD: &str = "hard";
 const TRADE_BUILDER_EXIT_MODE_STAGED: &str = "staged";
@@ -31,8 +32,14 @@ fn trade_builder_exit_ladder_kind(order: &TradeBuilderOrder) -> Option<&str> {
 }
 
 fn trade_builder_is_price_exit_ladder_child(order: &TradeBuilderOrder) -> bool {
-    trade_builder_exit_ladder_kind(order)
-        .is_some_and(|value| matches!(value, TRADE_BUILDER_EXIT_LADDER_KIND_TP | TRADE_BUILDER_EXIT_LADDER_KIND_SL))
+    trade_builder_exit_ladder_kind(order).is_some_and(|value| {
+        matches!(
+            value,
+            TRADE_BUILDER_EXIT_LADDER_KIND_TP
+                | TRADE_BUILDER_EXIT_LADDER_KIND_SL
+                | TRADE_BUILDER_EXIT_LADDER_KIND_PTB_SL
+        )
+    })
 }
 
 fn trade_builder_price_exit_rule_from_legacy(
@@ -204,6 +211,9 @@ fn trade_builder_exit_mode(order: &TradeBuilderOrder) -> &'static str {
 }
 
 fn trade_builder_exit_family(order: &TradeBuilderOrder) -> Option<&str> {
+    if trade_builder_exit_ladder_kind(order) == Some(TRADE_BUILDER_EXIT_LADDER_KIND_PTB_SL) {
+        return Some(TRADE_BUILDER_EXIT_LADDER_KIND_PTB_SL);
+    }
     if trade_builder_is_take_profit_child(order) {
         return Some(TRADE_BUILDER_EXIT_LADDER_KIND_TP);
     }
@@ -232,6 +242,7 @@ fn trade_builder_order_has_exit_ladders(order: &TradeBuilderOrder) -> bool {
         || trade_builder_hard_sl_rule(order).is_some()
         || !trade_builder_normalized_tp_rules(order).is_empty()
         || !trade_builder_normalized_sl_rules(order).is_empty()
+        || !order.ptb_stop_loss_rules_json.is_empty()
         || !trade_builder_normalized_time_exit_rules(order).is_empty()
 }
 
@@ -251,38 +262,43 @@ fn trade_builder_ladder_child_qty(
     })
 }
 
-fn trade_builder_ladder_rule_weight(order: &TradeBuilderOrder) -> Option<f64> {
-    order
-        .exit_ladder_size_pct
-        .filter(|value| value.is_finite() && *value > 0.0)
+#[derive(Debug, Clone, PartialEq)]
+struct TradeBuilderLadderTargetPlan<K: Copy + PartialEq> {
+    requested_targets: Vec<(K, f64)>,
+    targets: Vec<(K, f64)>,
+    skipped_keys: Vec<K>,
+    consolidation_target: Option<K>,
 }
 
-fn trade_builder_ladder_family_target_qtys(
-    family_children: &[&TradeBuilderOrder],
+fn trade_builder_plan_weighted_ladder_targets<K: Copy + PartialEq>(
+    weighted_keys: &[(K, f64)],
     current_parent_qty: f64,
-) -> Vec<(i64, f64)> {
+    order_min_size: Option<f64>,
+) -> TradeBuilderLadderTargetPlan<K> {
     let current_parent_qty = round_trade_builder_share_qty(current_parent_qty.max(0.0));
-    if current_parent_qty <= TRADE_BUILDER_EXIT_QTY_TOLERANCE {
-        return Vec::new();
+    if current_parent_qty <= TRADE_BUILDER_EXIT_QTY_TOLERANCE || weighted_keys.is_empty() {
+        return TradeBuilderLadderTargetPlan {
+            requested_targets: Vec::new(),
+            targets: Vec::new(),
+            skipped_keys: Vec::new(),
+            consolidation_target: None,
+        };
     }
 
-    let mut weighted_children = family_children
-        .iter()
-        .filter_map(|child| {
-            trade_builder_ladder_rule_weight(child).map(|weight_pct| (*child, weight_pct))
-        })
-        .collect::<Vec<_>>();
-    weighted_children.sort_by_key(|(child, _)| (child.exit_ladder_index.unwrap_or(i32::MAX), child.id));
-
-    let family_weight_sum: f64 = weighted_children.iter().map(|(_, weight_pct)| *weight_pct).sum();
+    let family_weight_sum: f64 = weighted_keys.iter().map(|(_, weight_pct)| *weight_pct).sum();
     if family_weight_sum <= 0.0 {
-        return Vec::new();
+        return TradeBuilderLadderTargetPlan {
+            requested_targets: Vec::new(),
+            targets: Vec::new(),
+            skipped_keys: Vec::new(),
+            consolidation_target: None,
+        };
     }
 
-    let mut targets = Vec::new();
+    let mut requested_targets = Vec::new();
     let mut assigned_qty = 0.0;
-    for (index, (child, weight_pct)) in weighted_children.iter().enumerate() {
-        let is_last = index + 1 == weighted_children.len();
+    for (index, (key, weight_pct)) in weighted_keys.iter().enumerate() {
+        let is_last = index + 1 == weighted_keys.len();
         let desired_qty = if is_last {
             round_trade_builder_share_qty((current_parent_qty - assigned_qty).max(0.0))
         } else {
@@ -292,10 +308,141 @@ fn trade_builder_ladder_family_target_qtys(
             continue;
         }
         assigned_qty = round_trade_builder_share_qty((assigned_qty + desired_qty).max(0.0));
-        targets.push((child.id, desired_qty));
+        requested_targets.push((*key, desired_qty));
     }
 
-    targets
+    let Some(order_min_size) = normalize_trade_builder_market_spec_number(order_min_size) else {
+        return TradeBuilderLadderTargetPlan {
+            requested_targets: requested_targets.clone(),
+            targets: requested_targets,
+            skipped_keys: Vec::new(),
+            consolidation_target: None,
+        };
+    };
+
+    let kept_targets = requested_targets
+        .iter()
+        .copied()
+        .filter(|(_, qty)| *qty >= order_min_size)
+        .collect::<Vec<_>>();
+    if kept_targets.is_empty() {
+        if current_parent_qty < order_min_size {
+            return TradeBuilderLadderTargetPlan {
+                skipped_keys: requested_targets.iter().map(|(key, _)| *key).collect(),
+                requested_targets,
+                targets: Vec::new(),
+                consolidation_target: None,
+            };
+        }
+
+        let Some((target_key, _)) = requested_targets.last().copied() else {
+            return TradeBuilderLadderTargetPlan {
+                requested_targets,
+                targets: Vec::new(),
+                skipped_keys: Vec::new(),
+                consolidation_target: None,
+            };
+        };
+        return TradeBuilderLadderTargetPlan {
+            skipped_keys: requested_targets
+                .iter()
+                .map(|(key, _)| *key)
+                .filter(|key| *key != target_key)
+                .collect(),
+            requested_targets,
+            targets: vec![(target_key, current_parent_qty)],
+            consolidation_target: Some(target_key),
+        };
+    }
+
+    let deepest_kept_key = kept_targets.last().map(|(key, _)| *key);
+    let mut targets = Vec::new();
+    let mut assigned_kept_qty = 0.0;
+    for (key, qty) in kept_targets {
+        let desired_qty = if Some(key) == deepest_kept_key {
+            round_trade_builder_share_qty((current_parent_qty - assigned_kept_qty).max(0.0))
+        } else {
+            qty
+        };
+        if desired_qty <= 0.0 {
+            continue;
+        }
+        assigned_kept_qty = round_trade_builder_share_qty((assigned_kept_qty + desired_qty).max(0.0));
+        targets.push((key, desired_qty));
+    }
+
+    let skipped_keys = requested_targets
+        .iter()
+        .map(|(key, _)| *key)
+        .filter(|key| !targets.iter().any(|(target_key, _)| target_key == key))
+        .collect::<Vec<_>>();
+    let consolidation_target = (!skipped_keys.is_empty())
+        .then_some(deepest_kept_key)
+        .flatten();
+
+    TradeBuilderLadderTargetPlan {
+        requested_targets,
+        targets,
+        skipped_keys,
+        consolidation_target,
+    }
+}
+
+fn trade_builder_ladder_rule_weight(order: &TradeBuilderOrder) -> Option<f64> {
+    order
+        .exit_ladder_size_pct
+        .filter(|value| value.is_finite() && *value > 0.0)
+}
+
+fn trade_builder_ladder_rule_target_plan(
+    rules: &[TradeBuilderPriceExitRule],
+    canonical_entry_qty: f64,
+    order_min_size: Option<f64>,
+) -> TradeBuilderLadderTargetPlan<usize> {
+    let weighted_rules = rules
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| (index, rule.size_pct))
+        .collect::<Vec<_>>();
+    trade_builder_plan_weighted_ladder_targets(
+        &weighted_rules,
+        canonical_entry_qty,
+        order_min_size,
+    )
+}
+
+fn trade_builder_ladder_family_target_plan(
+    family_children: &[&TradeBuilderOrder],
+    current_parent_qty: f64,
+    order_min_size: Option<f64>,
+) -> TradeBuilderLadderTargetPlan<i64> {
+    let mut weighted_children = family_children
+        .iter()
+        .filter_map(|child| {
+            trade_builder_ladder_rule_weight(child).map(|weight_pct| (child.id, weight_pct))
+        })
+        .collect::<Vec<_>>();
+    weighted_children.sort_by_key(|(order_id, _)| {
+        family_children
+            .iter()
+            .find(|child| child.id == *order_id)
+            .map(|child| (child.exit_ladder_index.unwrap_or(i32::MAX), child.id))
+            .unwrap_or((i32::MAX, *order_id))
+    });
+
+    trade_builder_plan_weighted_ladder_targets(
+        &weighted_children,
+        current_parent_qty,
+        order_min_size,
+    )
+}
+
+fn trade_builder_ladder_family_target_qtys(
+    family_children: &[&TradeBuilderOrder],
+    current_parent_qty: f64,
+    order_min_size: Option<f64>,
+) -> Vec<(i64, f64)> {
+    trade_builder_ladder_family_target_plan(family_children, current_parent_qty, order_min_size).targets
 }
 
 fn trade_builder_live_ladder_children<'a>(
@@ -322,22 +469,59 @@ async fn trade_builder_sync_ladder_family_remaining_qty(
     repo: &PostgresRepository,
     family_children: &[TradeBuilderOrder],
     current_parent_qty: f64,
+    order_min_size: Option<f64>,
     event_reason: &str,
 ) -> Result<Vec<i64>> {
     let family_child_refs = family_children.iter().collect::<Vec<_>>();
-    let target_qtys = trade_builder_ladder_family_target_qtys(&family_child_refs, current_parent_qty);
+    let target_plan =
+        trade_builder_ladder_family_target_plan(&family_child_refs, current_parent_qty, order_min_size);
+    let target_qtys = target_plan.targets.clone();
     let family_weight_sum: f64 = family_children
         .iter()
         .filter_map(|order| trade_builder_ladder_rule_weight(order))
         .sum();
-    if family_weight_sum <= 0.0 || target_qtys.is_empty() {
+    if family_weight_sum <= 0.0 || (target_qtys.is_empty() && target_plan.skipped_keys.is_empty()) {
         return Ok(Vec::new());
     }
     let remainder_close_order_id = target_qtys.last().map(|(order_id, _)| *order_id);
+    let consolidation_target = target_plan.consolidation_target;
 
     let mut updated_order_ids = Vec::new();
     for child in family_children {
-        if child.active_exchange_order_id.is_some() {
+        if target_plan.skipped_keys.contains(&child.id) {
+            let status_after = if child.active_exchange_order_id.is_some() {
+                "canceled_requested"
+            } else {
+                "canceled"
+            };
+            repo.set_trade_builder_order_status(
+                child.id,
+                status_after,
+                Some("staged_child_skipped_due_to_min_size"),
+            )
+            .await?;
+            let requested_target_qty = target_plan
+                .requested_targets
+                .iter()
+                .find_map(|(order_id, qty)| (*order_id == child.id).then_some(*qty));
+            repo.append_trade_builder_order_event(
+                child.id,
+                "staged_child_skipped_due_to_min_size",
+                &json!({
+                    "reason": event_reason,
+                    "current_parent_qty": current_parent_qty,
+                    "order_min_size": order_min_size,
+                    "requested_target_qty": requested_target_qty,
+                    "status_before": &child.status,
+                    "status_after": status_after,
+                    "family": trade_builder_exit_family(child),
+                    "exit_mode": trade_builder_exit_mode(child),
+                    "sibling_policy": trade_builder_exit_sibling_policy(child),
+                    "active_exchange_order_id": child.active_exchange_order_id,
+                }),
+            )
+            .await?;
+            updated_order_ids.push(child.id);
             continue;
         }
         let Some(weight_pct) = trade_builder_ladder_rule_weight(child) else {
@@ -351,22 +535,34 @@ async fn trade_builder_sync_ladder_family_remaining_qty(
         };
         let desired_qty = *desired_qty;
         let desired_size_usdc = trade_builder_scaled_size_usdc(child, desired_qty);
-        repo.update_trade_builder_order_sizing_and_state(
-            child.id,
-            &child.size_basis,
-            desired_size_usdc,
-            Some(desired_qty),
-            Some(desired_size_usdc),
-            Some(desired_qty),
-            &child.status,
-            child.last_error.as_deref(),
-            child.eligible_after_at,
-            child.eligible_before_at,
-            None,
-            None,
-            None,
-        )
-        .await?;
+        if child.active_exchange_order_id.is_some() {
+            repo.set_trade_builder_order_working_state(
+                child.id,
+                child.active_exchange_order_id.as_deref(),
+                child.working_price,
+                Some(desired_size_usdc),
+                Some(desired_qty),
+                &child.status,
+            )
+            .await?;
+        } else {
+            repo.update_trade_builder_order_sizing_and_state(
+                child.id,
+                &child.size_basis,
+                desired_size_usdc,
+                Some(desired_qty),
+                Some(desired_size_usdc),
+                Some(desired_qty),
+                &child.status,
+                child.last_error.as_deref(),
+                child.eligible_after_at,
+                child.eligible_before_at,
+                None,
+                None,
+                None,
+            )
+            .await?;
+        }
         repo.append_trade_builder_order_event(
             child.id,
             "ladder_sibling_resized",
@@ -385,6 +581,29 @@ async fn trade_builder_sync_ladder_family_remaining_qty(
             }),
         )
         .await?;
+        if Some(child.id) == consolidation_target {
+            let skipped_order_ids = target_plan
+                .skipped_keys
+                .iter()
+                .copied()
+                .filter(|order_id| *order_id != child.id)
+                .collect::<Vec<_>>();
+            repo.append_trade_builder_order_event(
+                child.id,
+                "staged_family_consolidated_due_to_min_size",
+                &json!({
+                    "reason": event_reason,
+                    "current_parent_qty": current_parent_qty,
+                    "order_min_size": order_min_size,
+                    "next_target_qty": desired_qty,
+                    "skipped_order_ids": skipped_order_ids,
+                    "family": trade_builder_exit_family(child),
+                    "exit_mode": trade_builder_exit_mode(child),
+                    "sibling_policy": trade_builder_exit_sibling_policy(child),
+                }),
+            )
+            .await?;
+        }
         updated_order_ids.push(child.id);
     }
 
@@ -494,6 +713,7 @@ async fn trade_builder_cancel_exit_children_without_inventory(
 
 async fn trade_builder_sync_parent_exit_children(
     repo: &PostgresRepository,
+    cfg: &AppConfig,
     parent_order: &TradeBuilderOrder,
     reason: &str,
 ) -> Result<Vec<i64>> {
@@ -504,6 +724,7 @@ async fn trade_builder_sync_parent_exit_children(
         .await?
         .map(|(qty, _)| qty)
         .unwrap_or_default();
+    let order_min_size = resolve_trade_builder_order_min_size(cfg, parent_order).await;
     if current_parent_qty <= TRADE_BUILDER_EXIT_QTY_TOLERANCE {
         return trade_builder_cancel_exit_children_without_inventory(
             repo,
@@ -524,6 +745,10 @@ async fn trade_builder_sync_parent_exit_children(
         &children,
         TRADE_BUILDER_EXIT_LADDER_KIND_SL,
     );
+    let live_ptb_sl_children = trade_builder_live_ladder_children(
+        &children,
+        TRADE_BUILDER_EXIT_LADDER_KIND_PTB_SL,
+    );
     updated_order_ids.extend(
         trade_builder_sync_hard_exit_remaining_qty(
             repo,
@@ -538,6 +763,7 @@ async fn trade_builder_sync_parent_exit_children(
             repo,
             &live_tp_children.into_iter().cloned().collect::<Vec<_>>(),
             current_parent_qty,
+            order_min_size,
             reason,
         )
         .await?,
@@ -547,6 +773,17 @@ async fn trade_builder_sync_parent_exit_children(
             repo,
             &live_sl_children.into_iter().cloned().collect::<Vec<_>>(),
             current_parent_qty,
+            order_min_size,
+            reason,
+        )
+        .await?,
+    );
+    updated_order_ids.extend(
+        trade_builder_sync_ladder_family_remaining_qty(
+            repo,
+            &live_ptb_sl_children.into_iter().cloned().collect::<Vec<_>>(),
+            current_parent_qty,
+            order_min_size,
             reason,
         )
         .await?,
@@ -596,6 +833,8 @@ mod exit_ladder_tests {
             origin_flow_definition_id: None,
             origin_flow_run_id: None,
             origin_flow_node_key: None,
+            pair_session_id: None,
+            pair_leg_role: None,
             tp_enabled: false,
             tp_price: None,
             tp_rules_json: Vec::new(),
@@ -617,6 +856,15 @@ mod exit_ladder_tests {
             retry_on_trigger_guard_block: false,
             retry_on_execution_floor_guard_block: false,
             retry_on_max_price_block: false,
+            ptb_stop_loss_gap_usd: None,
+            ptb_reference_price: None,
+            ptb_stop_loss_rules_json: Vec::new(),
+            ptb_stop_loss_time_decay_mode: None,
+            staged_sl_retry_only_dust: false,
+            staged_sl_retry_dust_metric: None,
+            staged_sl_retry_dust_value: None,
+            staged_sl_reentry_use_sold_notional: false,
+            staged_sl_reentry_only_after_all_stages: false,
             sl_trigger_price_mode: None,
             reenter_on_sl_hit: false,
             reentry_max_attempts: 0,
@@ -697,6 +945,9 @@ mod exit_ladder_tests {
         let mut staged = test_builder_order("sell", Some(9));
         staged.exit_ladder_kind = Some("sl".to_string());
 
+        let mut staged_ptb = test_builder_order("sell", Some(9));
+        staged_ptb.exit_ladder_kind = Some("ptb_sl".to_string());
+
         let hard = test_builder_order("sell", Some(9));
 
         assert_eq!(
@@ -704,8 +955,39 @@ mod exit_ladder_tests {
             TRADE_BUILDER_EXIT_SIBLING_POLICY_RESIZE_REMAINING
         );
         assert_eq!(
+            trade_builder_exit_sibling_policy(&staged_ptb),
+            TRADE_BUILDER_EXIT_SIBLING_POLICY_RESIZE_REMAINING
+        );
+        assert_eq!(
             trade_builder_exit_sibling_policy(&hard),
             TRADE_BUILDER_EXIT_SIBLING_POLICY_CANCEL_ALL
+        );
+    }
+
+    #[test]
+    fn ptb_stop_loss_family_isolated_from_classic_sl_family() {
+        let mut classic_sl = test_builder_order("sell", Some(9));
+        classic_sl.id = 71;
+        classic_sl.exit_ladder_kind = Some("sl".to_string());
+        classic_sl.exit_ladder_index = Some(0);
+        classic_sl.exit_ladder_size_pct = Some(50.0);
+
+        let mut staged_ptb = test_builder_order("sell", Some(9));
+        staged_ptb.id = 72;
+        staged_ptb.exit_ladder_kind = Some("ptb_sl".to_string());
+        staged_ptb.exit_ladder_index = Some(0);
+        staged_ptb.exit_ladder_size_pct = Some(25.0);
+
+        let classic_targets =
+            trade_builder_ladder_family_target_qtys(&[&classic_sl], 3.2, None);
+        let ptb_targets =
+            trade_builder_ladder_family_target_qtys(&[&staged_ptb], 3.2, None);
+
+        assert_eq!(classic_targets, vec![(71, 3.2)]);
+        assert_eq!(ptb_targets, vec![(72, 3.2)]);
+        assert_eq!(
+            trade_builder_exit_family(&staged_ptb),
+            Some(TRADE_BUILDER_EXIT_LADDER_KIND_PTB_SL)
         );
     }
 
@@ -726,8 +1008,11 @@ mod exit_ladder_tests {
         third_tp.exit_ladder_index = Some(2);
         third_tp.exit_ladder_size_pct = Some(33.34);
 
-        let targets =
-            trade_builder_ladder_family_target_qtys(&[&first_tp, &second_tp, &third_tp], 1.0);
+        let targets = trade_builder_ladder_family_target_qtys(
+            &[&first_tp, &second_tp, &third_tp],
+            1.0,
+            None,
+        );
 
         assert_eq!(targets, vec![(11, 0.33), (12, 0.33), (13, 0.34)]);
     }
@@ -740,8 +1025,63 @@ mod exit_ladder_tests {
         last_tp.exit_ladder_index = Some(1);
         last_tp.exit_ladder_size_pct = Some(50.0);
 
-        let targets = trade_builder_ladder_family_target_qtys(&[&last_tp], 1.41);
+        let targets = trade_builder_ladder_family_target_qtys(&[&last_tp], 1.41, None);
 
         assert_eq!(targets, vec![(22, 1.41)]);
+    }
+
+    #[test]
+    fn ladder_family_target_qtys_consolidate_all_sub_min_stages_into_last_stage() {
+        let mut first_sl = test_builder_order("sell", Some(9));
+        first_sl.id = 31;
+        first_sl.exit_ladder_kind = Some("sl".to_string());
+        first_sl.exit_ladder_index = Some(0);
+        first_sl.exit_ladder_size_pct = Some(50.0);
+
+        let mut second_sl = first_sl.clone();
+        second_sl.id = 32;
+        second_sl.exit_ladder_index = Some(1);
+
+        let targets =
+            trade_builder_ladder_family_target_qtys(&[&first_sl, &second_sl], 7.57, Some(5.0));
+
+        assert_eq!(targets, vec![(32, 7.57)]);
+    }
+
+    #[test]
+    fn ladder_family_target_qtys_pushes_sub_min_qty_into_deepest_surviving_stage() {
+        let mut first_sl = test_builder_order("sell", Some(9));
+        first_sl.id = 41;
+        first_sl.exit_ladder_kind = Some("sl".to_string());
+        first_sl.exit_ladder_index = Some(0);
+        first_sl.exit_ladder_size_pct = Some(30.0);
+
+        let mut second_sl = first_sl.clone();
+        second_sl.id = 42;
+        second_sl.exit_ladder_index = Some(1);
+        second_sl.exit_ladder_size_pct = Some(70.0);
+
+        let targets =
+            trade_builder_ladder_family_target_qtys(&[&first_sl, &second_sl], 8.0, Some(5.0));
+
+        assert_eq!(targets, vec![(42, 8.0)]);
+    }
+
+    #[test]
+    fn ladder_family_target_qtys_return_empty_when_total_qty_is_below_minimum() {
+        let mut first_sl = test_builder_order("sell", Some(9));
+        first_sl.id = 51;
+        first_sl.exit_ladder_kind = Some("sl".to_string());
+        first_sl.exit_ladder_index = Some(0);
+        first_sl.exit_ladder_size_pct = Some(50.0);
+
+        let mut second_sl = first_sl.clone();
+        second_sl.id = 52;
+        second_sl.exit_ladder_index = Some(1);
+
+        let targets =
+            trade_builder_ladder_family_target_qtys(&[&first_sl, &second_sl], 4.2, Some(5.0));
+
+        assert!(targets.is_empty());
     }
 }

@@ -10,6 +10,7 @@ fn test_node_spec(
         node_type: "trigger.market_price".to_string(),
         once_mode: true,
         once_scope_market: false,
+        pair_lock_only_monitor: false,
         auto_scope: true,
         price_mode: WsPriceMode::Midpoint,
         market_slug: Some("btc-updown-5m-test".to_string()),

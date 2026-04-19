@@ -70,11 +70,8 @@ fn trigger_guard_waiting_notification_mentions_recovery_retry() {
     let mut order = test_builder_order("buy", None);
     order.guard_trigger_price = Some(0.77);
 
-    let message = build_trigger_guard_waiting_notification_message(
-        &order,
-        0.76,
-        "current_price_fallback",
-    );
+    let message =
+        build_trigger_guard_waiting_notification_message(&order, 0.76, "current_price_fallback");
 
     assert!(message.contains("Bekleme"));
     assert!(message.contains("yeniden denenecek"));
@@ -153,13 +150,104 @@ fn max_price_waiting_notification_mentions_recovery_retry() {
     order.max_price = Some(0.9);
 
     let message =
-        build_max_price_waiting_notification_message(&order, 0.95, 0.96, "desired_price_fallback");
+        build_max_price_waiting_notification_message(
+            &order,
+            0.95,
+            0.96,
+            "desired_price_fallback",
+            Some("above_max_price"),
+        );
 
     assert!(message.contains("Bekleme"));
     assert!(message.contains("yeniden denenecek"));
     assert!(message.contains("Guncel: 0.9500"));
     assert!(message.contains("Referans (desired_price_fallback): 0.9600"));
     assert!(message.contains("Max: 0.9000"));
+}
+
+#[test]
+fn max_price_waiting_notification_describes_missing_best_ask() {
+    let mut order = test_builder_order("buy", None);
+    order.max_price = Some(0.9);
+
+    let message = build_max_price_waiting_notification_message(
+        &order,
+        0.67,
+        0.67,
+        "best_ask_unavailable",
+        Some("pair_primary_best_ask_unavailable"),
+    );
+
+    assert!(message.contains("Best ask verisi bekleniyor"));
+    assert!(message.contains("Referans (best_ask_unavailable): 0.6700"));
+    assert!(message.contains("Max: 0.9000"));
+    assert!(!message.contains("max fiyat limitini asiyor"));
+}
+
+#[test]
+fn pair_lock_primary_execution_floor_waiting_notification_mentions_secondary_reason() {
+    let message = build_pair_lock_primary_execution_floor_notification_message(
+        "btc-updown-5m-1",
+        &json!({
+            "outcome_label": "Up",
+            "best_ask": 0.18,
+            "reason_code": "below_best_ask_floor"
+        }),
+        Some(0.20),
+        true,
+        Some(&json!({
+            "outcome_label": "Down",
+            "reason_code": "above_max_price"
+        })),
+    );
+
+    assert!(message.contains("Execution Floor Bekleme Modu"));
+    assert!(message.contains("Outcome: Up"));
+    assert!(message.contains("Best Ask: 0.1800"));
+    assert!(message.contains("Floor: 0.2000"));
+    assert!(message.contains("Diger Aday: Down -> above_max_price"));
+}
+
+#[test]
+fn pair_lock_primary_price_to_beat_waiting_notification_mentions_gap_and_secondary_reason() {
+    let message = build_pair_lock_primary_price_to_beat_notification_message(
+        "btc-updown-5m-1",
+        &json!({
+            "outcome_label": "Down",
+            "price_to_beat_guard": {
+                "reason_detail": "directional gap -9.52065550 (direction=down) is below threshold 20.00000000 usd (~20.00000000 usd)",
+                "price_to_beat": 76130.01578425177,
+                "current_price": 76139.53643974895,
+                "directional_gap": -9.520655497180996,
+                "threshold_usd": 20.0,
+                "current_price_source": "chainlink_live_data_ws"
+            }
+        }),
+        true,
+        Some(&json!({
+            "outcome_label": "Up",
+            "reason_code": "below_best_ask_floor"
+        })),
+    );
+
+    assert!(message.contains("Price to Beat Korumasi Bekleme Modu"));
+    assert!(message.contains("Outcome: Down"));
+    assert!(message.contains("76130.01578425"));
+    assert!(message.contains("chainlink_live_data_ws"));
+    assert!(message.contains("Diger Aday: Up -> below_best_ask_floor"));
+}
+
+#[test]
+fn pair_lock_primary_guard_recovered_notification_mentions_previous_reason() {
+    let message = build_pair_lock_primary_guard_recovered_notification_message(
+        "btc-updown-5m-1",
+        "execution_floor",
+        "below_best_ask_floor",
+    );
+
+    assert!(message.contains("Execution Floor Korumasi Gecti"));
+    assert!(message.contains("Market: btc-updown-5m-1"));
+    assert!(message.contains("Onceki Sebep: below_best_ask_floor"));
 }
 
 #[test]

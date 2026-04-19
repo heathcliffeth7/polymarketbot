@@ -4,6 +4,7 @@ import type {
   ExitLadderRuleRow,
   KeyValueDraft,
   OutcomeConditionRow,
+  PtbStopLossRuleRow,
   TimeExitRuleRow,
 } from './types';
 import { createId } from './utils';
@@ -44,6 +45,10 @@ export function createEmptyDrawdownRuleRow(): DrawdownRuleRow {
 
 export function createEmptyExitLadderRuleRow(): ExitLadderRuleRow {
   return { id: createId('er'), priceCent: '', sizePct: '' };
+}
+
+export function createEmptyPtbStopLossRuleRow(): PtbStopLossRuleRow {
+  return { id: createId('pr'), gapUsd: '', sizePct: '' };
 }
 
 export function createEmptyTimeExitRuleRow(): TimeExitRuleRow {

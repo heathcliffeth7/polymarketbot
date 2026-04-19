@@ -1,10 +1,15 @@
 #[derive(Debug, Clone, Default)]
 struct ArmedBuilderOrderCache {
-    by_token: HashMap<String, Vec<TradeBuilderOrder>>,
+    price_by_token: HashMap<String, Vec<TradeBuilderOrder>>,
+    ptb_by_asset: HashMap<String, Vec<TradeBuilderOrder>>,
+    ptb_by_market_slug: HashMap<String, Vec<TradeBuilderOrder>>,
 }
 
 static ARMED_BUILDER_ORDER_CACHE: LazyLock<RwLock<ArmedBuilderOrderCache>> =
     LazyLock::new(|| RwLock::new(ArmedBuilderOrderCache::default()));
+#[cfg(test)]
+static ARMED_BUILDER_ORDER_CACHE_TEST_MUTEX: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 static LAST_ARMED_BUILDER_WS_PASSIVE_LOG_AT_MS: LazyLock<std::sync::atomic::AtomicI64> =
     LazyLock::new(|| std::sync::atomic::AtomicI64::new(0));
 
@@ -46,11 +51,82 @@ fn mark_armed_builder_ws_eval_logged_at(now_ms: i64) {
     LAST_ARMED_BUILDER_WS_PASSIVE_LOG_AT_MS.store(now_ms, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn trade_builder_is_ws_fast_path_tp_sl_child(order: &TradeBuilderOrder) -> bool {
+fn trade_builder_is_ws_fast_path_price_child(order: &TradeBuilderOrder) -> bool {
     trade_builder_is_child_exit_sell(order)
         && matches!(order.status.as_str(), "armed" | "triggered")
         && order.trigger_condition.is_some()
         && order.trigger_price.is_some()
+}
+
+#[cfg(test)]
+fn trade_builder_is_ws_fast_path_tp_sl_child(order: &TradeBuilderOrder) -> bool {
+    trade_builder_is_ws_fast_path_price_child(order)
+}
+
+fn trade_builder_is_ws_fast_path_ptb_child(order: &TradeBuilderOrder) -> bool {
+    trade_builder_is_child_exit_sell(order)
+        && matches!(order.status.as_str(), "armed" | "triggered")
+        && order.ptb_stop_loss_gap_usd.is_some()
+}
+
+fn trade_builder_ptb_asset_cache_key(order: &TradeBuilderOrder) -> Option<String> {
+    find_updown_scope_by_slug(&order.market_slug).map(|scope| scope.asset.to_string())
+}
+
+fn trade_builder_ptb_market_slug_cache_key(order: &TradeBuilderOrder) -> String {
+    order.market_slug.trim().to_ascii_lowercase()
+}
+
+fn remove_order_from_armed_builder_bucket(
+    buckets: &mut HashMap<String, Vec<TradeBuilderOrder>>,
+    order_id: i64,
+) {
+    buckets.retain(|_, bucket| {
+        bucket.retain(|existing| existing.id != order_id);
+        !bucket.is_empty()
+    });
+}
+
+fn push_order_into_armed_builder_bucket(
+    buckets: &mut HashMap<String, Vec<TradeBuilderOrder>>,
+    key: String,
+    order: &TradeBuilderOrder,
+) {
+    let bucket = buckets.entry(key).or_default();
+    bucket.push(order.clone());
+    bucket.sort_by_key(|existing| existing.created_at);
+}
+
+fn remove_order_from_armed_builder_cache(cache: &mut ArmedBuilderOrderCache, order_id: i64) {
+    remove_order_from_armed_builder_bucket(&mut cache.price_by_token, order_id);
+    remove_order_from_armed_builder_bucket(&mut cache.ptb_by_asset, order_id);
+    remove_order_from_armed_builder_bucket(&mut cache.ptb_by_market_slug, order_id);
+}
+
+fn sync_armed_builder_order_cache_entry(
+    cache: &mut ArmedBuilderOrderCache,
+    order: TradeBuilderOrder,
+) {
+    remove_order_from_armed_builder_cache(cache, order.id);
+
+    if trade_builder_is_ws_fast_path_price_child(&order) {
+        push_order_into_armed_builder_bucket(
+            &mut cache.price_by_token,
+            order.token_id.clone(),
+            &order,
+        );
+    }
+
+    if trade_builder_is_ws_fast_path_ptb_child(&order) {
+        if let Some(asset) = trade_builder_ptb_asset_cache_key(&order) {
+            push_order_into_armed_builder_bucket(&mut cache.ptb_by_asset, asset, &order);
+        }
+        push_order_into_armed_builder_bucket(
+            &mut cache.ptb_by_market_slug,
+            trade_builder_ptb_market_slug_cache_key(&order),
+            &order,
+        );
+    }
 }
 
 fn build_trade_builder_runtime_price_from_market_snapshot(
@@ -86,51 +162,39 @@ fn trade_builder_last_seen_price_from_market_snapshot(
 }
 
 async fn refresh_armed_builder_order_cache(orders: Vec<TradeBuilderOrder>) {
-    let mut by_token: HashMap<String, Vec<TradeBuilderOrder>> = HashMap::new();
+    let mut cache = ArmedBuilderOrderCache::default();
     for order in orders {
-        if !trade_builder_is_ws_fast_path_tp_sl_child(&order) {
-            continue;
-        }
-        by_token
-            .entry(order.token_id.clone())
-            .or_default()
-            .push(order);
+        sync_armed_builder_order_cache_entry(&mut cache, order);
     }
 
-    let mut cache = ARMED_BUILDER_ORDER_CACHE.write().await;
-    cache.by_token = by_token;
+    let mut shared_cache = ARMED_BUILDER_ORDER_CACHE.write().await;
+    *shared_cache = cache;
 }
 
-async fn insert_into_armed_builder_order_cache(order: TradeBuilderOrder) {
-    if !trade_builder_is_ws_fast_path_tp_sl_child(&order) {
-        return;
-    }
-
+async fn sync_armed_builder_order_to_cache(order: TradeBuilderOrder) {
     let mut cache = ARMED_BUILDER_ORDER_CACHE.write().await;
-    let bucket = cache.by_token.entry(order.token_id.clone()).or_default();
-    if let Some(existing) = bucket.iter_mut().find(|existing| existing.id == order.id) {
-        *existing = order;
-    } else {
-        bucket.push(order);
-        bucket.sort_by_key(|existing| existing.created_at);
-    }
+    sync_armed_builder_order_cache_entry(&mut cache, order);
 }
 
+#[cfg(test)]
 async fn rearm_builder_order_to_cache(order: TradeBuilderOrder) {
     if order.status == "armed" {
-        insert_into_armed_builder_order_cache(order).await;
+        sync_armed_builder_order_to_cache(order).await;
     }
 }
 
-async fn rearm_builder_order_to_cache_if_armed(repo: &PostgresRepository, order_id: i64) {
-    if let Ok(Some(order)) = repo.get_trade_builder_order(order_id).await {
-        rearm_builder_order_to_cache(order).await;
+async fn sync_armed_builder_order_cache_for_order(repo: &PostgresRepository, order_id: i64) {
+    let order = repo.get_trade_builder_order(order_id).await.ok().flatten();
+    let mut cache = ARMED_BUILDER_ORDER_CACHE.write().await;
+    remove_order_from_armed_builder_cache(&mut cache, order_id);
+    if let Some(order) = order {
+        sync_armed_builder_order_cache_entry(&mut cache, order);
     }
 }
 
 async fn armed_builder_order_cache_token_ids() -> Vec<String> {
     let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
-    cache.by_token.keys().cloned().collect()
+    cache.price_by_token.keys().cloned().collect()
 }
 
 async fn ensure_fast_path_market_stream_union(ws: &ClobWsClient) -> Result<()> {
@@ -166,7 +230,7 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
             .iter()
             .filter_map(|token_id| {
                 cache
-                    .by_token
+                    .price_by_token
                     .get(token_id)
                     .cloned()
                     .map(|orders| (token_id.clone(), orders))
@@ -294,7 +358,7 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
         let mut empty_tokens = Vec::new();
 
         for token_id in selected_token_ids {
-            let Some(bucket) = cache.by_token.get_mut(&token_id) else {
+            let Some(bucket) = cache.price_by_token.get_mut(&token_id) else {
                 continue;
             };
             let mut idx = 0usize;
@@ -322,7 +386,11 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
         }
 
         for token_id in empty_tokens {
-            cache.by_token.remove(&token_id);
+            cache.price_by_token.remove(&token_id);
+        }
+        for order_id in &triggered_order_ids {
+            remove_order_from_armed_builder_bucket(&mut cache.ptb_by_asset, *order_id);
+            remove_order_from_armed_builder_bucket(&mut cache.ptb_by_market_slug, *order_id);
         }
     }
 
@@ -387,6 +455,97 @@ async fn evaluate_armed_builder_orders_for_dirty_tokens(
     Ok(())
 }
 
+fn collect_armed_builder_ptb_orders_for_dirty_context(
+    cache: &ArmedBuilderOrderCache,
+    dirty_assets: &[String],
+    dirty_market_slugs: &[String],
+) -> Vec<TradeBuilderOrder> {
+    let mut selected_orders = HashMap::new();
+
+    for asset in dirty_assets {
+        let asset_key = asset.trim().to_ascii_lowercase();
+        let Some(bucket) = cache.ptb_by_asset.get(&asset_key) else {
+            continue;
+        };
+        for order in bucket {
+            selected_orders.insert(order.id, order.clone());
+        }
+    }
+
+    for market_slug in dirty_market_slugs {
+        let market_key = market_slug.trim().to_ascii_lowercase();
+        let Some(bucket) = cache.ptb_by_market_slug.get(&market_key) else {
+            continue;
+        };
+        for order in bucket {
+            selected_orders.insert(order.id, order.clone());
+        }
+    }
+
+    selected_orders.into_values().collect()
+}
+
+fn evaluate_armed_builder_ptb_dirty_orders(orders: &[TradeBuilderOrder]) -> HashSet<i64> {
+    orders
+        .iter()
+        .filter_map(|order| {
+            trade_builder_evaluate_ptb_stop_loss(order)
+                .filter(|evaluation| evaluation.should_trigger)
+                .map(|_| order.id)
+        })
+        .collect()
+}
+
+async fn evaluate_armed_builder_ptb_orders_for_dirty_context(
+    repo: &PostgresRepository,
+    run_id: i64,
+    ws: &ClobWsClient,
+    dirty_assets: &[String],
+    dirty_market_slugs: &[String],
+) -> Result<()> {
+    if dirty_assets.is_empty() && dirty_market_slugs.is_empty() {
+        return Ok(());
+    }
+
+    let selected_orders = {
+        let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
+        collect_armed_builder_ptb_orders_for_dirty_context(&cache, dirty_assets, dirty_market_slugs)
+    };
+    if selected_orders.is_empty() {
+        return Ok(());
+    }
+
+    let triggered_order_ids = evaluate_armed_builder_ptb_dirty_orders(&selected_orders);
+    info!(
+        run_id,
+        dirty_asset_count = dirty_assets.len(),
+        dirty_market_slug_count = dirty_market_slugs.len(),
+        selected_order_count = selected_orders.len(),
+        triggered_order_count = triggered_order_ids.len(),
+        "ARMED_BUILDER_PTB_DIRTY_EVAL_CYCLE"
+    );
+    if triggered_order_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut orders_to_spawn = Vec::new();
+    {
+        let mut cache = ARMED_BUILDER_ORDER_CACHE.write().await;
+        for order in &selected_orders {
+            if triggered_order_ids.contains(&order.id) {
+                remove_order_from_armed_builder_cache(&mut cache, order.id);
+                orders_to_spawn.push((order.id, order.user_id));
+            }
+        }
+    }
+
+    for (order_id, user_id) in orders_to_spawn {
+        spawn_armed_order_immediate_processing(repo, run_id, ws, order_id, user_id, None);
+    }
+
+    Ok(())
+}
+
 fn spawn_armed_order_immediate_processing(
     repo: &PostgresRepository,
     run_id: i64,
@@ -411,7 +570,7 @@ fn spawn_armed_order_immediate_processing(
                     error = %err,
                     "ARMED_ORDER_WS_USER_CONFIG_LOAD_FAILED"
                 );
-                rearm_builder_order_to_cache_if_armed(&repo, order_id).await;
+                sync_armed_builder_order_cache_for_order(&repo, order_id).await;
                 return;
             }
         };
@@ -432,7 +591,7 @@ fn spawn_armed_order_immediate_processing(
                     error = %err,
                     "ARMED_ORDER_WS_EXECUTOR_LOAD_FAILED"
                 );
-                rearm_builder_order_to_cache_if_armed(&repo, order_id).await;
+                sync_armed_builder_order_cache_for_order(&repo, order_id).await;
                 return;
             }
         };
@@ -471,7 +630,7 @@ fn spawn_armed_order_immediate_processing(
                 )
                 .await;
         }
-        rearm_builder_order_to_cache_if_armed(&repo, order_id).await;
+        sync_armed_builder_order_cache_for_order(&repo, order_id).await;
         sync_guarded_buy_order_cache_for_order(&repo, order_id).await;
     });
 }
@@ -479,6 +638,7 @@ fn spawn_armed_order_immediate_processing(
 #[cfg(test)]
 mod armed_ws_eval_tests {
     use super::*;
+    use crate::trade_flow::guards::polymarket_price_to_beat::seed_price_to_beat_from_chainlink;
 
     fn test_tp_sl_child_order() -> TradeBuilderOrder {
         TradeBuilderOrder {
@@ -516,6 +676,8 @@ mod armed_ws_eval_tests {
             origin_flow_definition_id: None,
             origin_flow_run_id: None,
             origin_flow_node_key: None,
+            pair_session_id: None,
+            pair_leg_role: None,
             tp_enabled: false,
             tp_price: None,
             tp_rules_json: Vec::new(),
@@ -537,6 +699,101 @@ mod armed_ws_eval_tests {
             retry_on_trigger_guard_block: false,
             retry_on_execution_floor_guard_block: false,
             retry_on_max_price_block: false,
+            ptb_stop_loss_gap_usd: None,
+            ptb_reference_price: None,
+            ptb_stop_loss_rules_json: Vec::new(),
+            ptb_stop_loss_time_decay_mode: None,
+            staged_sl_retry_only_dust: false,
+            staged_sl_retry_dust_metric: None,
+            staged_sl_retry_dust_value: None,
+            staged_sl_reentry_use_sold_notional: false,
+            staged_sl_reentry_only_after_all_stages: false,
+            sl_trigger_price_mode: None,
+            reenter_on_sl_hit: false,
+            reentry_max_attempts: 0,
+            reentry_trigger_node_key: None,
+            notify_on_fill: false,
+            notify_on_order_not_filled: false,
+            notify_on_trigger_guard_blocked: false,
+            notify_on_execution_floor_blocked: false,
+            notify_on_tp_hit: false,
+            notify_on_sl_hit: false,
+            notify_on_max_price_blocked: false,
+            last_guard_notification_reason: None,
+            exit_ladder_kind: None,
+            exit_ladder_index: None,
+            exit_ladder_size_pct: None,
+        }
+    }
+
+    fn test_ptb_child_order() -> TradeBuilderOrder {
+        TradeBuilderOrder {
+            id: 2,
+            trade_id: 78,
+            user_id: 2,
+            kind: "conditional".to_string(),
+            status: "armed".to_string(),
+            market_slug: "btc-updown-5m-2774013100".to_string(),
+            token_id: "tok-ptb".to_string(),
+            outcome_label: "Up".to_string(),
+            side: "sell".to_string(),
+            execution_mode: "market".to_string(),
+            trigger_condition: Some("cross_below".to_string()),
+            trigger_price: None,
+            max_price: None,
+            size_basis: TRADE_BUILDER_SIZE_BASIS_SHARES.to_string(),
+            size_usdc: 5.0,
+            target_qty: Some(5.0),
+            min_price_distance_cent: 1.0,
+            expires_at: None,
+            eligible_after_at: None,
+            eligible_before_at: None,
+            max_triggers: 1,
+            triggers_fired: 0,
+            active_exchange_order_id: None,
+            remaining_size: None,
+            remaining_qty: Some(5.0),
+            working_price: None,
+            last_seen_price: None,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            parent_order_id: Some(43),
+            origin_flow_definition_id: None,
+            origin_flow_run_id: None,
+            origin_flow_node_key: None,
+            pair_session_id: None,
+            pair_leg_role: None,
+            tp_enabled: false,
+            tp_price: None,
+            tp_rules_json: Vec::new(),
+            sl_enabled: false,
+            sl_price: None,
+            sl_rules_json: Vec::new(),
+            time_exit_rules_json: Vec::new(),
+            filled_qty: 0.0,
+            fee_rate_bps: 0,
+            trigger_latched: false,
+            trigger_latched_reason: None,
+            trigger_latched_at: None,
+            submitted_dynamic_qty: None,
+            submitted_dynamic_price: None,
+            runtime_snapshot_json: None,
+            fresh_submit_lease_until: None,
+            guard_trigger_price: None,
+            best_ask_floor_price: None,
+            retry_on_trigger_guard_block: false,
+            retry_on_execution_floor_guard_block: false,
+            retry_on_max_price_block: false,
+            ptb_stop_loss_gap_usd: Some(0.0),
+            ptb_reference_price: None,
+            ptb_stop_loss_rules_json: Vec::new(),
+            ptb_stop_loss_time_decay_mode: Some("tighten".to_string()),
+            staged_sl_retry_only_dust: false,
+            staged_sl_retry_dust_metric: None,
+            staged_sl_retry_dust_value: None,
+            staged_sl_reentry_use_sold_notional: false,
+            staged_sl_reentry_only_after_all_stages: false,
             sl_trigger_price_mode: None,
             reenter_on_sl_hit: false,
             reentry_max_attempts: 0,
@@ -557,26 +814,54 @@ mod armed_ws_eval_tests {
 
     async fn reset_armed_builder_order_cache() {
         let mut cache = ARMED_BUILDER_ORDER_CACHE.write().await;
-        cache.by_token.clear();
+        cache.price_by_token.clear();
+        cache.ptb_by_asset.clear();
+        cache.ptb_by_market_slug.clear();
     }
 
     #[tokio::test]
     async fn insert_cache_upserts_existing_order() {
+        let _test_guard = ARMED_BUILDER_ORDER_CACHE_TEST_MUTEX.lock().await;
         reset_armed_builder_order_cache().await;
         let mut order = test_tp_sl_child_order();
-        insert_into_armed_builder_order_cache(order.clone()).await;
+        sync_armed_builder_order_to_cache(order.clone()).await;
 
         order.last_seen_price = Some(0.77);
-        insert_into_armed_builder_order_cache(order.clone()).await;
+        sync_armed_builder_order_to_cache(order.clone()).await;
 
         let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
-        let bucket = cache.by_token.get(&order.token_id).expect("bucket");
+        let bucket = cache
+            .price_by_token
+            .get(&order.token_id)
+            .expect("bucket");
         assert_eq!(bucket.len(), 1);
         assert_eq!(bucket[0].last_seen_price, Some(0.77));
     }
 
     #[tokio::test]
+    async fn sync_cache_routes_ptb_child_into_ptb_indexes_only() {
+        let _test_guard = ARMED_BUILDER_ORDER_CACHE_TEST_MUTEX.lock().await;
+        reset_armed_builder_order_cache().await;
+        let order = test_ptb_child_order();
+
+        sync_armed_builder_order_to_cache(order.clone()).await;
+
+        let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
+        assert!(cache.price_by_token.get(&order.token_id).is_none());
+        let asset_bucket = cache.ptb_by_asset.get("btc").expect("asset bucket");
+        assert_eq!(asset_bucket.len(), 1);
+        assert_eq!(asset_bucket[0].id, order.id);
+        let market_bucket = cache
+            .ptb_by_market_slug
+            .get("btc-updown-5m-2774013100")
+            .expect("market bucket");
+        assert_eq!(market_bucket.len(), 1);
+        assert_eq!(market_bucket[0].id, order.id);
+    }
+
+    #[tokio::test]
     async fn rearm_cache_helper_reinserts_armed_orders() {
+        let _test_guard = ARMED_BUILDER_ORDER_CACHE_TEST_MUTEX.lock().await;
         reset_armed_builder_order_cache().await;
         let mut order = test_tp_sl_child_order();
         order.token_id = "tok-up-rearm-armed".to_string();
@@ -584,13 +869,17 @@ mod armed_ws_eval_tests {
         rearm_builder_order_to_cache(order.clone()).await;
 
         let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
-        let bucket = cache.by_token.get(&order.token_id).expect("bucket");
+        let bucket = cache
+            .price_by_token
+            .get(&order.token_id)
+            .expect("bucket");
         assert_eq!(bucket.len(), 1);
         assert_eq!(bucket[0].id, order.id);
     }
 
     #[tokio::test]
     async fn rearm_cache_helper_skips_non_armed_orders() {
+        let _test_guard = ARMED_BUILDER_ORDER_CACHE_TEST_MUTEX.lock().await;
         reset_armed_builder_order_cache().await;
         let mut order = test_tp_sl_child_order();
         order.token_id = "tok-up-rearm-skip".to_string();
@@ -599,7 +888,7 @@ mod armed_ws_eval_tests {
         rearm_builder_order_to_cache(order.clone()).await;
 
         let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
-        assert!(cache.by_token.get(&order.token_id).is_none());
+        assert!(cache.price_by_token.get(&order.token_id).is_none());
     }
 
     #[tokio::test]
@@ -617,5 +906,49 @@ mod armed_ws_eval_tests {
             trade_builder_last_seen_price_from_market_snapshot(&order, &snapshot),
             Some(0.76)
         );
+    }
+
+    #[tokio::test]
+    async fn collect_ptb_orders_filters_by_dirty_asset() {
+        let _test_guard = ARMED_BUILDER_ORDER_CACHE_TEST_MUTEX.lock().await;
+        reset_armed_builder_order_cache().await;
+        let btc_order = test_ptb_child_order();
+        let mut eth_order = test_ptb_child_order();
+        eth_order.id = 3;
+        eth_order.market_slug = "eth-updown-5m-2774013100".to_string();
+        eth_order.token_id = "tok-ptb-eth".to_string();
+
+        sync_armed_builder_order_to_cache(btc_order.clone()).await;
+        sync_armed_builder_order_to_cache(eth_order.clone()).await;
+
+        let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
+        let selected =
+            collect_armed_builder_ptb_orders_for_dirty_context(&cache, &["btc".to_string()], &[]);
+        drop(cache);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, btc_order.id);
+    }
+
+    #[tokio::test]
+    async fn ptb_dirty_evaluation_uses_seeded_reference_price_from_market_dirty_context() {
+        let _test_guard = ARMED_BUILDER_ORDER_CACHE_TEST_MUTEX.lock().await;
+        let now_ms = Utc::now().timestamp_millis();
+        trade_flow::guards::chainlink_price::seed_chainlink_price_test_ticks(
+            "btc",
+            &[(now_ms - 250, 70_000.0), (now_ms, 69_999.5)],
+        )
+        .expect("seed btc ticks");
+        assert!(seed_price_to_beat_from_chainlink(
+            "btc-updown-5m-2774013100",
+            "btc",
+            "5m",
+            70_000.0,
+            Some(0)
+        ));
+        let order = test_ptb_child_order();
+
+        let triggered = evaluate_armed_builder_ptb_dirty_orders(&[order]);
+        assert!(triggered.contains(&2));
     }
 }

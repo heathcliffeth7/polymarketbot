@@ -54,6 +54,32 @@ pub struct MarketDataSnapshot {
     pub last_source: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarketSnapshotWsState {
+    Seeded,
+    Stale,
+    SubscribedUnseeded,
+    NotSubscribed,
+}
+
+impl MarketSnapshotWsState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Seeded => "live_ws_seeded",
+            Self::Stale => "live_ws_stale",
+            Self::SubscribedUnseeded => "live_ws_subscribed_unseeded",
+            Self::NotSubscribed => "live_ws_not_subscribed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketSnapshotIntrospection {
+    pub state: MarketSnapshotWsState,
+    pub desired: bool,
+    pub snapshot: Option<MarketDataSnapshot>,
+}
+
 pub type MarketTickCallback = Arc<dyn Fn(&str, &MarketDataSnapshot) + Send + Sync>;
 
 struct ClobWsClientInner {
@@ -178,6 +204,33 @@ impl ClobWsClient {
                     .map(|snapshot| (token_id.clone(), snapshot))
             })
             .collect()
+    }
+
+    pub async fn inspect_market_snapshot(
+        &self,
+        token_id: &str,
+        stale_after_ms: i64,
+    ) -> MarketSnapshotIntrospection {
+        let desired = self.inner.desired_tokens.read().await.contains(token_id);
+        let snapshot = self.inner.cache.read().await.get(token_id).cloned();
+        let state = match snapshot.as_ref() {
+            Some(snapshot)
+                if Utc::now()
+                    .timestamp_millis()
+                    .saturating_sub(snapshot.updated_at_ms)
+                    <= stale_after_ms =>
+            {
+                MarketSnapshotWsState::Seeded
+            }
+            Some(_) => MarketSnapshotWsState::Stale,
+            None if desired => MarketSnapshotWsState::SubscribedUnseeded,
+            None => MarketSnapshotWsState::NotSubscribed,
+        };
+        MarketSnapshotIntrospection {
+            state,
+            desired,
+            snapshot,
+        }
     }
 
     pub async fn wait_for_market_update(&self) {
@@ -680,5 +733,55 @@ mod tests {
         assert_eq!(seen[1].1.best_bid, Some(0.70));
         assert_eq!(seen[1].1.last_trade_price, Some(0.68));
         assert_eq!(seen[1].1.updated_at_ms, 12346);
+    }
+
+    #[tokio::test]
+    async fn inspect_market_snapshot_reports_subscribed_unseeded() {
+        let ws = ClobWsClient::new("wss://example.com/ws".to_string());
+        ws.inner
+            .desired_tokens
+            .write()
+            .await
+            .insert("tok-yes".to_string());
+
+        let inspection = ws.inspect_market_snapshot("tok-yes", 250).await;
+        assert_eq!(inspection.state, MarketSnapshotWsState::SubscribedUnseeded);
+        assert!(inspection.desired);
+        assert!(inspection.snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn inspect_market_snapshot_reports_seeded_and_stale() {
+        let ws = ClobWsClient::new("wss://example.com/ws".to_string());
+        ws.inner
+            .desired_tokens
+            .write()
+            .await
+            .insert("tok-yes".to_string());
+        ws.update_market_cache_from_payload(&json!({
+            "event_type": "book",
+            "asset_id": "tok-yes",
+            "best_bid": "0.77",
+            "best_ask": "0.81",
+            "timestamp": Utc::now().timestamp_millis()
+        }))
+        .await;
+
+        let seeded = ws.inspect_market_snapshot("tok-yes", 250).await;
+        assert_eq!(seeded.state, MarketSnapshotWsState::Seeded);
+        assert!(seeded.snapshot.is_some());
+
+        ws.update_market_cache_from_payload(&json!({
+            "event_type": "book",
+            "asset_id": "tok-yes",
+            "best_bid": "0.77",
+            "best_ask": "0.81",
+            "timestamp": Utc::now().timestamp_millis() - 5_000
+        }))
+        .await;
+
+        let stale = ws.inspect_market_snapshot("tok-yes", 250).await;
+        assert_eq!(stale.state, MarketSnapshotWsState::Stale);
+        assert!(stale.snapshot.is_some());
     }
 }

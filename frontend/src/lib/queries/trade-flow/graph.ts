@@ -248,6 +248,7 @@ function normalizeNodeConfig(
   }
 
   const priceModeRaw = toTrimmedString(config.priceMode).toLowerCase();
+  const bindingModeRaw = toTrimmedString(config.bindingMode).toLowerCase();
   const validPriceModes = new Set([
     'composite',
     'midpoint',
@@ -260,6 +261,7 @@ function normalizeNodeConfig(
   return {
     ...normalizeTriggerMarketPriceCycleWindowConfig(config),
     priceMode: validPriceModes.has(priceModeRaw) ? priceModeRaw : 'composite',
+    bindingMode: bindingModeRaw === 'pair_lock_only' ? 'pair_lock_only' : 'standard',
   };
 }
 

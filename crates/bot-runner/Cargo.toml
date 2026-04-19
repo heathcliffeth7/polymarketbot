@@ -20,5 +20,6 @@ ethers.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 parking_lot.workspace = true
+async-trait.workspace = true
 bot-core = { path = "../bot-core" }
 bot-infra = { path = "../bot-infra" }
