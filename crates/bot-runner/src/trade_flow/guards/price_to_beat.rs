@@ -4,7 +4,6 @@ use super::polymarket_price_to_beat::{
     PriceToBeatSource,
 };
 use anyhow::Result;
-use chrono::Duration as ChronoDuration;
 use serde_json::{json, Value};
 
 mod auto_threshold;
@@ -15,8 +14,10 @@ mod notification_state;
 #[cfg(test)]
 mod notification_tests;
 mod resolution;
+mod runtime;
 #[cfg(test)]
 mod tests;
+mod threshold_math;
 use self::auto_threshold::{
     resolve_auto_price_to_beat_threshold, AutoPriceToBeatThresholdResolution,
     AutoPriceToBeatThresholdStrategy,
@@ -29,19 +30,15 @@ pub(crate) use self::notification::{
     build_price_to_beat_bump_increased_notification_message,
     build_price_to_beat_bump_max_reached_notification_message,
 };
-use self::notification::{
-    build_price_to_beat_guard_blocked_notification_message,
-    build_price_to_beat_guard_recovered_notification_message,
-    build_price_to_beat_guard_waiting_notification_message,
-};
 pub(crate) use self::notification_state::take_price_to_beat_guard_notification_seed;
-use self::notification_state::{
-    clear_price_to_beat_guard_waiting_context, price_to_beat_guard_notification_phase,
-    price_to_beat_guard_waiting_state, set_price_to_beat_guard_notification_phase,
-    set_price_to_beat_guard_notification_seed, set_price_to_beat_guard_waiting_state,
-    PriceToBeatGuardNotificationPhase,
-};
 pub(crate) use self::resolution::resolve_action_place_order_price_to_beat_guard_resolution;
+pub(crate) use self::runtime::{
+    evaluate_action_place_order_price_to_beat_guard_state,
+    maybe_block_action_place_order_price_to_beat_guard, PriceToBeatGuardRuntimeContext,
+};
+pub(crate) use self::threshold_math::{
+    apply_price_to_beat_risk_penalty, normalize_price_to_beat_threshold_usd,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PriceToBeatMode {
@@ -126,6 +123,7 @@ pub(crate) struct PriceToBeatGuardEvaluation {
     pub(crate) base_threshold_value: Option<f64>,
     pub(crate) base_threshold_unit: Option<String>,
     pub(crate) base_threshold_usd: Option<f64>,
+    pub(crate) current_effective_ptb_usd: Option<f64>,
     pub(crate) threshold_value: f64,
     pub(crate) threshold_unit: String,
     pub(crate) threshold_usd: f64,
@@ -219,6 +217,10 @@ impl PriceToBeatGuardEvaluation {
             obj.insert(
                 "base_threshold_usd".to_string(),
                 json!(self.base_threshold_usd),
+            );
+            obj.insert(
+                "current_effective_ptb_usd".to_string(),
+                json!(self.current_effective_ptb_usd),
             );
             obj.insert(
                 "stop_loss_bump_count".to_string(),
@@ -543,235 +545,6 @@ pub(crate) fn evaluate_price_to_beat_trigger_gate(
         Some(snapshot.status().to_string()),
         Some(current_price),
     )
-}
-
-pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
-    repo: &crate::PostgresRepository,
-    cfg: &crate::AppConfig,
-    client: Option<&dyn crate::OrderExecutor>,
-    run: &crate::TradeFlowRun,
-    node: &crate::TradeFlowNode,
-    context: &mut Value,
-    market_slug: &str,
-    token_id: &str,
-    outcome_label: &str,
-    side: &str,
-    execution_mode: &str,
-) -> Result<Option<crate::TradeFlowNodeExecution>> {
-    crate::set_flow_context(context, "priceToBeatGuard", Value::Null);
-
-    if side != "buy" {
-        clear_price_to_beat_guard_waiting_context(context);
-        return Ok(None);
-    }
-
-    let guard_enabled = crate::node_config_bool(node, "priceToBeatGuardEnabled").unwrap_or(false);
-    if !guard_enabled {
-        clear_price_to_beat_guard_waiting_context(context);
-        return Ok(None);
-    }
-    max_price_relax::ensure_max_price_relax_tracking_market(context, &node.key, market_slug);
-    let retry_on_guard_block =
-        crate::node_config_bool(node, "retryOnPriceToBeatGuardBlock").unwrap_or(true);
-    let resolution =
-        resolve_action_place_order_price_to_beat_guard_resolution(node, context, market_slug)?;
-    let mut evaluation = evaluate_price_to_beat_guard(
-        market_slug,
-        resolution.effective_mode,
-        resolution.threshold_value,
-        resolution.threshold_unit,
-        outcome_label,
-    )
-    .await;
-    resolution.apply_metadata(&mut evaluation);
-    if resolution.effective_mode != PriceToBeatMode::Manual {
-        apply_price_to_beat_risk_penalty(&mut evaluation, resolution.stop_loss_bump_usd);
-    }
-    max_price_relax::maybe_apply_action_place_order_max_price_relaxation(
-        repo,
-        run.user_id,
-        context,
-        node,
-        run.id,
-        market_slug,
-        outcome_label,
-        cfg,
-        client,
-        &mut evaluation,
-    )
-    .await?;
-    let evaluation_output = evaluation.to_value();
-    crate::set_flow_context(context, "priceToBeatGuard", evaluation_output.clone());
-    let should_notify =
-        crate::node_config_bool(node, "notifyOnPriceToBeatGapBlocked").unwrap_or(true);
-    let notification_phase =
-        price_to_beat_guard_notification_phase(context, &node.key, market_slug, token_id);
-    if evaluation.passed {
-        let waiting_state = price_to_beat_guard_waiting_state(context);
-        let recovered_from_reason_code = waiting_state
-            .as_ref()
-            .and_then(|prev| (prev.market_slug == market_slug).then(|| prev.reason_code.as_str()));
-        if let Some(recovered_from_reason_code) = recovered_from_reason_code {
-            repo.append_trade_flow_event(
-                Some(run.id),
-                run.definition_id,
-                Some(run.version_id),
-                "price_to_beat_guard_recovered",
-                &json!({
-                    "node_key": node.key,
-                    "node_type": node.node_type,
-                    "market_slug": market_slug,
-                    "token_id": token_id,
-                    "outcome_label": outcome_label,
-                    "side": side,
-                    "execution_mode": execution_mode,
-                    "recovered_from_reason_code": recovered_from_reason_code,
-                    "price_to_beat_guard": evaluation_output.clone(),
-                }),
-            )
-            .await?;
-
-            if should_notify
-                && notification_phase == Some(PriceToBeatGuardNotificationPhase::BlockedNotified)
-            {
-                let message = build_price_to_beat_guard_recovered_notification_message(
-                    &evaluation,
-                    recovered_from_reason_code,
-                );
-                if send_price_to_beat_guard_notification(repo, run.user_id, &message).await {
-                    set_price_to_beat_guard_notification_phase(
-                        context,
-                        &node.key,
-                        market_slug,
-                        token_id,
-                        PriceToBeatGuardNotificationPhase::PassedNotified,
-                        recovered_from_reason_code,
-                    );
-                }
-            }
-        }
-        clear_price_to_beat_guard_waiting_context(context);
-        return Ok(None);
-    }
-
-    repo.append_trade_flow_event(
-        Some(run.id),
-        run.definition_id,
-        Some(run.version_id),
-        "pre_order_price_to_beat_blocked",
-        &json!({
-            "node_key": node.key,
-            "node_type": node.node_type,
-            "market_slug": market_slug,
-            "token_id": token_id,
-            "outcome_label": outcome_label,
-            "side": side,
-            "execution_mode": execution_mode,
-            "price_to_beat_guard": evaluation_output.clone(),
-        }),
-    )
-    .await?;
-
-    let candidate_reason =
-        crate::build_guard_notification_reason("price_to_beat", &evaluation.reason_code);
-    if retry_on_guard_block {
-        let entered_waiting = match price_to_beat_guard_waiting_state(context) {
-            Some(prev) => {
-                prev.market_slug != market_slug || prev.reason_code != evaluation.reason_code
-            }
-            None => true,
-        };
-        set_price_to_beat_guard_waiting_state(context, market_slug, &evaluation.reason_code);
-        if entered_waiting && notification_phase.is_none() && should_notify {
-            let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
-            if send_price_to_beat_guard_notification(repo, run.user_id, &message).await {
-                set_price_to_beat_guard_notification_seed(
-                    context,
-                    &node.key,
-                    market_slug,
-                    token_id,
-                    &candidate_reason,
-                );
-                set_price_to_beat_guard_notification_phase(
-                    context,
-                    &node.key,
-                    market_slug,
-                    token_id,
-                    PriceToBeatGuardNotificationPhase::BlockedNotified,
-                    &evaluation.reason_code,
-                );
-            }
-        } else if entered_waiting {
-            set_price_to_beat_guard_notification_phase(
-                context,
-                &node.key,
-                market_slug,
-                token_id,
-                PriceToBeatGuardNotificationPhase::BlockedNotified,
-                &evaluation.reason_code,
-            );
-        }
-        let repeat_at = crate::Utc::now()
-            + ChronoDuration::milliseconds(crate::PRICE_TO_BEAT_GUARD_RETRY_DELAY_MS);
-        return Ok(Some(crate::TradeFlowNodeExecution {
-            output: json!({
-                "node_key": node.key,
-                "blocked": true,
-                "reason": "price_to_beat_guard_blocked",
-                "market_slug": market_slug,
-                "token_id": token_id,
-                "outcome_label": outcome_label,
-                "side": side,
-                "execution_mode": execution_mode,
-                "retrying": true,
-                "retry_delay_ms": crate::PRICE_TO_BEAT_GUARD_RETRY_DELAY_MS,
-                "price_to_beat_guard": evaluation_output,
-            }),
-            routes: vec![],
-            repeat_at: Some(repeat_at),
-            repeat_idempotency_key: None,
-        }));
-    }
-    if should_notify && notification_phase.is_none() {
-        let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
-        if send_price_to_beat_guard_notification(repo, run.user_id, &message).await {
-            set_price_to_beat_guard_notification_seed(
-                context,
-                &node.key,
-                market_slug,
-                token_id,
-                &candidate_reason,
-            );
-            set_price_to_beat_guard_notification_phase(
-                context,
-                &node.key,
-                market_slug,
-                token_id,
-                PriceToBeatGuardNotificationPhase::BlockedNotified,
-                &evaluation.reason_code,
-            );
-        }
-    }
-
-    Ok(Some(crate::TradeFlowNodeExecution {
-        output: json!({
-            "node_key": node.key,
-            "blocked": true,
-            "reason": "price_to_beat_guard_blocked",
-            "market_slug": market_slug,
-            "token_id": token_id,
-            "outcome_label": outcome_label,
-            "side": side,
-            "execution_mode": execution_mode,
-            "price_to_beat_guard": evaluation_output,
-        }),
-        routes: vec![crate::TradeFlowRouteDecision {
-            edge_type: "on_error".to_string(),
-            available_at: crate::Utc::now(),
-        }],
-        repeat_at: None,
-        repeat_idempotency_key: None,
-    }))
 }
 
 pub(crate) async fn evaluate_price_to_beat_guard(
@@ -1194,6 +967,7 @@ pub(crate) async fn evaluate_price_to_beat_guard(
         base_threshold_value: None,
         base_threshold_unit: None,
         base_threshold_usd: None,
+        current_effective_ptb_usd: None,
         threshold_value: resolved_threshold_value,
         threshold_unit: resolved_threshold_unit.as_str().to_string(),
         threshold_usd,
@@ -1286,6 +1060,7 @@ fn blocked_price_to_beat_guard_evaluation(
         base_threshold_value: None,
         base_threshold_unit: None,
         base_threshold_usd: None,
+        current_effective_ptb_usd: None,
         threshold_value,
         threshold_unit: threshold_unit.as_str().to_string(),
         threshold_usd,
@@ -1320,62 +1095,6 @@ fn blocked_price_to_beat_guard_evaluation(
         floor_usd,
         ceiling_usd,
         threshold_was_clamped,
-    }
-}
-
-pub(crate) fn apply_price_to_beat_risk_penalty(
-    evaluation: &mut PriceToBeatGuardEvaluation,
-    risk_penalty_usd: f64,
-) {
-    if !risk_penalty_usd.is_finite() || risk_penalty_usd <= 0.0 {
-        return;
-    }
-    evaluation.threshold_usd += risk_penalty_usd;
-    evaluation.threshold_value = if evaluation.threshold_unit == "cent" {
-        evaluation.threshold_usd * 100.0
-    } else {
-        evaluation.threshold_usd
-    };
-    if let (Some(current_price), Some(price_to_beat), Some(outcome_label)) = (
-        evaluation.current_price,
-        evaluation.price_to_beat,
-        evaluation.normalized_outcome_label.as_deref(),
-    ) {
-        if let Some(direction_evaluation) = evaluate_directional_gap(
-            current_price,
-            price_to_beat,
-            evaluation.threshold_usd,
-            outcome_label,
-        ) {
-            evaluation.passed = direction_evaluation.passed;
-            evaluation.directional_gap = Some(direction_evaluation.directional_gap);
-            evaluation.gap_abs = Some((current_price - price_to_beat).abs());
-            evaluation.reason_code = if direction_evaluation.passed {
-                "passed".to_string()
-            } else {
-                "price_to_beat_gap_below_threshold".to_string()
-            };
-            evaluation.reason_detail = (!direction_evaluation.passed).then(|| {
-                format!(
-                    "directional gap {:.8} (direction={}) is below threshold {:.8} {} (~{:.8} usd)",
-                    direction_evaluation.directional_gap,
-                    direction_evaluation.direction,
-                    evaluation.threshold_value,
-                    evaluation.threshold_unit,
-                    evaluation.threshold_usd
-                )
-            });
-        }
-    }
-}
-
-pub(crate) fn normalize_price_to_beat_threshold_usd(
-    threshold_value: f64,
-    threshold_unit: PriceToBeatDiffUnit,
-) -> f64 {
-    match threshold_unit {
-        PriceToBeatDiffUnit::Usd => threshold_value,
-        PriceToBeatDiffUnit::Cent => threshold_value / 100.0,
     }
 }
 

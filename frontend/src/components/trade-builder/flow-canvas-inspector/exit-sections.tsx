@@ -3,6 +3,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import type {
   ExitLadderRuleRow,
+  PtbGapUnit,
   PtbStopLossRuleRow,
 } from '@/lib/trade-flow-config-mappers';
 import { Plus, Trash2, Zap } from 'lucide-react';
@@ -91,16 +92,19 @@ export function ExitLadderSection({
 }
 
 export function PtbStopLossRuleSection({
+  unit,
   rows,
   onAdd,
   onUpdate,
   onRemove,
 }: {
+  unit: PtbGapUnit;
   rows: PtbStopLossRuleRow[];
   onAdd: () => void;
   onUpdate: (rowId: string, patch: Partial<PtbStopLossRuleRow>) => void;
   onRemove: (rowId: string) => void;
 }) {
+  const isCentUnit = unit === 'cent';
   return (
     <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
       <div className="flex items-center gap-1.5">
@@ -112,6 +116,11 @@ export function PtbStopLossRuleSection({
         toplam satis yuzu `100` olmalidir. Pozitif deger PTB farki halen pozitifken stop bekler,
         `0` parity demektir, negatif deger ise karsi yone overshoot bekler. Ornek:
         `20 &gt; 0 &gt; -20`.
+      </p>
+      <p className="text-[10px] leading-relaxed text-slate-400 italic">
+        {isCentUnit
+          ? 'Cent modu: 1 = $0.01. Bu bolumdeki tum gap satirlari cent olarak yorumlanir.'
+          : 'USD modu: 1 = $1.00. Bu bolumdeki tum gap satirlari USD olarak yorumlanir.'}
       </p>
       {rows.length === 0 ? (
         <p className="text-[10px] text-slate-400 italic">Henüz PTB kademesi eklenmedi.</p>
@@ -136,14 +145,14 @@ export function PtbStopLossRuleSection({
               <div className="grid grid-cols-2 gap-2">
                 <div className="space-y-1">
                   <Label className="text-[10px] font-medium text-slate-500">
-                    Gap Eşiği (USD)
+                    Gap Eşiği ({isCentUnit ? 'Cent' : 'USD'})
                   </Label>
                   <Input
                     type="number"
                     step="any"
                     value={row.gapUsd}
                     onChange={(event) => onUpdate(row.id, { gapUsd: event.target.value })}
-                    placeholder="12.5 veya -20"
+                    placeholder={isCentUnit ? '20 veya -20' : '12.5 veya -20'}
                     className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300"
                   />
                 </div>

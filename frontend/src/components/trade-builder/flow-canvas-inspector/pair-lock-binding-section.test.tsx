@@ -28,5 +28,7 @@ test('PairLockSummarySection explains custom range comes from trigger node', () 
   assert.match(html, /230-290s/);
   assert.match(html, /Pair lock icin ozel aralik varsa/);
   assert.match(html, /trigger\.market_price/);
+  assert.match(html, /ayri yonetilebilir/);
+  assert.match(html, /standalone devam eder/);
   assert.match(html, /Retry acik guard/);
 });

@@ -57,8 +57,10 @@ export function PairLockSummarySection({
         </p>
       )}
       <p>
-        Stop loss yalniz ilk dolan bacak icin calisir. Ikinci bacak dolup pair
-        <span className="font-semibold"> locked</span> oldugunda tum SL/PTB-SL yuzeyi otomatik iptal edilir.
+        Ana bacak ve karsi bacak stop loss / PTB-SL ayarlari ayri yonetilebilir. Pair
+        <span className="font-semibold"> locked</span> olduktan sonra ikinci bacak kendi SL/PTB-SL
+        esikleriyle cikabilir; bu olursa ikinci bacak kapanir, pair session biter ve kalan birinci
+        bacak standalone devam eder.
       </p>
       <p>
         Retry acik guard&apos;larda ilk bacak secimi hemen fail olmaz; ayni market icinde kosullar

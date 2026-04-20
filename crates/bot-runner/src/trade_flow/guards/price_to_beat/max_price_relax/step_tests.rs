@@ -210,7 +210,9 @@ async fn quality_score_does_not_change_relax_credit() {
         current_market_slug,
         "Up",
         1.80,
+        None,
         0,
+        true,
     )
     .await
     .expect("lower quality relaxation");
@@ -225,7 +227,9 @@ async fn quality_score_does_not_change_relax_credit() {
         current_market_slug,
         "Up",
         1.80,
+        None,
         0,
+        true,
     )
     .await
     .expect("higher quality relaxation");

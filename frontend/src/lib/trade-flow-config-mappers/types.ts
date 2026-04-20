@@ -1,6 +1,7 @@
 export type PrimitiveValueType = 'string' | 'number' | 'boolean';
 export type ExpressionJoin = 'and' | 'or';
 export type ConditionOperator = '>' | '>=' | '<' | '<=' | '==' | '!=';
+export type PtbGapUnit = 'usd' | 'cent';
 
 export interface KeyValueDraft {
   id: string;
@@ -77,6 +78,7 @@ export interface NodeConfigFormState {
   outcomeConditionRows: OutcomeConditionRow[];
   drawdownRuleRows: DrawdownRuleRow[];
   tpRuleRows: ExitLadderRuleRow[];
+  counterLegTpRuleRows: ExitLadderRuleRow[];
   slRuleRows: ExitLadderRuleRow[];
   ptbStopLossRuleRows: PtbStopLossRuleRow[];
   timeExitRuleRows: TimeExitRuleRow[];

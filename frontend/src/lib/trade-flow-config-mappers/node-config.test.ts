@@ -137,12 +137,14 @@ test('action.place_order ptb stop-loss round-trips through mapper form state', (
   });
 
   assert.equal(form.fields.ptbStopLossEnabled, 'true');
+  assert.equal(form.fields.ptbStopLossGapUnit, 'usd');
   assert.equal(form.ptbStopLossRuleRows.length, 1);
   assert.equal(form.ptbStopLossRuleRows[0]?.gapUsd, '0');
   assert.equal(form.ptbStopLossRuleRows[0]?.sizePct, '100');
 
   const rebuilt = buildNodeConfigFromForm('action.place_order', form);
   assert.equal(rebuilt.ptbStopLossEnabled, true);
+  assert.equal(rebuilt.ptbStopLossGapUnit, 'usd');
   assert.deepEqual(rebuilt.ptbStopLossRules, [{ gapUsd: 0, sizePct: 100 }]);
   assert.equal('ptbStopLossGapUsd' in rebuilt, false);
   assert.equal(rebuilt.notifyOnSlHit, true);
@@ -163,12 +165,14 @@ test('action.place_order negative ptb stop-loss round-trips through mapper form 
   });
 
   assert.equal(form.fields.ptbStopLossEnabled, 'true');
+  assert.equal(form.fields.ptbStopLossGapUnit, 'usd');
   assert.equal(form.ptbStopLossRuleRows.length, 1);
   assert.equal(form.ptbStopLossRuleRows[0]?.gapUsd, '-20');
   assert.equal(form.ptbStopLossRuleRows[0]?.sizePct, '100');
 
   const rebuilt = buildNodeConfigFromForm('action.place_order', form);
   assert.equal(rebuilt.ptbStopLossEnabled, true);
+  assert.equal(rebuilt.ptbStopLossGapUnit, 'usd');
   assert.deepEqual(rebuilt.ptbStopLossRules, [{ gapUsd: -20, sizePct: 100 }]);
   assert.equal('ptbStopLossGapUsd' in rebuilt, false);
 });
@@ -335,17 +339,47 @@ test('action.place_order staged ptb stop-loss round-trips through mapper form st
   });
 
   assert.equal(form.fields.ptbStopLossEnabled, 'true');
+  assert.equal(form.fields.ptbStopLossGapUnit, 'usd');
   assert.equal(form.ptbStopLossRuleRows.length, 2);
   assert.equal(form.ptbStopLossRuleRows[0]?.gapUsd, '12.5');
   assert.equal(form.ptbStopLossRuleRows[1]?.sizePct, '75');
 
   const rebuilt = buildNodeConfigFromForm('action.place_order', form);
+  assert.equal(rebuilt.ptbStopLossGapUnit, 'usd');
   assert.deepEqual(rebuilt.ptbStopLossRules, [
     { gapUsd: 12.5, sizePct: 25 },
     { gapUsd: 3, sizePct: 75 },
   ]);
   assert.equal(rebuilt.ptbStopLossEnabled, true);
   assert.equal(rebuilt.stagedSlReentryOnlyAfterAllStages, true);
+});
+
+test('action.place_order staged ptb stop-loss preserves cent unit through mapper form state', () => {
+  const form = parseNodeConfigToForm('action.place_order', {
+    side: 'buy',
+    executionMode: 'market',
+    sizeMode: 'usdc',
+    sizeUsdc: 10,
+    marketSlug: 'eth-updown-5m-1774013100',
+    tokenId: 'eth-up-token',
+    outcomeLabel: 'Up',
+    ptbStopLossGapUnit: 'cent',
+    ptbStopLossRules: [
+      { gapUsd: 20, sizePct: 60 },
+      { gapUsd: 0, sizePct: 40 },
+    ],
+  });
+
+  assert.equal(form.fields.ptbStopLossEnabled, 'true');
+  assert.equal(form.fields.ptbStopLossGapUnit, 'cent');
+  assert.equal(form.ptbStopLossRuleRows[0]?.gapUsd, '20');
+
+  const rebuilt = buildNodeConfigFromForm('action.place_order', form);
+  assert.equal(rebuilt.ptbStopLossGapUnit, 'cent');
+  assert.deepEqual(rebuilt.ptbStopLossRules, [
+    { gapUsd: 20, sizePct: 60 },
+    { gapUsd: 0, sizePct: 40 },
+  ]);
 });
 
 test('action.place_order disables ptb config when master toggle is off', () => {
@@ -606,13 +640,34 @@ test('action.place_order pair_lock fields round-trip through mapper form state',
     counterLegExecutionFloorGuardEnabled: true,
     counterLegExecutionFloorPriceCent: 18,
     counterLegRetryOnPriceToBeatGuardBlock: true,
+    tpEnabled: true,
+    tpPriceCent: 95,
+    tpRules: [{ priceCent: 95, sizePct: 100 }],
+    notifyOnTpHit: true,
+    counterLegTpEnabled: true,
+    counterLegTpPriceCent: 82,
+    counterLegTpRules: [{ priceCent: 82, sizePct: 100 }],
+    counterLegNotifyOnTpHit: false,
     slEnabled: true,
     slPriceCent: 45,
     slTriggerPriceMode: 'composite_safe',
     ptbStopLossEnabled: true,
     ptbStopLossGapUsd: 0,
+    ptbStopLossGapUnit: 'usd',
     ptbStopLossTimeDecayMode: 'relax',
+    ptbStopLossRules: [
+      { gapUsd: 7, sizePct: 60 },
+      { gapUsd: 0, sizePct: 40 },
+    ],
     notifyOnSlHit: true,
+    counterLegSlEnabled: true,
+    counterLegSlPriceCent: 38,
+    counterLegSlTriggerPriceMode: 'best_bid',
+    counterLegPtbStopLossEnabled: true,
+    counterLegPtbStopLossGapUsd: -2,
+    counterLegPtbStopLossGapUnit: 'cent',
+    counterLegPtbStopLossTimeDecayMode: 'tighten',
+    counterLegNotifyOnSlHit: false,
     reenterOnSlHit: true,
     reentryMaxAttempts: 2,
     reentryCooldownSec: 15,
@@ -623,9 +678,17 @@ test('action.place_order pair_lock fields round-trip through mapper form state',
   assert.equal(form.fields.counterLegOutcomeLabel, 'opposite');
   assert.equal(form.fields.pairMaxTotalCent, '90');
   assert.equal(form.fields.counterLegPriceToBeatMaxDiffUnit, 'usd');
+  assert.equal(form.fields.tpPriceCent, '95');
+  assert.equal(form.fields.counterLegTpPriceCent, '82');
   assert.equal(form.fields.slPriceCent, '45');
   assert.equal(form.fields.ptbStopLossGapUsd, '0');
-  assert.equal(form.ptbStopLossRuleRows.length, 0);
+  assert.equal(form.fields.ptbStopLossGapUnit, 'usd');
+  assert.equal(form.fields.counterLegSlPriceCent, '38');
+  assert.equal(form.fields.counterLegPtbStopLossGapUsd, '-2');
+  assert.equal(form.fields.counterLegPtbStopLossGapUnit, 'cent');
+  assert.equal(form.tpRuleRows.length, 1);
+  assert.equal(form.counterLegTpRuleRows.length, 1);
+  assert.equal(form.ptbStopLossRuleRows.length, 2);
 
   const rebuilt = buildNodeConfigFromForm('action.place_order', form);
   assert.equal(rebuilt.mode, 'pair_lock');
@@ -645,16 +708,85 @@ test('action.place_order pair_lock fields round-trip through mapper form state',
   assert.equal(rebuilt.counterLegExecutionFloorGuardEnabled, true);
   assert.equal(rebuilt.counterLegExecutionFloorPriceCent, 18);
   assert.equal(rebuilt.counterLegRetryOnPriceToBeatGuardBlock, true);
+  assert.equal(rebuilt.tpEnabled, true);
+  assert.equal(rebuilt.tpPriceCent, 95);
+  assert.deepEqual(rebuilt.tpRules, [{ priceCent: 95, sizePct: 100 }]);
+  assert.equal(rebuilt.notifyOnTpHit, true);
+  assert.equal(rebuilt.counterLegTpEnabled, true);
+  assert.equal(rebuilt.counterLegTpPriceCent, 82);
+  assert.deepEqual(rebuilt.counterLegTpRules, [{ priceCent: 82, sizePct: 100 }]);
+  assert.equal(rebuilt.counterLegNotifyOnTpHit, false);
+  assert.equal(rebuilt.counterLegSlEnabled, true);
+  assert.equal(rebuilt.counterLegSlPriceCent, 38);
+  assert.equal(rebuilt.counterLegSlTriggerPriceMode, 'best_bid');
+  assert.equal(rebuilt.counterLegPtbStopLossEnabled, true);
+  assert.equal(rebuilt.counterLegPtbStopLossGapUsd, -2);
+  assert.equal(rebuilt.counterLegPtbStopLossGapUnit, 'cent');
+  assert.equal(rebuilt.counterLegPtbStopLossTimeDecayMode, 'tighten');
+  assert.equal(rebuilt.counterLegNotifyOnSlHit, false);
   assert.equal(rebuilt.slEnabled, true);
   assert.equal(rebuilt.slPriceCent, 45);
   assert.equal(rebuilt.slTriggerPriceMode, 'composite_safe');
   assert.equal(rebuilt.ptbStopLossEnabled, true);
   assert.equal(rebuilt.ptbStopLossGapUsd, 0);
+  assert.equal(rebuilt.ptbStopLossGapUnit, 'usd');
   assert.equal(rebuilt.ptbStopLossTimeDecayMode, 'relax');
+  assert.deepEqual(rebuilt.ptbStopLossRules, [
+    { gapUsd: 7, sizePct: 60 },
+    { gapUsd: 0, sizePct: 40 },
+  ]);
   assert.equal(rebuilt.notifyOnSlHit, true);
   assert.equal(rebuilt.reenterOnSlHit, true);
   assert.equal(rebuilt.reentryMaxAttempts, 2);
   assert.equal(rebuilt.reentryCooldownSec, 15);
+});
+
+test('action.place_order pair_lock keeps counter stop-loss fields empty without explicit config', () => {
+  const form = parseNodeConfigToForm('action.place_order', {
+    mode: 'pair_lock',
+    side: 'buy',
+    executionMode: 'market',
+    sizeMode: 'usdc',
+    sizeUsdc: 5,
+    pairMaxTotalCent: 90,
+    pairSizingMode: 'manual',
+    counterLegEnabled: true,
+    counterLegSizeUsdc: 5,
+    slEnabled: true,
+    slPriceCent: 45,
+    slTriggerPriceMode: 'composite_safe',
+    ptbStopLossEnabled: true,
+    ptbStopLossGapUsd: 0,
+    ptbStopLossTimeDecayMode: 'relax',
+    notifyOnSlHit: true,
+  });
+
+  assert.equal(form.fields.counterLegSlEnabled ?? '', '');
+  assert.equal(form.fields.counterLegTpEnabled ?? '', '');
+  assert.equal(form.fields.counterLegTpPriceCent ?? '', '');
+  assert.equal(form.fields.counterLegNotifyOnTpHit ?? '', '');
+  assert.equal(form.fields.counterLegSlPriceCent ?? '', '');
+  assert.equal(form.fields.counterLegSlTriggerPriceMode ?? '', '');
+  assert.equal(form.fields.counterLegPtbStopLossEnabled ?? '', '');
+  assert.equal(form.fields.counterLegPtbStopLossGapUsd ?? '', '');
+  assert.equal(form.fields.counterLegPtbStopLossGapUnit ?? '', '');
+  assert.equal(form.fields.counterLegPtbStopLossTimeDecayMode ?? '', '');
+  assert.equal(form.fields.counterLegNotifyOnSlHit ?? '', '');
+
+  const rebuilt = buildNodeConfigFromForm('action.place_order', form);
+  assert.equal(rebuilt.ptbStopLossGapUnit, 'usd');
+  assert.equal('counterLegSlEnabled' in rebuilt, false);
+  assert.equal('counterLegTpEnabled' in rebuilt, false);
+  assert.equal('counterLegTpPriceCent' in rebuilt, false);
+  assert.equal('counterLegTpRules' in rebuilt, false);
+  assert.equal('counterLegNotifyOnTpHit' in rebuilt, false);
+  assert.equal('counterLegSlPriceCent' in rebuilt, false);
+  assert.equal('counterLegSlTriggerPriceMode' in rebuilt, false);
+  assert.equal('counterLegPtbStopLossEnabled' in rebuilt, false);
+  assert.equal('counterLegPtbStopLossGapUsd' in rebuilt, false);
+  assert.equal('counterLegPtbStopLossGapUnit' in rebuilt, false);
+  assert.equal('counterLegPtbStopLossTimeDecayMode' in rebuilt, false);
+  assert.equal('counterLegNotifyOnSlHit' in rebuilt, false);
 });
 
 test('action.place_order pair_lock auto remaining budget round-trips through mapper form state', () => {
@@ -730,6 +862,7 @@ test('action.place_order pair_lock drops counter PTB manual fields in auto mode'
     expressionRows: [],
     outcomeConditionRows: [],
     tpRuleRows: [],
+    counterLegTpRuleRows: [],
     slRuleRows: [],
     ptbStopLossRuleRows: [],
     timeExitRuleRows: [],
@@ -741,7 +874,7 @@ test('action.place_order pair_lock drops counter PTB manual fields in auto mode'
   assert.equal('counterLegPriceToBeatMaxDiffUnit' in rebuilt, false);
 });
 
-test('action.place_order pair_lock drops unsupported exit and advanced reentry fields', () => {
+test('action.place_order pair_lock preserves take profit while dropping unsupported exit and advanced reentry fields', () => {
   const rebuilt = buildNodeConfigFromForm('action.place_order', {
     fields: {
       mode: 'pair_lock',
@@ -756,11 +889,14 @@ test('action.place_order pair_lock drops unsupported exit and advanced reentry f
       slPriceCent: '45',
       ptbStopLossEnabled: 'true',
       ptbStopLossGapUsd: '0',
+      ptbStopLossGapUnit: 'usd',
       reenterOnSlHit: 'true',
       reentryMaxAttempts: '2',
       reentryCooldownSec: '15',
       tpEnabled: 'true',
       tpPriceCent: '95',
+      counterLegTpEnabled: 'true',
+      counterLegTpPriceCent: '82',
       reentryMinPriceCent: '40',
       reentryPriceToBeatMaxDiff: '3',
       reentryPriceToBeatMaxDiffUnit: 'usd',
@@ -771,6 +907,7 @@ test('action.place_order pair_lock drops unsupported exit and advanced reentry f
     expressionRows: [],
     outcomeConditionRows: [],
     tpRuleRows: [{ id: 'tp-1', priceCent: '95', sizePct: '100' }],
+    counterLegTpRuleRows: [{ id: 'counter-tp-1', priceCent: '82', sizePct: '100' }],
     slRuleRows: [{ id: 'sl-1', priceCent: '40', sizePct: '100' }],
     ptbStopLossRuleRows: [{ id: 'ptb-1', gapUsd: '0', sizePct: '100' }],
     timeExitRuleRows: [{ id: 'time-1', elapsedMinutes: '5', remainingPct: '100' }],
@@ -786,14 +923,18 @@ test('action.place_order pair_lock drops unsupported exit and advanced reentry f
   assert.equal(rebuilt.slPriceCent, 45);
   assert.equal(rebuilt.ptbStopLossEnabled, true);
   assert.equal(rebuilt.ptbStopLossGapUsd, 0);
+  assert.equal(rebuilt.ptbStopLossGapUnit, 'usd');
   assert.equal(rebuilt.reenterOnSlHit, true);
   assert.equal(rebuilt.reentryMaxAttempts, 2);
   assert.equal(rebuilt.reentryCooldownSec, 15);
-  assert.equal('tpEnabled' in rebuilt, false);
-  assert.equal('tpPriceCent' in rebuilt, false);
-  assert.equal('tpRules' in rebuilt, false);
+  assert.equal(rebuilt.tpEnabled, true);
+  assert.equal(rebuilt.tpPriceCent, 95);
+  assert.deepEqual(rebuilt.tpRules, [{ priceCent: 95, sizePct: 100 }]);
+  assert.equal(rebuilt.counterLegTpEnabled, true);
+  assert.equal(rebuilt.counterLegTpPriceCent, 82);
+  assert.deepEqual(rebuilt.counterLegTpRules, [{ priceCent: 82, sizePct: 100 }]);
   assert.equal('slRules' in rebuilt, false);
-  assert.equal('ptbStopLossRules' in rebuilt, false);
+  assert.deepEqual(rebuilt.ptbStopLossRules, [{ gapUsd: 0, sizePct: 100 }]);
   assert.equal('timeExitRules' in rebuilt, false);
   assert.equal('reentryMinPriceCent' in rebuilt, false);
   assert.equal('reentryPriceToBeatMaxDiff' in rebuilt, false);

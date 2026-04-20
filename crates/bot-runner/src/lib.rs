@@ -36,6 +36,7 @@ include!("trade_builder/pair_lock_market.rs");
 include!("trade_builder/pair_lock_quote.rs");
 include!("trade_builder/pair_lock_auto_primary.rs");
 include!("trade_builder/pair_lock_step_quote.rs");
+include!("trade_builder/pair_lock_take_profit.rs");
 include!("trade_builder/pair_lock.rs");
 include!("trade_builder/pair_lock_stop_loss.rs");
 include!("lib_parts/part_021.rs");

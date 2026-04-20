@@ -12,12 +12,18 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
         "counterLegEnabled": true,
         "counterLegSizeUsdc": 5,
         "counterLegOutcomeLabel": "opposite",
+        "tpEnabled": true,
+        "tpPriceCent": 95,
+        "tpRules": [{ "priceCent": 95.0, "sizePct": 100.0 }],
+        "notifyOnTpHit": true,
         "slEnabled": true,
         "slPriceCent": 45,
         "slTriggerPriceMode": "composite_safe",
         "ptbStopLossEnabled": true,
         "ptbStopLossGapUsd": 0.0,
+        "ptbStopLossGapUnit": "usd",
         "ptbStopLossTimeDecayMode": "tighten",
+        "ptbStopLossRules": [{ "gapUsd": 7.0, "sizePct": 60.0 }, { "gapUsd": 0.0, "sizePct": 40.0 }],
         "notifyOnSlHit": true,
         "reenterOnSlHit": true,
         "reentryMaxAttempts": 2,
@@ -27,13 +33,8 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
         .expect("pair lock config parse")
         .expect("pair lock config");
 
-    let primary = build_pair_lock_single_leg_node(
-        &node,
-        "btc-updown-5m-1",
-        "tok-up",
-        "Up",
-        "trigger_pair",
-    );
+    let primary =
+        build_pair_lock_single_leg_node(&node, "btc-updown-5m-1", "tok-up", "Up", "trigger_pair");
     let counter = build_pair_lock_counter_leg_node(
         &node,
         "btc-updown-5m-1",
@@ -46,36 +47,29 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
     );
 
     for candidate in [&primary, &counter] {
-        assert_eq!(candidate.config.get("mode").and_then(Value::as_str), Some("single"));
-        assert_eq!(candidate.config.get("slEnabled").and_then(Value::as_bool), Some(true));
-        assert_eq!(candidate.config.get("slPriceCent").and_then(Value::as_i64), Some(45));
         assert_eq!(
-            candidate.config.get("slTriggerPriceMode").and_then(Value::as_str),
-            Some("composite_safe")
-        );
-        assert_eq!(
-            candidate.config.get("ptbStopLossEnabled").and_then(Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            candidate.config.get("ptbStopLossGapUsd").and_then(Value::as_f64),
-            Some(0.0)
+            candidate.config.get("mode").and_then(Value::as_str),
+            Some("single")
         );
         assert_eq!(
             candidate
                 .config
-                .get("ptbStopLossTimeDecayMode")
-                .and_then(Value::as_str),
-            Some("tighten")
+                .get("reenterOnSlHit")
+                .and_then(Value::as_bool),
+            Some(true)
         );
-        assert_eq!(candidate.config.get("notifyOnSlHit").and_then(Value::as_bool), Some(true));
-        assert_eq!(candidate.config.get("reenterOnSlHit").and_then(Value::as_bool), Some(true));
         assert_eq!(
-            candidate.config.get("reentryMaxAttempts").and_then(Value::as_i64),
+            candidate
+                .config
+                .get("reentryMaxAttempts")
+                .and_then(Value::as_i64),
             Some(2)
         );
         assert_eq!(
-            candidate.config.get("reentryCooldownSec").and_then(Value::as_i64),
+            candidate
+                .config
+                .get("reentryCooldownSec")
+                .and_then(Value::as_i64),
             Some(15)
         );
         assert_eq!(
@@ -85,10 +79,360 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
                 .and_then(Value::as_str),
             Some("trigger_pair")
         );
-        assert!(candidate.config.get("tpEnabled").is_none());
-        assert!(candidate.config.get("ptbStopLossRules").is_none());
         assert!(candidate.config.get("slRules").is_none());
     }
+
+    assert_eq!(
+        primary.config.get("tpEnabled").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        primary.config.get("tpPriceCent").and_then(Value::as_i64),
+        Some(95)
+    );
+    assert_eq!(primary.config.get("tpRules"), node.config.get("tpRules"));
+    assert_eq!(
+        primary.config.get("notifyOnTpHit").and_then(Value::as_bool),
+        Some(true)
+    );
+
+    assert_eq!(
+        primary.config.get("slEnabled").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        primary.config.get("slPriceCent").and_then(Value::as_i64),
+        Some(45)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("slTriggerPriceMode")
+            .and_then(Value::as_str),
+        Some("composite_safe")
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("ptbStopLossEnabled")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("ptbStopLossGapUsd")
+            .and_then(Value::as_f64),
+        Some(0.0)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("ptbStopLossGapUnit")
+            .and_then(Value::as_str),
+        Some("usd")
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("ptbStopLossTimeDecayMode")
+            .and_then(Value::as_str),
+        Some("tighten")
+    );
+    assert_eq!(
+        primary.config.get("ptbStopLossRules"),
+        node.config.get("ptbStopLossRules")
+    );
+    assert_eq!(
+        primary.config.get("notifyOnSlHit").and_then(Value::as_bool),
+        Some(true)
+    );
+
+    assert!(counter.config.get("tpEnabled").is_none());
+    assert!(counter.config.get("tpPriceCent").is_none());
+    assert!(counter.config.get("tpRules").is_none());
+    assert!(counter.config.get("notifyOnTpHit").is_none());
+    assert!(counter.config.get("slEnabled").is_none());
+    assert!(counter.config.get("slPriceCent").is_none());
+    assert!(counter.config.get("slTriggerPriceMode").is_none());
+    assert!(counter.config.get("ptbStopLossEnabled").is_none());
+    assert!(counter.config.get("ptbStopLossGapUsd").is_none());
+    assert!(counter.config.get("ptbStopLossGapUnit").is_none());
+    assert!(counter.config.get("ptbStopLossTimeDecayMode").is_none());
+    assert!(counter.config.get("ptbStopLossRules").is_none());
+    assert!(counter.config.get("notifyOnSlHit").is_none());
+}
+
+#[test]
+fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
+    let node = test_node(json!({
+        "mode": "pair_lock",
+        "side": "buy",
+        "executionMode": "market",
+        "sizeUsdc": 5,
+        "pairMaxTotalCent": 90,
+        "counterLegEnabled": true,
+        "counterLegSizeUsdc": 5,
+        "counterLegOutcomeLabel": "opposite",
+        "tpEnabled": true,
+        "tpPriceCent": 95,
+        "tpRules": [{ "priceCent": 95.0, "sizePct": 100.0 }],
+        "notifyOnTpHit": true,
+        "slEnabled": true,
+        "slPriceCent": 45,
+        "slTriggerPriceMode": "composite_safe",
+        "ptbStopLossEnabled": true,
+        "ptbStopLossGapUsd": 0.0,
+        "ptbStopLossGapUnit": "usd",
+        "ptbStopLossTimeDecayMode": "tighten",
+        "notifyOnSlHit": true,
+        "counterLegSlEnabled": true,
+        "counterLegSlPriceCent": 38,
+        "counterLegSlTriggerPriceMode": "best_bid",
+        "counterLegPtbStopLossEnabled": true,
+        "counterLegPtbStopLossGapUsd": -2.0,
+        "counterLegPtbStopLossGapUnit": "cent",
+        "counterLegPtbStopLossTimeDecayMode": "relax",
+        "counterLegTpEnabled": true,
+        "counterLegTpPriceCent": 82,
+        "counterLegTpRules": [{ "priceCent": 82.0, "sizePct": 100.0 }],
+        "counterLegNotifyOnTpHit": false,
+        "counterLegNotifyOnSlHit": false,
+    }));
+    let pair_lock = resolve_action_place_order_pair_lock_config(&node)
+        .expect("pair lock config parse")
+        .expect("pair lock config");
+
+    let primary =
+        build_pair_lock_single_leg_node(&node, "btc-updown-5m-1", "tok-up", "Up", "trigger_pair");
+    let counter = build_pair_lock_counter_leg_node(
+        &node,
+        "btc-updown-5m-1",
+        &ActionPlaceOrderPairResolvedCounterLeg {
+            token_id: "tok-down".to_string(),
+            outcome_label: "Down".to_string(),
+        },
+        &pair_lock,
+        "trigger_pair",
+    );
+
+    assert_eq!(
+        primary.config.get("slPriceCent").and_then(Value::as_i64),
+        Some(45)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("slTriggerPriceMode")
+            .and_then(Value::as_str),
+        Some("composite_safe")
+    );
+    assert_eq!(
+        primary.config.get("tpPriceCent").and_then(Value::as_i64),
+        Some(95)
+    );
+    assert_eq!(primary.config.get("tpRules"), node.config.get("tpRules"));
+    assert_eq!(
+        primary.config.get("notifyOnTpHit").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("ptbStopLossGapUsd")
+            .and_then(Value::as_f64),
+        Some(0.0)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("ptbStopLossGapUnit")
+            .and_then(Value::as_str),
+        Some("usd")
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("ptbStopLossTimeDecayMode")
+            .and_then(Value::as_str),
+        Some("tighten")
+    );
+    assert_eq!(
+        primary.config.get("notifyOnSlHit").and_then(Value::as_bool),
+        Some(true)
+    );
+
+    assert_eq!(
+        counter.config.get("tpEnabled").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        counter.config.get("tpPriceCent").and_then(Value::as_i64),
+        Some(82)
+    );
+    assert_eq!(
+        counter.config.get("tpRules"),
+        node.config.get("counterLegTpRules")
+    );
+    assert_eq!(
+        counter.config.get("notifyOnTpHit").and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        counter.config.get("slPriceCent").and_then(Value::as_i64),
+        Some(38)
+    );
+    assert_eq!(
+        counter
+            .config
+            .get("slTriggerPriceMode")
+            .and_then(Value::as_str),
+        Some("best_bid")
+    );
+    assert_eq!(
+        counter
+            .config
+            .get("ptbStopLossGapUsd")
+            .and_then(Value::as_f64),
+        Some(-2.0)
+    );
+    assert_eq!(
+        counter
+            .config
+            .get("ptbStopLossGapUnit")
+            .and_then(Value::as_str),
+        Some("cent")
+    );
+    assert_eq!(
+        counter
+            .config
+            .get("ptbStopLossTimeDecayMode")
+            .and_then(Value::as_str),
+        Some("relax")
+    );
+    assert_eq!(
+        counter.config.get("notifyOnSlHit").and_then(Value::as_bool),
+        Some(false)
+    );
+}
+
+#[test]
+fn pair_lock_counter_leg_keeps_stop_loss_fields_empty_when_counter_fields_missing() {
+    let node = test_node(json!({
+        "mode": "pair_lock",
+        "side": "buy",
+        "executionMode": "market",
+        "sizeUsdc": 5,
+        "pairMaxTotalCent": 90,
+        "counterLegEnabled": true,
+        "counterLegSizeUsdc": 5,
+        "counterLegOutcomeLabel": "opposite",
+        "tpEnabled": true,
+        "tpPriceCent": 95,
+        "tpRules": [{ "priceCent": 95.0, "sizePct": 100.0 }],
+        "notifyOnTpHit": true,
+        "slEnabled": true,
+        "slPriceCent": 45,
+        "slTriggerPriceMode": "composite_safe",
+        "ptbStopLossEnabled": true,
+        "ptbStopLossGapUsd": 0.0,
+        "ptbStopLossGapUnit": "usd",
+        "ptbStopLossTimeDecayMode": "tighten",
+        "notifyOnSlHit": true,
+    }));
+    let pair_lock = resolve_action_place_order_pair_lock_config(&node)
+        .expect("pair lock config parse")
+        .expect("pair lock config");
+
+    let counter = build_pair_lock_counter_leg_node(
+        &node,
+        "btc-updown-5m-1",
+        &ActionPlaceOrderPairResolvedCounterLeg {
+            token_id: "tok-down".to_string(),
+            outcome_label: "Down".to_string(),
+        },
+        &pair_lock,
+        "trigger_pair",
+    );
+
+    assert!(counter.config.get("tpEnabled").is_none());
+    assert!(counter.config.get("tpPriceCent").is_none());
+    assert!(counter.config.get("tpRules").is_none());
+    assert!(counter.config.get("notifyOnTpHit").is_none());
+    assert!(counter.config.get("slEnabled").is_none());
+    assert!(counter.config.get("slPriceCent").is_none());
+    assert!(counter.config.get("slTriggerPriceMode").is_none());
+    assert!(counter.config.get("ptbStopLossEnabled").is_none());
+    assert!(counter.config.get("ptbStopLossGapUsd").is_none());
+    assert!(counter.config.get("ptbStopLossGapUnit").is_none());
+    assert!(counter.config.get("ptbStopLossTimeDecayMode").is_none());
+    assert!(counter.config.get("notifyOnSlHit").is_none());
+}
+
+fn test_pair_lock_session(status: &str, primary_order_id: i64, counter_order_id: i64) -> TradeBuilderPairSession {
+    TradeBuilderPairSession {
+        id: 17,
+        user_id: 1,
+        flow_definition_id: None,
+        flow_run_id: None,
+        flow_node_key: Some("action_1".to_string()),
+        market_slug: "btc-updown-5m-1".to_string(),
+        status: status.to_string(),
+        pair_target_total_cent: 90.0,
+        min_net_profit_usdc: 0.0,
+        profit_safety_buffer_usdc: 0.0,
+        orphan_grace_ms: 1500,
+        notify_on_pair_locked: false,
+        notify_on_pair_unwind: false,
+        notify_on_pair_no_edge: false,
+        primary_order_id: Some(primary_order_id),
+        counter_order_id: Some(counter_order_id),
+        lead_order_id: Some(primary_order_id),
+        primary_fill_qty: None,
+        primary_fill_fee_qty: None,
+        primary_net_qty: None,
+        primary_avg_fill_price: None,
+        counter_fill_qty: None,
+        counter_fill_fee_qty: None,
+        counter_net_qty: None,
+        counter_avg_fill_price: None,
+        lead_filled_at: None,
+        locked_qty: None,
+        projected_net_profit_usdc: None,
+        last_error: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    }
+}
+
+#[test]
+fn pair_lock_locked_session_skips_ptb_stop_loss_bump_for_candidate_orders() {
+    let mut counter = test_builder_order("buy", None);
+    counter.id = 12;
+    counter.pair_session_id = Some(17);
+    counter.pair_leg_role = Some(TRADE_BUILDER_PAIR_ROLE_COUNTER_CANDIDATE.to_string());
+
+    let locked_session = test_pair_lock_session(TRADE_BUILDER_PAIR_STATUS_LOCKED, 11, 12);
+
+    assert!(trade_builder_pair_lock_ptb_stop_loss_bump_should_skip_from_session(
+        &locked_session,
+        &counter,
+    ));
+}
+
+#[test]
+fn pair_lock_working_session_keeps_ptb_stop_loss_bump_enabled_for_lead_candidate() {
+    let mut lead = test_builder_order("buy", None);
+    lead.id = 11;
+    lead.pair_session_id = Some(17);
+    lead.pair_leg_role = Some(TRADE_BUILDER_PAIR_ROLE_LEAD_CANDIDATE.to_string());
+
+    let working_session = test_pair_lock_session(TRADE_BUILDER_PAIR_STATUS_WORKING, 11, 12);
+
+    assert!(!trade_builder_pair_lock_ptb_stop_loss_bump_should_skip_from_session(
+        &working_session,
+        &lead,
+    ));
 }
 
 #[test]

@@ -2,7 +2,13 @@ fn trade_builder_pair_lock_stop_loss_surface_active_from_session(
     session: &TradeBuilderPairSession,
     order_id: i64,
 ) -> bool {
-    session.status == TRADE_BUILDER_PAIR_STATUS_WORKING && session.lead_order_id == Some(order_id)
+    match session.status.as_str() {
+        TRADE_BUILDER_PAIR_STATUS_WORKING => session.lead_order_id == Some(order_id),
+        TRADE_BUILDER_PAIR_STATUS_LOCKED => {
+            session.primary_order_id == Some(order_id) || session.counter_order_id == Some(order_id)
+        }
+        _ => false,
+    }
 }
 
 async fn trade_builder_pair_lock_stop_loss_surface_active(
@@ -66,6 +72,67 @@ async fn cancel_trade_builder_pair_lock_stop_loss_children(
     Ok(canceled_child_ids)
 }
 
+async fn cancel_trade_builder_pair_lock_unwind_orders(
+    repo: &PostgresRepository,
+    orders: &[TradeBuilderOrder],
+    reason: &str,
+) -> Result<Vec<i64>> {
+    let mut canceled_unwind_order_ids = Vec::new();
+    for order in orders
+        .iter()
+        .filter(|order| trade_builder_pair_lock_is_unwind_order(order))
+    {
+        if trade_builder_is_terminal_status(&order.status) {
+            continue;
+        }
+        let next_status = if order.active_exchange_order_id.is_some() {
+            "canceled_requested"
+        } else {
+            "canceled"
+        };
+        repo.set_trade_builder_order_status(order.id, next_status, Some(reason))
+            .await?;
+        repo.append_trade_builder_order_event(
+            order.id,
+            "pair_lock_unwind_canceled",
+            &json!({
+                "pair_session_id": order.pair_session_id,
+                "reason": reason,
+                "status_after": next_status,
+            }),
+        )
+        .await?;
+        canceled_unwind_order_ids.push(order.id);
+    }
+    Ok(canceled_unwind_order_ids)
+}
+
+async fn detach_trade_builder_pair_lock_surviving_candidates(
+    repo: &PostgresRepository,
+    orders: &[TradeBuilderOrder],
+    filled_parent_order_id: i64,
+    reason: &str,
+) -> Result<Vec<i64>> {
+    let mut detached_candidate_order_ids = Vec::new();
+    for order in orders.iter().filter(|order| {
+        trade_builder_pair_lock_is_candidate_order(order) && order.id != filled_parent_order_id
+    }) {
+        repo.set_trade_builder_order_pair_session(order.id, None, None)
+            .await?;
+        repo.append_trade_builder_order_event(
+            order.id,
+            "pair_lock_candidate_detached",
+            &json!({
+                "pair_session_id": order.pair_session_id,
+                "reason": reason,
+            }),
+        )
+        .await?;
+        detached_candidate_order_ids.push(order.id);
+    }
+    Ok(detached_candidate_order_ids)
+}
+
 async fn maybe_finalize_trade_builder_pair_lock_after_lead_stop_loss_fill(
     repo: &PostgresRepository,
     parent_order: &TradeBuilderOrder,
@@ -84,6 +151,9 @@ async fn maybe_finalize_trade_builder_pair_lock_after_lead_stop_loss_fill(
     let Some(session) = repo.get_trade_builder_pair_session(pair_session_id).await? else {
         return Ok(());
     };
+    if session.status != TRADE_BUILDER_PAIR_STATUS_WORKING {
+        return Ok(());
+    }
     if !trade_builder_pair_lock_stop_loss_surface_active_from_session(&session, parent_order.id) {
         return Ok(());
     }
@@ -172,6 +242,80 @@ async fn maybe_finalize_trade_builder_pair_lock_after_lead_stop_loss_fill(
     Ok(())
 }
 
+async fn maybe_finalize_trade_builder_pair_lock_after_locked_leg_stop_loss_fill(
+    repo: &PostgresRepository,
+    parent_order: &TradeBuilderOrder,
+    stop_loss_order: &TradeBuilderOrder,
+) -> Result<()> {
+    if !trade_builder_is_stop_loss_child(stop_loss_order)
+        || !trade_builder_order_uses_pair_lock(parent_order)
+        || !trade_builder_pair_lock_is_candidate_order(parent_order)
+    {
+        return Ok(());
+    }
+
+    let Some(pair_session_id) = parent_order.pair_session_id else {
+        return Ok(());
+    };
+    let Some(session) = repo.get_trade_builder_pair_session(pair_session_id).await? else {
+        return Ok(());
+    };
+    if session.status != TRADE_BUILDER_PAIR_STATUS_LOCKED {
+        return Ok(());
+    }
+
+    let orders = repo
+        .list_trade_builder_orders_by_pair_session(pair_session_id)
+        .await?;
+    let canceled_unwind_order_ids =
+        cancel_trade_builder_pair_lock_unwind_orders(repo, &orders, "locked_leg_stop_loss")
+            .await?;
+    let detached_candidate_order_ids = detach_trade_builder_pair_lock_surviving_candidates(
+        repo,
+        &orders,
+        parent_order.id,
+        "locked_leg_stop_loss",
+    )
+    .await?;
+
+    repo.update_trade_builder_pair_session_state(
+        session.id,
+        TRADE_BUILDER_PAIR_STATUS_COMPLETED,
+        session.locked_qty,
+        session.projected_net_profit_usdc,
+        Some("locked_leg_stop_loss"),
+    )
+    .await?;
+    append_trade_builder_pair_lock_event(
+        repo,
+        &session,
+        "pair_lock_locked_leg_stop_loss",
+        json!({
+            "pair_session_id": session.id,
+            "parent_order_id": parent_order.id,
+            "sl_child_order_id": stop_loss_order.id,
+            "reason": "locked_leg_stop_loss",
+            "canceled_unwind_order_ids": canceled_unwind_order_ids,
+            "detached_candidate_order_ids": detached_candidate_order_ids,
+        }),
+    )
+    .await?;
+    append_trade_builder_pair_lock_event(
+        repo,
+        &session,
+        "pair_lock_session_state_changed",
+        json!({
+            "pair_session_id": session.id,
+            "status_after": TRADE_BUILDER_PAIR_STATUS_COMPLETED,
+            "reason": "locked_leg_stop_loss",
+            "canceled_unwind_order_ids": canceled_unwind_order_ids,
+            "detached_candidate_order_ids": detached_candidate_order_ids,
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod pair_lock_stop_loss_tests {
     use super::*;
@@ -221,8 +365,17 @@ mod pair_lock_stop_loss_tests {
 
         let mut locked_session = session.clone();
         locked_session.status = TRADE_BUILDER_PAIR_STATUS_LOCKED.to_string();
-        assert!(!trade_builder_pair_lock_stop_loss_surface_active_from_session(
+        assert!(trade_builder_pair_lock_stop_loss_surface_active_from_session(
             &locked_session, 12
+        ));
+        assert!(trade_builder_pair_lock_stop_loss_surface_active_from_session(
+            &locked_session, 11
+        ));
+
+        let mut completed_session = session;
+        completed_session.status = TRADE_BUILDER_PAIR_STATUS_COMPLETED.to_string();
+        assert!(!trade_builder_pair_lock_stop_loss_surface_active_from_session(
+            &completed_session, 12
         ));
     }
 }

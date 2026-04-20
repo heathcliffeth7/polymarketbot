@@ -149,14 +149,13 @@ fn max_price_waiting_notification_mentions_recovery_retry() {
     let mut order = test_builder_order("buy", None);
     order.max_price = Some(0.9);
 
-    let message =
-        build_max_price_waiting_notification_message(
-            &order,
-            0.95,
-            0.96,
-            "desired_price_fallback",
-            Some("above_max_price"),
-        );
+    let message = build_max_price_waiting_notification_message(
+        &order,
+        0.95,
+        0.96,
+        "desired_price_fallback",
+        Some("above_max_price"),
+    );
 
     assert!(message.contains("Bekleme"));
     assert!(message.contains("yeniden denenecek"));

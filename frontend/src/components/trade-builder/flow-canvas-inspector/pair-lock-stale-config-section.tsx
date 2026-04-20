@@ -25,11 +25,7 @@ function collectPairLockStaleEntries(form: NodeConfigFormState): string[] {
     })
     .filter((value): value is string => !!value);
 
-  if (form.tpRuleRows.length > 0) entries.push(`tpRules=${form.tpRuleRows.length}`);
   if (form.slRuleRows.length > 0) entries.push(`slRules=${form.slRuleRows.length}`);
-  if (form.ptbStopLossRuleRows.length > 0) {
-    entries.push(`ptbStopLossRules=${form.ptbStopLossRuleRows.length}`);
-  }
   if (form.timeExitRuleRows.length > 0) {
     entries.push(`timeExitRules=${form.timeExitRuleRows.length}`);
   }
@@ -82,9 +78,7 @@ export function PairLockStaleConfigSection({
             return {
               ...prev,
               fields: nextFields,
-              tpRuleRows: [],
               slRuleRows: [],
-              ptbStopLossRuleRows: [],
               timeExitRuleRows: [],
             };
           })

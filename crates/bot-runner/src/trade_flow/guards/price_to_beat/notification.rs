@@ -108,6 +108,27 @@ fn build_stop_loss_bump_summary(evaluation: &PriceToBeatGuardEvaluation) -> Opti
     Some(parts.join(", "))
 }
 
+fn stop_loss_bump_is_active(evaluation: &PriceToBeatGuardEvaluation) -> bool {
+    const PTB_BUMP_ACTIVE_EPSILON: f64 = 1e-9;
+
+    if !evaluation.stop_loss_bump_usd.is_finite() || evaluation.stop_loss_bump_usd <= 0.0 {
+        return false;
+    }
+
+    let baseline_usd = evaluation.base_threshold_usd.or(evaluation.auto_threshold_usd);
+    let effective_usd = evaluation
+        .current_effective_ptb_usd
+        .or(Some(evaluation.threshold_usd))
+        .filter(|value| value.is_finite());
+
+    match (baseline_usd, effective_usd) {
+        (Some(baseline_usd), Some(effective_usd)) => {
+            effective_usd > baseline_usd + PTB_BUMP_ACTIVE_EPSILON
+        }
+        _ => false,
+    }
+}
+
 fn build_price_to_beat_summary_block(evaluation: &PriceToBeatGuardEvaluation) -> String {
     let mut lines = Vec::new();
     let configured_mode = evaluation
@@ -143,8 +164,10 @@ fn build_price_to_beat_summary_block(evaluation: &PriceToBeatGuardEvaluation) ->
         .unwrap_or_else(|| "aktif".to_string());
         lines.push(format!("Re-entry Override: {reentry_override_summary}"));
     }
-    if let Some(stop_loss_bump_summary) = build_stop_loss_bump_summary(evaluation) {
+    if stop_loss_bump_is_active(evaluation) {
+        if let Some(stop_loss_bump_summary) = build_stop_loss_bump_summary(evaluation) {
         lines.push(format!("SL Bump: {stop_loss_bump_summary}"));
+        }
     }
 
     format!("\n{}", lines.join("\n"))
@@ -156,7 +179,7 @@ fn format_current_ptb_summary(
     current_ptb_usd: Option<f64>,
 ) -> String {
     format_optional_guard_threshold_summary(current_ptb_value, current_ptb_unit, current_ptb_usd)
-        .unwrap_or_else(|| "N/A".to_string())
+        .unwrap_or_else(|| "Bilinmiyor".to_string())
 }
 
 pub(super) fn build_price_to_beat_guard_blocked_notification_message(
@@ -290,6 +313,48 @@ pub(super) fn build_price_to_beat_relax_changed_notification_message(
     )
 }
 
+pub(super) fn build_price_to_beat_relax_miss_notification_message(
+    evaluation: &PriceToBeatGuardEvaluation,
+    previous_miss_streak: Option<i64>,
+    next_miss_streak: i64,
+    missed_market_slug: Option<&str>,
+    tradable_seconds_count: i64,
+    max_fillability_score: Option<f64>,
+    config_miss_count: i64,
+    relax_active: bool,
+    effective_target_threshold_usd: Option<f64>,
+) -> String {
+    let previous_miss_streak = previous_miss_streak
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "N/A".to_string());
+    let missed_market_slug = missed_market_slug.unwrap_or("N/A");
+    let relax_status = if relax_active {
+        format!(
+            "aktif\nGuncel Efektif Relax PTB: {}",
+            format_optional_guard_number(effective_target_threshold_usd)
+        )
+    } else {
+        "threshold henuz gevsemedi".to_string()
+    };
+    let summary_block = build_price_to_beat_summary_block(evaluation);
+    format!(
+        "{}\nMarket: {}\nMissed Market: {}\nYon: {}\nAsset: {}\nTimeframe: {}\nOnceki Bildirilen Miss Streak: {}\nYeni Miss Streak: {}\nMissed Tradable Seconds: {}\nMissed Max Fillability: {}\nConfigured Miss Count: {}\nRelax Durumu: {}{}",
+        "Price to Beat Relax Miss Artti",
+        evaluation.market_slug,
+        missed_market_slug,
+        format_optional_direction(evaluation.direction.as_deref()),
+        evaluation.asset.as_deref().unwrap_or("N/A"),
+        evaluation.timeframe.as_deref().unwrap_or("N/A"),
+        previous_miss_streak,
+        next_miss_streak,
+        tradable_seconds_count,
+        format_optional_guard_number(max_fillability_score),
+        config_miss_count,
+        relax_status,
+        summary_block,
+    )
+}
+
 pub(crate) fn build_price_to_beat_bump_increased_notification_message(
     market_slug: &str,
     amount: f64,
@@ -297,14 +362,19 @@ pub(crate) fn build_price_to_beat_bump_increased_notification_message(
     count: i64,
     previous_bump_usd: f64,
     next_bump_usd: f64,
+    previous_ptb_value: Option<f64>,
+    previous_ptb_unit: Option<&str>,
+    previous_ptb_usd: Option<f64>,
     current_ptb_value: Option<f64>,
     current_ptb_unit: Option<&str>,
     current_ptb_usd: Option<f64>,
 ) -> String {
+    let previous_ptb_summary =
+        format_current_ptb_summary(previous_ptb_value, previous_ptb_unit, previous_ptb_usd);
     let current_ptb_summary =
         format_current_ptb_summary(current_ptb_value, current_ptb_unit, current_ptb_usd);
     format!(
-        "PTB Stop-Loss Artisi Guncellendi\nMarket: {market_slug}\nKademe: {amount:.8} {unit}\nToplam Artis Sayisi: {count}\nUygulanan Toplam Artis: {previous_bump_usd:.8} USD -> {next_bump_usd:.8} USD\nGuncel PTB: {current_ptb_summary}"
+        "PTB Stop-Loss Artisi Guncellendi\nMarket: {market_slug}\nKademe: {amount:.8} {unit}\nToplam Artis Sayisi: {count}\nUygulanan Toplam Artis: {previous_bump_usd:.8} USD -> {next_bump_usd:.8} USD\nEfektif PTB: {previous_ptb_summary} -> {current_ptb_summary}\nGuncel PTB: {current_ptb_summary}"
     )
 }
 

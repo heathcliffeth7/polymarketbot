@@ -257,46 +257,25 @@ fn extract_source_trade_id(execution: &TradeFlowNodeExecution) -> Option<i64> {
 
 fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Value>) {
     for key in [
-        "mode",
-        "pairMaxTotalCent",
-        "pairTargetTotalCent",
-        "pairSizingMode",
-        "pairTotalBudgetUsdc",
-        "pairOrphanGraceMs",
-        "notifyOnPairLocked",
-        "notifyOnPairUnwind",
-        "counterLegEnabled",
-        "counterLegOutcomeLabel",
-        "counterLegTriggerCondition",
-        "counterLegTriggerPriceCent",
-        "counterLegMaxPriceCent",
-        "counterLegPriceToBeatGuardEnabled",
-        "counterLegPriceToBeatMode",
-        "counterLegPriceToBeatMaxDiff",
-        "counterLegPriceToBeatMaxDiffUnit",
-        "counterLegExecutionFloorGuardEnabled",
-        "counterLegExecutionFloorPriceCent",
-        "counterLegRetryOnPriceToBeatGuardBlock",
-        "counterLegRetryOnExecutionFloorGuardBlock",
-        "counterLegRetryOnMaxPriceBlock",
-        "counterLegSizeUsdc",
-        "tpEnabled",
-        "tpPrice",
-        "tpPriceCent",
-        "tpRules",
-        "slPrice",
-        "slRules",
-        "ptbStopLossRules",
-        "timeExitRules",
+        "mode", "pairMaxTotalCent", "pairTargetTotalCent", "pairSizingMode", "pairTotalBudgetUsdc",
+        "pairOrphanGraceMs", "notifyOnPairLocked", "notifyOnPairUnwind", "counterLegEnabled",
+        "counterLegOutcomeLabel", "counterLegTriggerCondition", "counterLegTriggerPriceCent",
+        "counterLegMaxPriceCent", "counterLegPriceToBeatGuardEnabled", "counterLegPriceToBeatMode",
+        "counterLegPriceToBeatMaxDiff", "counterLegPriceToBeatMaxDiffUnit",
+        "counterLegExecutionFloorGuardEnabled", "counterLegExecutionFloorPriceCent",
+        "counterLegRetryOnPriceToBeatGuardBlock", "counterLegRetryOnExecutionFloorGuardBlock",
+        "counterLegRetryOnMaxPriceBlock", "counterLegSizeUsdc", "counterLegTpEnabled",
+        "counterLegTpPriceCent", "counterLegTpRules", "counterLegNotifyOnTpHit",
+        "counterLegSlEnabled",
+        "counterLegSlPriceCent", "counterLegSlTriggerPriceMode", "counterLegPtbStopLossEnabled",
+        "counterLegPtbStopLossGapUsd", "counterLegPtbStopLossGapUnit",
+        "counterLegPtbStopLossTimeDecayMode",
+        "counterLegNotifyOnSlHit", "tpEnabled", "tpPrice", "tpPriceCent", "tpRules",
+        "notifyOnTpHit", "slPrice", "slRules", "ptbStopLossRules", "timeExitRules",
         "reentryTriggerNodeKey",
-        "reentryMinPriceCent",
-        "reentryMaxPriceCent",
-        "reentryPriceToBeatMaxDiff",
-        "reentryPriceToBeatMaxDiffUnit",
-        "reentrySkipCurrentWindow",
-        "reentryThresholdDecay",
-        "reentryMaxPriceTightenBps",
-        "stagedSlReentryOnlyAfterAllStages",
+        "reentryMinPriceCent", "reentryMaxPriceCent", "reentryPriceToBeatMaxDiff",
+        "reentryPriceToBeatMaxDiffUnit", "reentrySkipCurrentWindow", "reentryThresholdDecay",
+        "reentryMaxPriceTightenBps", "stagedSlReentryOnlyAfterAllStages",
     ] {
         config.remove(key);
     }
@@ -321,6 +300,10 @@ fn build_pair_lock_single_leg_node(
     config.insert("tokenId".to_string(), json!(token_id));
     config.insert("outcomeLabel".to_string(), json!(outcome_label));
     config.insert("reentryTriggerNodeKey".to_string(), json!(trigger_node_key));
+    copy_pair_lock_primary_take_profit_fields(node, &mut config);
+    if let Some(value) = node.config.get("ptbStopLossRules") {
+        config.insert("ptbStopLossRules".to_string(), value.clone());
+    }
 
     TradeFlowNode {
         key: node.key.clone(),
@@ -352,6 +335,7 @@ fn build_pair_lock_counter_leg_node(
     config.insert("tokenId".to_string(), json!(&counter.token_id));
     config.insert("outcomeLabel".to_string(), json!(&counter.outcome_label));
     config.insert("reentryTriggerNodeKey".to_string(), json!(trigger_node_key));
+    copy_pair_lock_counter_take_profit_fields(node, &mut config);
 
     if let Some(counter_size) = pair_lock.counter_leg_size_usdc {
         if counter_size > 0.0 {
@@ -375,6 +359,17 @@ fn build_pair_lock_counter_leg_node(
         ("counterLegRetryOnPriceToBeatGuardBlock", "retryOnPriceToBeatGuardBlock"),
         ("counterLegRetryOnExecutionFloorGuardBlock", "retryOnExecutionFloorGuardBlock"),
         ("counterLegRetryOnMaxPriceBlock", "retryOnMaxPriceBlock"),
+        ("counterLegTpEnabled", "tpEnabled"),
+        ("counterLegTpPriceCent", "tpPriceCent"),
+        ("counterLegNotifyOnTpHit", "notifyOnTpHit"),
+        ("counterLegSlEnabled", "slEnabled"),
+        ("counterLegSlPriceCent", "slPriceCent"),
+        ("counterLegSlTriggerPriceMode", "slTriggerPriceMode"),
+        ("counterLegPtbStopLossEnabled", "ptbStopLossEnabled"),
+        ("counterLegPtbStopLossGapUsd", "ptbStopLossGapUsd"),
+        ("counterLegPtbStopLossGapUnit", "ptbStopLossGapUnit"),
+        ("counterLegPtbStopLossTimeDecayMode", "ptbStopLossTimeDecayMode"),
+        ("counterLegNotifyOnSlHit", "notifyOnSlHit"),
     ] {
         if let Some(value) = node.config.get(source_key) {
             config.insert(target_key.to_string(), value.clone());
@@ -497,6 +492,14 @@ async fn execute_action_place_order_pair_lock(
             )
         } else {
             let selection_attempt = resolve_action_place_order_pair_lock_primary_selection(
+                Some(
+                    crate::trade_flow::guards::price_to_beat::PriceToBeatGuardRuntimeContext::pair_lock_auto_primary(
+                        repo,
+                        run.user_id,
+                        cfg,
+                        Some(client),
+                    ),
+                ),
                 ws,
                 client,
                 run,
@@ -1312,8 +1315,6 @@ async fn maybe_handle_trade_builder_pair_lock_buy_fill(
     let orders = repo
         .list_trade_builder_orders_by_pair_session(pair_session_id)
         .await?;
-    let canceled_stop_loss_child_ids =
-        cancel_trade_builder_pair_lock_stop_loss_children(repo, &orders, "pair_locked").await?;
     repo.update_trade_builder_pair_session_state(
         pair_session_id,
         TRADE_BUILDER_PAIR_STATUS_LOCKED,
@@ -1330,7 +1331,6 @@ async fn maybe_handle_trade_builder_pair_lock_buy_fill(
             "pair_session_id": pair_session_id,
             "locked_qty": common_qty,
             "projected_net_profit_usdc": projected_net_profit_usdc,
-            "canceled_stop_loss_child_ids": canceled_stop_loss_child_ids,
         }),
     )
     .await?;

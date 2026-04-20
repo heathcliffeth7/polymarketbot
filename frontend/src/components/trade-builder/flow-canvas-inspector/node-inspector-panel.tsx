@@ -5,17 +5,18 @@ import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { NODE_FIELD_SCHEMAS, createEmptyExitLadderRuleRow, createEmptyPtbStopLossRuleRow, createEmptyTimeExitRuleRow, type ExitLadderRuleRow, isPresetBuySellPlaceOrderMarker, isPresetPlaceOrderMarker, type PtbStopLossRuleRow, type TimeExitRuleRow } from '@/lib/trade-flow-config-mappers';
+import { NODE_FIELD_SCHEMAS, createEmptyExitLadderRuleRow, createEmptyTimeExitRuleRow, type ExitLadderRuleRow, isPresetBuySellPlaceOrderMarker, isPresetPlaceOrderMarker, type PtbGapUnit, type PtbStopLossRuleRow, type TimeExitRuleRow } from '@/lib/trade-flow-config-mappers';
 import { NODE_FIELD_HELP_CONTENT, NODE_TYPE_OPTIONS } from '../flow-canvas-constants';
 import { normalizeDateTimeInput } from '../flow-canvas-utils';
 import { Settings2, Trash2, Plus, Zap } from 'lucide-react';
 import { EMPTY_SELECT_SENTINEL } from './shared';
-import { ExitLadderSection, PtbStopLossRuleSection } from './exit-sections';
+import { ExitLadderSection } from './exit-sections';
 import { ExecutionFloorProtectionSection } from './execution-floor-protection-section';
 import { MaxPriceProtectionSection } from './max-price-protection-section';
 import { PairLockAutoPreviewSection } from './pair-lock-auto-preview-section';
 import { PriceToBeatMaxPriceRelaxSection } from './price-to-beat-max-price-relax-section';
 import { PriceToBeatStopLossBumpSection } from './price-to-beat-stop-loss-bump-section';
+import { PtbStopLossSection } from './ptb-stop-loss-section';
 import { TimeExitRulesSection } from './time-exit-rules-section';
 import { PairLockSummarySection, TriggerPairLockHint } from './pair-lock-binding-section';
 import { PairLockStaleConfigSection } from './pair-lock-stale-config-section';
@@ -25,6 +26,7 @@ import {
   resolvePairLockCounterPtbVisibility,
   resolvePairLockSizingFieldVisibility,
   resolvePairLockStopLossFieldVisibility,
+  resolvePairLockTakeProfitFieldVisibility,
   resolvePairLockUiState,
 } from './pair-lock-inspector';
 import { DrawdownRulesSection, ExpressionSection, OpenPositionsSection, OutcomeConditionsSection, StatePatchSection } from './sections';
@@ -99,9 +101,21 @@ export function NodeInspectorPanel({
       form.fields.refKey
     );
   const placeOrderSide = nodeTypeDraft === 'action.place_order' ? (form.fields.side ?? '').toString().trim().toLowerCase() : '';
+  const placeOrderCounterLegEnabled =
+    nodeTypeDraft === 'action.place_order'
+      ? (form.fields.counterLegEnabled ?? '').toString().trim().toLowerCase() === 'true'
+      : false;
   const placeOrderTpEnabled = nodeTypeDraft === 'action.place_order' ? (form.fields.tpEnabled ?? '').toString().trim().toLowerCase() === 'true' : false;
+  const placeOrderCounterTpEnabled =
+    nodeTypeDraft === 'action.place_order'
+      ? (form.fields.counterLegTpEnabled ?? '').toString().trim().toLowerCase() === 'true'
+      : false;
   const placeOrderSlEnabled = nodeTypeDraft === 'action.place_order' ? (form.fields.slEnabled ?? '').toString().trim().toLowerCase() === 'true' : false;
-  const placeOrderTpRuleRows = form.tpRuleRows || [], placeOrderSlRuleRows = form.slRuleRows || [], placeOrderPtbStopLossRuleRows = form.ptbStopLossRuleRows || [], placeOrderTimeExitRuleRows = form.timeExitRuleRows || [];
+  const placeOrderTpRuleRows = form.tpRuleRows || [],
+    placeOrderCounterTpRuleRows = form.counterLegTpRuleRows || [],
+    placeOrderSlRuleRows = form.slRuleRows || [],
+    placeOrderPtbStopLossRuleRows = form.ptbStopLossRuleRows || [],
+    placeOrderTimeExitRuleRows = form.timeExitRuleRows || [];
   const ptbStopLossChecked = nodeTypeDraft === 'action.place_order' ? (form.fields.ptbStopLossEnabled ?? '').toString().trim().toLowerCase() === 'true' : false;
   const placeOrderHasAnyStopLossProtection =
     nodeTypeDraft === 'action.place_order' &&
@@ -109,9 +123,15 @@ export function NodeInspectorPanel({
     (placeOrderSlEnabled ||
       ptbStopLossChecked ||
       placeOrderPtbStopLossRuleRows.length > 0);
-  const showTpLadderSection = nodeTypeDraft === 'action.place_order' && !placeOrderPairLockEnabled && placeOrderSide === 'buy' && (placeOrderTpEnabled || placeOrderTpRuleRows.length > 0);
+  const showTpLadderSection = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && (placeOrderTpEnabled || placeOrderTpRuleRows.length > 0);
+  const showCounterTpLadderSection =
+    nodeTypeDraft === 'action.place_order' &&
+    placeOrderPairLockEnabled &&
+    placeOrderSide === 'buy' &&
+    placeOrderCounterLegEnabled &&
+    (placeOrderCounterTpEnabled || placeOrderCounterTpRuleRows.length > 0);
   const showSlLadderSection = nodeTypeDraft === 'action.place_order' && !placeOrderPairLockEnabled && placeOrderSide === 'buy' && (placeOrderSlEnabled || placeOrderSlRuleRows.length > 0);
-  const showPtbStopLossSection = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && !placeOrderPairLockEnabled;
+  const showPtbStopLossSection = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy';
   const showTimeExitSection = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && !placeOrderPairLockEnabled;
   const placeOrderMaxPriceCentValue =
     nodeTypeDraft === 'action.place_order' ? (form.fields.maxPriceCent ?? '').toString().trim() : '';
@@ -205,6 +225,10 @@ export function NodeInspectorPanel({
     ptbStopLossTimeDecayModeRaw === 'none' || ptbStopLossTimeDecayModeRaw === 'relax'
       ? ptbStopLossTimeDecayModeRaw
       : 'tighten';
+  const ptbStopLossGapUnitRaw =
+    (form.fields.ptbStopLossGapUnit ?? '').toString().trim().toLowerCase();
+  const ptbStopLossGapUnit: PtbGapUnit =
+    ptbStopLossGapUnitRaw === 'cent' ? 'cent' : 'usd';
   const reentryPriceToBeatOverrideUnitRaw = nodeTypeDraft === 'action.place_order'
     ? (form.fields.reentryPriceToBeatMaxDiffUnit ?? '').toString().trim().toLowerCase()
     : '';
@@ -255,6 +279,17 @@ export function NodeInspectorPanel({
         : prev
     );
   };
+  const updateCounterTpRuleRows = (updater: (rows: ExitLadderRuleRow[]) => ExitLadderRuleRow[]) => {
+    actions.onFormChange((prev) =>
+      prev
+        ? {
+            ...prev,
+            fields: { ...prev.fields, counterLegTpEnabled: 'true' },
+            counterLegTpRuleRows: updater([...(prev.counterLegTpRuleRows || [])]),
+          }
+        : prev
+    );
+  };
   const updatePtbStopLossRuleRows = (
     updater: (rows: PtbStopLossRuleRow[]) => PtbStopLossRuleRow[]
   ) => {
@@ -299,6 +334,14 @@ export function NodeInspectorPanel({
       );
       if (pairLockCounterPtbVisibility != null) {
         return pairLockCounterPtbVisibility;
+      }
+      const pairLockTakeProfitVisibility = resolvePairLockTakeProfitFieldVisibility(
+        field.key,
+        placeOrderPairLockEnabled,
+        form.fields
+      );
+      if (pairLockTakeProfitVisibility != null) {
+        return pairLockTakeProfitVisibility;
       }
       const pairLockStopLossVisibility = resolvePairLockStopLossFieldVisibility(field.key, placeOrderPairLockEnabled, form.fields);
       if (pairLockStopLossVisibility != null) return pairLockStopLossVisibility;
@@ -379,6 +422,7 @@ export function NodeInspectorPanel({
       if (
         field.key === 'ptbStopLossEnabled' ||
         field.key === 'ptbStopLossGapUsd' ||
+        field.key === 'ptbStopLossGapUnit' ||
         field.key === 'triggerPriceGuardEnabled' ||
         field.key === 'retryOnTriggerPriceGuardBlock' ||
         field.key === 'executionFloorGuardEnabled' ||
@@ -1276,7 +1320,7 @@ export function NodeInspectorPanel({
 
             {showTpLadderSection && (
               <ExitLadderSection
-                title="Take Profit Kademeleri"
+                title={placeOrderPairLockEnabled ? 'Ilk Bacak Take Profit Kademeleri' : 'Take Profit Kademeleri'}
                 description="Fiyat seviyeleri strict artar; boyut yüzdeleri orijinal buy fill üzerinden düşünülür."
                 rows={placeOrderTpRuleRows}
                 addLabel="TP Kademesi Ekle"
@@ -1288,6 +1332,24 @@ export function NodeInspectorPanel({
                 }
                 onRemove={(rowId) =>
                   updateTpRuleRows((rows) => rows.filter((row) => row.id !== rowId))
+                }
+              />
+            )}
+
+            {showCounterTpLadderSection && (
+              <ExitLadderSection
+                title="Karsi Bacak Take Profit Kademeleri"
+                description="Fiyat seviyeleri strict artar; boyut yüzdeleri karsi bacagin orijinal buy fill'i uzerinden dusunulur."
+                rows={placeOrderCounterTpRuleRows}
+                addLabel="Karsi TP Kademesi Ekle"
+                onAdd={() => updateCounterTpRuleRows((rows) => [...rows, createEmptyExitLadderRuleRow()])}
+                onUpdate={(rowId, patch) =>
+                  updateCounterTpRuleRows((rows) =>
+                    rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row))
+                  )
+                }
+                onRemove={(rowId) =>
+                  updateCounterTpRuleRows((rows) => rows.filter((row) => row.id !== rowId))
                 }
               />
             )}
@@ -1311,72 +1373,14 @@ export function NodeInspectorPanel({
             )}
 
             {showPtbStopLossSection && (
-              <div className="space-y-2 rounded-md border border-slate-200/80 bg-slate-50/80 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="space-y-1">
-                    <Label className="text-[11px] font-medium text-slate-600">
-                      PTB Gap Stop-Loss
-                    </Label>
-                    <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                      Master PTB toggle. Hard gap ve kademeli PTB satirlari bu ana switch ile
-                      acilip kapanir.
-                    </p>
-                  </div>
-                  <input
-                    type="checkbox"
-                    checked={ptbStopLossChecked}
-                    onChange={(e) =>
-                      actions.onUpdateField(
-                        'ptbStopLossEnabled',
-                        e.target.checked ? 'true' : 'false'
-                      )
-                    }
-                    className="h-4 w-4 rounded border-slate-300"
-                  />
-                </div>
-                {ptbStopLossChecked && (
-                  <>
-                    <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                      Underlying directional gap izlenir. Up/Yes icin `current Chainlink - PTB`,
-                      Down/No icin `PTB - current Chainlink`. Buradan staged PTB satirlari
-                      tanimlanir; `0 / 100` tek satir, eski hard PTB ile ayni kapanis mantigini verir.
-                      Negatif gap, karsi yone ek overshoot bekler. Negatif esiklerde zaman decay uygulanmaz.
-                    </p>
-                    <div className="space-y-1">
-                      <Label className="text-[11px] font-medium text-slate-600">PTB SL Zaman Modu</Label>
-                      <Select value={ptbStopLossTimeDecayMode} onValueChange={(value) => actions.onUpdateField('ptbStopLossTimeDecayMode', value)}>
-                        <SelectTrigger className="h-8 w-full border-slate-200 bg-white text-xs text-slate-900" size="sm">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="tighten">tighten</SelectItem>
-                          <SelectItem value="relax">relax</SelectItem>
-                          <SelectItem value="none">none</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <PtbStopLossRuleSection
-                      rows={placeOrderPtbStopLossRuleRows}
-                      onAdd={() =>
-                        updatePtbStopLossRuleRows((rows) => [
-                          ...rows,
-                          createEmptyPtbStopLossRuleRow(),
-                        ])
-                      }
-                      onUpdate={(rowId, patch) =>
-                        updatePtbStopLossRuleRows((rows) =>
-                          rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row))
-                        )
-                      }
-                      onRemove={(rowId) =>
-                        updatePtbStopLossRuleRows((rows) =>
-                          rows.filter((row) => row.id !== rowId)
-                        )
-                      }
-                    />
-                  </>
-                )}
-              </div>
+              <PtbStopLossSection
+                enabled={ptbStopLossChecked}
+                unit={ptbStopLossGapUnit}
+                timeDecayMode={ptbStopLossTimeDecayMode}
+                rows={placeOrderPtbStopLossRuleRows}
+                onUpdateField={actions.onUpdateField}
+                onUpdateRows={updatePtbStopLossRuleRows}
+              />
             )}
 
             {showTimeExitSection && (

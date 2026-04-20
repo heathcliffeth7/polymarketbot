@@ -13,6 +13,7 @@ function baseForm(): NodeConfigFormState {
     outcomeConditionRows: [],
     drawdownRuleRows: [],
     tpRuleRows: [],
+    counterLegTpRuleRows: [],
     slRuleRows: [],
     ptbStopLossRuleRows: [],
     timeExitRuleRows: [],
@@ -64,10 +65,35 @@ test('PairLockStaleConfigSection ignores supported pair-lock stop-loss fields', 
   form.fields.slPriceCent = '45';
   form.fields.ptbStopLossEnabled = 'true';
   form.fields.ptbStopLossGapUsd = '0';
+  form.fields.ptbStopLossGapUnit = 'cent';
   form.fields.notifyOnSlHit = 'true';
   form.fields.reenterOnSlHit = 'true';
   form.fields.reentryMaxAttempts = '2';
   form.fields.reentryCooldownSec = '0';
+  form.ptbStopLossRuleRows = [{ id: 'ptb-1', gapUsd: '7', sizePct: '100' }];
+  const html = renderToStaticMarkup(
+    React.createElement(PairLockStaleConfigSection, {
+      visible: true,
+      form,
+      onFormChange: () => {},
+    })
+  );
+
+  assert.equal(html, '');
+});
+
+test('PairLockStaleConfigSection keeps supported take-profit rows out of stale warning', () => {
+  const form = baseForm();
+  form.fields.tpEnabled = 'true';
+  form.fields.tpPriceCent = '95';
+  form.fields.notifyOnTpHit = 'true';
+  form.tpRuleRows = [{ id: 'tp-1', priceCent: '95', sizePct: '100' }];
+  form.fields.counterLegEnabled = 'true';
+  form.fields.counterLegTpEnabled = 'true';
+  form.fields.counterLegTpPriceCent = '82';
+  form.fields.counterLegNotifyOnTpHit = 'true';
+  form.counterLegTpRuleRows = [{ id: 'counter-tp-1', priceCent: '82', sizePct: '100' }];
+
   const html = renderToStaticMarkup(
     React.createElement(PairLockStaleConfigSection, {
       visible: true,

@@ -1,4 +1,5 @@
 import { toStringValue } from './utils';
+import { normalizePtbStopLossGapUnit } from './ptb-stop-loss';
 
 export const PAIR_LOCK_CONFIG_KEYS = [
   'pairMaxTotalCent',
@@ -26,6 +27,18 @@ export const PAIR_LOCK_CONFIG_KEYS = [
   'counterLegRetryOnPriceToBeatGuardBlock',
   'counterLegRetryOnExecutionFloorGuardBlock',
   'counterLegRetryOnMaxPriceBlock',
+  'counterLegTpEnabled',
+  'counterLegTpPriceCent',
+  'counterLegTpRules',
+  'counterLegNotifyOnTpHit',
+  'counterLegSlEnabled',
+  'counterLegSlPriceCent',
+  'counterLegSlTriggerPriceMode',
+  'counterLegPtbStopLossEnabled',
+  'counterLegPtbStopLossGapUsd',
+  'counterLegPtbStopLossGapUnit',
+  'counterLegPtbStopLossTimeDecayMode',
+  'counterLegNotifyOnSlHit',
 ] as const;
 
 export const PAIR_LOCK_SUPPORTED_STOP_LOSS_FIELD_KEYS = [
@@ -34,22 +47,25 @@ export const PAIR_LOCK_SUPPORTED_STOP_LOSS_FIELD_KEYS = [
   'slTriggerPriceMode',
   'ptbStopLossEnabled',
   'ptbStopLossGapUsd',
+  'ptbStopLossGapUnit',
   'ptbStopLossTimeDecayMode',
   'notifyOnSlHit',
   'reenterOnSlHit',
   'reentryMaxAttempts',
   'reentryCooldownSec',
+  'counterLegSlEnabled',
+  'counterLegSlPriceCent',
+  'counterLegSlTriggerPriceMode',
+  'counterLegPtbStopLossEnabled',
+  'counterLegPtbStopLossGapUsd',
+  'counterLegPtbStopLossGapUnit',
+  'counterLegPtbStopLossTimeDecayMode',
+  'counterLegNotifyOnSlHit',
 ] as const;
 
 export const PAIR_LOCK_UNSUPPORTED_EXIT_FIELD_KEYS = [
-  'tpEnabled',
-  'tpPriceCent',
-  'tpPrice',
-  'tpRules',
   'slRules',
-  'ptbStopLossRules',
   'timeExitRules',
-  'notifyOnTpHit',
   'stagedSlReentryOnlyAfterAllStages',
   'reentryMinPriceCent',
   'reentryMaxPriceCent',
@@ -58,7 +74,27 @@ export const PAIR_LOCK_UNSUPPORTED_EXIT_FIELD_KEYS = [
   'reentryPriceToBeatMaxDiffUnit',
   'reentryThresholdDecay',
   'reentryMaxPriceTightenBps',
+  'counterLegSlRules',
+  'counterLegPtbStopLossRules',
+  'counterLegReenterOnSlHit',
+  'counterLegReentryMaxAttempts',
+  'counterLegReentryCooldownSec',
 ] as const;
+
+function applyExplicitCounterStopLossFormDefaults(fields: Record<string, string>): void {
+  if (
+    (fields.counterLegSlEnabled ?? '').trim().toLowerCase() === 'true' &&
+    !(fields.counterLegSlTriggerPriceMode ?? '').trim()
+  ) {
+    fields.counterLegSlTriggerPriceMode = 'best_bid';
+  }
+  if (
+    (fields.counterLegPtbStopLossEnabled ?? '').trim().toLowerCase() === 'true' &&
+    !(fields.counterLegPtbStopLossTimeDecayMode ?? '').trim()
+  ) {
+    fields.counterLegPtbStopLossTimeDecayMode = 'tighten';
+  }
+}
 
 export function isPairLockSupportedStopLossField(key: string): boolean {
   return (
@@ -98,6 +134,7 @@ export function applyPairLockFormDefaults(
   ) {
     fields.pairTotalBudgetUsdc = toStringValue(cfg.pairTotalBudgetUsdc).trim();
   }
+  applyExplicitCounterStopLossFormDefaults(fields);
 }
 
 export function normalizePairLockBuildConfig(config: Record<string, unknown>): void {
@@ -173,6 +210,9 @@ export function normalizePairLockStopLossBuildConfig(
   const slEnabled = config.slEnabled === true;
   const ptbStopLossEnabled = config.ptbStopLossEnabled === true;
   const anyStopLossEnabled = slEnabled || ptbStopLossEnabled;
+  const counterSlEnabled = config.counterLegSlEnabled === true;
+  const counterPtbStopLossEnabled = config.counterLegPtbStopLossEnabled === true;
+  const anyCounterStopLossEnabled = counterSlEnabled || counterPtbStopLossEnabled;
 
   for (const key of PAIR_LOCK_UNSUPPORTED_EXIT_FIELD_KEYS) {
     delete config[key];
@@ -188,8 +228,11 @@ export function normalizePairLockStopLossBuildConfig(
   if (!ptbStopLossEnabled) {
     delete config.ptbStopLossEnabled;
     delete config.ptbStopLossGapUsd;
+    delete config.ptbStopLossGapUnit;
+    delete config.ptbStopLossRules;
     delete config.ptbStopLossTimeDecayMode;
   } else {
+    config.ptbStopLossGapUnit = normalizePtbStopLossGapUnit(config.ptbStopLossGapUnit);
     const ptbStopLossTimeDecayModeRaw = toStringValue(config.ptbStopLossTimeDecayMode)
       .trim()
       .toLowerCase();
@@ -199,12 +242,53 @@ export function normalizePairLockStopLossBuildConfig(
         : 'tighten';
   }
 
+  if (!counterSlEnabled) {
+    delete config.counterLegSlPriceCent;
+    delete config.counterLegSlTriggerPriceMode;
+  } else {
+    const counterLegSlTriggerPriceModeRaw = toStringValue(config.counterLegSlTriggerPriceMode)
+      .trim()
+      .toLowerCase();
+    config.counterLegSlTriggerPriceMode =
+      counterLegSlTriggerPriceModeRaw === 'composite' ||
+      counterLegSlTriggerPriceModeRaw === 'composite_safe' ||
+      counterLegSlTriggerPriceModeRaw === 'composite_fast' ||
+      counterLegSlTriggerPriceModeRaw === 'last_trade'
+        ? counterLegSlTriggerPriceModeRaw
+        : 'best_bid';
+  }
+
+  if (!counterPtbStopLossEnabled) {
+    delete config.counterLegPtbStopLossGapUsd;
+    delete config.counterLegPtbStopLossGapUnit;
+    delete config.counterLegPtbStopLossTimeDecayMode;
+  } else {
+    config.counterLegPtbStopLossGapUnit = normalizePtbStopLossGapUnit(
+      config.counterLegPtbStopLossGapUnit,
+      config.ptbStopLossGapUnit === 'cent' ? 'cent' : 'usd'
+    );
+    const counterLegPtbStopLossTimeDecayModeRaw = toStringValue(
+      config.counterLegPtbStopLossTimeDecayMode
+    )
+      .trim()
+      .toLowerCase();
+    config.counterLegPtbStopLossTimeDecayMode =
+      counterLegPtbStopLossTimeDecayModeRaw === 'none' ||
+      counterLegPtbStopLossTimeDecayModeRaw === 'relax'
+        ? counterLegPtbStopLossTimeDecayModeRaw
+        : 'tighten';
+  }
+
   if (!anyStopLossEnabled) {
     delete config.notifyOnSlHit;
     delete config.reenterOnSlHit;
     delete config.reentryMaxAttempts;
     delete config.reentryCooldownSec;
     return;
+  }
+
+  if (!anyCounterStopLossEnabled) {
+    delete config.counterLegNotifyOnSlHit;
   }
 
   if (config.reenterOnSlHit !== true) {
@@ -229,5 +313,32 @@ export function normalizePairLockStopLossBuildConfig(
     config.reentryCooldownSec = reentryCooldownSec;
   } else {
     delete config.reentryCooldownSec;
+  }
+}
+
+export function normalizePairLockTakeProfitBuildConfig(
+  config: Record<string, unknown>
+): void {
+  const primaryTpEnabled =
+    config.tpEnabled === true ||
+    (Array.isArray(config.tpRules) && config.tpRules.length > 0);
+  const counterTpEnabled =
+    config.counterLegEnabled === true &&
+    (config.counterLegTpEnabled === true ||
+      (Array.isArray(config.counterLegTpRules) && config.counterLegTpRules.length > 0));
+
+  if (!primaryTpEnabled) {
+    delete config.tpEnabled;
+    delete config.tpPriceCent;
+    delete config.tpPrice;
+    delete config.tpRules;
+    delete config.notifyOnTpHit;
+  }
+
+  if (!counterTpEnabled) {
+    delete config.counterLegTpEnabled;
+    delete config.counterLegTpPriceCent;
+    delete config.counterLegTpRules;
+    delete config.counterLegNotifyOnTpHit;
   }
 }

@@ -1,9 +1,8 @@
-use super::notification::build_price_to_beat_relax_changed_notification_message;
-use super::notification_state::{
-    price_to_beat_guard_notification_seed_reason, PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY,
-};
+use super::notification::{build_price_to_beat_guard_blocked_notification_message, build_price_to_beat_guard_recovered_notification_message, build_price_to_beat_guard_waiting_notification_message, build_price_to_beat_relax_changed_notification_message};
+use super::notification_state::{price_to_beat_guard_notification_phase, price_to_beat_guard_notification_seed_reason, price_to_beat_guard_waiting_state, set_price_to_beat_guard_notification_phase, set_price_to_beat_guard_notification_seed, set_price_to_beat_guard_waiting_state, PriceToBeatGuardNotificationPhase, PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY};
 use super::*;
 
+mod shared_eval;
 mod stop_loss_bump;
 
 const BTC_MARKET_5M: &str = "btc-updown-5m-1774013100";
@@ -40,6 +39,7 @@ fn default_guard_evaluation() -> PriceToBeatGuardEvaluation {
         base_threshold_value: None,
         base_threshold_unit: None,
         base_threshold_usd: None,
+        current_effective_ptb_usd: None,
         threshold_value: 0.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 0.0,
@@ -386,9 +386,13 @@ fn manual_reentry_ptb_override_uses_explicit_unit_when_provided() {
         }
     });
 
-    let resolved =
-        resolve_action_place_order_price_to_beat_guard_resolution(&node, &context, BTC_MARKET_5M)
-            .expect("manual reentry ptb resolution with explicit unit");
+    let resolved = resolve_action_place_order_price_to_beat_guard_resolution(
+        &node,
+        &context,
+        BTC_MARKET_5M,
+        "Up",
+    )
+    .expect("manual reentry ptb resolution with explicit unit");
 
     assert_eq!(resolved.configured_mode, PriceToBeatMode::Manual);
     assert_eq!(resolved.effective_mode, PriceToBeatMode::Manual);
@@ -418,9 +422,13 @@ fn manual_reentry_ptb_override_inherits_primary_unit_when_unit_missing() {
         }
     });
 
-    let resolved =
-        resolve_action_place_order_price_to_beat_guard_resolution(&node, &context, BTC_MARKET_5M)
-            .expect("manual reentry ptb resolution");
+    let resolved = resolve_action_place_order_price_to_beat_guard_resolution(
+        &node,
+        &context,
+        BTC_MARKET_5M,
+        "Up",
+    )
+    .expect("manual reentry ptb resolution");
 
     assert_eq!(resolved.configured_mode, PriceToBeatMode::Manual);
     assert_eq!(resolved.effective_mode, PriceToBeatMode::Manual);
@@ -449,9 +457,13 @@ fn auto_reentry_ptb_override_uses_manual_style_override_unit() {
         }
     });
 
-    let resolved =
-        resolve_action_place_order_price_to_beat_guard_resolution(&node, &context, BTC_MARKET_5M)
-            .expect("auto reentry ptb resolution");
+    let resolved = resolve_action_place_order_price_to_beat_guard_resolution(
+        &node,
+        &context,
+        BTC_MARKET_5M,
+        "Up",
+    )
+    .expect("auto reentry ptb resolution");
 
     assert_eq!(resolved.configured_mode, PriceToBeatMode::AutoVolPct);
     assert_eq!(resolved.effective_mode, PriceToBeatMode::Manual);
@@ -474,9 +486,13 @@ fn first_entry_keeps_primary_ptb_threshold_when_reentry_override_exists() {
         "reentryPriceToBeatMaxDiff": 5
     }));
 
-    let resolved =
-        resolve_action_place_order_price_to_beat_guard_resolution(&node, &json!({}), BTC_MARKET_5M)
-            .expect("first entry ptb resolution");
+    let resolved = resolve_action_place_order_price_to_beat_guard_resolution(
+        &node,
+        &json!({}),
+        BTC_MARKET_5M,
+        "Up",
+    )
+    .expect("first entry ptb resolution");
 
     assert_eq!(resolved.configured_mode, PriceToBeatMode::Manual);
     assert_eq!(resolved.effective_mode, PriceToBeatMode::Manual);

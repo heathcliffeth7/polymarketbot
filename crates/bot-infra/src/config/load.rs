@@ -61,10 +61,7 @@ pub(crate) fn load_json_or_toml_or_default<T: for<'de> Deserialize<'de> + Defaul
 /// Empty strings, `false`, and null in DB are treated as "not set" and
 /// fall back to the TOML value. This handles seeded configs where
 /// sensitive fields are intentionally cleared.
-pub(crate) fn load_json_merged_with_toml<T>(
-    payload: Option<&Value>,
-    path: &Path,
-) -> Result<T>
+pub(crate) fn load_json_merged_with_toml<T>(payload: Option<&Value>, path: &Path) -> Result<T>
 where
     T: serde::de::DeserializeOwned + Default,
 {

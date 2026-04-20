@@ -3,6 +3,7 @@ export * from './presets';
 export * from './drafts';
 export * from './schemas';
 export * from './expressions';
+export * from './ptb-stop-loss';
 export * from './node-config';
 export * from './edge-config';
 export * from './context';

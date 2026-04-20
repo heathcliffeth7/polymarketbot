@@ -139,8 +139,21 @@ test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard/PTB stop-lo
           slTriggerPriceMode: 'composite_safe',
           ptbStopLossEnabled: true,
           ptbStopLossGapUsd: 0,
-          ptbStopLossTimeDecayMode: 'tighten',
+          ptbStopLossGapUnit: 'usd',
+          ptbStopLossTimeDecayMode: 'relax',
+          ptbStopLossRules: [
+            { gapUsd: 7, sizePct: 60 },
+            { gapUsd: 0, sizePct: 40 },
+          ],
           notifyOnSlHit: true,
+          counterLegSlEnabled: true,
+          counterLegSlPriceCent: 38,
+          counterLegSlTriggerPriceMode: 'best_bid',
+          counterLegPtbStopLossEnabled: true,
+          counterLegPtbStopLossGapUsd: -2,
+          counterLegPtbStopLossGapUnit: 'cent',
+          counterLegPtbStopLossTimeDecayMode: 'relax',
+          counterLegNotifyOnSlHit: true,
           reenterOnSlHit: true,
           reentryMaxAttempts: 2,
           reentryCooldownSec: 15,
@@ -152,6 +165,78 @@ test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard/PTB stop-lo
 
   const issues = collectActionIssues(graph, 'pair_buy_sl');
   assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig rejects invalid counter leg ptb stop-loss gap unit', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_pair_counter_bad_unit'),
+      {
+        key: 'pair_buy_counter_bad_unit',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          side: 'buy',
+          kind: 'immediate',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 5,
+          pairMaxTotalCent: 90,
+          pairSizingMode: 'manual',
+          counterLegEnabled: true,
+          counterLegSizeUsdc: 5,
+          counterLegOutcomeLabel: 'opposite',
+          counterLegPtbStopLossEnabled: true,
+          counterLegPtbStopLossGapUsd: -2,
+          counterLegPtbStopLossGapUnit: 'ticks',
+        },
+      },
+    ],
+    edges: [{ key: 'edge_pair_counter_bad_unit', source: 'trigger_pair_counter_bad_unit', target: 'pair_buy_counter_bad_unit', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_counter_bad_unit');
+  assert.ok(
+    issues.some((issue) => issue.code === 'invalid_counter_leg_ptb_stop_loss_gap_unit')
+  );
+});
+
+test('validateActionPlaceOrderConfig rejects counter leg stop-loss without required thresholds', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_pair_counter_sl'),
+      {
+        key: 'pair_buy_counter_sl',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          side: 'buy',
+          kind: 'immediate',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 5,
+          pairMaxTotalCent: 90,
+          pairSizingMode: 'manual',
+          counterLegEnabled: true,
+          counterLegSizeUsdc: 5,
+          counterLegOutcomeLabel: 'opposite',
+          counterLegSlEnabled: true,
+          counterLegPtbStopLossEnabled: true,
+        },
+      },
+    ],
+    edges: [{ key: 'edge_pair_counter_sl', source: 'trigger_pair_counter_sl', target: 'pair_buy_counter_sl', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_counter_sl');
+  assert.ok(issues.some((issue) => issue.code === 'invalid_counter_leg_sl_price_cent'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_counter_leg_ptb_stop_loss_gap_usd'));
 });
 
 test('validateActionPlaceOrderConfig accepts pair_lock with market execution', () => {
@@ -345,7 +430,7 @@ test('validateActionPlaceOrderConfig rejects pair_lock when upstream trigger is 
   assert.ok(issues.some((issue) => issue.code === 'pair_lock_requires_pair_lock_only_trigger'));
 });
 
-test('validateActionPlaceOrderConfig rejects pair_lock with classic exit features', () => {
+test('validateActionPlaceOrderConfig accepts pair_lock with primary take profit', () => {
   const graph = normalizeTradeFlowGraph({
     context: {},
     nodes: [
@@ -367,6 +452,7 @@ test('validateActionPlaceOrderConfig rejects pair_lock with classic exit feature
           counterLegOutcomeLabel: 'opposite',
           tpEnabled: true,
           tpPriceCent: 95,
+          notifyOnTpHit: true,
         },
       },
     ],
@@ -382,7 +468,143 @@ test('validateActionPlaceOrderConfig rejects pair_lock with classic exit feature
   });
 
   const issues = collectActionIssues(graph, 'pair_buy_invalid_exit');
-  assert.ok(issues.some((issue) => issue.code === 'pair_lock_disallows_exit_features'));
+  assert.equal(
+    issues.some((issue) => issue.code === 'pair_lock_disallows_exit_features'),
+    false
+  );
+  assert.equal(
+    issues.some((issue) => issue.code === 'notify_on_tp_hit_requires_tp'),
+    false
+  );
+});
+
+test('validateActionPlaceOrderConfig accepts pair_lock with counter take profit', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_pair_counter_tp'),
+      {
+        key: 'pair_buy_counter_tp',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          side: 'buy',
+          executionMode: 'limit',
+          sizeMode: 'usdc',
+          sizeUsdc: 5,
+          pairMaxTotalCent: 90,
+          counterLegEnabled: true,
+          counterLegSizeUsdc: 5,
+          counterLegOutcomeLabel: 'opposite',
+          counterLegTpEnabled: true,
+          counterLegTpPriceCent: 82,
+          counterLegTpRules: [{ priceCent: 82, sizePct: 100 }],
+          counterLegNotifyOnTpHit: true,
+        },
+      },
+    ],
+    edges: [
+      {
+        key: 'edge_pair_counter_tp',
+        source: 'trigger_pair_counter_tp',
+        target: 'pair_buy_counter_tp',
+        type: 'default',
+        condition: null,
+      },
+    ],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_counter_tp');
+  assert.equal(
+    issues.some((issue) => issue.code === 'pair_lock_disallows_exit_features'),
+    false
+  );
+  assert.equal(
+    issues.some((issue) => issue.code === 'counter_leg_notify_on_tp_hit_requires_take_profit'),
+    false
+  );
+});
+
+test('validateActionPlaceOrderConfig rejects counter TP without price or rules', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_pair_counter_tp_missing'),
+      {
+        key: 'pair_buy_counter_tp_missing',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          side: 'buy',
+          executionMode: 'limit',
+          sizeMode: 'usdc',
+          sizeUsdc: 5,
+          pairMaxTotalCent: 90,
+          counterLegEnabled: true,
+          counterLegSizeUsdc: 5,
+          counterLegOutcomeLabel: 'opposite',
+          counterLegTpEnabled: true,
+        },
+      },
+    ],
+    edges: [
+      {
+        key: 'edge_pair_counter_tp_missing',
+        source: 'trigger_pair_counter_tp_missing',
+        target: 'pair_buy_counter_tp_missing',
+        type: 'default',
+        condition: null,
+      },
+    ],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_counter_tp_missing');
+  assert.ok(issues.some((issue) => issue.code === 'counter_leg_tp_requires_price_or_rules'));
+});
+
+test('validateActionPlaceOrderConfig rejects counter TP notify without TP', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_pair_counter_tp_notify'),
+      {
+        key: 'pair_buy_counter_tp_notify',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          side: 'buy',
+          executionMode: 'limit',
+          sizeMode: 'usdc',
+          sizeUsdc: 5,
+          pairMaxTotalCent: 90,
+          counterLegEnabled: true,
+          counterLegSizeUsdc: 5,
+          counterLegOutcomeLabel: 'opposite',
+          counterLegNotifyOnTpHit: true,
+        },
+      },
+    ],
+    edges: [
+      {
+        key: 'edge_pair_counter_tp_notify',
+        source: 'trigger_pair_counter_tp_notify',
+        target: 'pair_buy_counter_tp_notify',
+        type: 'default',
+        condition: null,
+      },
+    ],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_counter_tp_notify');
+  assert.ok(
+    issues.some((issue) => issue.code === 'counter_leg_notify_on_tp_hit_requires_take_profit')
+  );
 });
 
 test('validateActionPlaceOrderConfig ignores zero-value reentry knobs in pair_lock mode', () => {

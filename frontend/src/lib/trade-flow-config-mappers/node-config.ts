@@ -1,9 +1,10 @@
 import { BOOLEAN_KEYS, NUMERIC_KEYS, RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME } from './constants';
 import { buildObjectFromKeyValueDrafts, buildExpression, nestedExprGroupToJsonLogic, objectToRows, parseExpressionDraft, parseNumberArrayToStringRows } from './expressions';
-import { createEmptyDrawdownRuleRow, createEmptyExitLadderRuleRow, createEmptyKeyValueDraft, createEmptyPtbStopLossRuleRow, createEmptyTimeExitRuleRow } from './drafts';
+import { createEmptyDrawdownRuleRow, createEmptyExitLadderRuleRow, createEmptyKeyValueDraft, createEmptyTimeExitRuleRow } from './drafts';
 import { NODE_FIELD_SCHEMAS } from './schemas';
 import { isPresetBuySellPlaceOrderMarker, isPresetPlaceOrderMarker, normalizeResolveMarketScope, resolveTriggerMarketOnceScope, toResolveMarketScope } from './presets';
-import { applyPairLockFormDefaults, normalizePairLockBuildConfig, normalizePairLockStopLossBuildConfig, PAIR_LOCK_CONFIG_KEYS } from './pair-lock';
+import { applyPairLockFormDefaults, normalizePairLockBuildConfig, normalizePairLockStopLossBuildConfig, normalizePairLockTakeProfitBuildConfig, PAIR_LOCK_CONFIG_KEYS } from './pair-lock';
+import { applyPtbStopLossFormDefaults, buildPtbStopLossRules, normalizePtbStopLossGapUnit, parsePtbStopLossRuleRows, shouldEnablePtbStopLossFromConfig } from './ptb-stop-loss';
 import { normalizeTriggerMarketPriceCycleWindowConfig, readTriggerMarketPriceCycleWindowFields } from './cycle-window';
 import { TRIGGER_MARKET_ONCE_SCOPE_VERSION } from './constants';
 import type { DrawdownRuleRow, ExitLadderRuleRow, NodeConfigFormState, OutcomeConditionRow, PtbStopLossRuleRow, TimeExitRuleRow } from './types';
@@ -22,6 +23,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
   const fields: Record<string, string> = {};
   let triggerSizeRows: string[] = [];
   const tpRuleRows: ExitLadderRuleRow[] = [];
+  const counterLegTpRuleRows: ExitLadderRuleRow[] = [];
   const slRuleRows: ExitLadderRuleRow[] = [];
   const ptbStopLossRuleRows: PtbStopLossRuleRow[] = [];
   const timeExitRuleRows: TimeExitRuleRow[] = [];
@@ -149,6 +151,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
       fields.sizePct = toStringValue(cfg.sizePercent);
     }
     applyPairLockFormDefaults(fields, cfg);
+    applyPtbStopLossFormDefaults(fields, cfg);
     const pairLockMode = fields.mode === 'pair_lock';
     if (Array.isArray(cfg.tpRules)) {
       for (const item of cfg.tpRules as Record<string, unknown>[]) {
@@ -162,6 +165,19 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
     if (tpRuleRows.length > 0) {
       fields.tpEnabled = 'true';
+    }
+    if (Array.isArray(cfg.counterLegTpRules)) {
+      for (const item of cfg.counterLegTpRules as Record<string, unknown>[]) {
+        if (!isRecord(item)) continue;
+        counterLegTpRuleRows.push({
+          ...createEmptyExitLadderRuleRow(),
+          priceCent: toCentStringValue(item.priceCent, item.price),
+          sizePct: toStringValue(item.sizePct),
+        });
+      }
+    }
+    if (counterLegTpRuleRows.length > 0) {
+      fields.counterLegTpEnabled = 'true';
     }
 
     if (Array.isArray(cfg.slRules)) {
@@ -178,37 +194,8 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
       fields.slEnabled = 'true';
     }
 
-    if (Array.isArray(cfg.ptbStopLossRules)) {
-      for (const item of cfg.ptbStopLossRules as Record<string, unknown>[]) {
-        if (!isRecord(item)) continue;
-        ptbStopLossRuleRows.push({
-          ...createEmptyPtbStopLossRuleRow(),
-          gapUsd: toStringValue(item.gapUsd),
-          sizePct: toStringValue(item.sizePct),
-        });
-      }
-    }
-    if (
-      !pairLockMode &&
-      ptbStopLossRuleRows.length === 0 &&
-      (cfg.ptbStopLossEnabled === true ||
-        (typeof cfg.ptbStopLossGapUsd === 'number' &&
-          Number.isFinite(cfg.ptbStopLossGapUsd) &&
-          true))
-    ) {
-      const legacyGapUsd = Number(cfg.ptbStopLossGapUsd);
-      if (Number.isFinite(legacyGapUsd)) {
-        ptbStopLossRuleRows.push({
-          ...createEmptyPtbStopLossRuleRow(),
-          gapUsd: String(legacyGapUsd),
-          sizePct: '100',
-        });
-      }
-    }
-    if (
-      ptbStopLossRuleRows.length > 0 ||
-      toStringValue(cfg.ptbStopLossGapUsd).trim().length > 0
-    ) {
+    ptbStopLossRuleRows.push(...parsePtbStopLossRuleRows(cfg, pairLockMode));
+    if (shouldEnablePtbStopLossFromConfig(cfg, ptbStopLossRuleRows)) {
       fields.ptbStopLossEnabled = 'true';
     }
 
@@ -487,6 +474,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     outcomeConditionRows,
     drawdownRuleRows,
     tpRuleRows,
+    counterLegTpRuleRows,
     slRuleRows,
     ptbStopLossRuleRows,
     timeExitRuleRows,
@@ -606,6 +594,15 @@ export function buildNodeConfigFromForm(
         return { priceCent, sizePct };
       })
       .filter((item): item is { priceCent: number; sizePct: number } => item != null);
+    const counterLegTpRules = (form.counterLegTpRuleRows || [])
+      .map((row) => {
+        const priceCent = Number(row.priceCent.trim());
+        const sizePct = Number(row.sizePct.trim());
+        if (!Number.isFinite(priceCent) || priceCent <= 0 || priceCent > 100) return null;
+        if (!Number.isFinite(sizePct) || sizePct <= 0 || sizePct > 100) return null;
+        return { priceCent, sizePct };
+      })
+      .filter((item): item is { priceCent: number; sizePct: number } => item != null);
     const slRules = (form.slRuleRows || [])
       .map((row) => {
         const priceCent = Number(row.priceCent.trim());
@@ -615,15 +612,7 @@ export function buildNodeConfigFromForm(
         return { priceCent, sizePct };
       })
       .filter((item): item is { priceCent: number; sizePct: number } => item != null);
-    const ptbStopLossRules = (form.ptbStopLossRuleRows || [])
-      .map((row) => {
-        const gapUsd = Number(row.gapUsd.trim());
-        const sizePct = Number(row.sizePct.trim());
-        if (!Number.isFinite(gapUsd)) return null;
-        if (!Number.isFinite(sizePct) || sizePct <= 0 || sizePct > 100) return null;
-        return { gapUsd, sizePct };
-      })
-      .filter((item): item is { gapUsd: number; sizePct: number } => item != null);
+    const ptbStopLossRules = buildPtbStopLossRules(form.ptbStopLossRuleRows || []);
     const timeExitRules = (form.timeExitRuleRows || [])
       .map((row) => {
         const elapsedMinutes = Number(row.elapsedMinutes.trim());
@@ -634,11 +623,34 @@ export function buildNodeConfigFromForm(
       })
       .filter((item): item is { elapsedMinutes: number; remainingPct: number } => item != null);
     const tpEnabled = config.tpEnabled === true || tpRules.length > 0;
+    const counterLegTpEnabled =
+      config.counterLegTpEnabled === true || counterLegTpRules.length > 0;
     const slEnabled = config.slEnabled === true || slRules.length > 0;
     const ptbStopLossEnabled = config.ptbStopLossEnabled === true;
     const anyStopLossEnabled = slEnabled || ptbStopLossEnabled || ptbStopLossRules.length > 0;
     if (pairLockMode) {
+      if (tpRules.length > 0) {
+        config.tpRules = tpRules;
+      } else {
+        delete config.tpRules;
+      }
+      if (counterLegTpRules.length > 0) {
+        config.counterLegTpRules = counterLegTpRules;
+      } else {
+        delete config.counterLegTpRules;
+      }
+      if (ptbStopLossRules.length > 0) {
+        config.ptbStopLossRules = ptbStopLossRules;
+      } else {
+        delete config.ptbStopLossRules;
+      }
       normalizePairLockBuildConfig(config);
+      if (!counterLegTpEnabled) {
+        delete config.counterLegTpEnabled;
+        delete config.counterLegTpPriceCent;
+        delete config.counterLegNotifyOnTpHit;
+      }
+      normalizePairLockTakeProfitBuildConfig(config);
     } else {
       delete config.mode;
       for (const key of PAIR_LOCK_CONFIG_KEYS) delete config[key];
@@ -653,6 +665,7 @@ export function buildNodeConfigFromForm(
       delete config.slPrice;
       delete config.ptbStopLossEnabled;
       delete config.ptbStopLossGapUsd;
+      delete config.ptbStopLossGapUnit;
       delete config.ptbStopLossRules;
       delete config.slRules;
       delete config.slTriggerPriceMode;
@@ -893,9 +906,11 @@ export function buildNodeConfigFromForm(
       if (config.ptbStopLossEnabled !== true) {
         delete config.ptbStopLossEnabled;
         delete config.ptbStopLossGapUsd;
+        delete config.ptbStopLossGapUnit;
         delete config.ptbStopLossRules;
         delete config.ptbStopLossTimeDecayMode;
       } else {
+        config.ptbStopLossGapUnit = normalizePtbStopLossGapUnit(config.ptbStopLossGapUnit);
         delete config.ptbStopLossGapUsd;
         const ptbStopLossTimeDecayModeRaw = toStringValue(config.ptbStopLossTimeDecayMode)
           .trim()

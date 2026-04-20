@@ -5,6 +5,8 @@ use bot_infra::db::{TradeBuilderMarketSecondSnapshot, TradeFlowNodeRuntimeSnapsh
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+mod miss_notifications;
+
 const DEFAULT_MAX_PRICE_RELAX_MISS_COUNT: i64 = 5;
 const DEFAULT_MAX_PRICE_RELAX_HISTORY_COUNT: usize = 5;
 const DEFAULT_MAX_PRICE_RELAX_STEP_PERCENT: f64 = 25.0;
@@ -34,6 +36,7 @@ pub(super) struct ActionPlaceOrderMaxPriceRelaxation {
     pub(super) buffer_usd: f64,
     pub(super) floor_usd: f64,
     pub(super) miss_streak: i64,
+    pub(super) missed_market_slug: Option<String>,
     pub(super) config_miss_count: i64,
     pub(super) config_history_count: usize,
     pub(super) config_step_mode: String,
@@ -45,10 +48,12 @@ pub(super) struct ActionPlaceOrderMaxPriceRelaxation {
     pub(super) price_ok_depth_fail_count: i64,
     pub(super) notification_sent: bool,
     pub(super) previous_threshold_usd: Option<f64>,
+    pub(super) miss_notification_sent: bool,
+    pub(super) previous_notified_miss_streak: Option<i64>,
 }
 
 impl ActionPlaceOrderMaxPriceRelaxation {
-    fn to_value(&self) -> Value {
+    pub(super) fn to_value(&self) -> Value {
         json!({
             "max_price_relax_applied": self.applied,
             "max_price_relax_target_usd": self.target_threshold_usd,
@@ -64,6 +69,7 @@ impl ActionPlaceOrderMaxPriceRelaxation {
             "max_price_relax_buffer_usd": self.buffer_usd,
             "max_price_relax_floor_usd": self.floor_usd,
             "max_price_relax_miss_streak": self.miss_streak,
+            "max_price_relax_missed_market_slug": self.missed_market_slug,
             "max_price_relax_config_miss_count": self.config_miss_count,
             "max_price_relax_config_history_count": self.config_history_count,
             "max_price_relax_config_step_mode": self.config_step_mode,
@@ -75,6 +81,8 @@ impl ActionPlaceOrderMaxPriceRelaxation {
             "max_price_relax_price_ok_depth_fail_count": self.price_ok_depth_fail_count,
             "max_price_relax_notification_sent": self.notification_sent,
             "max_price_relax_previous_threshold_usd": self.previous_threshold_usd,
+            "max_price_relax_miss_notification_sent": self.miss_notification_sent,
+            "max_price_relax_previous_notified_miss_streak": self.previous_notified_miss_streak,
         })
     }
 }
@@ -273,15 +281,14 @@ fn resolve_fill_less_completed_market_streak(
 
 fn recent_fill_less_completed_market_slugs(
     current_market_slug: &str,
-    miss_streak: i64,
-    limit: usize,
+    completed_market_count: i64,
 ) -> Vec<String> {
     let Some((_, _, slug_prefix, current_start, window_seconds)) =
         market_cycle_scope(current_market_slug)
     else {
         return Vec::new();
     };
-    let count = miss_streak.max(0).min(limit as i64) as usize;
+    let count = completed_market_count.max(0) as usize;
     let mut market_slugs = Vec::with_capacity(count);
     for offset in 1..=count {
         let start = current_start - crate::ChronoDuration::seconds(window_seconds * offset as i64);
@@ -644,15 +651,21 @@ async fn evaluate_relaxation_with_data_source<D>(
     market_slug: &str,
     outcome_label: &str,
     current_threshold_usd: f64,
+    base_threshold_usd: Option<f64>,
     reentry_generation: i64,
+    allow_relax_application: bool,
 ) -> Result<ActionPlaceOrderMaxPriceRelaxation>
 where
     D: MaxPriceRelaxationDataSource + Send + Sync,
 {
     let buffer_usd = resolve_relax_buffer_usd(node);
     let relax_config = resolve_max_price_relaxation_config(node);
+    let effective_floor_usd = base_threshold_usd
+        .unwrap_or(0.0)
+        .max(relax_config.floor_usd);
     let effective_max_price = resolve_effective_max_price(node, context, reentry_generation);
-    let miss_streak = resolve_fill_less_completed_market_streak(context, &node.key, market_slug);
+    let completed_market_count =
+        resolve_fill_less_completed_market_streak(context, &node.key, market_slug);
     let mut result = ActionPlaceOrderMaxPriceRelaxation {
         applied: false,
         target_threshold_usd: None,
@@ -666,8 +679,9 @@ where
         max_fillability_score: None,
         quality_score: None,
         buffer_usd,
-        floor_usd: relax_config.floor_usd,
-        miss_streak,
+        floor_usd: effective_floor_usd,
+        miss_streak: 0,
+        missed_market_slug: None,
         config_miss_count: relax_config.miss_count,
         config_history_count: relax_config.history_count,
         config_step_mode: relax_config.step_mode.as_str().to_string(),
@@ -679,20 +693,15 @@ where
         price_ok_depth_fail_count: 0,
         notification_sent: false,
         previous_threshold_usd: None,
+        miss_notification_sent: false,
+        previous_notified_miss_streak: None,
     };
 
     let Some(max_price) = effective_max_price else {
         return Ok(result);
     };
-    if miss_streak < relax_config.miss_count {
-        return Ok(result);
-    }
-
-    let candidate_market_slugs = recent_fill_less_completed_market_slugs(
-        market_slug,
-        miss_streak,
-        relax_config.history_count,
-    );
+    let candidate_market_slugs =
+        recent_fill_less_completed_market_slugs(market_slug, completed_market_count);
     if candidate_market_slugs.is_empty() {
         return Ok(result);
     }
@@ -705,7 +714,8 @@ where
     let mut min_gap_usd: Option<f64> = None;
     let mut candidate_gaps = Vec::new();
     let mut selected_candidate: Option<HistoricalRelaxCandidate> = None;
-    let mut first_observed_miss_reason: Option<RelaxMissReason> = None;
+    let mut latest_candidate: Option<HistoricalRelaxCandidate> = None;
+    let mut consecutive_qualified_candidates = Vec::new();
 
     for historical_market_slug in candidate_market_slugs {
         let candidate = historical_relax_candidate_from_snapshots(
@@ -716,27 +726,88 @@ where
             max_price,
             relax_config,
         );
-        if first_observed_miss_reason.is_none() {
-            first_observed_miss_reason = Some(candidate.miss_reason);
-        }
-        if matches!(candidate.miss_reason, RelaxMissReason::DepthMiss) {
-            result.price_ok_depth_fail_count += candidate.price_ok_depth_fail_count;
+        tracing::debug!(
+            message = "PTB_RELAX_HISTORICAL_CANDIDATE",
+            run_id,
+            node_key = %node.key,
+            current_market_slug = %market_slug,
+            historical_market_slug = %historical_market_slug,
+            miss_reason = %candidate.miss_reason.as_str(),
+            qualifies_for_relax = candidate.qualifies_for_relax,
+            tradable_seconds_count = candidate.tradable_seconds_count,
+            price_ok_depth_fail_count = candidate.price_ok_depth_fail_count,
+            max_fillability_score = candidate.max_fillability_score,
+            quality_score = candidate.quality_score,
+            first_tradable_second_ts = ?candidate.first_tradable_second_ts,
+            first_tradable_gap_usd = ?candidate.first_tradable_gap_usd,
+            effective_max_price = max_price,
+        );
+        if latest_candidate.is_none() {
+            latest_candidate = Some(candidate.clone());
         }
         if candidate.qualifies_for_relax {
-            result
-                .qualified_market_slugs
-                .push(historical_market_slug.clone());
-            if let Some(gap) = candidate.first_tradable_gap_usd {
-                candidate_gaps.push(gap);
-                min_gap_usd = Some(
-                    min_gap_usd
-                        .map(|current_min| current_min.min(gap))
-                        .unwrap_or(gap),
-                );
-            }
-            if selected_candidate.is_none() {
-                selected_candidate = Some(candidate);
-            }
+            consecutive_qualified_candidates.push(candidate);
+            continue;
+        }
+        break;
+    }
+
+    if let Some(latest_candidate) = latest_candidate.as_ref() {
+        result.miss_reason = Some(latest_candidate.miss_reason.as_str().to_string());
+        result.tradable_seconds_count = latest_candidate.tradable_seconds_count;
+        result.max_fillability_score = Some(latest_candidate.max_fillability_score);
+        result.quality_score = Some(latest_candidate.quality_score);
+        result.price_ok_depth_fail_count = latest_candidate.price_ok_depth_fail_count;
+    }
+    result.miss_streak = consecutive_qualified_candidates.len() as i64;
+    if let Some(latest_qualified_candidate) = consecutive_qualified_candidates.first() {
+        result.missed_market_slug = Some(latest_qualified_candidate.market_slug.clone());
+        result.first_tradable_market_slug = Some(latest_qualified_candidate.market_slug.clone());
+        result.first_tradable_second_ts = latest_qualified_candidate.first_tradable_second_ts.clone();
+        result.tradable_seconds_count = latest_qualified_candidate.tradable_seconds_count;
+        result.max_fillability_score = Some(latest_qualified_candidate.max_fillability_score);
+        result.quality_score = Some(latest_qualified_candidate.quality_score);
+        result.price_ok_depth_fail_count = latest_qualified_candidate.price_ok_depth_fail_count;
+    }
+    let consecutive_qualified_market_slugs = consecutive_qualified_candidates
+        .iter()
+        .map(|candidate| candidate.market_slug.clone())
+        .collect::<Vec<_>>();
+    tracing::debug!(
+        message = "PTB_RELAX_MISS_STREAK_EVALUATED",
+        run_id,
+        node_key = %node.key,
+        current_market_slug = %market_slug,
+        completed_market_count,
+        miss_streak = result.miss_streak,
+        missed_market_slug = ?result.missed_market_slug,
+        config_miss_count = result.config_miss_count,
+        config_history_count = result.config_history_count,
+        allow_relax_application,
+        miss_reason = ?result.miss_reason,
+        qualified_market_slugs = ?consecutive_qualified_market_slugs,
+    );
+    if !allow_relax_application || result.miss_streak < relax_config.miss_count {
+        return Ok(result);
+    }
+
+    for candidate in consecutive_qualified_candidates
+        .iter()
+        .take(relax_config.history_count)
+    {
+        result
+            .qualified_market_slugs
+            .push(candidate.market_slug.clone());
+        if let Some(gap) = candidate.first_tradable_gap_usd {
+            candidate_gaps.push(gap);
+            min_gap_usd = Some(
+                min_gap_usd
+                    .map(|current_min| current_min.min(gap))
+                    .unwrap_or(gap),
+            );
+        }
+        if selected_candidate.is_none() {
+            selected_candidate = Some(candidate.clone());
         }
     }
 
@@ -747,29 +818,147 @@ where
         .map(|selected_gap| (selected_gap + buffer_usd).max(0.0));
     result.target_threshold_usd = result
         .raw_target_threshold_usd
-        .map(|target| target.max(relax_config.floor_usd));
+        .map(|target| target.max(effective_floor_usd));
     result.relax_credit_usd = result
         .target_threshold_usd
-        .map(|target| relax_credit_usd(relax_config, current_threshold_usd, target, miss_streak))
+        .map(|target| {
+            relax_credit_usd(
+                relax_config,
+                current_threshold_usd,
+                target,
+                result.miss_streak,
+            )
+        })
         .unwrap_or(0.0);
     result.effective_target_threshold_usd = result
         .target_threshold_usd
         .map(|target| (current_threshold_usd - result.relax_credit_usd).max(target));
     if let Some(selected_candidate) = selected_candidate {
         result.miss_reason = Some(selected_candidate.miss_reason.as_str().to_string());
+        result.missed_market_slug = Some(selected_candidate.market_slug.clone());
         result.first_tradable_market_slug = Some(selected_candidate.market_slug);
         result.first_tradable_second_ts = selected_candidate.first_tradable_second_ts;
         result.tradable_seconds_count = selected_candidate.tradable_seconds_count;
         result.max_fillability_score = Some(selected_candidate.max_fillability_score);
         result.quality_score = Some(selected_candidate.quality_score);
-    } else if let Some(miss_reason) = first_observed_miss_reason {
-        result.miss_reason = Some(miss_reason.as_str().to_string());
     }
     result.applied = result
         .effective_target_threshold_usd
         .map(|target| target < current_threshold_usd)
         .unwrap_or(false);
     Ok(result)
+}
+
+#[rustfmt::skip]
+async fn preview_action_place_order_max_price_relaxation_with_data_source<D>(data_source: &D, node: &crate::TradeFlowNode, context: &mut Value, run_id: i64, market_slug: &str, outcome_label: &str, evaluation: &mut PriceToBeatGuardEvaluation) -> Result<Option<ActionPlaceOrderMaxPriceRelaxation>>
+where D: MaxPriceRelaxationDataSource + Send + Sync,
+{
+    let allow_relax_application = evaluation.reason_code == "price_to_beat_gap_below_threshold";
+    let relaxation = evaluate_relaxation_with_data_source(
+        data_source,
+        node,
+        &*context,
+        run_id,
+        market_slug,
+        outcome_label,
+        evaluation.threshold_usd,
+        evaluation.base_threshold_usd,
+        evaluation.reentry_generation,
+        allow_relax_application,
+    )
+    .await?;
+    if allow_relax_application {
+        update_evaluation_after_relaxation(evaluation, &relaxation);
+        if relaxation.applied {
+            if let Some(target_threshold_usd) = relaxation.effective_target_threshold_usd {
+                crate::set_action_place_order_ptb_current_effective_threshold_state(
+                    context,
+                    node,
+                    &node.key,
+                    market_slug,
+                    outcome_label,
+                    target_threshold_usd,
+                    evaluation.stop_loss_bump_usd,
+                    "relax_preview",
+                    crate::Utc::now(),
+                );
+            }
+        }
+    }
+    if allow_relax_application
+        || relaxation.miss_streak > 0
+        || relaxation.miss_reason.is_some()
+    {
+        return Ok(Some(relaxation));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+pub(super) async fn preview_action_place_order_max_price_relaxation_with_snapshots(
+    context: &mut Value,
+    node: &crate::TradeFlowNode,
+    run_id: i64,
+    market_slug: &str,
+    outcome_label: &str,
+    evaluation: &mut PriceToBeatGuardEvaluation,
+    snapshots: HashMap<String, Vec<TradeBuilderMarketSecondSnapshot>>,
+    runtime_snapshots: HashMap<String, TradeFlowNodeRuntimeSnapshotRecord>,
+) -> Result<()> {
+    struct MockDataSource {
+        snapshots: HashMap<String, Vec<TradeBuilderMarketSecondSnapshot>>,
+        runtime_snapshots: HashMap<String, TradeFlowNodeRuntimeSnapshotRecord>,
+    }
+    #[async_trait]
+    impl MaxPriceRelaxationDataSource for MockDataSource {
+        async fn load_market_second_snapshots(
+            &self,
+            market_slugs: &[String],
+        ) -> Result<HashMap<String, Vec<TradeBuilderMarketSecondSnapshot>>> {
+            Ok(market_slugs
+                .iter()
+                .filter_map(|market_slug| {
+                    self.snapshots
+                        .get(market_slug)
+                        .cloned()
+                        .map(|rows| (market_slug.clone(), rows))
+                })
+                .collect())
+        }
+        async fn load_market_runtime_snapshots(
+            &self,
+            _run_id: i64,
+            _node_key: &str,
+            market_slugs: &[String],
+        ) -> Result<HashMap<String, TradeFlowNodeRuntimeSnapshotRecord>> {
+            Ok(market_slugs
+                .iter()
+                .filter_map(|market_slug| {
+                    self.runtime_snapshots
+                        .get(market_slug)
+                        .cloned()
+                        .map(|row| (market_slug.clone(), row))
+                })
+                .collect())
+        }
+    }
+    if let Some(relaxation) = preview_action_place_order_max_price_relaxation_with_data_source(
+        &MockDataSource {
+            snapshots,
+            runtime_snapshots,
+        },
+        node,
+        context,
+        run_id,
+        market_slug,
+        outcome_label,
+        evaluation,
+    )
+    .await?
+    {
+        evaluation.max_price_relax = Some(relaxation.to_value());
+    }
+    Ok(())
 }
 
 pub(super) fn ensure_max_price_relax_tracking_market(
@@ -819,6 +1008,7 @@ fn update_evaluation_after_relaxation(
             } else {
                 target_threshold_usd
             };
+            evaluation.current_effective_ptb_usd = Some(target_threshold_usd);
             evaluation.auto_threshold_usd = Some(target_threshold_usd);
             if let (Some(current_price), Some(price_to_beat), Some(outcome_label)) = (
                 evaluation.current_price,
@@ -937,6 +1127,12 @@ async fn maybe_notify_relax_threshold_change(
     Ok(())
 }
 
+#[rustfmt::skip]
+pub(super) async fn preview_action_place_order_max_price_relaxation_state(repo: &crate::PostgresRepository, context: &mut Value, node: &crate::TradeFlowNode, run_id: i64, market_slug: &str, outcome_label: &str, evaluation: &mut PriceToBeatGuardEvaluation) -> Result<Option<ActionPlaceOrderMaxPriceRelaxation>> {
+    let data_source = LiveMaxPriceRelaxationDataSource { repo };
+    preview_action_place_order_max_price_relaxation_with_data_source(&data_source, node, context, run_id, market_slug, outcome_label, evaluation).await
+}
+
 pub(super) async fn maybe_apply_action_place_order_max_price_relaxation(
     repo: &crate::PostgresRepository,
     user_id: i64,
@@ -949,22 +1145,31 @@ pub(super) async fn maybe_apply_action_place_order_max_price_relaxation(
     _client: Option<&dyn crate::OrderExecutor>,
     evaluation: &mut PriceToBeatGuardEvaluation,
 ) -> Result<()> {
-    if evaluation.reason_code != "price_to_beat_gap_below_threshold" {
-        return Ok(());
-    }
-    let data_source = LiveMaxPriceRelaxationDataSource { repo };
-    let mut relaxation = evaluate_relaxation_with_data_source(
-        &data_source,
-        node,
+    let relaxation_result = preview_action_place_order_max_price_relaxation_state(
+        repo,
         context,
+        node,
         run_id,
         market_slug,
         outcome_label,
-        evaluation.threshold_usd,
-        evaluation.reentry_generation,
+        evaluation,
     )
     .await?;
-    update_evaluation_after_relaxation(evaluation, &relaxation);
+
+    let Some(mut relaxation) = relaxation_result else {
+        return Ok(());
+    };
+
+    miss_notifications::maybe_notify_relax_miss_streak_change(
+        repo,
+        user_id,
+        context,
+        node,
+        market_slug,
+        evaluation,
+        &mut relaxation,
+    )
+    .await?;
     maybe_notify_relax_threshold_change(
         repo,
         user_id,
@@ -975,483 +1180,24 @@ pub(super) async fn maybe_apply_action_place_order_max_price_relaxation(
         &mut relaxation,
     )
     .await?;
+    if relaxation.applied {
+        if let Some(target_threshold_usd) = relaxation.effective_target_threshold_usd {
+            crate::set_action_place_order_ptb_current_effective_threshold_state(
+                context,
+                node,
+                &node.key,
+                market_slug,
+                outcome_label,
+                target_threshold_usd,
+                evaluation.stop_loss_bump_usd,
+                "relax",
+                crate::Utc::now(),
+            );
+        }
+    }
     evaluation.max_price_relax = Some(relaxation.to_value());
     Ok(())
 }
 
 #[cfg(test)]
 mod step_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct MockDataSource {
-        snapshots: HashMap<String, Vec<TradeBuilderMarketSecondSnapshot>>,
-        runtime_snapshots: HashMap<String, TradeFlowNodeRuntimeSnapshotRecord>,
-    }
-
-    #[async_trait]
-    impl MaxPriceRelaxationDataSource for MockDataSource {
-        async fn load_market_second_snapshots(
-            &self,
-            market_slugs: &[String],
-        ) -> Result<HashMap<String, Vec<TradeBuilderMarketSecondSnapshot>>> {
-            Ok(market_slugs
-                .iter()
-                .filter_map(|market_slug| {
-                    self.snapshots
-                        .get(market_slug)
-                        .cloned()
-                        .map(|rows| (market_slug.clone(), rows))
-                })
-                .collect())
-        }
-
-        async fn load_market_runtime_snapshots(
-            &self,
-            _run_id: i64,
-            _node_key: &str,
-            market_slugs: &[String],
-        ) -> Result<HashMap<String, TradeFlowNodeRuntimeSnapshotRecord>> {
-            Ok(market_slugs
-                .iter()
-                .filter_map(|market_slug| {
-                    self.runtime_snapshots
-                        .get(market_slug)
-                        .cloned()
-                        .map(|row| (market_slug.clone(), row))
-                })
-                .collect())
-        }
-    }
-
-    fn test_node(config: Value) -> crate::TradeFlowNode {
-        crate::TradeFlowNode {
-            key: "action_1".to_string(),
-            node_type: "action.place_order".to_string(),
-            config,
-        }
-    }
-
-    fn second_snapshot(
-        market_slug: &str,
-        second_offset: i64,
-        best_ask: f64,
-        ask_depth_usdc: f64,
-        chainlink_price: f64,
-        ptb_ref_price: f64,
-        outcome_side: &str,
-    ) -> TradeBuilderMarketSecondSnapshot {
-        let (window_start, window_end) =
-            crate::trade_builder_second_snapshot_window(market_slug).expect("window");
-        let second_ts = window_start + crate::ChronoDuration::seconds(second_offset);
-        TradeBuilderMarketSecondSnapshot {
-            market_slug: market_slug.to_string(),
-            asset: "eth".to_string(),
-            window_start,
-            window_end,
-            second_ts,
-            ptb_ref_price: Some(ptb_ref_price),
-            chainlink_price: Some(chainlink_price),
-            yes_best_bid: None,
-            yes_best_ask: (outcome_side == "yes").then_some(best_ask),
-            yes_ask_depth_usdc: (outcome_side == "yes").then_some(ask_depth_usdc),
-            no_best_bid: None,
-            no_best_ask: (outcome_side == "no").then_some(best_ask),
-            no_ask_depth_usdc: (outcome_side == "no").then_some(ask_depth_usdc),
-            sample_count: 1,
-        }
-    }
-
-    fn assert_close_option(actual: Option<f64>, expected: f64, tolerance: f64) {
-        let actual = actual.expect("expected Some(f64)");
-        assert!(
-            (actual - expected).abs() <= tolerance,
-            "expected {actual} to be within {tolerance} of {expected}"
-        );
-    }
-
-    #[tokio::test]
-    async fn max_price_relax_applies_after_five_fill_less_markets() {
-        let _guard = super::super::tests::lock_price_to_beat_test_state();
-        let current_market_slug = "eth-updown-5m-1774117900";
-        let node = test_node(json!({
-            "priceToBeatGuardEnabled": true,
-            "priceToBeatMode": "auto_last_3_avg_excursion",
-            "maxPriceCent": 80,
-            "priceToBeatStopLossBumpEnabled": true,
-            "priceToBeatStopLossBumpAmount": 10,
-            "priceToBeatStopLossBumpUnit": "cent",
-        }));
-        let context = json!({
-            "nodeState": {
-                "action_1": {
-                    "ptb_max_price_relax_tracking_start_market_slug": "eth-updown-5m-1774116100"
-                }
-            }
-        });
-
-        let current_start = crate::MarketCycleId(current_market_slug.to_string())
-            .start_time()
-            .expect("current start");
-        let window_ms = 300_000_i64;
-        let mut snapshots = HashMap::new();
-        for offset in 1..=5 {
-            let market_start =
-                current_start - crate::ChronoDuration::milliseconds(window_ms * offset);
-            let market_slug = format!("eth-updown-5m-{}", market_start.timestamp());
-            let gap = match offset {
-                1 => 1.25,
-                2 => 1.05,
-                3 => 1.30,
-                4 => 1.10,
-                _ => 1.40,
-            };
-            snapshots.insert(
-                market_slug.clone(),
-                vec![
-                    second_snapshot(&market_slug, 120, 0.79, 10.0, 2_000.0 + gap, 2_000.0, "yes"),
-                    second_snapshot(
-                        &market_slug,
-                        121,
-                        0.79,
-                        10.0,
-                        2_000.0 + gap + 0.01,
-                        2_000.0,
-                        "yes",
-                    ),
-                ],
-            );
-        }
-
-        let relaxation = evaluate_relaxation_with_data_source(
-            &MockDataSource {
-                snapshots,
-                runtime_snapshots: HashMap::new(),
-            },
-            &node,
-            &context,
-            1,
-            current_market_slug,
-            "Up",
-            1.80,
-            0,
-        )
-        .await
-        .expect("relaxation");
-
-        assert!(relaxation.applied);
-        assert_eq!(relaxation.miss_streak, 6);
-        assert_close_option(relaxation.min_gap_usd, 1.05, 1e-9);
-        assert_close_option(relaxation.selected_gap_usd, 1.10, 1e-9);
-        assert_eq!(relaxation.buffer_usd, 0.10);
-        assert_close_option(relaxation.target_threshold_usd, 1.20, 1e-9);
-        assert_close_option(relaxation.effective_target_threshold_usd, 1.50, 1e-9);
-        assert!(
-            (relaxation.relax_credit_usd - 0.30).abs() <= 1e-9,
-            "expected relax credit to be 0.30, got {}",
-            relaxation.relax_credit_usd
-        );
-        assert_eq!(relaxation.qualified_market_slugs.len(), 5);
-    }
-
-    #[tokio::test]
-    async fn max_price_relax_skips_when_no_qualified_market_exists() {
-        let _guard = super::super::tests::lock_price_to_beat_test_state();
-        let current_market_slug = "eth-updown-5m-1774117900";
-        let node = test_node(json!({
-            "priceToBeatGuardEnabled": true,
-            "priceToBeatMode": "auto_vol_pct",
-            "maxPriceCent": 80,
-            "priceToBeatStopLossBumpEnabled": true,
-            "priceToBeatStopLossBumpAmount": 10,
-            "priceToBeatStopLossBumpUnit": "cent",
-        }));
-        let context = json!({
-            "nodeState": {
-                "action_1": {
-                    "ptb_max_price_relax_tracking_start_market_slug": "eth-updown-5m-1774116100"
-                }
-            }
-        });
-
-        let current_start = crate::MarketCycleId(current_market_slug.to_string())
-            .start_time()
-            .expect("current start");
-        let window_ms = 300_000_i64;
-        let mut snapshots = HashMap::new();
-        for offset in 1..=5 {
-            let market_start =
-                current_start - crate::ChronoDuration::milliseconds(window_ms * offset);
-            let market_slug = format!("eth-updown-5m-{}", market_start.timestamp());
-            snapshots.insert(
-                market_slug.clone(),
-                vec![second_snapshot(
-                    &market_slug,
-                    120,
-                    0.92,
-                    10.0,
-                    2_101.0,
-                    2_100.0,
-                    "yes",
-                )],
-            );
-        }
-
-        let relaxation = evaluate_relaxation_with_data_source(
-            &MockDataSource {
-                snapshots,
-                runtime_snapshots: HashMap::new(),
-            },
-            &node,
-            &context,
-            1,
-            current_market_slug,
-            "Up",
-            1.80,
-            0,
-        )
-        .await
-        .expect("relaxation");
-
-        assert!(!relaxation.applied);
-        assert_eq!(relaxation.min_gap_usd, None);
-        assert_eq!(relaxation.target_threshold_usd, None);
-        assert!(relaxation.qualified_market_slugs.is_empty());
-    }
-
-    #[tokio::test]
-    async fn max_price_relax_uses_configured_miss_and_history_counts() {
-        let _guard = super::super::tests::lock_price_to_beat_test_state();
-        let current_market_slug = "eth-updown-5m-1774117900";
-        let node = test_node(json!({
-            "priceToBeatGuardEnabled": true,
-            "priceToBeatMode": "auto_vol_pct",
-            "maxPriceCent": 80,
-            "priceToBeatStopLossBumpEnabled": true,
-            "priceToBeatStopLossBumpAmount": 10,
-            "priceToBeatStopLossBumpUnit": "cent",
-            "priceToBeatMaxPriceRelaxMissCount": 3,
-            "priceToBeatMaxPriceRelaxHistoryCount": 3
-        }));
-        let context = json!({
-            "nodeState": {
-                "action_1": {
-                    "ptb_max_price_relax_tracking_start_market_slug": "eth-updown-5m-1774116100"
-                }
-            }
-        });
-
-        let current_start = crate::MarketCycleId(current_market_slug.to_string())
-            .start_time()
-            .expect("current start");
-        let window_ms = 300_000_i64;
-        let mut snapshots = HashMap::new();
-        for offset in 1..=5 {
-            let market_start =
-                current_start - crate::ChronoDuration::milliseconds(window_ms * offset);
-            let market_slug = format!("eth-updown-5m-{}", market_start.timestamp());
-            let gap = 1.0 + (offset as f64 * 0.1);
-            snapshots.insert(
-                market_slug.clone(),
-                vec![
-                    second_snapshot(&market_slug, 120, 0.79, 10.0, 2_500.0 + gap, 2_500.0, "yes"),
-                    second_snapshot(
-                        &market_slug,
-                        121,
-                        0.79,
-                        10.0,
-                        2_500.0 + gap + 0.01,
-                        2_500.0,
-                        "yes",
-                    ),
-                ],
-            );
-        }
-
-        let relaxation = evaluate_relaxation_with_data_source(
-            &MockDataSource {
-                snapshots,
-                runtime_snapshots: HashMap::new(),
-            },
-            &node,
-            &context,
-            1,
-            current_market_slug,
-            "Up",
-            1.80,
-            0,
-        )
-        .await
-        .expect("relaxation");
-
-        assert!(relaxation.applied);
-        assert_eq!(relaxation.config_miss_count, 3);
-        assert_eq!(relaxation.config_history_count, 3);
-        assert_eq!(relaxation.qualified_market_slugs.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn max_price_relax_allows_manual_ptb_mode() {
-        let _guard = super::super::tests::lock_price_to_beat_test_state();
-        let current_market_slug = "eth-updown-5m-1774117900";
-        let node = test_node(json!({
-            "priceToBeatGuardEnabled": true,
-            "priceToBeatMode": "manual",
-            "priceToBeatMaxDiff": 80,
-            "priceToBeatMaxDiffUnit": "cent",
-            "maxPriceCent": 80,
-            "priceToBeatMaxPriceRelaxMissCount": 3,
-            "priceToBeatMaxPriceRelaxHistoryCount": 3,
-            "priceToBeatMaxPriceRelaxMinValue": 15,
-            "priceToBeatMaxPriceRelaxMinUnit": "cent"
-        }));
-        let context = json!({
-            "nodeState": {
-                "action_1": {
-                    "ptb_max_price_relax_tracking_start_market_slug": "eth-updown-5m-1774116100"
-                }
-            }
-        });
-
-        let current_start = crate::MarketCycleId(current_market_slug.to_string())
-            .start_time()
-            .expect("current start");
-        let window_ms = 300_000_i64;
-        let mut snapshots = HashMap::new();
-        for offset in 1..=3 {
-            let market_start =
-                current_start - crate::ChronoDuration::milliseconds(window_ms * offset);
-            let market_slug = format!("eth-updown-5m-{}", market_start.timestamp());
-            snapshots.insert(
-                market_slug.clone(),
-                vec![
-                    second_snapshot(&market_slug, 120, 0.79, 10.0, 2_601.1, 2_600.0, "yes"),
-                    second_snapshot(&market_slug, 121, 0.79, 10.0, 2_601.11, 2_600.0, "yes"),
-                ],
-            );
-        }
-
-        let relaxation = evaluate_relaxation_with_data_source(
-            &MockDataSource {
-                snapshots,
-                runtime_snapshots: HashMap::new(),
-            },
-            &node,
-            &context,
-            1,
-            current_market_slug,
-            "Up",
-            2.00,
-            0,
-        )
-        .await
-        .expect("relaxation");
-
-        assert!(relaxation.applied);
-        assert_eq!(relaxation.config_miss_count, 3);
-    }
-
-    #[tokio::test]
-    async fn max_price_relax_applies_floor_to_effective_target() {
-        let _guard = super::super::tests::lock_price_to_beat_test_state();
-        let current_market_slug = "eth-updown-5m-1774117900";
-        let node = test_node(json!({
-            "priceToBeatGuardEnabled": true,
-            "priceToBeatMode": "auto_last_3_avg_excursion",
-            "maxPriceCent": 80,
-            "priceToBeatStopLossBumpEnabled": true,
-            "priceToBeatStopLossBumpAmount": 10,
-            "priceToBeatStopLossBumpUnit": "cent",
-            "priceToBeatMaxPriceRelaxMinValue": 1.20,
-            "priceToBeatMaxPriceRelaxMinUnit": "usd"
-        }));
-        let context = json!({
-            "nodeState": {
-                "action_1": {
-                    "ptb_max_price_relax_tracking_start_market_slug": "eth-updown-5m-1774116100"
-                }
-            }
-        });
-
-        let current_start = crate::MarketCycleId(current_market_slug.to_string())
-            .start_time()
-            .expect("current start");
-        let window_ms = 300_000_i64;
-        let mut snapshots = HashMap::new();
-        for offset in 1..=5 {
-            let market_start =
-                current_start - crate::ChronoDuration::milliseconds(window_ms * offset);
-            let market_slug = format!("eth-updown-5m-{}", market_start.timestamp());
-            snapshots.insert(
-                market_slug.clone(),
-                vec![
-                    second_snapshot(&market_slug, 120, 0.79, 10.0, 2_801.05, 2_800.0, "yes"),
-                    second_snapshot(&market_slug, 121, 0.79, 10.0, 2_801.06, 2_800.0, "yes"),
-                ],
-            );
-        }
-
-        let relaxation = evaluate_relaxation_with_data_source(
-            &MockDataSource {
-                snapshots,
-                runtime_snapshots: HashMap::new(),
-            },
-            &node,
-            &context,
-            1,
-            current_market_slug,
-            "Up",
-            1.80,
-            0,
-        )
-        .await
-        .expect("relaxation");
-
-        assert_close_option(relaxation.raw_target_threshold_usd, 1.15, 1e-9);
-        assert_close_option(relaxation.target_threshold_usd, 1.20, 1e-9);
-        assert_close_option(relaxation.effective_target_threshold_usd, 1.50, 1e-9);
-        assert_eq!(relaxation.floor_usd, 1.20);
-    }
-
-    #[test]
-    fn fill_less_miss_streak_resets_from_last_fill_market() {
-        let current_market_slug = "eth-updown-5m-1774117900";
-        let context = json!({
-            "nodeState": {
-                "action_1": {
-                    "ptb_max_price_relax_tracking_start_market_slug": "eth-updown-5m-1774116100",
-                    "ptb_max_price_relax_last_fill_market_slug": "eth-updown-5m-1774117300"
-                }
-            }
-        });
-
-        assert_eq!(
-            resolve_fill_less_completed_market_streak(&context, "action_1", current_market_slug),
-            1
-        );
-    }
-
-    #[test]
-    fn relax_notification_requires_meaningful_same_market_change() {
-        assert!(!should_notify_relax_threshold_change(
-            Some("eth-updown-5m-1"),
-            Some(1.00),
-            "eth-updown-5m-1",
-            1.009
-        ));
-        assert!(should_notify_relax_threshold_change(
-            Some("eth-updown-5m-1"),
-            Some(1.00),
-            "eth-updown-5m-1",
-            1.01
-        ));
-        assert!(should_notify_relax_threshold_change(
-            Some("eth-updown-5m-1"),
-            Some(1.00),
-            "eth-updown-5m-2",
-            1.001
-        ));
-    }
-}

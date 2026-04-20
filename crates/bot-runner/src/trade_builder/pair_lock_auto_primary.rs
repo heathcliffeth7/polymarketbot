@@ -379,6 +379,45 @@ fn pair_lock_primary_ptb_guard_decision(
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct PairLockPrimaryPtbEvaluationLogSnapshot {
+    flow_run_id: i64,
+    node_key: String,
+    market_slug: String,
+    outcome_label: String,
+    ptb_passed: bool,
+    ptb_reason_code: String,
+    directional_gap: Option<f64>,
+    threshold_usd: f64,
+    current_price: Option<f64>,
+    price_to_beat: Option<f64>,
+}
+
+fn pair_lock_primary_should_log_ptb_skip(node: &TradeFlowNode, decision: &str) -> bool {
+    node_config_bool(node, "priceToBeatGuardEnabled").unwrap_or(false) && decision != "passed"
+}
+
+fn pair_lock_primary_ptb_evaluation_log_snapshot(
+    flow_run_id: i64,
+    node_key: &str,
+    market_slug: &str,
+    outcome_label: &str,
+    evaluation: &crate::trade_flow::guards::price_to_beat::PriceToBeatGuardEvaluation,
+) -> PairLockPrimaryPtbEvaluationLogSnapshot {
+    PairLockPrimaryPtbEvaluationLogSnapshot {
+        flow_run_id,
+        node_key: node_key.to_string(),
+        market_slug: market_slug.to_string(),
+        outcome_label: outcome_label.to_string(),
+        ptb_passed: evaluation.passed,
+        ptb_reason_code: evaluation.reason_code.clone(),
+        directional_gap: evaluation.directional_gap,
+        threshold_usd: evaluation.threshold_usd,
+        current_price: evaluation.current_price,
+        price_to_beat: evaluation.price_to_beat,
+    }
+}
+
 fn pair_lock_primary_waiting_signature_changed(
     context: &Value,
     node_key: &str,
@@ -536,12 +575,13 @@ async fn maybe_emit_pair_lock_primary_recovered_event(
 }
 
 async fn evaluate_action_place_order_pair_lock_primary_candidate(
+    ptb_runtime: Option<crate::trade_flow::guards::price_to_beat::PriceToBeatGuardRuntimeContext<'_>>,
     ws: &ClobWsClient,
     client: &dyn OrderExecutor,
     run: &TradeFlowRun,
     step: &TradeFlowRunStep,
     node: &TradeFlowNode,
-    context: &Value,
+    context: &mut Value,
     market_slug: &str,
     token_id: &str,
     outcome_label: &str,
@@ -607,30 +647,52 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
     let mut ptb_guard = Value::Null;
     let mut decision = guard_eval.effective_decision;
     let mut reason_code = guard_eval.effective_reason_code.to_string();
+    if pair_lock_primary_should_log_ptb_skip(node, decision) {
+        tracing::debug!(
+            message = "PAIR_LOCK_PRIMARY_PTB_SKIPPED_BY_PRE_GUARD",
+            flow_run_id = run.id,
+            node_key = %node.key,
+            market_slug = %market_slug,
+            outcome_label = %outcome_label,
+            pre_guard_decision = %decision,
+            pre_guard_reason_code = %reason_code,
+            best_ask = ?best_ask,
+            current_price,
+            effective_max_price = ?reentry_guard_resolution.effective_max_price,
+            best_ask_floor_price = ?best_ask_floor_price,
+        );
+    }
     if decision == "passed" && node_config_bool(node, "priceToBeatGuardEnabled").unwrap_or(false) {
-        let resolution =
-            crate::trade_flow::guards::price_to_beat::resolve_action_place_order_price_to_beat_guard_resolution(
-                node,
+        let evaluation =
+            crate::trade_flow::guards::price_to_beat::evaluate_action_place_order_price_to_beat_guard_state(
+                ptb_runtime,
                 context,
+                node,
+                run.id,
                 market_slug,
-            )?;
-        let mut evaluation = crate::trade_flow::guards::price_to_beat::evaluate_price_to_beat_guard(
+                outcome_label,
+            )
+            .await?;
+        let ptb_log_snapshot = pair_lock_primary_ptb_evaluation_log_snapshot(
+            run.id,
+            &node.key,
             market_slug,
-            resolution.effective_mode,
-            resolution.threshold_value,
-            resolution.threshold_unit,
             outcome_label,
-        )
-        .await;
-        resolution.apply_metadata(&mut evaluation);
-        if resolution.effective_mode
-            != crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual
-        {
-            crate::trade_flow::guards::price_to_beat::apply_price_to_beat_risk_penalty(
-                &mut evaluation,
-                resolution.stop_loss_bump_usd,
-            );
-        }
+            &evaluation,
+        );
+        tracing::debug!(
+            message = "PAIR_LOCK_PRIMARY_PTB_EVALUATED",
+            flow_run_id = ptb_log_snapshot.flow_run_id,
+            node_key = %ptb_log_snapshot.node_key,
+            market_slug = %ptb_log_snapshot.market_slug,
+            outcome_label = %ptb_log_snapshot.outcome_label,
+            ptb_passed = ptb_log_snapshot.ptb_passed,
+            ptb_reason_code = %ptb_log_snapshot.ptb_reason_code,
+            directional_gap = ?ptb_log_snapshot.directional_gap,
+            threshold_usd = ptb_log_snapshot.threshold_usd,
+            current_price = ?ptb_log_snapshot.current_price,
+            price_to_beat = ?ptb_log_snapshot.price_to_beat,
+        );
         ptb_guard = evaluation.to_value();
         decision = pair_lock_primary_ptb_guard_decision(
             evaluation.passed,
@@ -680,48 +742,10 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
     })
 }
 
-async fn resolve_action_place_order_pair_lock_primary_selection(
-    ws: &ClobWsClient,
-    client: &dyn OrderExecutor,
-    run: &TradeFlowRun,
-    step: &TradeFlowRunStep,
-    node: &TradeFlowNode,
-    context: &Value,
-    market_slug: &str,
-    yes_token_id: Option<String>,
-    no_token_id: Option<String>,
-) -> Result<ActionPlaceOrderPairLockPrimarySelectionAttempt> {
-    let (up_label, down_label) = pair_lock_primary_outcome_labels(market_slug);
-    let yes_token_id = yes_token_id
-        .ok_or_else(|| anyhow::anyhow!("pair_lock auto primary selection requires yesTokenId"))?;
-    let no_token_id = no_token_id
-        .ok_or_else(|| anyhow::anyhow!("pair_lock auto primary selection requires noTokenId"))?;
-
-    let up_candidate = evaluate_action_place_order_pair_lock_primary_candidate(
-        ws,
-        client,
-        run,
-        step,
-        node,
-        context,
-        market_slug,
-        &yes_token_id,
-        up_label,
-    )
-    .await?;
-    let down_candidate = evaluate_action_place_order_pair_lock_primary_candidate(
-        ws,
-        client,
-        run,
-        step,
-        node,
-        context,
-        market_slug,
-        &no_token_id,
-        down_label,
-    )
-    .await?;
-
+fn resolve_action_place_order_pair_lock_primary_selection_attempt(
+    up_candidate: ActionPlaceOrderPairLockPrimaryCandidateEval,
+    down_candidate: ActionPlaceOrderPairLockPrimaryCandidateEval,
+) -> ActionPlaceOrderPairLockPrimarySelectionAttempt {
     let passing = [&up_candidate, &down_candidate]
         .into_iter()
         .filter(|candidate| candidate.decision == "passed")
@@ -738,7 +762,7 @@ async fn resolve_action_place_order_pair_lock_primary_selection(
 
     if passing.len() == 1 {
         let selected = passing[0];
-        return Ok(ActionPlaceOrderPairLockPrimarySelectionAttempt {
+        return ActionPlaceOrderPairLockPrimarySelectionAttempt {
             selection: Some(ActionPlaceOrderPairLockPrimarySelection {
                 token_id: selected.token_id.clone(),
                 outcome_label: selected.outcome_label.clone(),
@@ -750,33 +774,73 @@ async fn resolve_action_place_order_pair_lock_primary_selection(
             yes_candidate: up_candidate,
             no_candidate: down_candidate,
             diagnostics,
-        });
+        };
     }
-
-    if passing.is_empty() && !waiting.is_empty() {
-        return Ok(ActionPlaceOrderPairLockPrimarySelectionAttempt {
-            selection: None,
-            waiting: true,
-            failure_reason: Some("pair_lock_primary_guard_waiting"),
-            yes_candidate: up_candidate,
-            no_candidate: down_candidate,
-            diagnostics,
-        });
-    }
-
-    let failure_reason = if passing.is_empty() {
-        "pair_lock_no_primary_leg_passed"
+    let failure_reason = if passing.is_empty() && !waiting.is_empty() {
+        Some("pair_lock_primary_guard_waiting")
+    } else if passing.is_empty() {
+        Some("pair_lock_no_primary_leg_passed")
     } else {
-        "pair_lock_primary_leg_ambiguous"
+        Some("pair_lock_primary_leg_ambiguous")
     };
-    Ok(ActionPlaceOrderPairLockPrimarySelectionAttempt {
+    ActionPlaceOrderPairLockPrimarySelectionAttempt {
         selection: None,
-        waiting: false,
-        failure_reason: Some(failure_reason),
+        waiting: failure_reason == Some("pair_lock_primary_guard_waiting"),
+        failure_reason,
         yes_candidate: up_candidate,
         no_candidate: down_candidate,
         diagnostics,
-    })
+    }
+}
+
+async fn resolve_action_place_order_pair_lock_primary_selection(
+    ptb_runtime: Option<crate::trade_flow::guards::price_to_beat::PriceToBeatGuardRuntimeContext<'_>>,
+    ws: &ClobWsClient,
+    client: &dyn OrderExecutor,
+    run: &TradeFlowRun,
+    step: &TradeFlowRunStep,
+    node: &TradeFlowNode,
+    context: &mut Value,
+    market_slug: &str,
+    yes_token_id: Option<String>,
+    no_token_id: Option<String>,
+) -> Result<ActionPlaceOrderPairLockPrimarySelectionAttempt> {
+    let (up_label, down_label) = pair_lock_primary_outcome_labels(market_slug);
+    let yes_token_id = yes_token_id
+        .ok_or_else(|| anyhow::anyhow!("pair_lock auto primary selection requires yesTokenId"))?;
+    let no_token_id = no_token_id
+        .ok_or_else(|| anyhow::anyhow!("pair_lock auto primary selection requires noTokenId"))?;
+
+    let up_candidate = evaluate_action_place_order_pair_lock_primary_candidate(
+        ptb_runtime,
+        ws,
+        client,
+        run,
+        step,
+        node,
+        context,
+        market_slug,
+        &yes_token_id,
+        up_label,
+    )
+    .await?;
+    let down_candidate = evaluate_action_place_order_pair_lock_primary_candidate(
+        ptb_runtime,
+        ws,
+        client,
+        run,
+        step,
+        node,
+        context,
+        market_slug,
+        &no_token_id,
+        down_label,
+    )
+    .await?;
+    Ok(resolve_action_place_order_pair_lock_primary_selection_attempt(
+        up_candidate,
+        down_candidate,
+    ))
 }
 
 #[cfg(test)]
@@ -898,14 +962,16 @@ mod pair_lock_auto_primary_tests {
             idempotency_key: None,
             created_at: Utc::now(),
         };
+        let mut context = json!({});
 
         let selection = resolve_action_place_order_pair_lock_primary_selection(
+            None,
             &ws,
             &executor,
             &pair_lock_test_run(),
             &step,
             &node,
-            &json!({}),
+            &mut context,
             "btc-updown-5m-1",
             Some("yes".to_string()),
             Some("no".to_string()),
@@ -956,14 +1022,16 @@ mod pair_lock_auto_primary_tests {
             idempotency_key: None,
             created_at: Utc::now(),
         };
+        let mut context = json!({});
 
         let selection = resolve_action_place_order_pair_lock_primary_selection(
+            None,
             &ws,
             &executor,
             &pair_lock_test_run(),
             &step,
             &node,
-            &json!({}),
+            &mut context,
             "btc-updown-5m-1",
             Some("yes".to_string()),
             Some("no".to_string()),
@@ -1016,14 +1084,16 @@ mod pair_lock_auto_primary_tests {
             idempotency_key: None,
             created_at: Utc::now(),
         };
+        let mut context = json!({});
 
         let selection = resolve_action_place_order_pair_lock_primary_selection(
+            None,
             &ws,
             &executor,
             &pair_lock_test_run(),
             &step,
             &node,
-            &json!({}),
+            &mut context,
             "btc-updown-5m-1",
             Some("yes".to_string()),
             Some("no".to_string()),
@@ -1074,6 +1144,171 @@ mod pair_lock_auto_primary_tests {
         assert_eq!(pair_lock_primary_ptb_guard_decision(true, true), "passed");
         assert_eq!(pair_lock_primary_ptb_guard_decision(false, true), "waiting");
         assert_eq!(pair_lock_primary_ptb_guard_decision(false, false), "blocked");
+    }
+
+    #[test]
+    fn pair_lock_primary_logs_ptb_skip_only_when_pre_guard_blocks_with_ptb_enabled() {
+        let node = TradeFlowNode {
+            key: "pair_buy".to_string(),
+            node_type: "action.place_order".to_string(),
+            config: json!({
+                "priceToBeatGuardEnabled": true
+            }),
+        };
+        let node_without_ptb = TradeFlowNode {
+            key: "pair_buy".to_string(),
+            node_type: "action.place_order".to_string(),
+            config: json!({}),
+        };
+
+        assert!(pair_lock_primary_should_log_ptb_skip(&node, "waiting"));
+        assert!(pair_lock_primary_should_log_ptb_skip(&node, "blocked"));
+        assert!(!pair_lock_primary_should_log_ptb_skip(&node, "passed"));
+        assert!(!pair_lock_primary_should_log_ptb_skip(
+            &node_without_ptb,
+            "waiting"
+        ));
+    }
+
+    #[test]
+    fn pair_lock_primary_ptb_evaluation_log_snapshot_captures_key_fields() {
+        let evaluation = crate::trade_flow::guards::price_to_beat::PriceToBeatGuardEvaluation {
+            passed: false,
+            reason_code: "price_to_beat_gap_below_threshold".to_string(),
+            reason_detail: None,
+            normalized_outcome_label: Some("down".to_string()),
+            direction: Some("down".to_string()),
+            market_slug: "eth-updown-5m-1".to_string(),
+            event_url: String::new(),
+            timeframe: Some("5m".to_string()),
+            asset: Some("eth".to_string()),
+            price_to_beat: Some(2305.9),
+            price_to_beat_status: None,
+            price_to_beat_source: None,
+            price_to_beat_source_latency_ms: None,
+            current_price: Some(2304.55),
+            current_price_source: "chainlink_live_data_ws",
+            directional_gap: Some(1.35),
+            gap_abs: Some(1.35),
+            threshold_mode: "manual".to_string(),
+            configured_threshold_mode: Some("manual".to_string()),
+            base_threshold_value: None,
+            base_threshold_unit: None,
+            base_threshold_usd: None,
+            current_effective_ptb_usd: Some(2.5),
+            threshold_value: 250.0,
+            threshold_unit: "cent".to_string(),
+            threshold_usd: 2.5,
+            stop_loss_bump_count: 0,
+            stop_loss_bump_applied_count: 0,
+            stop_loss_bump_amount: None,
+            stop_loss_bump_max_value: None,
+            stop_loss_bump_unit: None,
+            stop_loss_bump_raw_usd: 0.0,
+            stop_loss_bump_usd: 0.0,
+            stop_loss_bump_capped: false,
+            stop_loss_bump_max_reached: false,
+            stop_loss_bump_current_market_excluded: false,
+            stop_loss_bump_increment_usd: 0.0,
+            reentry_generation: 0,
+            reentry_override_active: false,
+            reentry_override_value: None,
+            reentry_override_unit: None,
+            max_price_relax: None,
+            auto_threshold_usd: None,
+            lookback_windows_used: None,
+            current_windows_used: None,
+            avg_up_excursion_usd: None,
+            avg_down_excursion_usd: None,
+            lookback_market_slugs: None,
+            lookback_window_snapshots: None,
+            baseline_pct: None,
+            current_pct: None,
+            vol_factor: None,
+            threshold_pct: None,
+            base_pct: None,
+            floor_usd: None,
+            ceiling_usd: None,
+            threshold_was_clamped: None,
+        };
+
+        let snapshot = pair_lock_primary_ptb_evaluation_log_snapshot(
+            715,
+            "action_xy5g02",
+            "eth-updown-5m-1776677100",
+            "Down",
+            &evaluation,
+        );
+
+        assert_eq!(snapshot.flow_run_id, 715);
+        assert_eq!(snapshot.node_key, "action_xy5g02");
+        assert_eq!(snapshot.market_slug, "eth-updown-5m-1776677100");
+        assert_eq!(snapshot.outcome_label, "Down");
+        assert!(!snapshot.ptb_passed);
+        assert_eq!(snapshot.ptb_reason_code, "price_to_beat_gap_below_threshold");
+        assert_eq!(snapshot.directional_gap, Some(1.35));
+        assert_eq!(snapshot.threshold_usd, 2.5);
+        assert_eq!(snapshot.current_price, Some(2304.55));
+        assert_eq!(snapshot.price_to_beat, Some(2305.9));
+    }
+
+    #[test]
+    fn pair_lock_primary_selection_prefers_relaxed_ptb_candidate() {
+        let quote = PairLockResolvedQuote {
+            best_bid: Some(0.69),
+            best_ask: Some(0.70),
+            last_trade_price: Some(0.70),
+            current_price: 0.70,
+            quote_source_kind: "test",
+            quote_ws_state: "live_ws_not_subscribed",
+            quote_event_ts: None,
+            quote_snapshot_age_ms: None,
+            quote_source_detail: "test".to_string(),
+            quote_book_missing_fields: Vec::new(),
+            quote_snapshot_used: Value::Null,
+        };
+        let selection = resolve_action_place_order_pair_lock_primary_selection_attempt(
+            ActionPlaceOrderPairLockPrimaryCandidateEval {
+                token_id: "yes".to_string(),
+                outcome_label: "Up".to_string(),
+                decision: "passed",
+                reason_code: "passed".to_string(),
+                quote: quote.clone(),
+                diagnostics: json!({
+                    "decision": "passed",
+                    "reason_code": "passed",
+                    "outcome_label": "Up",
+                    "price_to_beat_guard": {
+                        "passed": true,
+                        "reason_code": "passed",
+                        "max_price_relax": { "max_price_relax_applied": true }
+                    }
+                }),
+            },
+            ActionPlaceOrderPairLockPrimaryCandidateEval {
+                token_id: "no".to_string(),
+                outcome_label: "Down".to_string(),
+                decision: "waiting",
+                reason_code: "price_to_beat_gap_below_threshold".to_string(),
+                quote,
+                diagnostics: json!({
+                    "decision": "waiting",
+                    "reason_code": "price_to_beat_gap_below_threshold",
+                    "outcome_label": "Down",
+                    "price_to_beat_guard": {
+                        "passed": false,
+                        "reason_code": "price_to_beat_gap_below_threshold"
+                    }
+                }),
+            },
+        );
+
+        assert!(!selection.waiting);
+        assert_eq!(
+            selection.selection.as_ref().map(|value| value.token_id.as_str()),
+            Some("yes")
+        );
+        assert_eq!(selection.failure_reason, None);
     }
 
     #[test]

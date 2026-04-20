@@ -60,6 +60,19 @@ async fn maybe_schedule_trade_builder_stop_loss_reentry(
         let Some(session) = repo.get_trade_builder_pair_session(pair_session_id).await? else {
             return Ok(());
         };
+        if session.status == TRADE_BUILDER_PAIR_STATUS_LOCKED {
+            repo.append_trade_builder_order_event(
+                parent_order.id,
+                "reentry_skipped",
+                &json!({
+                    "reason": "pair_lock_locked_leg_stop_loss",
+                    "sl_child_order_id": stop_loss_order.id,
+                    "pair_session_id": pair_session_id,
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
         if !trade_builder_pair_lock_stop_loss_surface_active_from_session(&session, parent_order.id)
         {
             repo.append_trade_builder_order_event(
@@ -1035,6 +1048,20 @@ async fn finalize_builder_fill(
                     parent_builder_order_id = parent_order.id,
                     error = %err,
                     "TRADE_BUILDER_REENTRY_SCHEDULE_FAILED"
+                );
+            }
+            if let Err(err) = maybe_finalize_trade_builder_pair_lock_after_locked_leg_stop_loss_fill(
+                repo,
+                parent_order,
+                order,
+            )
+            .await
+            {
+                warn!(
+                    builder_order_id = order.id,
+                    parent_builder_order_id = parent_order.id,
+                    error = %err,
+                    "TRADE_BUILDER_PAIR_LOCK_LOCKED_LEG_STOP_LOSS_FINALIZE_FAILED"
                 );
             }
             if let Err(err) = maybe_finalize_trade_builder_pair_lock_after_lead_stop_loss_fill(

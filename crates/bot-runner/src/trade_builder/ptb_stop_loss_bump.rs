@@ -25,6 +25,24 @@ pub(crate) struct ActionPlaceOrderPtbStopLossBumpState {
     pub(crate) current_market_excluded: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct ActionPlaceOrderPtbCurrentEffectiveState {
+    pub(crate) threshold_usd: Option<f64>,
+    pub(crate) bump_usd: Option<f64>,
+    pub(crate) source: Option<String>,
+    pub(crate) updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ActionPlaceOrderPtbCurrentEffectiveResolution {
+    pub(crate) threshold_usd: f64,
+    pub(crate) bump_usd: f64,
+    pub(crate) decay_delta_usd: f64,
+    pub(crate) stored_threshold_usd: Option<f64>,
+    pub(crate) stored_bump_usd: Option<f64>,
+    pub(crate) stored_source: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct ActionPlaceOrderPtbStopLossBumpStateUpdate {
     applied: bool,
@@ -38,16 +56,21 @@ struct ActionPlaceOrderPtbStopLossBumpStateUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct ActionPlaceOrderPtbStopLossBumpCurrentPtbSnapshot {
-    value: f64,
-    unit: String,
-    usd: f64,
+pub(crate) struct ActionPlaceOrderPtbStopLossBumpCurrentPtbSnapshot {
+    pub(crate) value: f64,
+    pub(crate) unit: String,
+    pub(crate) usd: f64,
 }
 
 const FLOW_NODE_STATE_PTB_SL_BUMP_MAX_NOTIFIED: &str = "ptb_stop_loss_bump_max_notified";
 const FLOW_NODE_STATE_PTB_SL_BUMP_MAX_NOTIFIED_MARKET_SLUG: &str =
     "ptb_stop_loss_bump_max_notified_market_slug";
 const FLOW_NODE_STATE_PTB_SL_BUMP_SCOPE_MAP: &str = "ptb_stop_loss_bump_scope_map";
+const FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_THRESHOLD_USD: &str =
+    "ptb_current_effective_threshold_usd";
+const FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_BUMP_USD: &str = "ptb_current_effective_bump_usd";
+const FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_SOURCE: &str = "ptb_current_effective_source";
+const FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_UPDATED_AT: &str = "ptb_current_effective_updated_at";
 
 fn resolve_action_place_order_ptb_stop_loss_bump_scope_mode(
     node: &TradeFlowNode,
@@ -74,40 +97,61 @@ fn resolve_action_place_order_ptb_stop_loss_bump_scope_key(
     Some(format!("{}:{}:{direction}", scope.asset, scope.timeframe))
 }
 
-fn resolve_action_place_order_ptb_stop_loss_bump_current_ptb_snapshot(
-    context: &Value,
-    market_slug: &str,
+fn build_action_place_order_ptb_stop_loss_bump_current_ptb_snapshot(
+    effective_mode: trade_flow::guards::price_to_beat::PriceToBeatMode,
+    evaluation: &trade_flow::guards::price_to_beat::PriceToBeatGuardEvaluation,
 ) -> Option<ActionPlaceOrderPtbStopLossBumpCurrentPtbSnapshot> {
-    let snapshot = crate::flow_context_value(context, "priceToBeatGuard")?;
-    let snapshot_market_slug = snapshot
-        .get("market_slug")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    if snapshot_market_slug != market_slug {
+    if effective_mode != trade_flow::guards::price_to_beat::PriceToBeatMode::Manual
+        && evaluation.auto_threshold_usd.is_none()
+    {
         return None;
     }
-
-    let threshold_value = snapshot
-        .get("threshold_value")
-        .and_then(crate::value_as_f64)
-        .filter(|value| value.is_finite())?;
-    let threshold_unit = snapshot
-        .get("threshold_unit")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)?;
-    let threshold_usd = snapshot
-        .get("threshold_usd")
-        .and_then(crate::value_as_f64)
-        .filter(|value| value.is_finite())?;
-
+    let threshold_unit = evaluation.threshold_unit.trim();
+    if threshold_unit.is_empty()
+        || !evaluation.threshold_value.is_finite()
+        || !evaluation.threshold_usd.is_finite()
+    {
+        return None;
+    }
     Some(ActionPlaceOrderPtbStopLossBumpCurrentPtbSnapshot {
-        value: threshold_value,
-        unit: threshold_unit,
-        usd: threshold_usd,
+        value: evaluation.threshold_value,
+        unit: threshold_unit.to_string(),
+        usd: evaluation.threshold_usd,
     })
+}
+
+pub(crate) async fn resolve_action_place_order_ptb_stop_loss_bump_live_ptb_snapshot(
+    _repo: Option<&PostgresRepository>,
+    node: &TradeFlowNode,
+    context: &Value,
+    _run_id: Option<i64>,
+    market_slug: &str,
+    outcome_label: &str,
+) -> Option<ActionPlaceOrderPtbStopLossBumpCurrentPtbSnapshot> {
+    let resolution =
+        trade_flow::guards::price_to_beat::resolve_action_place_order_price_to_beat_guard_resolution(
+            node, context, market_slug, outcome_label,
+        )
+        .ok()?;
+    let mut evaluation = trade_flow::guards::price_to_beat::evaluate_price_to_beat_guard(
+        market_slug,
+        resolution.effective_mode,
+        resolution.threshold_value,
+        resolution.threshold_unit,
+        outcome_label,
+    )
+    .await;
+    resolution.apply_metadata(&mut evaluation);
+    if resolution.effective_mode != trade_flow::guards::price_to_beat::PriceToBeatMode::Manual {
+        trade_flow::guards::price_to_beat::apply_price_to_beat_risk_penalty(
+            &mut evaluation,
+            resolution.stop_loss_bump_usd,
+        );
+    }
+    build_action_place_order_ptb_stop_loss_bump_current_ptb_snapshot(
+        resolution.effective_mode,
+        &evaluation,
+    )
 }
 
 fn resolve_action_place_order_ptb_stop_loss_bump_unit(
@@ -281,6 +325,37 @@ fn resolve_action_place_order_ptb_stop_loss_bump_base_usd(
     )
 }
 
+pub(crate) fn resolve_action_place_order_ptb_stop_loss_bump_capped_usd(
+    raw_bump_usd: f64,
+    config: Option<&ActionPlaceOrderPtbStopLossBumpConfig>,
+) -> (f64, bool, bool) {
+    let raw_bump_usd = raw_bump_usd.max(0.0);
+    let capped_bump_usd = config
+        .and_then(|value| value.max_value.map(|max_value| (max_value, value.unit)))
+        .map(|(max_value, unit)| {
+            trade_flow::guards::price_to_beat::normalize_price_to_beat_threshold_usd(
+                max_value, unit,
+            )
+        })
+        .map(|max_usd| raw_bump_usd.min(max_usd))
+        .unwrap_or(raw_bump_usd);
+    let max_reached = config
+        .and_then(|value| value.max_value.map(|max_value| (max_value, value.unit)))
+        .map(|(max_value, unit)| {
+            trade_flow::guards::price_to_beat::normalize_price_to_beat_threshold_usd(
+                max_value, unit,
+            )
+        })
+        .map(|max_usd| capped_bump_usd >= max_usd)
+        .unwrap_or(false);
+
+    (
+        capped_bump_usd,
+        capped_bump_usd + f64::EPSILON < raw_bump_usd,
+        max_reached,
+    )
+}
+
 fn ptb_stop_loss_bump_market_windows_since(
     previous_market_slug: &str,
     current_market_slug: &str,
@@ -424,6 +499,284 @@ pub(crate) fn resolve_action_place_order_ptb_stop_loss_bump_state(
     }
 }
 
+fn resolve_action_place_order_ptb_current_effective_state(
+    context: &Value,
+    node: &TradeFlowNode,
+    node_key: &str,
+    market_slug: &str,
+    outcome_label: &str,
+) -> ActionPlaceOrderPtbCurrentEffectiveState {
+    let read_threshold = |value: Option<&Value>| {
+        value
+            .and_then(crate::value_as_f64)
+            .filter(|threshold| threshold.is_finite() && *threshold >= 0.0)
+    };
+    let read_string = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(str::to_string)
+    };
+
+    match resolve_action_place_order_ptb_stop_loss_bump_config(node, "buy")
+        .ok()
+        .flatten()
+        .map(|config| config.scope_mode)
+        .unwrap_or(ActionPlaceOrderPtbStopLossBumpScopeMode::PerScope)
+    {
+        ActionPlaceOrderPtbStopLossBumpScopeMode::Global => {
+            ActionPlaceOrderPtbCurrentEffectiveState {
+                threshold_usd: read_threshold(flow_node_state(
+                    context,
+                    node_key,
+                    FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_THRESHOLD_USD,
+                )),
+                bump_usd: read_threshold(flow_node_state(
+                    context,
+                    node_key,
+                    FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_BUMP_USD,
+                )),
+                source: flow_node_state_string(
+                    context,
+                    node_key,
+                    FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_SOURCE,
+                ),
+                updated_at: flow_node_state_string(
+                    context,
+                    node_key,
+                    FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_UPDATED_AT,
+                ),
+            }
+        }
+        ActionPlaceOrderPtbStopLossBumpScopeMode::PerScope => {
+            let Some(scope_key) =
+                resolve_action_place_order_ptb_stop_loss_bump_scope_key(market_slug, outcome_label)
+            else {
+                return ActionPlaceOrderPtbCurrentEffectiveState::default();
+            };
+            let entry = resolve_action_place_order_ptb_stop_loss_bump_scope_entry(
+                context, node_key, &scope_key,
+            );
+            ActionPlaceOrderPtbCurrentEffectiveState {
+                threshold_usd: read_threshold(entry.as_ref().and_then(|value| {
+                    value.get(FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_THRESHOLD_USD)
+                })),
+                bump_usd: read_threshold(
+                    entry.as_ref().and_then(|value| {
+                        value.get(FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_BUMP_USD)
+                    }),
+                ),
+                source: read_string(
+                    entry
+                        .as_ref()
+                        .and_then(|value| value.get(FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_SOURCE)),
+                ),
+                updated_at: read_string(
+                    entry.as_ref().and_then(|value| {
+                        value.get(FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_UPDATED_AT)
+                    }),
+                ),
+            }
+        }
+    }
+}
+
+pub(crate) fn resolve_action_place_order_ptb_current_effective_threshold_resolution(
+    context: &Value,
+    node: &TradeFlowNode,
+    node_key: &str,
+    market_slug: &str,
+    outcome_label: &str,
+    seed_threshold_usd: Option<f64>,
+    current_bump_usd: f64,
+) -> Option<ActionPlaceOrderPtbCurrentEffectiveResolution> {
+    let stored = resolve_action_place_order_ptb_current_effective_state(
+        context,
+        node,
+        node_key,
+        market_slug,
+        outcome_label,
+    );
+    let threshold_usd = stored.threshold_usd.or(seed_threshold_usd)?;
+    let decay_delta_usd = stored
+        .bump_usd
+        .map(|stored_bump_usd| (stored_bump_usd - current_bump_usd).max(0.0))
+        .unwrap_or(0.0);
+    let threshold_usd = if stored.threshold_usd.is_some() {
+        (threshold_usd - decay_delta_usd).max(0.0)
+    } else {
+        threshold_usd.max(0.0)
+    };
+
+    Some(ActionPlaceOrderPtbCurrentEffectiveResolution {
+        threshold_usd,
+        bump_usd: current_bump_usd.max(0.0),
+        decay_delta_usd,
+        stored_threshold_usd: stored.threshold_usd,
+        stored_bump_usd: stored.bump_usd,
+        stored_source: stored.source,
+    })
+}
+
+pub(crate) fn resolve_action_place_order_ptb_authoritative_previous_effective_threshold_usd(
+    context: &Value,
+    node: &TradeFlowNode,
+    node_key: &str,
+    market_slug: &str,
+    outcome_label: &str,
+    fallback_threshold_usd: Option<f64>,
+    minimum_threshold_usd: Option<f64>,
+) -> Option<f64> {
+    let stored = resolve_action_place_order_ptb_current_effective_state(
+        context,
+        node,
+        node_key,
+        market_slug,
+        outcome_label,
+    );
+    let threshold_usd = stored.threshold_usd.or(fallback_threshold_usd)?;
+    Some(
+        minimum_threshold_usd
+            .map(|minimum| threshold_usd.max(minimum))
+            .unwrap_or(threshold_usd),
+    )
+}
+
+pub(crate) fn resolve_action_place_order_ptb_next_effective_threshold_usd(
+    previous_effective_ptb_usd: Option<f64>,
+    effective_delta_usd: f64,
+) -> Option<f64> {
+    previous_effective_ptb_usd
+        .map(|threshold_usd| threshold_usd + effective_delta_usd.max(0.0))
+}
+
+pub(crate) fn sync_action_place_order_ptb_current_effective_threshold_state(
+    context: &mut Value,
+    node: &TradeFlowNode,
+    node_key: &str,
+    market_slug: &str,
+    outcome_label: &str,
+    resolution: &ActionPlaceOrderPtbCurrentEffectiveResolution,
+    updated_at: DateTime<Utc>,
+    default_source: &str,
+) -> bool {
+    let mut source = resolution
+        .stored_source
+        .clone()
+        .unwrap_or_else(|| default_source.to_string());
+    if resolution.stored_threshold_usd.is_none() {
+        source = "seed".to_string();
+    } else if resolution.decay_delta_usd > 0.0 {
+        source = "sl_bump_decay".to_string();
+    }
+    let threshold_changed = resolution
+        .stored_threshold_usd
+        .map(|value| (value - resolution.threshold_usd).abs() > 1e-9)
+        .unwrap_or(true);
+    let bump_changed = resolution
+        .stored_bump_usd
+        .map(|value| (value - resolution.bump_usd).abs() > 1e-9)
+        .unwrap_or(true);
+    if !threshold_changed && !bump_changed {
+        return false;
+    }
+    set_action_place_order_ptb_current_effective_threshold_state(
+        context,
+        node,
+        node_key,
+        market_slug,
+        outcome_label,
+        resolution.threshold_usd,
+        resolution.bump_usd,
+        &source,
+        updated_at,
+    );
+    true
+}
+
+pub(crate) fn set_action_place_order_ptb_current_effective_threshold_state(
+    context: &mut Value,
+    node: &TradeFlowNode,
+    node_key: &str,
+    market_slug: &str,
+    outcome_label: &str,
+    threshold_usd: f64,
+    bump_usd: f64,
+    source: &str,
+    updated_at: DateTime<Utc>,
+) {
+    let source = source.trim();
+    let source = (!source.is_empty()).then_some(source);
+    match resolve_action_place_order_ptb_stop_loss_bump_config(node, "buy")
+        .ok()
+        .flatten()
+        .map(|config| config.scope_mode)
+        .unwrap_or(ActionPlaceOrderPtbStopLossBumpScopeMode::PerScope)
+    {
+        ActionPlaceOrderPtbStopLossBumpScopeMode::Global => {
+            set_flow_node_state(
+                context,
+                node_key,
+                FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_THRESHOLD_USD,
+                json!(threshold_usd.max(0.0)),
+            );
+            set_flow_node_state(
+                context,
+                node_key,
+                FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_BUMP_USD,
+                json!(bump_usd.max(0.0)),
+            );
+            set_flow_node_state(
+                context,
+                node_key,
+                FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_SOURCE,
+                json!(source),
+            );
+            set_flow_node_state(
+                context,
+                node_key,
+                FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_UPDATED_AT,
+                json!(updated_at.to_rfc3339()),
+            );
+        }
+        ActionPlaceOrderPtbStopLossBumpScopeMode::PerScope => {
+            let Some(scope_key) =
+                resolve_action_place_order_ptb_stop_loss_bump_scope_key(market_slug, outcome_label)
+            else {
+                return;
+            };
+            let mut entry = resolve_action_place_order_ptb_stop_loss_bump_scope_entry(
+                context, node_key, &scope_key,
+            )
+            .unwrap_or_else(|| json!({}));
+            if !entry.is_object() {
+                entry = json!({});
+            }
+            let entry_obj = entry.as_object_mut().expect("scope entry object");
+            entry_obj.insert(
+                FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_THRESHOLD_USD.to_string(),
+                json!(threshold_usd.max(0.0)),
+            );
+            entry_obj.insert(
+                FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_BUMP_USD.to_string(),
+                json!(bump_usd.max(0.0)),
+            );
+            entry_obj.insert(
+                FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_SOURCE.to_string(),
+                json!(source),
+            );
+            entry_obj.insert(
+                FLOW_NODE_STATE_PTB_CURRENT_EFFECTIVE_UPDATED_AT.to_string(),
+                json!(updated_at.to_rfc3339()),
+            );
+            set_action_place_order_ptb_stop_loss_bump_scope_entry(
+                context, node_key, &scope_key, entry,
+            );
+        }
+    }
+}
+
 fn apply_action_place_order_ptb_stop_loss_bump_state(
     context: &mut Value,
     node: &TradeFlowNode,
@@ -511,18 +864,25 @@ fn apply_action_place_order_ptb_stop_loss_bump_state(
             if let Some(scope_key) =
                 resolve_action_place_order_ptb_stop_loss_bump_scope_key(market_slug, outcome_label)
             {
+                let mut entry = resolve_action_place_order_ptb_stop_loss_bump_scope_entry(
+                    context, node_key, &scope_key,
+                )
+                .unwrap_or_else(|| json!({}));
+                if !entry.is_object() {
+                    entry = json!({});
+                }
+                let entry_obj = entry.as_object_mut().expect("scope entry object");
+                entry_obj.insert("count".to_string(), json!(next_count));
+                entry_obj.insert(
+                    "accumulated_bump_usd".to_string(),
+                    json!(next_accumulated_bump_usd),
+                );
+                entry_obj.insert("last_increment_usd".to_string(), json!(bump_increment_usd));
+                entry_obj.insert("last_market_slug".to_string(), json!(market_slug));
+                entry_obj.insert("last_child_order_id".to_string(), json!(child_order_id));
+                entry_obj.insert("updated_at".to_string(), json!(updated_at.to_rfc3339()));
                 set_action_place_order_ptb_stop_loss_bump_scope_entry(
-                    context,
-                    node_key,
-                    &scope_key,
-                    json!({
-                        "count": next_count,
-                        "accumulated_bump_usd": next_accumulated_bump_usd,
-                        "last_increment_usd": bump_increment_usd,
-                        "last_market_slug": market_slug,
-                        "last_child_order_id": child_order_id,
-                        "updated_at": updated_at.to_rfc3339(),
-                    }),
+                    context, node_key, &scope_key, entry,
                 );
             }
         }
@@ -565,6 +925,15 @@ fn mark_action_place_order_ptb_stop_loss_bump_max_notified(
     );
 }
 
+fn trade_builder_pair_lock_ptb_stop_loss_bump_should_skip_from_session(
+    session: &TradeBuilderPairSession,
+    order: &TradeBuilderOrder,
+) -> bool {
+    session.status == TRADE_BUILDER_PAIR_STATUS_LOCKED
+        && trade_builder_pair_lock_is_candidate_order(order)
+        && (session.primary_order_id == Some(order.id) || session.counter_order_id == Some(order.id))
+}
+
 async fn maybe_record_action_place_order_ptb_stop_loss_bump(
     repo: &PostgresRepository,
     parent_order: &TradeBuilderOrder,
@@ -581,6 +950,35 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
     else {
         return Ok(());
     };
+    if trade_builder_order_uses_pair_lock(parent_order)
+        && trade_builder_pair_lock_is_candidate_order(parent_order)
+    {
+        let Some(pair_session_id) = parent_order.pair_session_id else {
+            return Ok(());
+        };
+        let Some(session) = repo.get_trade_builder_pair_session(pair_session_id).await? else {
+            return Ok(());
+        };
+        if trade_builder_pair_lock_ptb_stop_loss_bump_should_skip_from_session(
+            &session,
+            parent_order,
+        ) {
+            repo.append_trade_builder_order_event(
+                parent_order.id,
+                "ptb_stop_loss_bump_skipped",
+                &json!({
+                    "reason": "pair_lock_locked_leg_stop_loss",
+                    "pair_session_id": pair_session_id,
+                    "sl_child_order_id": stop_loss_order.id,
+                    "flow_run_id": run_id,
+                    "node_key": action_node_key,
+                    "market_slug": &stop_loss_order.market_slug,
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
     let Some(flow_run) = repo.get_trade_flow_run(run_id).await? else {
         return Ok(());
     };
@@ -604,6 +1002,42 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
     let updated_at = Utc::now();
     let base_bump_usd = resolve_action_place_order_ptb_stop_loss_bump_base_usd(&config);
     let bump_increment_usd = base_bump_usd;
+    let previous_resolution =
+        trade_flow::guards::price_to_beat::resolve_action_place_order_price_to_beat_guard_resolution(
+            node,
+            &context,
+            &stop_loss_order.market_slug,
+            &parent_order.outcome_label,
+        )
+        .ok();
+    let previous_effective_ptb_usd =
+        resolve_action_place_order_ptb_authoritative_previous_effective_threshold_usd(
+            &context,
+            node,
+            action_node_key,
+            &stop_loss_order.market_slug,
+            &parent_order.outcome_label,
+            previous_resolution
+                .as_ref()
+                .and_then(|resolution| resolution.current_effective_ptb_usd),
+            previous_resolution
+                .as_ref()
+                .and_then(|resolution| resolution.base_threshold_usd),
+        );
+    let previous_ptb_snapshot = previous_resolution.as_ref().and_then(|resolution| {
+        previous_effective_ptb_usd.map(|threshold_usd| {
+            ActionPlaceOrderPtbStopLossBumpCurrentPtbSnapshot {
+                value: match resolution.threshold_unit {
+                    trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd => threshold_usd,
+                    trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Cent => {
+                        threshold_usd * 100.0
+                    }
+                },
+                unit: resolution.threshold_unit.as_str().to_string(),
+                usd: threshold_usd,
+            }
+        })
+    });
     let update = apply_action_place_order_ptb_stop_loss_bump_state(
         &mut context,
         node,
@@ -643,6 +1077,33 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
         return Ok(());
     }
 
+    let (previous_capped_bump_usd, _, _) = resolve_action_place_order_ptb_stop_loss_bump_capped_usd(
+        update.previous_accumulated_bump_usd,
+        Some(&config),
+    );
+    let (applied_bump_usd, _, _) = resolve_action_place_order_ptb_stop_loss_bump_capped_usd(
+        update.next_accumulated_bump_usd,
+        Some(&config),
+    );
+    let effective_delta_usd = (applied_bump_usd - previous_capped_bump_usd).max(0.0);
+    let next_effective_ptb_usd = resolve_action_place_order_ptb_next_effective_threshold_usd(
+        previous_effective_ptb_usd,
+        effective_delta_usd,
+    );
+    if let Some(next_effective_ptb_usd) = next_effective_ptb_usd {
+        set_action_place_order_ptb_current_effective_threshold_state(
+            &mut context,
+            node,
+            action_node_key,
+            &stop_loss_order.market_slug,
+            &parent_order.outcome_label,
+            next_effective_ptb_usd,
+            applied_bump_usd,
+            "sl_bump",
+            updated_at,
+        );
+    }
+
     repo.update_trade_flow_run_context(run_id, &context).await?;
     let cache_updated = replace_trade_flow_ws_fast_path_run_context(run_id, &context).await;
     repo.append_trade_builder_order_event(
@@ -676,24 +1137,16 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
     )
     .await?;
 
-    let previous_raw_bump_usd = update.previous_accumulated_bump_usd;
     let raw_bump_usd = update.next_accumulated_bump_usd;
-    let max_bump_usd = config.max_value.map(|max_value| {
-        trade_flow::guards::price_to_beat::normalize_price_to_beat_threshold_usd(
-            max_value,
-            config.unit,
-        )
-    });
-    let previous_applied_bump_usd = max_bump_usd
-        .map(|max_usd| previous_raw_bump_usd.min(max_usd))
-        .unwrap_or(previous_raw_bump_usd);
-    let applied_bump_usd = max_bump_usd
-        .map(|max_usd| raw_bump_usd.min(max_usd))
-        .unwrap_or(raw_bump_usd);
-    let current_ptb_snapshot = resolve_action_place_order_ptb_stop_loss_bump_current_ptb_snapshot(
+    let current_ptb_snapshot = resolve_action_place_order_ptb_stop_loss_bump_live_ptb_snapshot(
+        Some(repo),
+        node,
         &context,
+        Some(run_id),
         &stop_loss_order.market_slug,
-    );
+        &parent_order.outcome_label,
+    )
+    .await;
 
     if let Some(max_value) = config.max_value {
         let mut messages = vec![
@@ -702,8 +1155,13 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
                 config.amount,
                 config.unit.as_str(),
                 update.next_count,
-                previous_applied_bump_usd,
+                previous_capped_bump_usd,
                 applied_bump_usd,
+                previous_ptb_snapshot.as_ref().map(|snapshot| snapshot.value),
+                previous_ptb_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.unit.as_str()),
+                previous_ptb_snapshot.as_ref().map(|snapshot| snapshot.usd),
                 current_ptb_snapshot.as_ref().map(|snapshot| snapshot.value),
                 current_ptb_snapshot
                     .as_ref()
@@ -751,8 +1209,13 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
                 config.amount,
                 config.unit.as_str(),
                 update.next_count,
-                previous_applied_bump_usd,
+                previous_capped_bump_usd,
                 applied_bump_usd,
+                previous_ptb_snapshot.as_ref().map(|snapshot| snapshot.value),
+                previous_ptb_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.unit.as_str()),
+                previous_ptb_snapshot.as_ref().map(|snapshot| snapshot.usd),
                 current_ptb_snapshot.as_ref().map(|snapshot| snapshot.value),
                 current_ptb_snapshot
                     .as_ref()

@@ -1,10 +1,12 @@
 use super::current_price::CURRENT_PRICE_SOURCE_CHAINLINK;
 use super::notification::{
+    build_price_to_beat_bump_increased_notification_message,
     build_price_to_beat_bump_max_reached_notification_message,
     build_price_to_beat_guard_blocked_notification_message,
     build_price_to_beat_guard_recovered_notification_message,
     build_price_to_beat_guard_waiting_notification_message,
     build_price_to_beat_relax_changed_notification_message,
+    build_price_to_beat_relax_miss_notification_message,
 };
 use super::*;
 
@@ -32,6 +34,7 @@ fn default_guard_evaluation() -> PriceToBeatGuardEvaluation {
         base_threshold_value: None,
         base_threshold_unit: None,
         base_threshold_usd: None,
+        current_effective_ptb_usd: None,
         threshold_value: 0.0,
         threshold_unit: "usd".to_string(),
         threshold_usd: 0.0,
@@ -114,6 +117,118 @@ fn blocked_notification_includes_detailed_ptb_summary_when_metadata_present() {
     assert!(message.contains("SL Bump: kademe 10.00000000 cent"));
     assert!(message.contains("uygulanan 0.10000000 USD"));
     assert!(message.contains("bu market dislandi"));
+}
+
+#[test]
+fn blocked_notification_hides_sl_bump_when_effective_ptb_matches_base() {
+    let evaluation = PriceToBeatGuardEvaluation {
+        reason_code: "price_to_beat_gap_below_threshold".to_string(),
+        market_slug: "eth-updown-5m-1776200100".to_string(),
+        event_url: "https://polymarket.com/event/eth-updown-5m-1776200100".to_string(),
+        configured_threshold_mode: Some("manual".to_string()),
+        base_threshold_value: Some(100.0),
+        base_threshold_unit: Some("cent".to_string()),
+        base_threshold_usd: Some(1.0),
+        current_effective_ptb_usd: Some(1.0),
+        threshold_value: 100.0,
+        threshold_unit: "cent".to_string(),
+        threshold_usd: 1.0,
+        stop_loss_bump_count: 7,
+        stop_loss_bump_applied_count: 7,
+        stop_loss_bump_amount: Some(25.0),
+        stop_loss_bump_max_value: Some(300.0),
+        stop_loss_bump_unit: Some("cent".to_string()),
+        stop_loss_bump_usd: 1.75,
+        ..default_guard_evaluation()
+    };
+
+    let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
+    assert!(message.contains("Efektif PTB: 100.00000000 cent (~1.00000000 USD)"));
+    assert!(message.contains("Base PTB: 100.00000000 cent (~1.00000000 USD)"));
+    assert!(!message.contains("SL Bump:"));
+}
+
+#[test]
+fn blocked_notification_shows_sl_bump_when_auto_threshold_is_lifted() {
+    let evaluation = PriceToBeatGuardEvaluation {
+        reason_code: "price_to_beat_gap_below_threshold".to_string(),
+        market_slug: "eth-updown-5m-1776200100".to_string(),
+        event_url: "https://polymarket.com/event/eth-updown-5m-1776200100".to_string(),
+        configured_threshold_mode: Some("auto_vol_pct".to_string()),
+        threshold_mode: "auto_vol_pct".to_string(),
+        auto_threshold_usd: Some(1.2),
+        current_effective_ptb_usd: Some(1.5),
+        threshold_value: 150.0,
+        threshold_unit: "cent".to_string(),
+        threshold_usd: 1.5,
+        stop_loss_bump_count: 2,
+        stop_loss_bump_applied_count: 2,
+        stop_loss_bump_amount: Some(15.0),
+        stop_loss_bump_max_value: Some(200.0),
+        stop_loss_bump_unit: Some("cent".to_string()),
+        stop_loss_bump_usd: 0.3,
+        ..default_guard_evaluation()
+    };
+
+    let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
+    assert!(message.contains("Auto Threshold: 1.20000000 USD"));
+    assert!(message.contains("SL Bump: kademe 15.00000000 cent"));
+}
+
+#[test]
+fn blocked_notification_uses_reentry_adjusted_base_when_deciding_sl_bump_visibility() {
+    let hidden_message = build_price_to_beat_guard_blocked_notification_message(
+        &PriceToBeatGuardEvaluation {
+            reason_code: "price_to_beat_gap_below_threshold".to_string(),
+            market_slug: "eth-updown-5m-1776200100".to_string(),
+            event_url: "https://polymarket.com/event/eth-updown-5m-1776200100".to_string(),
+            configured_threshold_mode: Some("manual".to_string()),
+            base_threshold_value: Some(50.0),
+            base_threshold_unit: Some("cent".to_string()),
+            base_threshold_usd: Some(0.5),
+            current_effective_ptb_usd: Some(0.5),
+            threshold_value: 50.0,
+            threshold_unit: "cent".to_string(),
+            threshold_usd: 0.5,
+            reentry_override_active: true,
+            reentry_override_value: Some(50.0),
+            reentry_override_unit: Some("cent".to_string()),
+            stop_loss_bump_count: 3,
+            stop_loss_bump_applied_count: 3,
+            stop_loss_bump_amount: Some(10.0),
+            stop_loss_bump_unit: Some("cent".to_string()),
+            stop_loss_bump_usd: 0.3,
+            ..default_guard_evaluation()
+        },
+    );
+    assert!(!hidden_message.contains("SL Bump:"));
+
+    let visible_message = build_price_to_beat_guard_blocked_notification_message(
+        &PriceToBeatGuardEvaluation {
+            reason_code: "price_to_beat_gap_below_threshold".to_string(),
+            market_slug: "eth-updown-5m-1776200100".to_string(),
+            event_url: "https://polymarket.com/event/eth-updown-5m-1776200100".to_string(),
+            configured_threshold_mode: Some("manual".to_string()),
+            base_threshold_value: Some(50.0),
+            base_threshold_unit: Some("cent".to_string()),
+            base_threshold_usd: Some(0.5),
+            current_effective_ptb_usd: Some(0.75),
+            threshold_value: 75.0,
+            threshold_unit: "cent".to_string(),
+            threshold_usd: 0.75,
+            reentry_override_active: true,
+            reentry_override_value: Some(50.0),
+            reentry_override_unit: Some("cent".to_string()),
+            stop_loss_bump_count: 3,
+            stop_loss_bump_applied_count: 3,
+            stop_loss_bump_amount: Some(10.0),
+            stop_loss_bump_unit: Some("cent".to_string()),
+            stop_loss_bump_usd: 0.25,
+            ..default_guard_evaluation()
+        },
+    );
+    assert!(visible_message.contains("Re-entry Override: 50.00000000 cent (~0.50000000 USD)"));
+    assert!(visible_message.contains("SL Bump: kademe 10.00000000 cent"));
 }
 
 #[test]
@@ -233,6 +348,95 @@ fn relax_notification_keeps_special_fields_and_adds_shared_summary_block() {
 }
 
 #[test]
+fn relax_miss_notification_reports_streak_and_status() {
+    let inactive_evaluation = PriceToBeatGuardEvaluation {
+        direction: Some("up".to_string()),
+        market_slug: "eth-updown-5m-1776198600".to_string(),
+        timeframe: Some("5m".to_string()),
+        asset: Some("eth".to_string()),
+        configured_threshold_mode: Some("manual".to_string()),
+        threshold_value: 100.0,
+        threshold_unit: "cent".to_string(),
+        threshold_usd: 1.0,
+        ..default_guard_evaluation()
+    };
+    let inactive_message = build_price_to_beat_relax_miss_notification_message(
+        &inactive_evaluation,
+        None,
+        1,
+        Some("eth-updown-5m-1776198300"),
+        3,
+        Some(0.75),
+        5,
+        false,
+        None,
+    );
+    assert!(inactive_message.contains("Missed Market: eth-updown-5m-1776198300"));
+    assert!(inactive_message.contains("Onceki Bildirilen Miss Streak: N/A"));
+    assert!(inactive_message.contains("Yeni Miss Streak: 1"));
+    assert!(inactive_message.contains("Missed Tradable Seconds: 3"));
+    assert!(inactive_message.contains("Missed Max Fillability: 0.75000000"));
+    assert!(inactive_message.contains("Configured Miss Count: 5"));
+    assert!(inactive_message.contains("Relax Durumu: threshold henuz gevsemedi"));
+    assert!(inactive_message.contains("Configured Mod: manual"));
+
+    let active_evaluation = PriceToBeatGuardEvaluation {
+        direction: Some("down".to_string()),
+        market_slug: "eth-updown-5m-1776198900".to_string(),
+        timeframe: Some("5m".to_string()),
+        asset: Some("eth".to_string()),
+        configured_threshold_mode: Some("manual".to_string()),
+        threshold_value: 1.5,
+        threshold_unit: "usd".to_string(),
+        threshold_usd: 1.5,
+        ..default_guard_evaluation()
+    };
+    let active_message = build_price_to_beat_relax_miss_notification_message(
+        &active_evaluation,
+        Some(5),
+        6,
+        Some("eth-updown-5m-1776198600"),
+        4,
+        Some(1.0),
+        5,
+        true,
+        Some(1.5),
+    );
+    assert!(active_message.contains("Missed Market: eth-updown-5m-1776198600"));
+    assert!(active_message.contains("Onceki Bildirilen Miss Streak: 5"));
+    assert!(active_message.contains("Yeni Miss Streak: 6"));
+    assert!(active_message.contains("Missed Tradable Seconds: 4"));
+    assert!(active_message.contains("Missed Max Fillability: 1.00000000"));
+    assert!(active_message.contains("Relax Durumu: aktif"));
+    assert!(active_message.contains("Guncel Efektif Relax PTB: 1.50000000"));
+    assert!(active_message.contains("Efektif PTB: 1.50000000 USD"));
+}
+
+#[test]
+fn bump_increased_notification_reports_relaxed_threshold_delta_without_reseeding_base_plus_bump() {
+    let message = build_price_to_beat_bump_increased_notification_message(
+        "eth-updown-5m-1776678300",
+        25.0,
+        "cent",
+        6,
+        1.25,
+        1.50,
+        Some(100.0),
+        Some("cent"),
+        Some(1.0),
+        Some(125.0),
+        Some("cent"),
+        Some(1.25),
+    );
+
+    assert!(message.contains("Uygulanan Toplam Artis: 1.25000000 USD -> 1.50000000 USD"));
+    assert!(message.contains(
+        "Efektif PTB: 100.00000000 cent (~1.00000000 USD) -> 125.00000000 cent (~1.25000000 USD)"
+    ));
+    assert!(message.contains("Guncel PTB: 125.00000000 cent (~1.25000000 USD)"));
+}
+
+#[test]
 fn bump_max_reached_notification_formats_current_ptb_and_na() {
     let cent_message = build_price_to_beat_bump_max_reached_notification_message(
         "eth-updown-5m-1776200100",
@@ -256,5 +460,5 @@ fn bump_max_reached_notification_formats_current_ptb_and_na() {
         None,
         None,
     );
-    assert!(na_message.contains("Guncel PTB: N/A"));
+    assert!(na_message.contains("Guncel PTB: Bilinmiyor"));
 }

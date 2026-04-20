@@ -1,4 +1,7 @@
 use bot_infra::db::TradeBuilderPtbStopLossRule;
+use crate::trade_flow::guards::price_to_beat::{
+    normalize_price_to_beat_threshold_usd, PriceToBeatDiffUnit,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 struct ActionPlaceOrderPtbStopLossConfig {
@@ -39,8 +42,9 @@ fn resolve_action_place_order_ptb_stop_loss_config(
     market_slug: &str,
 ) -> Result<Option<ActionPlaceOrderPtbStopLossConfig>> {
     let hard_stop_loss_enabled = node_config_bool(node, "ptbStopLossEnabled").unwrap_or(false);
+    let gap_unit = resolve_action_place_order_ptb_stop_loss_gap_unit(node)?;
     let staged_rules =
-        parse_action_place_order_ptb_stop_loss_rules(node.config.get("ptbStopLossRules"))?;
+        parse_action_place_order_ptb_stop_loss_rules(node.config.get("ptbStopLossRules"), gap_unit)?;
     if side != "buy" || (!hard_stop_loss_enabled && staged_rules.is_empty()) {
         return Ok(None);
     }
@@ -50,7 +54,8 @@ fn resolve_action_place_order_ptb_stop_loss_config(
         "action.place_order ptbStopLossEnabled only supports 5m/15m updown market slugs"
     );
 
-    let hard_gap_usd = node_config_f64(node, "ptbStopLossGapUsd");
+    let hard_gap_usd = node_config_f64(node, "ptbStopLossGapUsd")
+        .map(|value| normalize_price_to_beat_threshold_usd(value, gap_unit));
     if hard_stop_loss_enabled && hard_gap_usd.is_none() && staged_rules.is_empty() {
         anyhow::bail!("action.place_order ptbStopLossGapUsd must be set");
     }
@@ -74,6 +79,15 @@ fn resolve_action_place_order_ptb_stop_loss_config(
     }))
 }
 
+fn resolve_action_place_order_ptb_stop_loss_gap_unit(
+    node: &TradeFlowNode,
+) -> Result<PriceToBeatDiffUnit> {
+    let raw = node_config_string(node, "ptbStopLossGapUnit");
+    PriceToBeatDiffUnit::parse(raw.as_deref()).ok_or_else(|| {
+        anyhow::anyhow!("action.place_order ptbStopLossGapUnit must be usd or cent")
+    })
+}
+
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct ActionPlaceOrderPtbStopLossRuleConfig {
@@ -83,6 +97,7 @@ struct ActionPlaceOrderPtbStopLossRuleConfig {
 
 fn parse_action_place_order_ptb_stop_loss_rules(
     raw_value: Option<&Value>,
+    gap_unit: PriceToBeatDiffUnit,
 ) -> Result<Vec<TradeBuilderPtbStopLossRule>> {
     let Some(raw_value) = raw_value else {
         return Ok(Vec::new());
@@ -116,7 +131,7 @@ fn parse_action_place_order_ptb_stop_loss_rules(
         previous_gap_usd = Some(rule.gap_usd);
         total_size_pct += rule.size_pct;
         parsed.push(TradeBuilderPtbStopLossRule {
-            gap_usd: rule.gap_usd,
+            gap_usd: normalize_price_to_beat_threshold_usd(rule.gap_usd, gap_unit),
             size_pct: rule.size_pct,
         });
     }
@@ -430,11 +445,11 @@ mod trade_builder_ptb_stop_loss_tests {
     async fn ptb_stop_loss_triggers_when_up_gap_reverts_to_zero() {
         let now_ms = Utc::now().timestamp_millis();
         trade_flow::guards::chainlink_price::seed_chainlink_price_test_ticks(
-            "eth",
+            "sol",
             &[(now_ms - 250, 101.0), (now_ms, 99.75)],
         )
-        .expect("seed eth ticks");
-        let order = test_ptb_stop_loss_order("eth-updown-5m-1774013100", "Up", 0.0, Some(100.0));
+        .expect("seed sol ticks");
+        let order = test_ptb_stop_loss_order("sol-updown-5m-1774013100", "Up", 0.0, Some(100.0));
 
         let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
         assert_eq!(evaluation.reason_code, "ptb_gap_threshold_hit");
@@ -481,7 +496,8 @@ mod trade_builder_ptb_stop_loss_tests {
             { "gapUsd": 3.0, "sizePct": 75.0 }
         ]);
         let parsed =
-            parse_action_place_order_ptb_stop_loss_rules(Some(&raw)).expect("ptb staged rules");
+            parse_action_place_order_ptb_stop_loss_rules(Some(&raw), PriceToBeatDiffUnit::Usd)
+                .expect("ptb staged rules");
 
         assert_eq!(
             parsed,
@@ -505,8 +521,9 @@ mod trade_builder_ptb_stop_loss_tests {
             { "gapUsd": 0.0, "sizePct": 25.0 },
             { "gapUsd": -20.0, "sizePct": 50.0 }
         ]);
-        let parsed = parse_action_place_order_ptb_stop_loss_rules(Some(&raw))
-            .expect("negative ptb staged rules");
+        let parsed =
+            parse_action_place_order_ptb_stop_loss_rules(Some(&raw), PriceToBeatDiffUnit::Usd)
+                .expect("negative ptb staged rules");
 
         assert_eq!(
             parsed,
@@ -522,6 +539,31 @@ mod trade_builder_ptb_stop_loss_tests {
                 TradeBuilderPtbStopLossRule {
                     gap_usd: -20.0,
                     size_pct: 50.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn ptb_stop_loss_rules_normalize_cent_rows_to_usd() {
+        let raw = json!([
+            { "gapUsd": 20.0, "sizePct": 60.0 },
+            { "gapUsd": 0.0, "sizePct": 40.0 }
+        ]);
+        let parsed =
+            parse_action_place_order_ptb_stop_loss_rules(Some(&raw), PriceToBeatDiffUnit::Cent)
+                .expect("cent ptb staged rules");
+
+        assert_eq!(
+            parsed,
+            vec![
+                TradeBuilderPtbStopLossRule {
+                    gap_usd: 0.20,
+                    size_pct: 60.0,
+                },
+                TradeBuilderPtbStopLossRule {
+                    gap_usd: 0.0,
+                    size_pct: 40.0,
                 },
             ]
         );
@@ -580,6 +622,26 @@ mod trade_builder_ptb_stop_loss_tests {
     }
 
     #[test]
+    fn ptb_stop_loss_config_normalizes_cent_hard_gap_to_usd() {
+        let node = test_place_order_node(json!({
+            "ptbStopLossEnabled": true,
+            "ptbStopLossGapUsd": 20.0,
+            "ptbStopLossGapUnit": "cent"
+        }));
+
+        let config = resolve_action_place_order_ptb_stop_loss_config(
+            &node,
+            "buy",
+            "eth-updown-5m-1774013100",
+        )
+        .expect("cent hard ptb config should resolve")
+        .expect("ptb config should be enabled");
+
+        assert_eq!(config.hard_gap_usd, Some(0.2));
+        assert!(config.staged_rules.is_empty());
+    }
+
+    #[test]
     fn ptb_stop_loss_config_preserves_hard_gap_with_staged_rules() {
         let node = test_place_order_node(json!({
             "ptbStopLossEnabled": true,
@@ -600,6 +662,32 @@ mod trade_builder_ptb_stop_loss_tests {
             config.staged_rules,
             vec![TradeBuilderPtbStopLossRule {
                 gap_usd: 1.0,
+                size_pct: 100.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn ptb_stop_loss_config_normalizes_cent_staged_rules_to_usd() {
+        let node = test_place_order_node(json!({
+            "ptbStopLossEnabled": true,
+            "ptbStopLossGapUnit": "cent",
+            "ptbStopLossRules": [{ "gapUsd": 20.0, "sizePct": 100.0 }]
+        }));
+
+        let config = resolve_action_place_order_ptb_stop_loss_config(
+            &node,
+            "buy",
+            "eth-updown-5m-1774013100",
+        )
+        .expect("cent staged ptb config should resolve")
+        .expect("ptb config should be enabled");
+
+        assert_eq!(config.hard_gap_usd, None);
+        assert_eq!(
+            config.staged_rules,
+            vec![TradeBuilderPtbStopLossRule {
+                gap_usd: 0.2,
                 size_pct: 100.0,
             }]
         );
@@ -665,8 +753,9 @@ mod trade_builder_ptb_stop_loss_tests {
             { "gapUsd": 3.0, "sizePct": 50.0 }
         ]);
 
-        let error = parse_action_place_order_ptb_stop_loss_rules(Some(&raw))
-            .expect_err("non-decreasing staged ptb rules should fail");
+        let error =
+            parse_action_place_order_ptb_stop_loss_rules(Some(&raw), PriceToBeatDiffUnit::Usd)
+                .expect_err("non-decreasing staged ptb rules should fail");
         assert!(error
             .to_string()
             .contains("ptbStopLossRules gapUsd values must be strictly decreasing"));

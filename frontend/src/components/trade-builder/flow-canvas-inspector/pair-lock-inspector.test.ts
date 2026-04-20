@@ -5,6 +5,7 @@ import {
   estimatePairLockAutoRemainingBudgetPreview,
   resolvePairLockStopLossFieldVisibility,
   resolvePairLockSizingFieldVisibility,
+  resolvePairLockTakeProfitFieldVisibility,
 } from './pair-lock-inspector';
 
 test('estimatePairLockAutoRemainingBudgetPreview computes remaining budget and profit', () => {
@@ -91,8 +92,11 @@ test('resolvePairLockSizingFieldVisibility toggles manual and auto fields', () =
 
 test('resolvePairLockStopLossFieldVisibility allows supported lead-leg stop-loss fields', () => {
   const fields = {
+    counterLegEnabled: 'true',
     slEnabled: 'true',
     ptbStopLossEnabled: 'true',
+    counterLegSlEnabled: 'true',
+    counterLegPtbStopLossEnabled: 'true',
     reenterOnSlHit: 'true',
   };
 
@@ -109,11 +113,61 @@ test('resolvePairLockStopLossFieldVisibility allows supported lead-leg stop-loss
     true
   );
   assert.equal(
+    resolvePairLockStopLossFieldVisibility('ptbStopLossGapUnit', true, fields),
+    true
+  );
+  assert.equal(
     resolvePairLockStopLossFieldVisibility('reentryCooldownSec', true, fields),
+    true
+  );
+  assert.equal(
+    resolvePairLockStopLossFieldVisibility('counterLegSlPriceCent', true, fields),
+    true
+  );
+  assert.equal(
+    resolvePairLockStopLossFieldVisibility('counterLegPtbStopLossGapUsd', true, fields),
+    true
+  );
+  assert.equal(
+    resolvePairLockStopLossFieldVisibility('counterLegPtbStopLossGapUnit', true, fields),
+    true
+  );
+  assert.equal(
+    resolvePairLockStopLossFieldVisibility('counterLegNotifyOnSlHit', true, fields),
     true
   );
   assert.equal(
     resolvePairLockStopLossFieldVisibility('reentryMinPriceCent', true, fields),
     null
+  );
+});
+
+test('resolvePairLockTakeProfitFieldVisibility gates counter TP fields behind counter leg and TP toggle', () => {
+  assert.equal(
+    resolvePairLockTakeProfitFieldVisibility('counterLegTpEnabled', true, {
+      counterLegEnabled: 'true',
+    }),
+    true
+  );
+  assert.equal(
+    resolvePairLockTakeProfitFieldVisibility('counterLegTpPriceCent', true, {
+      counterLegEnabled: 'true',
+      counterLegTpEnabled: 'false',
+    }),
+    false
+  );
+  assert.equal(
+    resolvePairLockTakeProfitFieldVisibility('counterLegTpPriceCent', true, {
+      counterLegEnabled: 'true',
+      counterLegTpEnabled: 'true',
+    }),
+    true
+  );
+  assert.equal(
+    resolvePairLockTakeProfitFieldVisibility('counterLegNotifyOnTpHit', false, {
+      counterLegEnabled: 'true',
+      counterLegTpEnabled: 'true',
+    }),
+    false
   );
 });

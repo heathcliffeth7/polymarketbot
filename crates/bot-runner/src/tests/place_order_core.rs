@@ -52,7 +52,10 @@ fn pair_lock_config_resolves_manual_counter_budget() {
         .expect("pair lock config parse")
         .expect("pair lock config");
 
-    assert_eq!(pair_lock.sizing_mode, ActionPlaceOrderPairLockSizingMode::Manual);
+    assert_eq!(
+        pair_lock.sizing_mode,
+        ActionPlaceOrderPairLockSizingMode::Manual
+    );
     assert_eq!(pair_lock.primary_leg_size_usdc, 5.0);
     assert_eq!(pair_lock.total_budget_usdc, None);
     assert_eq!(pair_lock.counter_leg_size_usdc, Some(9.0));
@@ -95,7 +98,10 @@ fn pair_lock_config_allows_market_execution_in_validation_contract() {
         .expect("pair lock config parse")
         .expect("pair lock config");
 
-    assert_eq!(pair_lock.sizing_mode, ActionPlaceOrderPairLockSizingMode::Manual);
+    assert_eq!(
+        pair_lock.sizing_mode,
+        ActionPlaceOrderPairLockSizingMode::Manual
+    );
 }
 
 #[test]
@@ -834,62 +840,6 @@ fn ptb_stop_loss_bump_state_increments_once_per_market() {
 }
 
 #[test]
-fn ptb_stop_loss_bump_current_ptb_uses_matching_guard_snapshot() {
-    let context = json!({
-        "flowContext": {
-            "priceToBeatGuard": {
-                "market_slug": "eth-updown-5m-1776200100",
-                "threshold_value": 150.0,
-                "threshold_unit": "cent",
-                "threshold_usd": 1.5
-            }
-        }
-    });
-
-    let snapshot = resolve_action_place_order_ptb_stop_loss_bump_current_ptb_snapshot(
-        &context,
-        "eth-updown-5m-1776200100",
-    )
-    .expect("matching ptb snapshot");
-
-    assert_eq!(snapshot.unit, "cent");
-    assert_eq!(snapshot.value, 150.0);
-    assert_eq!(snapshot.usd, 1.5);
-}
-
-#[test]
-fn ptb_stop_loss_bump_current_ptb_ignores_missing_or_mismatched_snapshot() {
-    let missing = json!({
-        "flowContext": {}
-    });
-    assert!(
-        resolve_action_place_order_ptb_stop_loss_bump_current_ptb_snapshot(
-            &missing,
-            "eth-updown-5m-1776200100",
-        )
-        .is_none()
-    );
-
-    let mismatched = json!({
-        "flowContext": {
-            "priceToBeatGuard": {
-                "market_slug": "eth-updown-5m-1776200400",
-                "threshold_value": 150.0,
-                "threshold_unit": "cent",
-                "threshold_usd": 1.5
-            }
-        }
-    });
-    assert!(
-        resolve_action_place_order_ptb_stop_loss_bump_current_ptb_snapshot(
-            &mismatched,
-            "eth-updown-5m-1776200100",
-        )
-        .is_none()
-    );
-}
-
-#[test]
 fn ptb_stop_loss_bump_notification_message_formats_current_ptb_cent() {
     let message =
         trade_flow::guards::price_to_beat::build_price_to_beat_bump_increased_notification_message(
@@ -899,12 +849,18 @@ fn ptb_stop_loss_bump_notification_message_formats_current_ptb_cent() {
             2,
             0.25,
             0.5,
+            Some(60.0),
+            Some("cent"),
+            Some(0.6),
             Some(150.0),
             Some("cent"),
             Some(1.5),
         );
 
     assert!(message.contains("Uygulanan Toplam Artis: 0.25000000 USD -> 0.50000000 USD"));
+    assert!(message.contains(
+        "Efektif PTB: 60.00000000 cent (~0.60000000 USD) -> 150.00000000 cent (~1.50000000 USD)"
+    ));
     assert!(message.contains("Guncel PTB: 150.00000000 cent (~1.50000000 USD)"));
 }
 
@@ -918,10 +874,14 @@ fn ptb_stop_loss_bump_notification_message_formats_current_ptb_usd_and_na() {
             2,
             0.25,
             0.5,
+            Some(0.6),
+            Some("usd"),
+            Some(0.6),
             Some(1.5),
             Some("usd"),
             Some(1.5),
         );
+    assert!(usd_message.contains("Efektif PTB: 0.60000000 USD -> 1.50000000 USD"));
     assert!(usd_message.contains("Guncel PTB: 1.50000000 USD"));
 
     let na_message =
@@ -935,8 +895,12 @@ fn ptb_stop_loss_bump_notification_message_formats_current_ptb_usd_and_na() {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         );
-    assert!(na_message.contains("Guncel PTB: N/A"));
+    assert!(na_message.contains("Efektif PTB: Bilinmiyor -> Bilinmiyor"));
+    assert!(na_message.contains("Guncel PTB: Bilinmiyor"));
 }
 
 #[test]

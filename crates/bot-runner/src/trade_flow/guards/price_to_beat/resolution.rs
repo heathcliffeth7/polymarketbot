@@ -12,6 +12,7 @@ pub(crate) struct ActionPlaceOrderPriceToBeatGuardResolution {
     pub(crate) base_threshold_unit: Option<PriceToBeatDiffUnit>,
     pub(crate) base_threshold_usd: Option<f64>,
     pub(crate) effective_threshold_usd: Option<f64>,
+    pub(crate) current_effective_ptb_usd: Option<f64>,
     pub(crate) stop_loss_bump_count: i64,
     pub(crate) stop_loss_bump_applied_count: i64,
     pub(crate) stop_loss_bump_amount: Option<f64>,
@@ -37,6 +38,7 @@ impl ActionPlaceOrderPriceToBeatGuardResolution {
             .base_threshold_unit
             .map(|unit| unit.as_str().to_string());
         evaluation.base_threshold_usd = self.base_threshold_usd;
+        evaluation.current_effective_ptb_usd = self.current_effective_ptb_usd;
         evaluation.stop_loss_bump_count = self.stop_loss_bump_count;
         evaluation.stop_loss_bump_applied_count = self.stop_loss_bump_applied_count;
         evaluation.stop_loss_bump_amount = self.stop_loss_bump_amount;
@@ -81,6 +83,7 @@ pub(crate) fn resolve_action_place_order_price_to_beat_guard_resolution(
     node: &crate::TradeFlowNode,
     context: &Value,
     market_slug: &str,
+    outcome_label: &str,
 ) -> Result<ActionPlaceOrderPriceToBeatGuardResolution> {
     let configured_mode =
         PriceToBeatMode::parse(crate::node_config_string(node, "priceToBeatMode").as_deref())
@@ -180,9 +183,7 @@ pub(crate) fn resolve_action_place_order_price_to_beat_guard_resolution(
             node,
             &node.key,
             market_slug,
-            crate::node_config_string(node, "outcomeLabel")
-                .as_deref()
-                .unwrap_or("yes"),
+            outcome_label,
         )
     } else {
         crate::ActionPlaceOrderPtbStopLossBumpState::default()
@@ -195,29 +196,29 @@ pub(crate) fn resolve_action_place_order_price_to_beat_guard_resolution(
     ) = stop_loss_bump_config
         .as_ref()
         .map(|config| {
-            let raw_bump_usd = stop_loss_bump_state.applied_bump_usd.max(0.0);
-            let capped_bump_usd = config
-                .max_value
-                .map(|max_value| {
-                    super::normalize_price_to_beat_threshold_usd(max_value, config.unit)
-                })
-                .map(|max_usd| raw_bump_usd.min(max_usd))
-                .unwrap_or(raw_bump_usd);
-            (
-                raw_bump_usd,
-                capped_bump_usd,
-                capped_bump_usd + f64::EPSILON < raw_bump_usd,
-                config
-                    .max_value
-                    .map(|max_value| {
-                        super::normalize_price_to_beat_threshold_usd(max_value, config.unit)
-                    })
-                    .map(|max_usd| capped_bump_usd >= max_usd)
-                    .unwrap_or(false),
-            )
+            let raw_bump_usd = stop_loss_bump_state.accumulated_bump_usd.max(0.0);
+            let (capped_bump_usd, capped, max_reached) =
+                crate::resolve_action_place_order_ptb_stop_loss_bump_capped_usd(
+                    raw_bump_usd,
+                    Some(config),
+                );
+            (raw_bump_usd, capped_bump_usd, capped, max_reached)
         })
         .unwrap_or((0.0, 0.0, false, false));
-    let effective_threshold_usd = base_threshold_usd.map(|base| base + stop_loss_bump_usd);
+    let current_effective_ptb =
+        crate::resolve_action_place_order_ptb_current_effective_threshold_resolution(
+            context,
+            node,
+            &node.key,
+            market_slug,
+            outcome_label,
+            base_threshold_usd.map(|base| base + stop_loss_bump_usd),
+            stop_loss_bump_usd,
+        );
+    let effective_threshold_usd = current_effective_ptb
+        .as_ref()
+        .map(|value| value.threshold_usd)
+        .or_else(|| base_threshold_usd.map(|base| base + stop_loss_bump_usd));
     let threshold_value = effective_threshold_usd
         .map(|threshold_usd| threshold_value_from_usd(threshold_usd, threshold_unit));
 
@@ -230,8 +231,9 @@ pub(crate) fn resolve_action_place_order_price_to_beat_guard_resolution(
         base_threshold_unit: base_threshold_value.map(|_| threshold_unit),
         base_threshold_usd,
         effective_threshold_usd,
+        current_effective_ptb_usd: effective_threshold_usd,
         stop_loss_bump_count: stop_loss_bump_state.count,
-        stop_loss_bump_applied_count: stop_loss_bump_state.applied_count,
+        stop_loss_bump_applied_count: stop_loss_bump_state.count,
         stop_loss_bump_amount: stop_loss_bump_config.as_ref().map(|config| config.amount),
         stop_loss_bump_max_value: stop_loss_bump_config
             .as_ref()
@@ -241,7 +243,7 @@ pub(crate) fn resolve_action_place_order_price_to_beat_guard_resolution(
         stop_loss_bump_usd,
         stop_loss_bump_capped,
         stop_loss_bump_max_reached,
-        stop_loss_bump_current_market_excluded: stop_loss_bump_state.current_market_excluded,
+        stop_loss_bump_current_market_excluded: false,
         stop_loss_bump_increment_usd: stop_loss_bump_state.last_bump_increment_usd,
         reentry_generation,
         reentry_override_active,

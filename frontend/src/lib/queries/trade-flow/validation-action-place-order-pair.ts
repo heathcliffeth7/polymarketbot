@@ -3,11 +3,57 @@ import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/
 import { hasUpstreamAutoScopeMarketTrigger } from './graph';
 import {
   isSupportedMarketPriceTriggerCondition,
+  isRecord,
+  resolveConfiguredBinaryPrice,
   toBooleanish,
   toFiniteNumber,
   toTrimmedString,
 } from './shared';
+import { normalizePtbStopLossGapUnitValue } from './validation-action-place-order-ptb-stop-loss';
 import { pushNodeError } from './validation-core';
+
+interface ParsedExitLadderRule {
+  priceCent: number;
+  sizePct: number;
+}
+
+function parseExitLadderRules(raw: unknown): {
+  isArray: boolean;
+  validRules: ParsedExitLadderRule[];
+  invalidItem: boolean;
+} {
+  if (!Array.isArray(raw)) {
+    return { isArray: false, validRules: [], invalidItem: false };
+  }
+
+  const validRules: ParsedExitLadderRule[] = [];
+  let invalidItem = false;
+  for (const item of raw) {
+    if (!isRecord(item)) {
+      invalidItem = true;
+      continue;
+    }
+    const resolvedPrice = resolveConfiguredBinaryPrice(item.priceCent, item.price);
+    const sizePct = toFiniteNumber(item.sizePct);
+    if (
+      !resolvedPrice.provided ||
+      resolvedPrice.value == null ||
+      sizePct == null ||
+      sizePct <= 0 ||
+      sizePct > 100
+    ) {
+      invalidItem = true;
+      continue;
+    }
+    validRules.push({ priceCent: resolvedPrice.value * 100, sizePct });
+  }
+
+  if (raw.length > 0 && validRules.length === 0) {
+    invalidItem = true;
+  }
+
+  return { isArray: true, validRules, invalidItem };
+}
 
 function normalizeBinaryOutcome(value: string): 'yes' | 'no' | null {
   switch (value.trim().toLowerCase()) {
@@ -31,6 +77,16 @@ function isIgnoredPairLockZeroValue(key: string, value: unknown): boolean {
     return false;
   }
   return toFiniteNumber(value) === 0;
+}
+
+function isSupportedStopLossTriggerPriceMode(value: string): boolean {
+  return [
+    'best_bid',
+    'composite',
+    'composite_safe',
+    'composite_fast',
+    'last_trade',
+  ].includes(value);
 }
 
 export function validateActionPlaceOrderPairLockConfig(
@@ -186,15 +242,188 @@ export function validateActionPlaceOrderPairLockConfig(
   for (const [key, code] of [
     ['notifyOnPairLocked', 'invalid_notify_on_pair_locked'],
     ['notifyOnPairUnwind', 'invalid_notify_on_pair_unwind'],
+    ['counterLegTpEnabled', 'invalid_counter_leg_tp_enabled'],
+    ['counterLegNotifyOnTpHit', 'invalid_counter_leg_notify_on_tp_hit'],
     ['counterLegPriceToBeatGuardEnabled', 'invalid_counter_leg_ptb_guard_enabled'],
     ['counterLegExecutionFloorGuardEnabled', 'invalid_counter_leg_execution_floor_enabled'],
     ['counterLegRetryOnPriceToBeatGuardBlock', 'invalid_counter_leg_retry_on_ptb'],
     ['counterLegRetryOnExecutionFloorGuardBlock', 'invalid_counter_leg_retry_on_floor'],
     ['counterLegRetryOnMaxPriceBlock', 'invalid_counter_leg_retry_on_max'],
+    ['counterLegSlEnabled', 'invalid_counter_leg_sl_enabled'],
+    ['counterLegPtbStopLossEnabled', 'invalid_counter_leg_ptb_stop_loss_enabled'],
+    ['counterLegNotifyOnSlHit', 'invalid_counter_leg_notify_on_sl_hit'],
   ] as const) {
     if (config[key] != null && toBooleanish(config[key]) == null) {
       pushNodeError(issues, node, code, `action.place_order ${key} must be boolean (true/false).`);
     }
+  }
+
+  const counterLegTpEnabled = toBooleanish(config.counterLegTpEnabled);
+  const counterLegNotifyOnTpHit = toBooleanish(config.counterLegNotifyOnTpHit);
+  const counterLegTpPrice = resolveConfiguredBinaryPrice(config.counterLegTpPriceCent, null);
+  const parsedCounterLegTpRules = parseExitLadderRules(config.counterLegTpRules);
+  const hasCounterLegTpRules = parsedCounterLegTpRules.validRules.length > 0;
+
+  if (
+    config.counterLegTpPriceCent != null &&
+    (!counterLegTpPrice.provided || counterLegTpPrice.value == null)
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_counter_leg_tp_price_cent',
+      'action.place_order counterLegTpPriceCent must be in (0, 100] when provided.'
+    );
+  }
+  if (parsedCounterLegTpRules.isArray && parsedCounterLegTpRules.validRules.length > 5) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_counter_leg_tp_rules_length',
+      'action.place_order counterLegTpRules cannot contain more than 5 entries.'
+    );
+  }
+  if (parsedCounterLegTpRules.invalidItem) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_counter_leg_tp_rules',
+      'action.place_order counterLegTpRules entries must provide priceCent in (0, 100] and sizePct in (0, 100].'
+    );
+  }
+  if (hasCounterLegTpRules) {
+    const counterLegTpRulesSum = parsedCounterLegTpRules.validRules.reduce(
+      (sum, item) => sum + item.sizePct,
+      0
+    );
+    if (Math.abs(counterLegTpRulesSum - 100) > 0.000001) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_counter_leg_tp_rules_sum',
+        'action.place_order counterLegTpRules total sizePct must equal 100.'
+      );
+    }
+    for (let index = 1; index < parsedCounterLegTpRules.validRules.length; index += 1) {
+      if (
+        parsedCounterLegTpRules.validRules[index - 1].priceCent >=
+        parsedCounterLegTpRules.validRules[index].priceCent
+      ) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_counter_leg_tp_rules_order',
+          'action.place_order counterLegTpRules priceCent values must be strictly increasing.'
+        );
+        break;
+      }
+    }
+  }
+  if (counterLegTpEnabled === true && !counterLegTpPrice.provided && !hasCounterLegTpRules) {
+    pushNodeError(
+      issues,
+      node,
+      'counter_leg_tp_requires_price_or_rules',
+      'action.place_order counterLegTpEnabled requires counterLegTpPriceCent or counterLegTpRules.'
+    );
+  }
+  if (
+    counterLegNotifyOnTpHit === true &&
+    counterLegTpEnabled !== true &&
+    !hasCounterLegTpRules
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'counter_leg_notify_on_tp_hit_requires_take_profit',
+      'action.place_order counterLegNotifyOnTpHit requires counterLegTpEnabled=true or counterLegTpRules.'
+    );
+  }
+
+  const counterLegSlEnabled = toBooleanish(config.counterLegSlEnabled);
+  const counterLegPtbStopLossEnabled = toBooleanish(config.counterLegPtbStopLossEnabled);
+  const counterLegNotifyOnSlHit = toBooleanish(config.counterLegNotifyOnSlHit);
+  if (counterLegSlEnabled === true) {
+    const counterLegSlPriceCent = toFiniteNumber(config.counterLegSlPriceCent);
+    if (
+      counterLegSlPriceCent == null ||
+      counterLegSlPriceCent <= 0 ||
+      counterLegSlPriceCent > 100
+    ) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_counter_leg_sl_price_cent',
+        'action.place_order counterLegSlPriceCent must be in (0, 100] when counter leg SL is enabled.'
+      );
+    }
+    const counterLegSlTriggerPriceMode = toTrimmedString(
+      config.counterLegSlTriggerPriceMode
+    ).toLowerCase();
+    if (
+      counterLegSlTriggerPriceMode &&
+      !isSupportedStopLossTriggerPriceMode(counterLegSlTriggerPriceMode)
+    ) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_counter_leg_sl_trigger_price_mode',
+        'action.place_order counterLegSlTriggerPriceMode must be best_bid, composite, composite_safe, composite_fast, or last_trade.'
+      );
+    }
+  }
+
+  if (counterLegPtbStopLossEnabled === true) {
+    const counterLegPtbStopLossGapUsd = toFiniteNumber(config.counterLegPtbStopLossGapUsd);
+    if (counterLegPtbStopLossGapUsd == null) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_counter_leg_ptb_stop_loss_gap_usd',
+        'action.place_order counterLegPtbStopLossGapUsd must be set when counter leg PTB stop-loss is enabled.'
+      );
+    }
+    const counterLegPtbStopLossGapUnit = normalizePtbStopLossGapUnitValue(
+      config.counterLegPtbStopLossGapUnit
+    );
+    if (
+      config.counterLegPtbStopLossGapUnit != null &&
+      counterLegPtbStopLossGapUnit == null
+    ) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_counter_leg_ptb_stop_loss_gap_unit',
+        'action.place_order counterLegPtbStopLossGapUnit must be usd or cent when provided.'
+      );
+    }
+    const counterLegPtbStopLossTimeDecayMode = toTrimmedString(
+      config.counterLegPtbStopLossTimeDecayMode
+    ).toLowerCase();
+    if (
+      counterLegPtbStopLossTimeDecayMode &&
+      !['tighten', 'relax', 'none'].includes(counterLegPtbStopLossTimeDecayMode)
+    ) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_counter_leg_ptb_stop_loss_time_decay_mode',
+        'action.place_order counterLegPtbStopLossTimeDecayMode must be tighten, relax, or none.'
+      );
+    }
+  }
+
+  if (
+    counterLegNotifyOnSlHit === true &&
+    counterLegSlEnabled !== true &&
+    counterLegPtbStopLossEnabled !== true
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'counter_leg_notify_on_sl_hit_requires_stop_loss',
+      'action.place_order counterLegNotifyOnSlHit requires counterLegSlEnabled=true or counterLegPtbStopLossEnabled=true.'
+    );
   }
 
   const primaryLegSizeUsdc = toFiniteNumber(config.sizeUsdc ?? config.targetNotionalUsdc);
@@ -369,7 +598,7 @@ export function validateActionPlaceOrderPairLockConfig(
         issues,
         node,
         'pair_lock_disallows_exit_features',
-        'action.place_order pair_lock only allows hard SL/PTB-SL plus basic re-entry fields; TP, staged exits, time exits, and advanced re-entry fields are not supported.'
+        'action.place_order pair_lock allows primary/counter take profit plus hard SL/PTB stop-loss and basic re-entry fields; classic staged SL exits, time exits, and advanced re-entry fields are not supported.'
       );
       break;
     }

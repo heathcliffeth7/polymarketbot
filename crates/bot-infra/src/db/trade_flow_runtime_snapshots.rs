@@ -42,7 +42,9 @@ fn resolve_runtime_snapshot_identity(
 ) -> (Option<String>, Option<String>) {
     let market_slug = output_json
         .and_then(|value| snapshot_string_field(value, "market_slug"))
-        .or_else(|| output_json.and_then(|value| snapshot_string_field(value, "resolved_market_slug")))
+        .or_else(|| {
+            output_json.and_then(|value| snapshot_string_field(value, "resolved_market_slug"))
+        })
         .or_else(|| input_json.and_then(|value| snapshot_string_field(value, "market_slug")))
         .or_else(|| input_json.and_then(|value| snapshot_string_field(value, "marketSlug")));
     let token_id = output_json
@@ -202,10 +204,7 @@ impl PostgresRepository {
             .collect())
     }
 
-    pub async fn sync_trade_flow_node_runtime_snapshot_for_step(
-        &self,
-        step_id: i64,
-    ) -> Result<()> {
+    pub async fn sync_trade_flow_node_runtime_snapshot_for_step(&self, step_id: i64) -> Result<()> {
         let row = sqlx::query(
             "SELECT s.run_id, r.definition_id, r.version_id, s.node_key, s.node_type, s.status, \
                     s.input_json, s.output_json, s.error_text \

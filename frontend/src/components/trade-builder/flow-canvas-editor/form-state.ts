@@ -4,6 +4,7 @@ import {
   createEmptyKeyValueDraft,
   createEmptyOutcomeConditionRow,
   isPresetPlaceOrderMarker,
+  normalizePtbStopLossGapUnit,
   type ConditionDraft,
   type DrawdownRuleRow,
   type NodeConfigFormState,
@@ -52,6 +53,15 @@ function normalizePairLockCounterPtbMode(value: string): string {
 
 function normalizePairLockCounterPtbUnit(value: string): 'usd' | 'cent' {
   return value.trim().toLowerCase() === 'cent' ? 'cent' : 'usd';
+}
+
+function normalizeStopLossTriggerPriceMode(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  return ['best_bid', 'composite', 'composite_safe', 'composite_fast', 'last_trade'].includes(
+    normalized
+  )
+    ? normalized
+    : 'best_bid';
 }
 
 export function updateNodeFieldState(
@@ -149,6 +159,48 @@ export function updateNodeFieldState(
                 ),
               }
             : {}),
+        },
+      };
+    }
+    if (nodeType === 'action.place_order' && key === 'counterLegSlEnabled' && value === 'true') {
+      return {
+        ...next,
+        fields: {
+          ...next.fields,
+          counterLegSlTriggerPriceMode: normalizeStopLossTriggerPriceMode(
+            next.fields.counterLegSlTriggerPriceMode ?? next.fields.slTriggerPriceMode ?? ''
+          ),
+        },
+      };
+    }
+    if (nodeType === 'action.place_order' && key === 'ptbStopLossEnabled' && value === 'true') {
+      return {
+        ...next,
+        fields: {
+          ...next.fields,
+          ptbStopLossGapUnit: normalizePtbStopLossGapUnit(next.fields.ptbStopLossGapUnit ?? ''),
+          ptbStopLossTimeDecayMode:
+            (next.fields.ptbStopLossTimeDecayMode ?? '').trim() || 'tighten',
+        },
+      };
+    }
+    if (
+      nodeType === 'action.place_order' &&
+      key === 'counterLegPtbStopLossEnabled' &&
+      value === 'true'
+    ) {
+      return {
+        ...next,
+        fields: {
+          ...next.fields,
+          counterLegPtbStopLossGapUnit: normalizePtbStopLossGapUnit(
+            next.fields.counterLegPtbStopLossGapUnit ?? '',
+            normalizePtbStopLossGapUnit(next.fields.ptbStopLossGapUnit ?? '')
+          ),
+          counterLegPtbStopLossTimeDecayMode:
+            (next.fields.counterLegPtbStopLossTimeDecayMode ?? '').trim() ||
+            (next.fields.ptbStopLossTimeDecayMode ?? '').trim() ||
+            'tighten',
         },
       };
     }

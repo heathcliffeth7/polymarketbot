@@ -172,11 +172,13 @@ export function PriceToBeatMaxPriceRelaxSection({
         )}
       </div>
       <p className="text-[10px] leading-relaxed text-slate-400 italic">
-        Miss sayisi kadar completed market buy fill gormezse relax calisir. History
-        sayisi kadar market taranir. Tradeable sayilmasi icin best ask maxPrice altinda
-        ve depth bu USDC esigini karsiliyor olmali. Her ekstra miss&apos;te secilen step kadar
-        ek gevseme uygulanir. Final PTB, relax sonrasinda bu min degerin altina inmez;
-        bos birakirsan tampon fallback kullanilir.
+        Miss sayisi kadar ardisk completed markette PTB gecildigi halde maxPrice ve
+        fillability yuzunden kaliteli firsat kacarsa relax calisir. History sayisi kadar
+        market taranir. Qualified miss sayilmasi icin best ask maxPrice altinda olmali,
+        en az iki tradeable saniye gorulmeli ve depth bu USDC esigini karsilamali.
+        Her ekstra miss&apos;te secilen step kadar ek gevseme uygulanir. Final PTB,
+        relax sonrasinda bu min degerin altina inmez; bos birakirsan tampon fallback
+        kullanilir.
       </p>
     </div>
   );
