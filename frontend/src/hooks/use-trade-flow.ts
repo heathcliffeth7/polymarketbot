@@ -3,6 +3,8 @@
 import { usePolling } from './use-polling';
 import { requestJson, type RequestJsonOptions } from '@/lib/http-client';
 import type {
+  AutoScopeTradeAnalysisPnlFilter,
+  AutoScopeTradeAnalysisPositionFilter,
   AutoScopeTradeAnalysisResponse,
   AutoScopeTradeAnalysisSortBy,
   AutoScopeTradeAnalysisSortDirection,
@@ -29,6 +31,33 @@ function buildSearchParams(params: Record<string, string | undefined>): string {
     search.set(key, value);
   }
   return search.toString();
+}
+
+export interface TradeFlowAutoScopeAnalysisParams {
+  page?: number;
+  limit?: number;
+  sortBy?: AutoScopeTradeAnalysisSortBy;
+  sortDirection?: AutoScopeTradeAnalysisSortDirection;
+  pnl?: AutoScopeTradeAnalysisPnlFilter;
+  position?: AutoScopeTradeAnalysisPositionFilter;
+  from?: string;
+  to?: string;
+  enabled?: boolean;
+}
+
+export function buildTradeFlowAutoScopeAnalysisQuery(
+  params: TradeFlowAutoScopeAnalysisParams
+): string {
+  return buildSearchParams({
+    page: params.page != null ? String(params.page) : undefined,
+    limit: params.limit != null ? String(params.limit) : undefined,
+    sortBy: params.sortBy,
+    sortDirection: params.sortDirection,
+    pnl: params.pnl,
+    position: params.position,
+    from: params.from,
+    to: params.to,
+  });
 }
 
 export function useTradeFlowDefinitions(
@@ -135,18 +164,26 @@ export function useTradeFlowRecentEvents(
   return usePolling<{ data: TradeFlowEvent[] }>(endpoint, 3000);
 }
 
-export function useTradeFlowAutoScopeAnalysis(
+export function useTradeFlowAutoScopeAnalysis({
   page = 1,
   limit = 50,
-  sortBy: AutoScopeTradeAnalysisSortBy = 'default',
-  sortDirection: AutoScopeTradeAnalysisSortDirection = 'desc',
-  enabled = true
-) {
-  const query = buildSearchParams({
-    page: String(page),
-    limit: String(limit),
+  sortBy = 'default',
+  sortDirection = 'desc',
+  pnl = 'all',
+  position = 'all',
+  from,
+  to,
+  enabled = true,
+}: TradeFlowAutoScopeAnalysisParams = {}) {
+  const query = buildTradeFlowAutoScopeAnalysisQuery({
+    page,
+    limit,
     sortBy,
     sortDirection,
+    pnl,
+    position,
+    from,
+    to,
   });
   const endpoint = enabled ? `/api/trade-flow/analytics/auto-scope?${query}` : null;
   return usePolling<AutoScopeTradeAnalysisResponse>(endpoint, 10_000);

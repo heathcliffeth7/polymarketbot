@@ -389,6 +389,15 @@ pub struct TradeFlowAutoScopeAnalysisRowInput {
     pub row_qty: f64,
     pub remaining_qty_after_exit: f64,
     pub row_pnl_usdc: f64,
+    pub buy_notional_usdc: Option<f64>,
+    pub buy_fee_usdc: Option<f64>,
+    pub cost_basis_usdc: Option<f64>,
+    pub sell_notional_usdc: Option<f64>,
+    pub sell_fee_usdc: Option<f64>,
+    pub mark_value_usdc: Option<f64>,
+    pub net_value_usdc: Option<f64>,
+    pub pnl_pct: Option<f64>,
+    pub valuation_kind: String,
 }
 
 #[derive(Debug, Clone)]

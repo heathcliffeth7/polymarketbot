@@ -1,8 +1,10 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import { Download } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import {
   Table,
   TableBody,
@@ -11,15 +13,38 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { useTradeFlowAutoScopeAnalysis } from '@/hooks/use-trade-flow';
+import {
+  buildTradeFlowAutoScopeAnalysisQuery,
+  useTradeFlowAutoScopeAnalysis,
+} from '@/hooks/use-trade-flow';
 import type {
+  AutoScopeTradeAnalysisPnlFilter,
+  AutoScopeTradeAnalysisPositionFilter,
   AutoScopeTradeAnalysisRow,
   AutoScopeTradeAnalysisSortBy,
   AutoScopeTradeAnalysisSortDirection,
+  AutoScopeTradeAnalysisSummary,
 } from '@/lib/types';
 
 const PAGE_SIZE = 50;
 type SortOption = 'default' | 'pnl_asc' | 'pnl_desc';
+
+const EMPTY_SUMMARY: AutoScopeTradeAnalysisSummary = {
+  rowCount: 0,
+  marketCount: 0,
+  lossCount: 0,
+  profitCount: 0,
+  totalPnlUsdc: 0,
+  realizedPnlUsdc: 0,
+  openPnlUsdc: 0,
+  lossUsdc: 0,
+  profitUsdc: 0,
+  buyFeeUsdc: 0,
+  sellFeeUsdc: 0,
+  totalFeeUsdc: 0,
+  costBasisUsdc: 0,
+  netValueUsdc: 0,
+};
 
 function formatDateTime(value: string | null): string {
   if (!value) return '-';
@@ -42,6 +67,14 @@ function formatDuration(ms: number | null): string {
   return `${seconds}sn`;
 }
 
+function dateStartIso(value: string): string | undefined {
+  return value ? `${value}T00:00:00.000Z` : undefined;
+}
+
+function dateEndIso(value: string): string | undefined {
+  return value ? `${value}T23:59:59.999Z` : undefined;
+}
+
 function formatPrice(value: number | null): string {
   return value == null ? '-' : value.toFixed(4);
 }
@@ -50,9 +83,19 @@ function formatQty(value: number): string {
   return value.toFixed(4);
 }
 
+function formatUsdc(value: number | null): string {
+  return value == null ? '-' : `${value.toFixed(2)} USDC`;
+}
+
 function formatPnl(value: number): string {
   const sign = value > 0 ? '+' : '';
-  return `${sign}${value.toFixed(4)}`;
+  return `${sign}${value.toFixed(2)} USDC`;
+}
+
+function formatPercent(value: number | null): string {
+  if (value == null) return '-';
+  const sign = value > 0 ? '+' : '';
+  return `${sign}${value.toFixed(2)}%`;
 }
 
 function exitReasonLabel(row: AutoScopeTradeAnalysisRow): string {
@@ -77,7 +120,9 @@ function exitMetaLabel(row: AutoScopeTradeAnalysisRow): string {
       : 'Market bitti';
   }
   if (row.positionState === 'open') {
-    return 'Acik pozisyon devam ediyor';
+    return row.markPriceCapturedAt
+      ? `Mark: ${formatDateTime(row.markPriceCapturedAt)}`
+      : 'Acik pozisyon devam ediyor';
   }
   return row.sellFilledAt ? formatDateTime(row.sellFilledAt) : 'Kapandi';
 }
@@ -88,85 +133,194 @@ function pnlClassName(value: number): string {
   return 'text-zinc-300';
 }
 
+function filterSelectClassName(): string {
+  return 'h-8 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200';
+}
+
 export function AutoScopeAnalysisTable() {
   const [page, setPage] = useState(1);
   const [sortOption, setSortOption] = useState<SortOption>('default');
+  const [pnlFilter, setPnlFilter] = useState<AutoScopeTradeAnalysisPnlFilter>('all');
+  const [positionFilter, setPositionFilter] =
+    useState<AutoScopeTradeAnalysisPositionFilter>('all');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
 
   const sortBy: AutoScopeTradeAnalysisSortBy =
     sortOption === 'default' ? 'default' : 'pnl';
   const sortDirection: AutoScopeTradeAnalysisSortDirection =
     sortOption === 'pnl_asc' ? 'asc' : 'desc';
+  const from = dateStartIso(fromDate);
+  const to = dateEndIso(toDate);
 
-  const { data, error, isLoading } = useTradeFlowAutoScopeAnalysis(
+  const { data, error, isLoading } = useTradeFlowAutoScopeAnalysis({
     page,
-    PAGE_SIZE,
+    limit: PAGE_SIZE,
     sortBy,
-    sortDirection
-  );
+    sortDirection,
+    pnl: pnlFilter,
+    position: positionFilter,
+    from,
+    to,
+  });
 
   const rows = useMemo(() => data?.data ?? [], [data?.data]);
   const total = data?.total ?? 0;
   const totalPages = data?.totalPages ?? 0;
   const refreshedAt = data?.refreshedAt ?? null;
-
-  const marketCount = useMemo(
-    () => new Set(rows.map((row) => `${row.marketSlug}:${row.rootOrderId}`)).size,
-    [rows]
-  );
+  const summary = data?.summary ?? EMPTY_SUMMARY;
   const pagePnl = useMemo(
     () => rows.reduce((sum, row) => sum + row.rowPnlUsdc, 0),
     [rows]
   );
+  const exportQuery = buildTradeFlowAutoScopeAnalysisQuery({
+    sortBy,
+    sortDirection,
+    pnl: pnlFilter,
+    position: positionFilter,
+    from,
+    to,
+  });
+
+  function resetPage() {
+    setPage(1);
+  }
+
+  function exportCsv() {
+    const a = document.createElement('a');
+    a.href = `/api/trade-flow/analytics/auto-scope/export?${exportQuery}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
 
   return (
     <Card className="border-zinc-800 bg-zinc-900">
-      <CardHeader className="space-y-3">
-        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+      <CardHeader className="space-y-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
             <CardTitle className="text-sm font-medium text-zinc-200">
               Auto-Scope Trade Analizi
             </CardTitle>
             <p className="mt-1 text-xs text-zinc-500">
-              Her satir tek bir exit tranche veya kalan acik pozisyonu temsil eder.
+              Realized ve acik mark PnL kirilimi
             </p>
           </div>
-          <div className="text-xs text-zinc-500">
-            Son yenileme: {formatDateTime(refreshedAt)}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-xs text-zinc-500">
+              Son yenileme: {formatDateTime(refreshedAt)}
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-zinc-700 text-zinc-200"
+              disabled={total === 0}
+              onClick={exportCsv}
+            >
+              <Download className="size-4" />
+              CSV
+            </Button>
           </div>
         </div>
-        <div className="flex flex-wrap gap-3 text-xs text-zinc-300">
-          <span className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1">
-            Sayfadaki market: {marketCount}
+
+        <div className="grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 lg:grid-cols-4">
+          <span className={`rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 ${pnlClassName(summary.totalPnlUsdc)}`}>
+            Toplam PnL: {formatPnl(summary.totalPnlUsdc)}
           </span>
-          <span className="rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1">
-            Toplam satir: {total}
+          <span className={`rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 ${pnlClassName(summary.realizedPnlUsdc)}`}>
+            Realized: {formatPnl(summary.realizedPnlUsdc)}
           </span>
-          <span className={`rounded-full border border-zinc-700 bg-zinc-950 px-3 py-1 ${pnlClassName(pagePnl)}`}>
+          <span className={`rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 ${pnlClassName(summary.openPnlUsdc)}`}>
+            Acik/Mark: {formatPnl(summary.openPnlUsdc)}
+          </span>
+          <span className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-red-300">
+            Zarar: {formatUsdc(summary.lossUsdc)}
+          </span>
+          <span className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2">
+            Toplam fee: {formatUsdc(summary.totalFeeUsdc)}
+          </span>
+          <span className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2">
+            Maliyet: {formatUsdc(summary.costBasisUsdc)}
+          </span>
+          <span className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2">
+            Market: {summary.marketCount}
+          </span>
+          <span className={`rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 ${pnlClassName(pagePnl)}`}>
             Sayfa PnL: {formatPnl(pagePnl)}
           </span>
         </div>
-        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-          <div className="text-xs text-zinc-500">
-            Siralama secimi sadece mevcut sayfayi degil, tum pagination duzenini etkiler.
-          </div>
-          <div className="flex items-center gap-2">
-            <label htmlFor="analysis-sort" className="text-xs text-zinc-400">
-              Siralama
-            </label>
+
+        <div className="grid gap-2 md:grid-cols-5">
+          <label className="space-y-1 text-xs text-zinc-400">
+            <span>PnL</span>
             <select
-              id="analysis-sort"
+              value={pnlFilter}
+              onChange={(event) => {
+                setPnlFilter(event.target.value as AutoScopeTradeAnalysisPnlFilter);
+                resetPage();
+              }}
+              className={filterSelectClassName()}
+            >
+              <option value="all">Tum satirlar</option>
+              <option value="loss">Sadece zarar</option>
+              <option value="profit">Sadece kar</option>
+            </select>
+          </label>
+          <label className="space-y-1 text-xs text-zinc-400">
+            <span>Pozisyon</span>
+            <select
+              value={positionFilter}
+              onChange={(event) => {
+                setPositionFilter(event.target.value as AutoScopeTradeAnalysisPositionFilter);
+                resetPage();
+              }}
+              className={filterSelectClassName()}
+            >
+              <option value="all">Tum pozisyonlar</option>
+              <option value="realized">Realized</option>
+              <option value="open">Acik/Mark</option>
+            </select>
+          </label>
+          <label className="space-y-1 text-xs text-zinc-400">
+            <span>Baslangic</span>
+            <Input
+              type="date"
+              value={fromDate}
+              onChange={(event) => {
+                setFromDate(event.target.value);
+                resetPage();
+              }}
+              className="h-8 border-zinc-700 bg-zinc-950 text-xs text-zinc-200"
+            />
+          </label>
+          <label className="space-y-1 text-xs text-zinc-400">
+            <span>Bitis</span>
+            <Input
+              type="date"
+              value={toDate}
+              onChange={(event) => {
+                setToDate(event.target.value);
+                resetPage();
+              }}
+              className="h-8 border-zinc-700 bg-zinc-950 text-xs text-zinc-200"
+            />
+          </label>
+          <label className="space-y-1 text-xs text-zinc-400">
+            <span>Siralama</span>
+            <select
               value={sortOption}
               onChange={(event) => {
                 setSortOption(event.target.value as SortOption);
-                setPage(1);
+                resetPage();
               }}
-              className="h-8 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200"
+              className={filterSelectClassName()}
             >
-              <option value="default">Tetik zamani (Varsayilan)</option>
+              <option value="default">Tetik zamani</option>
               <option value="pnl_asc">PnL artan</option>
               <option value="pnl_desc">PnL azalan</option>
             </select>
-          </div>
+          </label>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -176,85 +330,130 @@ export function AutoScopeAnalysisTable() {
           </div>
         )}
 
-        <Table className="text-xs text-zinc-200">
-          <TableHeader>
-            <TableRow className="border-zinc-800 hover:bg-transparent">
-              <TableHead className="text-zinc-400">Workflow</TableHead>
-              <TableHead className="text-zinc-400">Market</TableHead>
-              <TableHead className="text-zinc-400">Exit</TableHead>
-              <TableHead className="text-zinc-400">Trigger</TableHead>
-              <TableHead className="text-zinc-400">Open→Trigger</TableHead>
-              <TableHead className="text-zinc-400">Trigger→Buy</TableHead>
-              <TableHead className="text-right text-zinc-400">Buy</TableHead>
-              <TableHead className="text-right text-zinc-400">Sell/Canli</TableHead>
-              <TableHead className="text-right text-zinc-400">Qty</TableHead>
-              <TableHead className="text-right text-zinc-400">Kalan Qty</TableHead>
-              <TableHead className="text-right text-zinc-400">PnL</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {isLoading && rows.length === 0 ? (
-              <TableRow className="border-zinc-800">
-                <TableCell colSpan={11} className="py-10 text-center text-zinc-500">
-                  Analiz verisi yukleniyor...
-                </TableCell>
+        <div className="overflow-x-auto">
+          <Table className="min-w-[1180px] text-xs text-zinc-200">
+            <TableHeader>
+              <TableRow className="border-zinc-800 hover:bg-transparent">
+                <TableHead className="text-zinc-400">Workflow</TableHead>
+                <TableHead className="text-zinc-400">Market</TableHead>
+                <TableHead className="text-zinc-400">Exit</TableHead>
+                <TableHead className="text-zinc-400">Trigger</TableHead>
+                <TableHead className="text-zinc-400">Gecikme</TableHead>
+                <TableHead className="text-right text-zinc-400">Buy</TableHead>
+                <TableHead className="text-right text-zinc-400">Sell/Canli</TableHead>
+                <TableHead className="text-right text-zinc-400">Qty</TableHead>
+                <TableHead className="text-right text-zinc-400">Maliyet</TableHead>
+                <TableHead className="text-right text-zinc-400">Fee</TableHead>
+                <TableHead className="text-right text-zinc-400">Net</TableHead>
+                <TableHead className="text-right text-zinc-400">PnL</TableHead>
+                <TableHead className="text-right text-zinc-400">PnL %</TableHead>
               </TableRow>
-            ) : rows.length === 0 ? (
-              <TableRow className="border-zinc-800">
-                <TableCell colSpan={11} className="py-10 text-center text-zinc-500">
-                  Gosterilecek auto-scope trade analizi bulunamadi.
-                </TableCell>
-              </TableRow>
-            ) : (
-              rows.map((row) => (
-                <TableRow key={row.rowId} className="border-zinc-800 hover:bg-zinc-950/60">
-                  <TableCell>
-                    <div className="space-y-1">
-                      <p className="font-medium text-zinc-100">
-                        {row.definitionName || `Flow #${row.definitionId}`}
-                      </p>
-                      <p className="text-[11px] text-zinc-500">
-                        Run #{row.runId} • Root #{row.rootOrderId}
-                      </p>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="space-y-1">
-                      <p className="font-medium text-zinc-100">{row.marketSlug}</p>
-                      <p className="text-[11px] text-zinc-500">
-                        {row.outcomeLabel} • {row.tokenId.slice(0, 10)}...
-                      </p>
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="space-y-1">
-                      <span className="inline-flex rounded-full border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200">
-                        {exitReasonLabel(row)}
-                      </span>
-                      <p className="text-[11px] text-zinc-500">
-                        {exitMetaLabel(row)}
-                      </p>
-                    </div>
-                  </TableCell>
-                  <TableCell>{formatDateTime(row.triggeredAt)}</TableCell>
-                  <TableCell>{formatDuration(row.openToTriggerMs)}</TableCell>
-                  <TableCell>{formatDuration(row.triggerToBuyFillMs)}</TableCell>
-                  <TableCell className="text-right font-mono">{formatPrice(row.buyAvgPrice)}</TableCell>
-                  <TableCell className="text-right font-mono">{formatPrice(row.sellOrLivePrice)}</TableCell>
-                  <TableCell className="text-right font-mono">{formatQty(row.rowQty)}</TableCell>
-                  <TableCell className="text-right font-mono">{formatQty(row.remainingQtyAfterExit)}</TableCell>
-                  <TableCell className={`text-right font-mono ${pnlClassName(row.rowPnlUsdc)}`}>
-                    {formatPnl(row.rowPnlUsdc)}
+            </TableHeader>
+            <TableBody>
+              {isLoading && rows.length === 0 ? (
+                <TableRow className="border-zinc-800">
+                  <TableCell colSpan={13} className="py-10 text-center text-zinc-500">
+                    Analiz verisi yukleniyor...
                   </TableCell>
                 </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
+              ) : rows.length === 0 ? (
+                <TableRow className="border-zinc-800">
+                  <TableCell colSpan={13} className="py-10 text-center text-zinc-500">
+                    Gosterilecek auto-scope trade analizi bulunamadi.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                rows.map((row) => (
+                  <TableRow key={row.rowId} className="border-zinc-800 hover:bg-zinc-950/60">
+                    <TableCell>
+                      <div className="space-y-1">
+                        <p className="font-medium text-zinc-100">
+                          {row.definitionName || `Flow #${row.definitionId}`}
+                        </p>
+                        <p className="text-[11px] text-zinc-500">
+                          Run #{row.runId} / Root #{row.rootOrderId}
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        <p className="font-medium text-zinc-100">{row.marketSlug}</p>
+                        <p className="text-[11px] text-zinc-500">
+                          {row.outcomeLabel} / {row.tokenId.slice(0, 10)}...
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        <span className="inline-flex rounded-full border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200">
+                          {exitReasonLabel(row)}
+                        </span>
+                        <p className="text-[11px] text-zinc-500">{exitMetaLabel(row)}</p>
+                      </div>
+                    </TableCell>
+                    <TableCell>{formatDateTime(row.triggeredAt)}</TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        <p>{formatDuration(row.openToTriggerMs)}</p>
+                        <p className="text-[11px] text-zinc-500">
+                          Buy: {formatDuration(row.triggerToBuyFillMs)}
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      <div className="space-y-1">
+                        <p>{formatPrice(row.buyAvgPrice)}</p>
+                        <p className="text-[11px] text-zinc-500">
+                          {formatUsdc(row.buyNotionalUsdc)}
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      <div className="space-y-1">
+                        <p>{formatPrice(row.sellOrLivePrice)}</p>
+                        <p className="text-[11px] text-zinc-500">
+                          {formatUsdc(row.sellNotionalUsdc ?? row.markValueUsdc)}
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      <div className="space-y-1">
+                        <p>{formatQty(row.rowQty)}</p>
+                        <p className="text-[11px] text-zinc-500">
+                          Kalan {formatQty(row.remainingQtyAfterExit)}
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      {formatUsdc(row.costBasisUsdc)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      <div className="space-y-1">
+                        <p>{formatUsdc(row.buyFeeUsdc)}</p>
+                        <p className="text-[11px] text-zinc-500">
+                          Sell {formatUsdc(row.sellFeeUsdc)}
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      {formatUsdc(row.netValueUsdc)}
+                    </TableCell>
+                    <TableCell className={`text-right font-mono ${pnlClassName(row.rowPnlUsdc)}`}>
+                      {formatPnl(row.rowPnlUsdc)}
+                    </TableCell>
+                    <TableCell className={`text-right font-mono ${pnlClassName(row.rowPnlUsdc)}`}>
+                      {formatPercent(row.pnlPct)}
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </div>
 
         <div className="flex items-center justify-between gap-3">
           <p className="text-xs text-zinc-500">
-            Sayfa {data?.page ?? page} / {Math.max(totalPages, 1)}
+            Sayfa {data?.page ?? page} / {Math.max(totalPages, 1)} - Satir {total}
           </p>
           <div className="flex items-center gap-2">
             <Button

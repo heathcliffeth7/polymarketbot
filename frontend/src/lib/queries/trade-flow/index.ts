@@ -26,7 +26,9 @@ export {
   getRecentTradeFlowEvents,
 } from './definitions';
 export {
+  buildAutoScopeTradeAnalysisCsv,
   getAutoScopeTradeAnalysis,
+  getAutoScopeTradeAnalysisRowsForExport,
   getTradeFlowNodeRuntime,
   getTradeFlowPtbState,
 } from './analytics';

@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth';
-import { getAutoScopeTradeAnalysis } from '@/lib/queries/trade-flow';
+import {
+  buildAutoScopeTradeAnalysisCsv,
+  getAutoScopeTradeAnalysisRowsForExport,
+} from '@/lib/queries/trade-flow';
 import type {
   AutoScopeTradeAnalysisPnlFilter,
   AutoScopeTradeAnalysisPositionFilter,
@@ -25,8 +28,6 @@ export async function GET(req: NextRequest) {
     }
 
     const { searchParams } = new URL(req.url);
-    const page = Number(searchParams.get('page') || '1');
-    const limit = Number(searchParams.get('limit') || '50');
     const sortBy =
       ((searchParams.get('sortBy') || '').trim() || 'default') as AutoScopeTradeAnalysisSortBy;
     const sortDirection =
@@ -42,12 +43,6 @@ export async function GET(req: NextRequest) {
     const from = parseOptionalDate(fromRaw);
     const to = parseOptionalDate(toRaw);
 
-    if (!Number.isFinite(page) || page < 1) {
-      return NextResponse.json({ error: 'page must be >= 1' }, { status: 400 });
-    }
-    if (!Number.isFinite(limit) || limit < 1 || limit > 100) {
-      return NextResponse.json({ error: 'limit must be in [1,100]' }, { status: 400 });
-    }
     if (fromRaw && !from) {
       return NextResponse.json({ error: 'from must be a valid date' }, { status: 400 });
     }
@@ -55,10 +50,8 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'to must be a valid date' }, { status: 400 });
     }
 
-    const result = await getAutoScopeTradeAnalysis({
+    const rows = await getAutoScopeTradeAnalysisRowsForExport({
       userId: user.userId,
-      page: Math.floor(page),
-      limit: Math.floor(limit),
       sortBy,
       sortDirection,
       pnl,
@@ -66,12 +59,20 @@ export async function GET(req: NextRequest) {
       from,
       to,
     });
+    const csv = buildAutoScopeTradeAnalysisCsv(rows);
+    const date = new Date().toISOString().slice(0, 10);
 
-    return NextResponse.json(result);
+    return new NextResponse(csv, {
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="auto-scope-trade-analysis-${date}.csv"`,
+        'Cache-Control': 'no-store',
+      },
+    });
   } catch (err) {
-    console.error('Trade flow auto-scope analytics error:', err);
+    console.error('Trade flow auto-scope analytics export error:', err);
     return NextResponse.json(
-      { error: 'Failed to load auto-scope trade analysis' },
+      { error: 'Failed to export auto-scope trade analysis' },
       { status: 500 }
     );
   }

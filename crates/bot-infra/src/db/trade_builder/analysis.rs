@@ -21,10 +21,18 @@ impl PostgresRepository {
                      AND e.event_type = 'filled'
                  )
                )
-               AND NOT EXISTS (
-                 SELECT 1
-                 FROM trade_flow_auto_scope_analysis_rows s
-                 WHERE s.root_builder_order_id = o.id
+               AND (
+                 NOT EXISTS (
+                   SELECT 1
+                   FROM trade_flow_auto_scope_analysis_rows s
+                   WHERE s.root_builder_order_id = o.id
+                 )
+                 OR EXISTS (
+                   SELECT 1
+                   FROM trade_flow_auto_scope_analysis_rows s
+                   WHERE s.root_builder_order_id = o.id
+                     AND s.valuation_kind IS NULL
+                 )
                )
              ORDER BY o.created_at ASC, o.id ASC
              LIMIT $1",
@@ -67,11 +75,14 @@ impl PostgresRepository {
                    exit_reason, market_open_at, triggered_at, buy_filled_at, sell_filled_at,
                    open_to_trigger_ms, trigger_to_buy_fill_ms, buy_avg_price, mark_or_sell_price,
                    mark_price_captured_at, row_qty, remaining_qty_after_exit, row_pnl_usdc,
+                   buy_notional_usdc, buy_fee_usdc, cost_basis_usdc, sell_notional_usdc,
+                   sell_fee_usdc, mark_value_usdc, net_value_usdc, pnl_pct, valuation_kind,
                    updated_at)
                  VALUES
                   ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                    $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                   $20, $21, $22, $23, NOW())
+                   $20, $21, $22, $23, $24, $25, $26, $27, $28,
+                   $29, $30, $31, $32, NOW())
                  ON CONFLICT (row_key) DO UPDATE SET
                    user_id = EXCLUDED.user_id,
                    definition_id = EXCLUDED.definition_id,
@@ -95,6 +106,15 @@ impl PostgresRepository {
                    row_qty = EXCLUDED.row_qty,
                    remaining_qty_after_exit = EXCLUDED.remaining_qty_after_exit,
                    row_pnl_usdc = EXCLUDED.row_pnl_usdc,
+                   buy_notional_usdc = EXCLUDED.buy_notional_usdc,
+                   buy_fee_usdc = EXCLUDED.buy_fee_usdc,
+                   cost_basis_usdc = EXCLUDED.cost_basis_usdc,
+                   sell_notional_usdc = EXCLUDED.sell_notional_usdc,
+                   sell_fee_usdc = EXCLUDED.sell_fee_usdc,
+                   mark_value_usdc = EXCLUDED.mark_value_usdc,
+                   net_value_usdc = EXCLUDED.net_value_usdc,
+                   pnl_pct = EXCLUDED.pnl_pct,
+                   valuation_kind = EXCLUDED.valuation_kind,
                    updated_at = NOW()",
             )
             .bind(&row.row_key)
@@ -120,6 +140,15 @@ impl PostgresRepository {
             .bind(row.row_qty)
             .bind(row.remaining_qty_after_exit)
             .bind(row.row_pnl_usdc)
+            .bind(row.buy_notional_usdc)
+            .bind(row.buy_fee_usdc)
+            .bind(row.cost_basis_usdc)
+            .bind(row.sell_notional_usdc)
+            .bind(row.sell_fee_usdc)
+            .bind(row.mark_value_usdc)
+            .bind(row.net_value_usdc)
+            .bind(row.pnl_pct)
+            .bind(&row.valuation_kind)
             .execute(&mut *tx)
             .await?;
         }

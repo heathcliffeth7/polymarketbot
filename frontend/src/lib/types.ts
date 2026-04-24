@@ -620,6 +620,9 @@ export type AutoScopeTradeAnalysisPositionState =
   | 'closed_exit';
 export type AutoScopeTradeAnalysisSortBy = 'default' | 'pnl';
 export type AutoScopeTradeAnalysisSortDirection = 'asc' | 'desc';
+export type AutoScopeTradeAnalysisPnlFilter = 'all' | 'loss' | 'profit';
+export type AutoScopeTradeAnalysisPositionFilter = 'all' | 'realized' | 'open';
+export type AutoScopeTradeAnalysisValuationKind = 'realized' | 'mark_to_market';
 
 export type AutoScopeTradeAnalysisExitReason =
   | 'tp'
@@ -646,6 +649,7 @@ export interface AutoScopeTradeAnalysisRow {
   triggeredAt: string | null;
   buyFilledAt: string | null;
   sellFilledAt: string | null;
+  markPriceCapturedAt: string | null;
   openToTriggerMs: number | null;
   triggerToBuyFillMs: number | null;
   buyAvgPrice: number | null;
@@ -653,6 +657,32 @@ export interface AutoScopeTradeAnalysisRow {
   rowQty: number;
   remainingQtyAfterExit: number;
   rowPnlUsdc: number;
+  buyNotionalUsdc: number | null;
+  buyFeeUsdc: number | null;
+  costBasisUsdc: number | null;
+  sellNotionalUsdc: number | null;
+  sellFeeUsdc: number | null;
+  markValueUsdc: number | null;
+  netValueUsdc: number | null;
+  pnlPct: number | null;
+  valuationKind: AutoScopeTradeAnalysisValuationKind | null;
+}
+
+export interface AutoScopeTradeAnalysisSummary {
+  rowCount: number;
+  marketCount: number;
+  lossCount: number;
+  profitCount: number;
+  totalPnlUsdc: number;
+  realizedPnlUsdc: number;
+  openPnlUsdc: number;
+  lossUsdc: number;
+  profitUsdc: number;
+  buyFeeUsdc: number;
+  sellFeeUsdc: number;
+  totalFeeUsdc: number;
+  costBasisUsdc: number;
+  netValueUsdc: number;
 }
 
 export interface AutoScopeTradeAnalysisResponse
@@ -660,6 +690,11 @@ export interface AutoScopeTradeAnalysisResponse
   refreshedAt: string;
   sortBy: AutoScopeTradeAnalysisSortBy;
   sortDirection: AutoScopeTradeAnalysisSortDirection;
+  pnlFilter: AutoScopeTradeAnalysisPnlFilter;
+  positionFilter: AutoScopeTradeAnalysisPositionFilter;
+  from: string | null;
+  to: string | null;
+  summary: AutoScopeTradeAnalysisSummary;
 }
 
 export interface TradeFlowPtbStateRow {

@@ -1,22 +1,29 @@
 import { pool } from '@/lib/db';
 import type {
+  AutoScopeTradeAnalysisPnlFilter,
   AutoScopeTradeAnalysisPositionState,
+  AutoScopeTradeAnalysisPositionFilter,
   AutoScopeTradeAnalysisResponse,
   AutoScopeTradeAnalysisRow,
   AutoScopeTradeAnalysisSortBy,
   AutoScopeTradeAnalysisSortDirection,
+  AutoScopeTradeAnalysisSummary,
   TradeFlowNodeRuntimeResponse,
   TradeFlowNodeRuntimeRow,
   TradeFlowPtbStateResponse,
   TradeFlowPtbStateRow,
 } from '@/lib/types';
 
-interface AutoScopeTradeAnalysisFilters {
+export interface AutoScopeTradeAnalysisFilters {
   userId: number;
   page?: number;
   limit?: number;
   sortBy?: AutoScopeTradeAnalysisSortBy;
   sortDirection?: AutoScopeTradeAnalysisSortDirection;
+  pnl?: AutoScopeTradeAnalysisPnlFilter;
+  position?: AutoScopeTradeAnalysisPositionFilter;
+  from?: string | null;
+  to?: string | null;
 }
 
 interface AutoScopeTradeAnalysisRowDb {
@@ -36,6 +43,7 @@ interface AutoScopeTradeAnalysisRowDb {
   triggered_at: string | null;
   buy_filled_at: string | null;
   sell_filled_at: string | null;
+  mark_price_captured_at: string | null;
   open_to_trigger_ms: number | null;
   trigger_to_buy_fill_ms: number | null;
   buy_avg_price: number | null;
@@ -43,7 +51,33 @@ interface AutoScopeTradeAnalysisRowDb {
   row_qty: number;
   remaining_qty_after_exit: number;
   row_pnl_usdc: number;
+  buy_notional_usdc: number | null;
+  buy_fee_usdc: number | null;
+  cost_basis_usdc: number | null;
+  sell_notional_usdc: number | null;
+  sell_fee_usdc: number | null;
+  mark_value_usdc: number | null;
+  net_value_usdc: number | null;
+  pnl_pct: number | null;
+  valuation_kind: 'realized' | 'mark_to_market' | null;
   updated_at: string;
+}
+
+interface AutoScopeTradeAnalysisSummaryDb {
+  row_count: number;
+  market_count: number;
+  loss_count: number;
+  profit_count: number;
+  total_pnl_usdc: number | null;
+  realized_pnl_usdc: number | null;
+  open_pnl_usdc: number | null;
+  loss_usdc: number | null;
+  profit_usdc: number | null;
+  buy_fee_usdc: number | null;
+  sell_fee_usdc: number | null;
+  total_fee_usdc: number | null;
+  cost_basis_usdc: number | null;
+  net_value_usdc: number | null;
 }
 
 interface TradeFlowPtbStateRowDb {
@@ -82,10 +116,63 @@ interface TradeFlowNodeRuntimeRowDb {
   updated_at: string;
 }
 
+const ANALYSIS_FILTER_TIME_EXPR =
+  'COALESCE(s.triggered_at, s.buy_filled_at, s.sell_filled_at, s.updated_at)';
+
 function parseDate(value: string | null): Date | null {
   if (!value) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function numberOrNull(value: number | null): number | null {
+  return value == null ? null : Number(value);
+}
+
+function normalizePnlFilter(value: string | undefined): AutoScopeTradeAnalysisPnlFilter {
+  return value === 'loss' || value === 'profit' ? value : 'all';
+}
+
+function normalizePositionFilter(
+  value: string | undefined
+): AutoScopeTradeAnalysisPositionFilter {
+  return value === 'realized' || value === 'open' ? value : 'all';
+}
+
+function buildAnalysisWhereClause(filters: AutoScopeTradeAnalysisFilters): {
+  whereClause: string;
+  params: Array<number | string | null>;
+} {
+  const params: Array<number | string | null> = [filters.userId];
+  const conditions = ['s.user_id = $1'];
+  const pnlFilter = normalizePnlFilter(filters.pnl);
+  const positionFilter = normalizePositionFilter(filters.position);
+
+  if (pnlFilter === 'loss') {
+    conditions.push('s.row_pnl_usdc < 0');
+  } else if (pnlFilter === 'profit') {
+    conditions.push('s.row_pnl_usdc > 0');
+  }
+
+  if (positionFilter === 'realized') {
+    conditions.push("s.row_type = 'sell_exit'");
+  } else if (positionFilter === 'open') {
+    conditions.push("s.row_type = 'open_position'");
+  }
+
+  if (filters.from) {
+    params.push(filters.from);
+    conditions.push(`${ANALYSIS_FILTER_TIME_EXPR} >= $${params.length}::timestamptz`);
+  }
+  if (filters.to) {
+    params.push(filters.to);
+    conditions.push(`${ANALYSIS_FILTER_TIME_EXPR} <= $${params.length}::timestamptz`);
+  }
+
+  return {
+    whereClause: conditions.join('\n         AND '),
+    params,
+  };
 }
 
 function deriveMarketEndAtFromSlug(marketSlug: string): string | null {
@@ -143,6 +230,7 @@ function mapAnalysisRow(row: AutoScopeTradeAnalysisRowDb): AutoScopeTradeAnalysi
     triggeredAt: row.triggered_at,
     buyFilledAt: row.buy_filled_at,
     sellFilledAt: row.sell_filled_at,
+    markPriceCapturedAt: row.mark_price_captured_at,
     openToTriggerMs:
       row.open_to_trigger_ms == null ? null : Number(row.open_to_trigger_ms),
     triggerToBuyFillMs:
@@ -153,6 +241,34 @@ function mapAnalysisRow(row: AutoScopeTradeAnalysisRowDb): AutoScopeTradeAnalysi
     rowQty: Number(row.row_qty),
     remainingQtyAfterExit: Number(row.remaining_qty_after_exit),
     rowPnlUsdc: Number(row.row_pnl_usdc),
+    buyNotionalUsdc: numberOrNull(row.buy_notional_usdc),
+    buyFeeUsdc: numberOrNull(row.buy_fee_usdc),
+    costBasisUsdc: numberOrNull(row.cost_basis_usdc),
+    sellNotionalUsdc: numberOrNull(row.sell_notional_usdc),
+    sellFeeUsdc: numberOrNull(row.sell_fee_usdc),
+    markValueUsdc: numberOrNull(row.mark_value_usdc),
+    netValueUsdc: numberOrNull(row.net_value_usdc),
+    pnlPct: numberOrNull(row.pnl_pct),
+    valuationKind: row.valuation_kind,
+  };
+}
+
+function mapAnalysisSummary(row: AutoScopeTradeAnalysisSummaryDb | undefined): AutoScopeTradeAnalysisSummary {
+  return {
+    rowCount: Number(row?.row_count || 0),
+    marketCount: Number(row?.market_count || 0),
+    lossCount: Number(row?.loss_count || 0),
+    profitCount: Number(row?.profit_count || 0),
+    totalPnlUsdc: Number(row?.total_pnl_usdc || 0),
+    realizedPnlUsdc: Number(row?.realized_pnl_usdc || 0),
+    openPnlUsdc: Number(row?.open_pnl_usdc || 0),
+    lossUsdc: Number(row?.loss_usdc || 0),
+    profitUsdc: Number(row?.profit_usdc || 0),
+    buyFeeUsdc: Number(row?.buy_fee_usdc || 0),
+    sellFeeUsdc: Number(row?.sell_fee_usdc || 0),
+    totalFeeUsdc: Number(row?.total_fee_usdc || 0),
+    costBasisUsdc: Number(row?.cost_basis_usdc || 0),
+    netValueUsdc: Number(row?.net_value_usdc || 0),
   };
 }
 
@@ -183,31 +299,7 @@ function buildOrderByClause(
           s.row_key ASC`;
 }
 
-export async function getAutoScopeTradeAnalysis(
-  filters: AutoScopeTradeAnalysisFilters
-): Promise<AutoScopeTradeAnalysisResponse> {
-  const page = Math.max(1, filters.page || 1);
-  const limit = Math.min(Math.max(1, filters.limit || 50), 100);
-  const offset = (page - 1) * limit;
-  const sortBy = normalizeSortBy(filters.sortBy);
-  const sortDirection = normalizeSortDirection(filters.sortDirection);
-  const orderByClause = buildOrderByClause(sortBy, sortDirection);
-
-  const [countRes, refreshedAtRes, dataRes] = await Promise.all([
-    pool.query<{ total: number }>(
-      `SELECT COUNT(*)::int AS total
-       FROM trade_flow_auto_scope_analysis_rows
-       WHERE user_id = $1`,
-      [filters.userId]
-    ),
-    pool.query<{ refreshed_at: string | null }>(
-      `SELECT MAX(updated_at)::text AS refreshed_at
-       FROM trade_flow_auto_scope_analysis_rows
-       WHERE user_id = $1`,
-      [filters.userId]
-    ),
-    pool.query<AutoScopeTradeAnalysisRowDb>(
-      `SELECT
+const ANALYSIS_ROW_SELECT = `SELECT
          s.row_key,
          s.definition_id,
          d.name AS definition_name,
@@ -224,6 +316,7 @@ export async function getAutoScopeTradeAnalysis(
          s.triggered_at::text,
          s.buy_filled_at::text,
          s.sell_filled_at::text,
+         s.mark_price_captured_at::text,
          s.open_to_trigger_ms,
          s.trigger_to_buy_fill_ms,
          s.buy_avg_price,
@@ -231,14 +324,78 @@ export async function getAutoScopeTradeAnalysis(
          s.row_qty,
          s.remaining_qty_after_exit,
          s.row_pnl_usdc,
+         s.buy_notional_usdc,
+         s.buy_fee_usdc,
+         s.cost_basis_usdc,
+         s.sell_notional_usdc,
+         s.sell_fee_usdc,
+         s.mark_value_usdc,
+         s.net_value_usdc,
+         s.pnl_pct,
+         s.valuation_kind,
          s.updated_at::text
        FROM trade_flow_auto_scope_analysis_rows s
        LEFT JOIN trade_flow_definitions d ON d.id = s.definition_id
-       LEFT JOIN markets m ON m.market_slug = s.market_slug
-       WHERE s.user_id = $1
+       LEFT JOIN markets m ON m.market_slug = s.market_slug`;
+
+export async function getAutoScopeTradeAnalysis(
+  filters: AutoScopeTradeAnalysisFilters
+): Promise<AutoScopeTradeAnalysisResponse> {
+  const page = Math.max(1, filters.page || 1);
+  const limit = Math.min(Math.max(1, filters.limit || 50), 100);
+  const offset = (page - 1) * limit;
+  const sortBy = normalizeSortBy(filters.sortBy);
+  const sortDirection = normalizeSortDirection(filters.sortDirection);
+  const pnlFilter = normalizePnlFilter(filters.pnl);
+  const positionFilter = normalizePositionFilter(filters.position);
+  const orderByClause = buildOrderByClause(sortBy, sortDirection);
+  const where = buildAnalysisWhereClause({
+    ...filters,
+    pnl: pnlFilter,
+    position: positionFilter,
+  });
+  const limitParam = where.params.length + 1;
+  const offsetParam = where.params.length + 2;
+
+  const [countRes, refreshedAtRes, summaryRes, dataRes] = await Promise.all([
+    pool.query<{ total: number }>(
+      `SELECT COUNT(*)::int AS total
+       FROM trade_flow_auto_scope_analysis_rows s
+       WHERE ${where.whereClause}`,
+      where.params
+    ),
+    pool.query<{ refreshed_at: string | null }>(
+      `SELECT MAX(updated_at)::text AS refreshed_at
+       FROM trade_flow_auto_scope_analysis_rows s
+       WHERE ${where.whereClause}`,
+      where.params
+    ),
+    pool.query<AutoScopeTradeAnalysisSummaryDb>(
+      `SELECT
+         COUNT(*)::int AS row_count,
+         COUNT(DISTINCT (s.market_slug, s.root_builder_order_id))::int AS market_count,
+         COUNT(*) FILTER (WHERE s.row_pnl_usdc < 0)::int AS loss_count,
+         COUNT(*) FILTER (WHERE s.row_pnl_usdc > 0)::int AS profit_count,
+         COALESCE(SUM(s.row_pnl_usdc), 0)::double precision AS total_pnl_usdc,
+         COALESCE(SUM(s.row_pnl_usdc) FILTER (WHERE s.row_type = 'sell_exit'), 0)::double precision AS realized_pnl_usdc,
+         COALESCE(SUM(s.row_pnl_usdc) FILTER (WHERE s.row_type = 'open_position'), 0)::double precision AS open_pnl_usdc,
+         ABS(COALESCE(SUM(s.row_pnl_usdc) FILTER (WHERE s.row_pnl_usdc < 0), 0))::double precision AS loss_usdc,
+         COALESCE(SUM(s.row_pnl_usdc) FILTER (WHERE s.row_pnl_usdc > 0), 0)::double precision AS profit_usdc,
+         COALESCE(SUM(s.buy_fee_usdc), 0)::double precision AS buy_fee_usdc,
+         COALESCE(SUM(s.sell_fee_usdc), 0)::double precision AS sell_fee_usdc,
+         COALESCE(SUM(COALESCE(s.buy_fee_usdc, 0) + COALESCE(s.sell_fee_usdc, 0)), 0)::double precision AS total_fee_usdc,
+         COALESCE(SUM(s.cost_basis_usdc), 0)::double precision AS cost_basis_usdc,
+         COALESCE(SUM(s.net_value_usdc), 0)::double precision AS net_value_usdc
+       FROM trade_flow_auto_scope_analysis_rows s
+       WHERE ${where.whereClause}`,
+      where.params
+    ),
+    pool.query<AutoScopeTradeAnalysisRowDb>(
+      `${ANALYSIS_ROW_SELECT}
+       WHERE ${where.whereClause}
        ORDER BY ${orderByClause}
-       LIMIT $2 OFFSET $3`,
-      [filters.userId, limit, offset]
+       LIMIT $${limitParam} OFFSET $${offsetParam}`,
+      [...where.params, limit, offset]
     ),
   ]);
 
@@ -252,9 +409,129 @@ export async function getAutoScopeTradeAnalysis(
     totalPages: Math.ceil(total / limit),
     sortBy,
     sortDirection,
+    pnlFilter,
+    positionFilter,
+    from: filters.from ?? null,
+    to: filters.to ?? null,
+    summary: mapAnalysisSummary(summaryRes.rows[0]),
     refreshedAt:
       refreshedAtRes.rows[0]?.refreshed_at ?? new Date().toISOString(),
   };
+}
+
+export async function getAutoScopeTradeAnalysisRowsForExport(
+  filters: AutoScopeTradeAnalysisFilters
+): Promise<AutoScopeTradeAnalysisRow[]> {
+  const sortBy = normalizeSortBy(filters.sortBy);
+  const sortDirection = normalizeSortDirection(filters.sortDirection);
+  const pnlFilter = normalizePnlFilter(filters.pnl);
+  const positionFilter = normalizePositionFilter(filters.position);
+  const where = buildAnalysisWhereClause({
+    ...filters,
+    pnl: pnlFilter,
+    position: positionFilter,
+  });
+
+  const rows = await pool.query<AutoScopeTradeAnalysisRowDb>(
+    `${ANALYSIS_ROW_SELECT}
+     WHERE ${where.whereClause}
+     ORDER BY ${buildOrderByClause(sortBy, sortDirection)}`,
+    where.params
+  );
+
+  return rows.rows.map(mapAnalysisRow);
+}
+
+function csvField(value: string | number | null): string {
+  if (value == null) return '';
+  const text = String(value);
+  if (!/[",\r\n]/.test(text)) return text;
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+export function buildAutoScopeTradeAnalysisCsv(
+  rows: AutoScopeTradeAnalysisRow[]
+): string {
+  const headers = [
+    'workflow',
+    'definition_id',
+    'run_id',
+    'root_order_id',
+    'exit_order_id',
+    'row_type',
+    'position_state',
+    'valuation_kind',
+    'market_slug',
+    'token_id',
+    'outcome_label',
+    'exit_reason',
+    'market_open_at',
+    'market_end_at',
+    'triggered_at',
+    'buy_filled_at',
+    'sell_filled_at',
+    'mark_price_captured_at',
+    'open_to_trigger_ms',
+    'trigger_to_buy_fill_ms',
+    'buy_avg_price',
+    'sell_or_live_price',
+    'row_qty',
+    'remaining_qty_after_exit',
+    'buy_notional_usdc',
+    'buy_fee_usdc',
+    'cost_basis_usdc',
+    'sell_notional_usdc',
+    'sell_fee_usdc',
+    'mark_value_usdc',
+    'net_value_usdc',
+    'row_pnl_usdc',
+    'pnl_pct',
+  ];
+  const lines = [headers.map(csvField).join(',')];
+
+  for (const row of rows) {
+    lines.push(
+      [
+        row.definitionName ?? '',
+        row.definitionId,
+        row.runId,
+        row.rootOrderId,
+        row.exitOrderId,
+        row.rowType,
+        row.positionState,
+        row.valuationKind,
+        row.marketSlug,
+        row.tokenId,
+        row.outcomeLabel,
+        row.exitReason,
+        row.marketOpenAt,
+        row.marketEndAt,
+        row.triggeredAt,
+        row.buyFilledAt,
+        row.sellFilledAt,
+        row.markPriceCapturedAt,
+        row.openToTriggerMs,
+        row.triggerToBuyFillMs,
+        row.buyAvgPrice,
+        row.sellOrLivePrice,
+        row.rowQty,
+        row.remainingQtyAfterExit,
+        row.buyNotionalUsdc,
+        row.buyFeeUsdc,
+        row.costBasisUsdc,
+        row.sellNotionalUsdc,
+        row.sellFeeUsdc,
+        row.markValueUsdc,
+        row.netValueUsdc,
+        row.rowPnlUsdc,
+        row.pnlPct,
+      ]
+        .map(csvField)
+        .join(',')
+    );
+  }
+
+  return `${lines.join('\n')}\n`;
 }
 
 function mapPtbStateRow(row: TradeFlowPtbStateRowDb): TradeFlowPtbStateRow {

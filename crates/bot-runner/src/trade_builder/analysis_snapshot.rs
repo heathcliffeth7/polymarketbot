@@ -13,6 +13,16 @@ struct AutoScopeAnalysisOrderMetrics {
     avg_price: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AutoScopeAnalysisPnlBreakdown {
+    buy_notional_usdc: f64,
+    buy_fee_usdc: f64,
+    cost_basis_usdc: f64,
+    net_value_usdc: f64,
+    row_pnl_usdc: f64,
+    pnl_pct: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 struct SelectedAutoScopeTriggerEvent {
     created_at: DateTime<Utc>,
@@ -63,6 +73,31 @@ fn trade_builder_analysis_payload_number(payload: &Value, keys: &[&str]) -> Opti
         }
     }
     None
+}
+
+fn trade_builder_analysis_pnl_breakdown(
+    row_qty: f64,
+    buy_notional_per_share: f64,
+    buy_fee_per_share: f64,
+    net_value_usdc: f64,
+) -> AutoScopeAnalysisPnlBreakdown {
+    let buy_notional_usdc = row_qty * buy_notional_per_share;
+    let buy_fee_usdc = row_qty * buy_fee_per_share;
+    let cost_basis_usdc = buy_notional_usdc + buy_fee_usdc;
+    let row_pnl_usdc = net_value_usdc - cost_basis_usdc;
+    let pnl_pct = (cost_basis_usdc > 0.0)
+        .then_some(round_trade_builder_signed_qty(
+            (row_pnl_usdc / cost_basis_usdc) * 100.0,
+        ));
+
+    AutoScopeAnalysisPnlBreakdown {
+        buy_notional_usdc: round_trade_builder_signed_qty(buy_notional_usdc),
+        buy_fee_usdc: round_trade_builder_signed_qty(buy_fee_usdc),
+        cost_basis_usdc: round_trade_builder_signed_qty(cost_basis_usdc),
+        net_value_usdc: round_trade_builder_signed_qty(net_value_usdc),
+        row_pnl_usdc: round_trade_builder_signed_qty(row_pnl_usdc),
+        pnl_pct,
+    }
 }
 
 fn trade_builder_analysis_payload_datetime(
@@ -522,8 +557,8 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
                 .max(0)
         });
 
-    let cost_basis_per_share =
-        (buy_metrics.notional_usdc + buy_metrics.fee_usdc) / buy_metrics.qty.max(0.0000001);
+    let buy_notional_per_share = buy_metrics.notional_usdc / buy_metrics.qty.max(0.0000001);
+    let buy_fee_per_share = buy_metrics.fee_usdc / buy_metrics.qty.max(0.0000001);
     let mut cumulative_sold_qty = 0.0;
     let mut rows = Vec::new();
 
@@ -557,8 +592,14 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
         cumulative_sold_qty = round_trade_builder_share_qty(cumulative_sold_qty + sell_qty);
         let remaining_qty_after_exit =
             round_trade_builder_share_qty((buy_metrics.qty - cumulative_sold_qty).max(0.0));
-        let row_pnl_usdc =
-            metrics.notional_usdc - metrics.fee_usdc - (sell_qty * cost_basis_per_share);
+        let sell_notional_usdc = round_trade_builder_signed_qty(metrics.notional_usdc);
+        let sell_fee_usdc = round_trade_builder_signed_qty(metrics.fee_usdc);
+        let breakdown = trade_builder_analysis_pnl_breakdown(
+            sell_qty,
+            buy_notional_per_share,
+            buy_fee_per_share,
+            metrics.notional_usdc - metrics.fee_usdc,
+        );
         let order_events = events_by_order_id
             .get(&child_order.id)
             .map(Vec::as_slice)
@@ -587,7 +628,16 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
             mark_price_captured_at: metrics.last_filled_at,
             row_qty: sell_qty,
             remaining_qty_after_exit,
-            row_pnl_usdc: round_trade_builder_signed_qty(row_pnl_usdc),
+            row_pnl_usdc: breakdown.row_pnl_usdc,
+            buy_notional_usdc: Some(breakdown.buy_notional_usdc),
+            buy_fee_usdc: Some(breakdown.buy_fee_usdc),
+            cost_basis_usdc: Some(breakdown.cost_basis_usdc),
+            sell_notional_usdc: Some(sell_notional_usdc),
+            sell_fee_usdc: Some(sell_fee_usdc),
+            mark_value_usdc: None,
+            net_value_usdc: Some(breakdown.net_value_usdc),
+            pnl_pct: breakdown.pnl_pct,
+            valuation_kind: "realized".to_string(),
         });
     }
 
@@ -599,7 +649,13 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
             mark_price_override,
             buy_avg_price,
         );
-        let row_pnl_usdc = remaining_qty * (mark_price - cost_basis_per_share);
+        let mark_value_usdc = remaining_qty * mark_price;
+        let breakdown = trade_builder_analysis_pnl_breakdown(
+            remaining_qty,
+            buy_notional_per_share,
+            buy_fee_per_share,
+            mark_value_usdc,
+        );
         rows.push(TradeFlowAutoScopeAnalysisRowInput {
             row_key: format!("open:{root_builder_order_id}"),
             user_id: run.user_id,
@@ -623,7 +679,16 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
             mark_price_captured_at: Some(mark_price_captured_at),
             row_qty: remaining_qty,
             remaining_qty_after_exit: remaining_qty,
-            row_pnl_usdc: round_trade_builder_signed_qty(row_pnl_usdc),
+            row_pnl_usdc: breakdown.row_pnl_usdc,
+            buy_notional_usdc: Some(breakdown.buy_notional_usdc),
+            buy_fee_usdc: Some(breakdown.buy_fee_usdc),
+            cost_basis_usdc: Some(breakdown.cost_basis_usdc),
+            sell_notional_usdc: None,
+            sell_fee_usdc: None,
+            mark_value_usdc: Some(round_trade_builder_signed_qty(mark_value_usdc)),
+            net_value_usdc: Some(breakdown.net_value_usdc),
+            pnl_pct: breakdown.pnl_pct,
+            valuation_kind: "mark_to_market".to_string(),
         });
     }
 
@@ -725,5 +790,27 @@ mod auto_scope_analysis_tests {
             &graph,
             "action_buy"
         ));
+    }
+
+    #[test]
+    fn pnl_breakdown_includes_buy_fee_in_cost_basis() {
+        let breakdown = trade_builder_analysis_pnl_breakdown(10.0, 0.40, 0.01, 3.50);
+
+        assert_eq!(breakdown.buy_notional_usdc, 4.0);
+        assert_eq!(breakdown.buy_fee_usdc, 0.1);
+        assert_eq!(breakdown.cost_basis_usdc, 4.1);
+        assert_eq!(breakdown.net_value_usdc, 3.5);
+        assert_eq!(breakdown.row_pnl_usdc, -0.6);
+        assert_eq!(breakdown.pnl_pct, Some(-14.63));
+    }
+
+    #[test]
+    fn pnl_breakdown_supports_mark_to_market_profit() {
+        let breakdown = trade_builder_analysis_pnl_breakdown(5.0, 0.20, 0.0, 1.50);
+
+        assert_eq!(breakdown.cost_basis_usdc, 1.0);
+        assert_eq!(breakdown.net_value_usdc, 1.5);
+        assert_eq!(breakdown.row_pnl_usdc, 0.5);
+        assert_eq!(breakdown.pnl_pct, Some(50.0));
     }
 }
