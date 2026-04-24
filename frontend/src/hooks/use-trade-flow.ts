@@ -5,6 +5,7 @@ import { requestJson, type RequestJsonOptions } from '@/lib/http-client';
 import type {
   AutoScopeTradeAnalysisPnlFilter,
   AutoScopeTradeAnalysisPositionFilter,
+  AutoScopeTradeDiagnosticResponse,
   AutoScopeTradeAnalysisResponse,
   AutoScopeTradeAnalysisSortBy,
   AutoScopeTradeAnalysisSortDirection,
@@ -187,6 +188,17 @@ export function useTradeFlowAutoScopeAnalysis({
   });
   const endpoint = enabled ? `/api/trade-flow/analytics/auto-scope?${query}` : null;
   return usePolling<AutoScopeTradeAnalysisResponse>(endpoint, 10_000);
+}
+
+export function useTradeFlowAutoScopeTradeDiagnostic(
+  rootOrderId: number | null,
+  enabled = true
+) {
+  const endpoint =
+    enabled && rootOrderId
+      ? `/api/trade-flow/analytics/auto-scope/${rootOrderId}/diagnostics`
+      : null;
+  return usePolling<AutoScopeTradeDiagnosticResponse>(endpoint, 10_000);
 }
 
 export function useTradeFlowPtbState(

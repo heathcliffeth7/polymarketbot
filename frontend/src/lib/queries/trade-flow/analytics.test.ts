@@ -96,6 +96,10 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
       netValueUsdc: 3.5,
       pnlPct: -14.63,
       valuationKind: 'realized',
+      primaryDiagnosisCode: 'bad_entry_price',
+      diagnosisLabel: 'Kotu giris fiyati',
+      entryQualityScore: 72,
+      exitQualityScore: 81,
     },
   ];
 
@@ -104,5 +108,7 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
   assert.match(csv, /^workflow,definition_id,/);
   assert.match(csv, /"Flow, A"/);
   assert.match(csv, /buy_fee_usdc/);
+  assert.match(csv, /diagnosis_code/);
+  assert.match(csv, /bad_entry_price/);
   assert.match(csv, /-14.63/);
 });

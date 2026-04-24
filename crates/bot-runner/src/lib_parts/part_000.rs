@@ -13,13 +13,13 @@ use bot_infra::config::{AppConfig, TelegramConfig};
 use bot_infra::contracts::{OrderExecutor, StateRepository};
 use bot_infra::db::{
     ActiveTradeFlowRunOrderPeer, PendingTradeBuilderFirstVisibleInventoryObservation,
-    PostgresRepository, TradeBuilderExchangeFillSummary,
+    PostgresRepository, TradeBuilderExchangeFillSummary, TradeBuilderMarketSecondSnapshot,
     TradeBuilderInventoryObservationInput, TradeBuilderOrder, TradeBuilderOrderEventRecord,
     TradeBuilderPairSession, TradeBuilderParentPosition, TradeBuilderParentPositionInput,
     TradeBuilderParentPositionSeed, TradeBuilderPriceExitRule, TradeBuilderTimeExitRule,
     TradeBuilderWorkflow, TradeBuilderWorkflowLeg, TradeFlowAutoScopeAnalysisRowInput,
-    TradeFlowDefinitionRuntime, TradeFlowEventRecord, TradeFlowRun, TradeFlowRunStep,
-    TradeFlowVersionRuntime,
+    TradeFlowAutoScopeTradeDiagnosticInput, TradeFlowDefinitionRuntime, TradeFlowEventRecord,
+    TradeFlowRun, TradeFlowRunStep, TradeFlowVersionRuntime,
 };
 use bot_infra::exchange::{
     ClobHttpClient, ClobRestClient, FillInfo, GammaClient, GammaHttpClient, GammaMarket,

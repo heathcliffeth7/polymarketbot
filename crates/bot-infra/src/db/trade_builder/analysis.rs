@@ -27,6 +27,11 @@ impl PostgresRepository {
                    FROM trade_flow_auto_scope_analysis_rows s
                    WHERE s.root_builder_order_id = o.id
                  )
+                 OR NOT EXISTS (
+                   SELECT 1
+                   FROM trade_flow_auto_scope_trade_diagnostics d
+                   WHERE d.root_builder_order_id = o.id
+                 )
                  OR EXISTS (
                    SELECT 1
                    FROM trade_flow_auto_scope_analysis_rows s
@@ -49,10 +54,140 @@ impl PostgresRepository {
         root_builder_order_id: i64,
     ) -> Result<()> {
         sqlx::query(
+            "DELETE FROM trade_flow_auto_scope_trade_diagnostics
+             WHERE root_builder_order_id = $1",
+        )
+        .bind(root_builder_order_id)
+        .execute(self.pool())
+        .await?;
+
+        sqlx::query(
             "DELETE FROM trade_flow_auto_scope_analysis_rows
              WHERE root_builder_order_id = $1",
         )
         .bind(root_builder_order_id)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn upsert_trade_flow_auto_scope_trade_diagnostic(
+        &self,
+        input: &TradeFlowAutoScopeTradeDiagnosticInput,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO trade_flow_auto_scope_trade_diagnostics
+              (root_builder_order_id, user_id, definition_id, run_id, market_slug, token_id,
+               outcome_label, total_pnl_usdc, realized_pnl_usdc, open_pnl_usdc, pnl_pct,
+               fee_drag_usdc, cost_basis_usdc, net_value_usdc, entry_trigger_price,
+               entry_submit_price, entry_fill_price, entry_reference_price,
+               entry_slippage_usdc, entry_quality_score, exit_reason, exit_price,
+               best_price_during_hold, worst_price_during_hold, max_favorable_usdc,
+               max_adverse_usdc, gave_back_usdc, exit_quality_score, open_to_trigger_ms,
+               trigger_to_buy_fill_ms, trigger_to_submit_ms, submit_to_fill_ms, hold_ms,
+               snapshot_age_ms, runtime_price_fetch_ms, guard_eval_ms, place_http_ms,
+               primary_diagnosis_code, secondary_diagnosis_code, diagnosis_label,
+               diagnosis_detail, data_quality_flags, compact_metrics_json, updated_at)
+             VALUES
+              ($1, $2, $3, $4, $5, $6,
+               $7, $8, $9, $10, $11,
+               $12, $13, $14, $15,
+               $16, $17, $18,
+               $19, $20, $21, $22,
+               $23, $24, $25,
+               $26, $27, $28, $29,
+               $30, $31, $32, $33,
+               $34, $35, $36, $37,
+               $38, $39, $40,
+               $41, $42, $43, NOW())
+             ON CONFLICT (root_builder_order_id) DO UPDATE SET
+               user_id = EXCLUDED.user_id,
+               definition_id = EXCLUDED.definition_id,
+               run_id = EXCLUDED.run_id,
+               market_slug = EXCLUDED.market_slug,
+               token_id = EXCLUDED.token_id,
+               outcome_label = EXCLUDED.outcome_label,
+               total_pnl_usdc = EXCLUDED.total_pnl_usdc,
+               realized_pnl_usdc = EXCLUDED.realized_pnl_usdc,
+               open_pnl_usdc = EXCLUDED.open_pnl_usdc,
+               pnl_pct = EXCLUDED.pnl_pct,
+               fee_drag_usdc = EXCLUDED.fee_drag_usdc,
+               cost_basis_usdc = EXCLUDED.cost_basis_usdc,
+               net_value_usdc = EXCLUDED.net_value_usdc,
+               entry_trigger_price = EXCLUDED.entry_trigger_price,
+               entry_submit_price = EXCLUDED.entry_submit_price,
+               entry_fill_price = EXCLUDED.entry_fill_price,
+               entry_reference_price = EXCLUDED.entry_reference_price,
+               entry_slippage_usdc = EXCLUDED.entry_slippage_usdc,
+               entry_quality_score = EXCLUDED.entry_quality_score,
+               exit_reason = EXCLUDED.exit_reason,
+               exit_price = EXCLUDED.exit_price,
+               best_price_during_hold = EXCLUDED.best_price_during_hold,
+               worst_price_during_hold = EXCLUDED.worst_price_during_hold,
+               max_favorable_usdc = EXCLUDED.max_favorable_usdc,
+               max_adverse_usdc = EXCLUDED.max_adverse_usdc,
+               gave_back_usdc = EXCLUDED.gave_back_usdc,
+               exit_quality_score = EXCLUDED.exit_quality_score,
+               open_to_trigger_ms = EXCLUDED.open_to_trigger_ms,
+               trigger_to_buy_fill_ms = EXCLUDED.trigger_to_buy_fill_ms,
+               trigger_to_submit_ms = EXCLUDED.trigger_to_submit_ms,
+               submit_to_fill_ms = EXCLUDED.submit_to_fill_ms,
+               hold_ms = EXCLUDED.hold_ms,
+               snapshot_age_ms = EXCLUDED.snapshot_age_ms,
+               runtime_price_fetch_ms = EXCLUDED.runtime_price_fetch_ms,
+               guard_eval_ms = EXCLUDED.guard_eval_ms,
+               place_http_ms = EXCLUDED.place_http_ms,
+               primary_diagnosis_code = EXCLUDED.primary_diagnosis_code,
+               secondary_diagnosis_code = EXCLUDED.secondary_diagnosis_code,
+               diagnosis_label = EXCLUDED.diagnosis_label,
+               diagnosis_detail = EXCLUDED.diagnosis_detail,
+               data_quality_flags = EXCLUDED.data_quality_flags,
+               compact_metrics_json = EXCLUDED.compact_metrics_json,
+               updated_at = NOW()",
+        )
+        .bind(input.root_builder_order_id)
+        .bind(input.user_id)
+        .bind(input.definition_id)
+        .bind(input.run_id)
+        .bind(&input.market_slug)
+        .bind(&input.token_id)
+        .bind(&input.outcome_label)
+        .bind(input.total_pnl_usdc)
+        .bind(input.realized_pnl_usdc)
+        .bind(input.open_pnl_usdc)
+        .bind(input.pnl_pct)
+        .bind(input.fee_drag_usdc)
+        .bind(input.cost_basis_usdc)
+        .bind(input.net_value_usdc)
+        .bind(input.entry_trigger_price)
+        .bind(input.entry_submit_price)
+        .bind(input.entry_fill_price)
+        .bind(input.entry_reference_price)
+        .bind(input.entry_slippage_usdc)
+        .bind(input.entry_quality_score)
+        .bind(&input.exit_reason)
+        .bind(input.exit_price)
+        .bind(input.best_price_during_hold)
+        .bind(input.worst_price_during_hold)
+        .bind(input.max_favorable_usdc)
+        .bind(input.max_adverse_usdc)
+        .bind(input.gave_back_usdc)
+        .bind(input.exit_quality_score)
+        .bind(input.open_to_trigger_ms)
+        .bind(input.trigger_to_buy_fill_ms)
+        .bind(input.trigger_to_submit_ms)
+        .bind(input.submit_to_fill_ms)
+        .bind(input.hold_ms)
+        .bind(input.snapshot_age_ms)
+        .bind(input.runtime_price_fetch_ms)
+        .bind(input.guard_eval_ms)
+        .bind(input.place_http_ms)
+        .bind(&input.primary_diagnosis_code)
+        .bind(&input.secondary_diagnosis_code)
+        .bind(&input.diagnosis_label)
+        .bind(&input.diagnosis_detail)
+        .bind(&input.data_quality_flags)
+        .bind(&input.compact_metrics_json)
         .execute(self.pool())
         .await?;
         Ok(())

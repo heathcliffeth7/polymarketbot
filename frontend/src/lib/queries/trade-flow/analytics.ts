@@ -1,8 +1,12 @@
 import { pool } from '@/lib/db';
 import type {
+  AutoScopeTradeAnalysisDiagnosisBreakdown,
   AutoScopeTradeAnalysisPnlFilter,
   AutoScopeTradeAnalysisPositionState,
   AutoScopeTradeAnalysisPositionFilter,
+  AutoScopeTradeDiagnostic,
+  AutoScopeTradeDiagnosticResponse,
+  AutoScopeTradeDiagnosisCode,
   AutoScopeTradeAnalysisResponse,
   AutoScopeTradeAnalysisRow,
   AutoScopeTradeAnalysisSortBy,
@@ -60,6 +64,10 @@ interface AutoScopeTradeAnalysisRowDb {
   net_value_usdc: number | null;
   pnl_pct: number | null;
   valuation_kind: 'realized' | 'mark_to_market' | null;
+  primary_diagnosis_code: AutoScopeTradeDiagnosisCode | null;
+  diagnosis_label: string | null;
+  entry_quality_score: number | null;
+  exit_quality_score: number | null;
   updated_at: string;
 }
 
@@ -78,6 +86,61 @@ interface AutoScopeTradeAnalysisSummaryDb {
   total_fee_usdc: number | null;
   cost_basis_usdc: number | null;
   net_value_usdc: number | null;
+  largest_loss_usdc: number | null;
+}
+
+interface AutoScopeTradeAnalysisDiagnosisBreakdownDb {
+  primary_diagnosis_code: AutoScopeTradeDiagnosisCode;
+  diagnosis_label: string;
+  trade_count: number;
+  pnl_usdc: number | null;
+}
+
+interface AutoScopeTradeDiagnosticDb {
+  root_builder_order_id: number;
+  user_id: number;
+  definition_id: number;
+  run_id: number;
+  market_slug: string;
+  token_id: string;
+  outcome_label: string;
+  total_pnl_usdc: number;
+  realized_pnl_usdc: number;
+  open_pnl_usdc: number;
+  pnl_pct: number | null;
+  fee_drag_usdc: number;
+  cost_basis_usdc: number;
+  net_value_usdc: number;
+  entry_trigger_price: number | null;
+  entry_submit_price: number | null;
+  entry_fill_price: number | null;
+  entry_reference_price: number | null;
+  entry_slippage_usdc: number | null;
+  entry_quality_score: number | null;
+  exit_reason: string | null;
+  exit_price: number | null;
+  best_price_during_hold: number | null;
+  worst_price_during_hold: number | null;
+  max_favorable_usdc: number | null;
+  max_adverse_usdc: number | null;
+  gave_back_usdc: number | null;
+  exit_quality_score: number | null;
+  open_to_trigger_ms: number | null;
+  trigger_to_buy_fill_ms: number | null;
+  trigger_to_submit_ms: number | null;
+  submit_to_fill_ms: number | null;
+  hold_ms: number | null;
+  snapshot_age_ms: number | null;
+  runtime_price_fetch_ms: number | null;
+  guard_eval_ms: number | null;
+  place_http_ms: number | null;
+  primary_diagnosis_code: AutoScopeTradeDiagnosisCode;
+  secondary_diagnosis_code: AutoScopeTradeDiagnosisCode | null;
+  diagnosis_label: string;
+  diagnosis_detail: string;
+  data_quality_flags: string[] | null;
+  compact_metrics_json: Record<string, unknown> | null;
+  updated_at: string;
 }
 
 interface TradeFlowPtbStateRowDb {
@@ -250,25 +313,107 @@ function mapAnalysisRow(row: AutoScopeTradeAnalysisRowDb): AutoScopeTradeAnalysi
     netValueUsdc: numberOrNull(row.net_value_usdc),
     pnlPct: numberOrNull(row.pnl_pct),
     valuationKind: row.valuation_kind,
+    primaryDiagnosisCode: row.primary_diagnosis_code,
+    diagnosisLabel: row.diagnosis_label,
+    entryQualityScore: numberOrNull(row.entry_quality_score),
+    exitQualityScore: numberOrNull(row.exit_quality_score),
   };
 }
 
-function mapAnalysisSummary(row: AutoScopeTradeAnalysisSummaryDb | undefined): AutoScopeTradeAnalysisSummary {
+function mapDiagnosisBreakdown(
+  rows: AutoScopeTradeAnalysisDiagnosisBreakdownDb[]
+): AutoScopeTradeAnalysisDiagnosisBreakdown[] {
+  return rows.map((row) => ({
+    code: row.primary_diagnosis_code,
+    label: row.diagnosis_label,
+    count: Number(row.trade_count || 0),
+    pnlUsdc: Number(row.pnl_usdc || 0),
+  }));
+}
+
+function mapAnalysisSummary(
+  row: AutoScopeTradeAnalysisSummaryDb | undefined,
+  diagnosisBreakdown: AutoScopeTradeAnalysisDiagnosisBreakdown[] = []
+): AutoScopeTradeAnalysisSummary {
+  const rowCount = Number(row?.row_count || 0);
+  const profitCount = Number(row?.profit_count || 0);
+  const lossCount = Number(row?.loss_count || 0);
+  const profitUsdc = Number(row?.profit_usdc || 0);
+  const lossUsdc = Number(row?.loss_usdc || 0);
   return {
-    rowCount: Number(row?.row_count || 0),
+    rowCount,
     marketCount: Number(row?.market_count || 0),
-    lossCount: Number(row?.loss_count || 0),
-    profitCount: Number(row?.profit_count || 0),
+    lossCount,
+    profitCount,
     totalPnlUsdc: Number(row?.total_pnl_usdc || 0),
     realizedPnlUsdc: Number(row?.realized_pnl_usdc || 0),
     openPnlUsdc: Number(row?.open_pnl_usdc || 0),
-    lossUsdc: Number(row?.loss_usdc || 0),
-    profitUsdc: Number(row?.profit_usdc || 0),
+    lossUsdc,
+    profitUsdc,
     buyFeeUsdc: Number(row?.buy_fee_usdc || 0),
     sellFeeUsdc: Number(row?.sell_fee_usdc || 0),
     totalFeeUsdc: Number(row?.total_fee_usdc || 0),
     costBasisUsdc: Number(row?.cost_basis_usdc || 0),
     netValueUsdc: Number(row?.net_value_usdc || 0),
+    profitFactor: lossUsdc > 0 ? profitUsdc / lossUsdc : null,
+    winRatePct: rowCount > 0 ? (profitCount / rowCount) * 100 : null,
+    avgWinUsdc: profitCount > 0 ? profitUsdc / profitCount : null,
+    avgLossUsdc: lossCount > 0 ? lossUsdc / lossCount : null,
+    largestLossUsdc: numberOrNull(row?.largest_loss_usdc ?? null),
+    feeDragUsdc: Number(row?.total_fee_usdc || 0),
+    diagnosisBreakdown,
+  };
+}
+
+function mapDiagnostic(row: AutoScopeTradeDiagnosticDb): AutoScopeTradeDiagnostic {
+  return {
+    rootOrderId: Number(row.root_builder_order_id),
+    userId: Number(row.user_id),
+    definitionId: Number(row.definition_id),
+    runId: Number(row.run_id),
+    marketSlug: row.market_slug,
+    tokenId: row.token_id,
+    outcomeLabel: row.outcome_label,
+    totalPnlUsdc: Number(row.total_pnl_usdc || 0),
+    realizedPnlUsdc: Number(row.realized_pnl_usdc || 0),
+    openPnlUsdc: Number(row.open_pnl_usdc || 0),
+    pnlPct: numberOrNull(row.pnl_pct),
+    feeDragUsdc: Number(row.fee_drag_usdc || 0),
+    costBasisUsdc: Number(row.cost_basis_usdc || 0),
+    netValueUsdc: Number(row.net_value_usdc || 0),
+    entryTriggerPrice: numberOrNull(row.entry_trigger_price),
+    entrySubmitPrice: numberOrNull(row.entry_submit_price),
+    entryFillPrice: numberOrNull(row.entry_fill_price),
+    entryReferencePrice: numberOrNull(row.entry_reference_price),
+    entrySlippageUsdc: numberOrNull(row.entry_slippage_usdc),
+    entryQualityScore: numberOrNull(row.entry_quality_score),
+    exitReason: row.exit_reason,
+    exitPrice: numberOrNull(row.exit_price),
+    bestPriceDuringHold: numberOrNull(row.best_price_during_hold),
+    worstPriceDuringHold: numberOrNull(row.worst_price_during_hold),
+    maxFavorableUsdc: numberOrNull(row.max_favorable_usdc),
+    maxAdverseUsdc: numberOrNull(row.max_adverse_usdc),
+    gaveBackUsdc: numberOrNull(row.gave_back_usdc),
+    exitQualityScore: numberOrNull(row.exit_quality_score),
+    openToTriggerMs: row.open_to_trigger_ms == null ? null : Number(row.open_to_trigger_ms),
+    triggerToBuyFillMs:
+      row.trigger_to_buy_fill_ms == null ? null : Number(row.trigger_to_buy_fill_ms),
+    triggerToSubmitMs:
+      row.trigger_to_submit_ms == null ? null : Number(row.trigger_to_submit_ms),
+    submitToFillMs: row.submit_to_fill_ms == null ? null : Number(row.submit_to_fill_ms),
+    holdMs: row.hold_ms == null ? null : Number(row.hold_ms),
+    snapshotAgeMs: row.snapshot_age_ms == null ? null : Number(row.snapshot_age_ms),
+    runtimePriceFetchMs:
+      row.runtime_price_fetch_ms == null ? null : Number(row.runtime_price_fetch_ms),
+    guardEvalMs: row.guard_eval_ms == null ? null : Number(row.guard_eval_ms),
+    placeHttpMs: row.place_http_ms == null ? null : Number(row.place_http_ms),
+    primaryDiagnosisCode: row.primary_diagnosis_code,
+    secondaryDiagnosisCode: row.secondary_diagnosis_code,
+    diagnosisLabel: row.diagnosis_label,
+    diagnosisDetail: row.diagnosis_detail,
+    dataQualityFlags: row.data_quality_flags ?? [],
+    compactMetrics: row.compact_metrics_json ?? {},
+    updatedAt: row.updated_at,
   };
 }
 
@@ -333,9 +478,15 @@ const ANALYSIS_ROW_SELECT = `SELECT
          s.net_value_usdc,
          s.pnl_pct,
          s.valuation_kind,
+         dg.primary_diagnosis_code,
+         dg.diagnosis_label,
+         dg.entry_quality_score,
+         dg.exit_quality_score,
          s.updated_at::text
        FROM trade_flow_auto_scope_analysis_rows s
        LEFT JOIN trade_flow_definitions d ON d.id = s.definition_id
+       LEFT JOIN trade_flow_auto_scope_trade_diagnostics dg
+         ON dg.root_builder_order_id = s.root_builder_order_id
        LEFT JOIN markets m ON m.market_slug = s.market_slug`;
 
 export async function getAutoScopeTradeAnalysis(
@@ -357,7 +508,7 @@ export async function getAutoScopeTradeAnalysis(
   const limitParam = where.params.length + 1;
   const offsetParam = where.params.length + 2;
 
-  const [countRes, refreshedAtRes, summaryRes, dataRes] = await Promise.all([
+  const [countRes, refreshedAtRes, summaryRes, diagnosisRes, dataRes] = await Promise.all([
     pool.query<{ total: number }>(
       `SELECT COUNT(*)::int AS total
        FROM trade_flow_auto_scope_analysis_rows s
@@ -385,9 +536,28 @@ export async function getAutoScopeTradeAnalysis(
          COALESCE(SUM(s.sell_fee_usdc), 0)::double precision AS sell_fee_usdc,
          COALESCE(SUM(COALESCE(s.buy_fee_usdc, 0) + COALESCE(s.sell_fee_usdc, 0)), 0)::double precision AS total_fee_usdc,
          COALESCE(SUM(s.cost_basis_usdc), 0)::double precision AS cost_basis_usdc,
-         COALESCE(SUM(s.net_value_usdc), 0)::double precision AS net_value_usdc
+         COALESCE(SUM(s.net_value_usdc), 0)::double precision AS net_value_usdc,
+         ABS(MIN(s.row_pnl_usdc) FILTER (WHERE s.row_pnl_usdc < 0))::double precision AS largest_loss_usdc
        FROM trade_flow_auto_scope_analysis_rows s
        WHERE ${where.whereClause}`,
+      where.params
+    ),
+    pool.query<AutoScopeTradeAnalysisDiagnosisBreakdownDb>(
+      `WITH filtered_roots AS (
+         SELECT DISTINCT s.root_builder_order_id
+         FROM trade_flow_auto_scope_analysis_rows s
+         WHERE ${where.whereClause}
+       )
+       SELECT
+         dg.primary_diagnosis_code,
+         dg.diagnosis_label,
+         COUNT(*)::int AS trade_count,
+         COALESCE(SUM(dg.total_pnl_usdc), 0)::double precision AS pnl_usdc
+       FROM filtered_roots r
+       JOIN trade_flow_auto_scope_trade_diagnostics dg
+         ON dg.root_builder_order_id = r.root_builder_order_id
+       GROUP BY dg.primary_diagnosis_code, dg.diagnosis_label
+       ORDER BY pnl_usdc ASC, trade_count DESC, dg.primary_diagnosis_code ASC`,
       where.params
     ),
     pool.query<AutoScopeTradeAnalysisRowDb>(
@@ -413,7 +583,10 @@ export async function getAutoScopeTradeAnalysis(
     positionFilter,
     from: filters.from ?? null,
     to: filters.to ?? null,
-    summary: mapAnalysisSummary(summaryRes.rows[0]),
+    summary: mapAnalysisSummary(
+      summaryRes.rows[0],
+      mapDiagnosisBreakdown(diagnosisRes.rows)
+    ),
     refreshedAt:
       refreshedAtRes.rows[0]?.refreshed_at ?? new Date().toISOString(),
   };
@@ -440,6 +613,88 @@ export async function getAutoScopeTradeAnalysisRowsForExport(
   );
 
   return rows.rows.map(mapAnalysisRow);
+}
+
+const DIAGNOSTIC_SELECT = `SELECT
+         root_builder_order_id,
+         user_id,
+         definition_id,
+         run_id,
+         market_slug,
+         token_id,
+         outcome_label,
+         total_pnl_usdc,
+         realized_pnl_usdc,
+         open_pnl_usdc,
+         pnl_pct,
+         fee_drag_usdc,
+         cost_basis_usdc,
+         net_value_usdc,
+         entry_trigger_price,
+         entry_submit_price,
+         entry_fill_price,
+         entry_reference_price,
+         entry_slippage_usdc,
+         entry_quality_score,
+         exit_reason,
+         exit_price,
+         best_price_during_hold,
+         worst_price_during_hold,
+         max_favorable_usdc,
+         max_adverse_usdc,
+         gave_back_usdc,
+         exit_quality_score,
+         open_to_trigger_ms,
+         trigger_to_buy_fill_ms,
+         trigger_to_submit_ms,
+         submit_to_fill_ms,
+         hold_ms,
+         snapshot_age_ms,
+         runtime_price_fetch_ms,
+         guard_eval_ms,
+         place_http_ms,
+         primary_diagnosis_code,
+         secondary_diagnosis_code,
+         diagnosis_label,
+         diagnosis_detail,
+         data_quality_flags,
+         compact_metrics_json,
+         updated_at::text
+       FROM trade_flow_auto_scope_trade_diagnostics`;
+
+export async function getAutoScopeTradeDiagnostic(params: {
+  userId: number;
+  rootOrderId: number;
+}): Promise<AutoScopeTradeDiagnosticResponse> {
+  const [diagnosticRes, rowsRes] = await Promise.all([
+    pool.query<AutoScopeTradeDiagnosticDb>(
+      `${DIAGNOSTIC_SELECT}
+       WHERE user_id = $1
+         AND root_builder_order_id = $2`,
+      [params.userId, params.rootOrderId]
+    ),
+    pool.query<AutoScopeTradeAnalysisRowDb>(
+      `${ANALYSIS_ROW_SELECT}
+       WHERE s.user_id = $1
+         AND s.root_builder_order_id = $2
+       ORDER BY s.sell_filled_at ASC NULLS LAST,
+                s.mark_price_captured_at ASC NULLS LAST,
+                s.row_key ASC`,
+      [params.userId, params.rootOrderId]
+    ),
+  ]);
+
+  const diagnostic = diagnosticRes.rows[0]
+    ? mapDiagnostic(diagnosticRes.rows[0])
+    : null;
+  const rows = rowsRes.rows.map(mapAnalysisRow);
+
+  return {
+    diagnostic,
+    rows,
+    refreshedAt:
+      diagnostic?.updatedAt ?? rows[0]?.markPriceCapturedAt ?? new Date().toISOString(),
+  };
 }
 
 function csvField(value: string | number | null): string {
@@ -475,6 +730,10 @@ export function buildAutoScopeTradeAnalysisCsv(
     'trigger_to_buy_fill_ms',
     'buy_avg_price',
     'sell_or_live_price',
+    'diagnosis_code',
+    'diagnosis_label',
+    'entry_quality_score',
+    'exit_quality_score',
     'row_qty',
     'remaining_qty_after_exit',
     'buy_notional_usdc',
@@ -514,6 +773,10 @@ export function buildAutoScopeTradeAnalysisCsv(
         row.triggerToBuyFillMs,
         row.buyAvgPrice,
         row.sellOrLivePrice,
+        row.primaryDiagnosisCode,
+        row.diagnosisLabel,
+        row.entryQualityScore,
+        row.exitQualityScore,
         row.rowQty,
         row.remainingQtyAfterExit,
         row.buyNotionalUsdc,

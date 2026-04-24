@@ -28,6 +28,7 @@ export {
 export {
   buildAutoScopeTradeAnalysisCsv,
   getAutoScopeTradeAnalysis,
+  getAutoScopeTradeDiagnostic,
   getAutoScopeTradeAnalysisRowsForExport,
   getTradeFlowNodeRuntime,
   getTradeFlowPtbState,

@@ -623,6 +623,19 @@ export type AutoScopeTradeAnalysisSortDirection = 'asc' | 'desc';
 export type AutoScopeTradeAnalysisPnlFilter = 'all' | 'loss' | 'profit';
 export type AutoScopeTradeAnalysisPositionFilter = 'all' | 'realized' | 'open';
 export type AutoScopeTradeAnalysisValuationKind = 'realized' | 'mark_to_market';
+export type AutoScopeTradeDiagnosisCode =
+  | 'bad_entry_price'
+  | 'late_entry'
+  | 'slow_fill'
+  | 'thin_liquidity'
+  | 'stop_loss_expected'
+  | 'exit_too_late'
+  | 'market_reversal'
+  | 'fee_drag'
+  | 'unrealized_mark_loss'
+  | 'take_profit_success'
+  | 'clean_win'
+  | 'unknown';
 
 export type AutoScopeTradeAnalysisExitReason =
   | 'tp'
@@ -630,6 +643,60 @@ export type AutoScopeTradeAnalysisExitReason =
   | 'window_end_auto_sell'
   | 'other'
   | 'open_position';
+
+export interface AutoScopeTradeDiagnostic {
+  rootOrderId: number;
+  userId: number;
+  definitionId: number;
+  runId: number;
+  marketSlug: string;
+  tokenId: string;
+  outcomeLabel: string;
+  totalPnlUsdc: number;
+  realizedPnlUsdc: number;
+  openPnlUsdc: number;
+  pnlPct: number | null;
+  feeDragUsdc: number;
+  costBasisUsdc: number;
+  netValueUsdc: number;
+  entryTriggerPrice: number | null;
+  entrySubmitPrice: number | null;
+  entryFillPrice: number | null;
+  entryReferencePrice: number | null;
+  entrySlippageUsdc: number | null;
+  entryQualityScore: number | null;
+  exitReason: AutoScopeTradeAnalysisExitReason | string | null;
+  exitPrice: number | null;
+  bestPriceDuringHold: number | null;
+  worstPriceDuringHold: number | null;
+  maxFavorableUsdc: number | null;
+  maxAdverseUsdc: number | null;
+  gaveBackUsdc: number | null;
+  exitQualityScore: number | null;
+  openToTriggerMs: number | null;
+  triggerToBuyFillMs: number | null;
+  triggerToSubmitMs: number | null;
+  submitToFillMs: number | null;
+  holdMs: number | null;
+  snapshotAgeMs: number | null;
+  runtimePriceFetchMs: number | null;
+  guardEvalMs: number | null;
+  placeHttpMs: number | null;
+  primaryDiagnosisCode: AutoScopeTradeDiagnosisCode;
+  secondaryDiagnosisCode: AutoScopeTradeDiagnosisCode | null;
+  diagnosisLabel: string;
+  diagnosisDetail: string;
+  dataQualityFlags: string[];
+  compactMetrics: Record<string, unknown>;
+  updatedAt: string;
+}
+
+export interface AutoScopeTradeAnalysisDiagnosisBreakdown {
+  code: AutoScopeTradeDiagnosisCode;
+  label: string;
+  count: number;
+  pnlUsdc: number;
+}
 
 export interface AutoScopeTradeAnalysisRow {
   rowId: string;
@@ -666,6 +733,10 @@ export interface AutoScopeTradeAnalysisRow {
   netValueUsdc: number | null;
   pnlPct: number | null;
   valuationKind: AutoScopeTradeAnalysisValuationKind | null;
+  primaryDiagnosisCode: AutoScopeTradeDiagnosisCode | null;
+  diagnosisLabel: string | null;
+  entryQualityScore: number | null;
+  exitQualityScore: number | null;
 }
 
 export interface AutoScopeTradeAnalysisSummary {
@@ -683,6 +754,13 @@ export interface AutoScopeTradeAnalysisSummary {
   totalFeeUsdc: number;
   costBasisUsdc: number;
   netValueUsdc: number;
+  profitFactor: number | null;
+  winRatePct: number | null;
+  avgWinUsdc: number | null;
+  avgLossUsdc: number | null;
+  largestLossUsdc: number | null;
+  feeDragUsdc: number;
+  diagnosisBreakdown: AutoScopeTradeAnalysisDiagnosisBreakdown[];
 }
 
 export interface AutoScopeTradeAnalysisResponse
@@ -695,6 +773,12 @@ export interface AutoScopeTradeAnalysisResponse
   from: string | null;
   to: string | null;
   summary: AutoScopeTradeAnalysisSummary;
+}
+
+export interface AutoScopeTradeDiagnosticResponse {
+  diagnostic: AutoScopeTradeDiagnostic | null;
+  rows: AutoScopeTradeAnalysisRow[];
+  refreshedAt: string;
 }
 
 export interface TradeFlowPtbStateRow {

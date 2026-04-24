@@ -17,6 +17,8 @@ import {
   buildTradeFlowAutoScopeAnalysisQuery,
   useTradeFlowAutoScopeAnalysis,
 } from '@/hooks/use-trade-flow';
+import { AutoScopeDiagnosticsPanel } from './auto-scope-diagnostics-panel';
+import { AutoScopeSummaryCards } from './auto-scope-summary-cards';
 import type {
   AutoScopeTradeAnalysisPnlFilter,
   AutoScopeTradeAnalysisPositionFilter,
@@ -44,6 +46,13 @@ const EMPTY_SUMMARY: AutoScopeTradeAnalysisSummary = {
   totalFeeUsdc: 0,
   costBasisUsdc: 0,
   netValueUsdc: 0,
+  profitFactor: null,
+  winRatePct: null,
+  avgWinUsdc: null,
+  avgLossUsdc: null,
+  largestLossUsdc: null,
+  feeDragUsdc: 0,
+  diagnosisBreakdown: [],
 };
 
 function formatDateTime(value: string | null): string {
@@ -98,6 +107,10 @@ function formatPercent(value: number | null): string {
   return `${sign}${value.toFixed(2)}%`;
 }
 
+function formatScore(value: number | null): string {
+  return value == null ? '-' : `${value.toFixed(0)}/100`;
+}
+
 function exitReasonLabel(row: AutoScopeTradeAnalysisRow): string {
   if (row.positionState === 'closed_market_ended') return 'Kapali (Market End)';
   if (row.positionState === 'open') return 'Acik Pozisyon';
@@ -133,6 +146,20 @@ function pnlClassName(value: number): string {
   return 'text-zinc-300';
 }
 
+function diagnosisBadgeClassName(row: AutoScopeTradeAnalysisRow): string {
+  const code = row.primaryDiagnosisCode;
+  if (code === 'clean_win' || code === 'take_profit_success') {
+    return 'border-emerald-800 bg-emerald-950/40 text-emerald-300';
+  }
+  if (code === 'unknown' || !code) {
+    return 'border-zinc-700 bg-zinc-950 text-zinc-300';
+  }
+  if (row.rowPnlUsdc < 0) {
+    return 'border-red-900 bg-red-950/40 text-red-300';
+  }
+  return 'border-amber-900 bg-amber-950/40 text-amber-300';
+}
+
 function filterSelectClassName(): string {
   return 'h-8 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200';
 }
@@ -145,6 +172,7 @@ export function AutoScopeAnalysisTable() {
     useState<AutoScopeTradeAnalysisPositionFilter>('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+  const [selectedRootOrderId, setSelectedRootOrderId] = useState<number | null>(null);
 
   const sortBy: AutoScopeTradeAnalysisSortBy =
     sortOption === 'default' ? 'default' : 'pnl';
@@ -224,32 +252,7 @@ export function AutoScopeAnalysisTable() {
           </div>
         </div>
 
-        <div className="grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 lg:grid-cols-4">
-          <span className={`rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 ${pnlClassName(summary.totalPnlUsdc)}`}>
-            Toplam PnL: {formatPnl(summary.totalPnlUsdc)}
-          </span>
-          <span className={`rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 ${pnlClassName(summary.realizedPnlUsdc)}`}>
-            Realized: {formatPnl(summary.realizedPnlUsdc)}
-          </span>
-          <span className={`rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 ${pnlClassName(summary.openPnlUsdc)}`}>
-            Acik/Mark: {formatPnl(summary.openPnlUsdc)}
-          </span>
-          <span className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-red-300">
-            Zarar: {formatUsdc(summary.lossUsdc)}
-          </span>
-          <span className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2">
-            Toplam fee: {formatUsdc(summary.totalFeeUsdc)}
-          </span>
-          <span className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2">
-            Maliyet: {formatUsdc(summary.costBasisUsdc)}
-          </span>
-          <span className="rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2">
-            Market: {summary.marketCount}
-          </span>
-          <span className={`rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 ${pnlClassName(pagePnl)}`}>
-            Sayfa PnL: {formatPnl(pagePnl)}
-          </span>
-        </div>
+        <AutoScopeSummaryCards summary={summary} pagePnl={pagePnl} />
 
         <div className="grid gap-2 md:grid-cols-5">
           <label className="space-y-1 text-xs text-zinc-400">
@@ -330,13 +333,19 @@ export function AutoScopeAnalysisTable() {
           </div>
         )}
 
+        <AutoScopeDiagnosticsPanel
+          rootOrderId={selectedRootOrderId}
+          onClose={() => setSelectedRootOrderId(null)}
+        />
+
         <div className="overflow-x-auto">
-          <Table className="min-w-[1180px] text-xs text-zinc-200">
+          <Table className="min-w-[1320px] text-xs text-zinc-200">
             <TableHeader>
               <TableRow className="border-zinc-800 hover:bg-transparent">
                 <TableHead className="text-zinc-400">Workflow</TableHead>
                 <TableHead className="text-zinc-400">Market</TableHead>
                 <TableHead className="text-zinc-400">Exit</TableHead>
+                <TableHead className="text-zinc-400">Teshis</TableHead>
                 <TableHead className="text-zinc-400">Trigger</TableHead>
                 <TableHead className="text-zinc-400">Gecikme</TableHead>
                 <TableHead className="text-right text-zinc-400">Buy</TableHead>
@@ -352,19 +361,25 @@ export function AutoScopeAnalysisTable() {
             <TableBody>
               {isLoading && rows.length === 0 ? (
                 <TableRow className="border-zinc-800">
-                  <TableCell colSpan={13} className="py-10 text-center text-zinc-500">
+                  <TableCell colSpan={14} className="py-10 text-center text-zinc-500">
                     Analiz verisi yukleniyor...
                   </TableCell>
                 </TableRow>
               ) : rows.length === 0 ? (
                 <TableRow className="border-zinc-800">
-                  <TableCell colSpan={13} className="py-10 text-center text-zinc-500">
+                  <TableCell colSpan={14} className="py-10 text-center text-zinc-500">
                     Gosterilecek auto-scope trade analizi bulunamadi.
                   </TableCell>
                 </TableRow>
               ) : (
                 rows.map((row) => (
-                  <TableRow key={row.rowId} className="border-zinc-800 hover:bg-zinc-950/60">
+                  <TableRow
+                    key={row.rowId}
+                    className={`cursor-pointer border-zinc-800 hover:bg-zinc-950/60 ${
+                      selectedRootOrderId === row.rootOrderId ? 'bg-zinc-950/80' : ''
+                    }`}
+                    onClick={() => setSelectedRootOrderId(row.rootOrderId)}
+                  >
                     <TableCell>
                       <div className="space-y-1">
                         <p className="font-medium text-zinc-100">
@@ -389,6 +404,21 @@ export function AutoScopeAnalysisTable() {
                           {exitReasonLabel(row)}
                         </span>
                         <p className="text-[11px] text-zinc-500">{exitMetaLabel(row)}</p>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        <span
+                          className={`inline-flex max-w-[170px] rounded-full border px-2 py-1 text-[11px] ${diagnosisBadgeClassName(row)}`}
+                        >
+                          <span className="truncate">
+                            {row.diagnosisLabel ?? 'Teshis yok'}
+                          </span>
+                        </span>
+                        <p className="text-[11px] text-zinc-500">
+                          E {formatScore(row.entryQualityScore)} / X{' '}
+                          {formatScore(row.exitQualityScore)}
+                        </p>
                       </div>
                     </TableCell>
                     <TableCell>{formatDateTime(row.triggeredAt)}</TableCell>

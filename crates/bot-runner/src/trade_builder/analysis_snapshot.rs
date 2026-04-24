@@ -692,9 +692,24 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
         });
     }
 
+    let second_snapshots = repo
+        .list_trade_builder_market_second_snapshots(&[root_order.market_slug.clone()])
+        .await?;
+    let diagnostic = trade_builder_analysis_build_trade_diagnostic(
+        &root_order,
+        &rows,
+        &events_by_order_id,
+        &second_snapshots,
+        &buy_metrics,
+        open_to_trigger_ms,
+        trigger_to_buy_fill_ms,
+    );
+
     repo.delete_trade_flow_auto_scope_analysis_rows_for_root(root_builder_order_id)
         .await?;
     repo.upsert_trade_flow_auto_scope_analysis_rows(&rows).await?;
+    repo.upsert_trade_flow_auto_scope_trade_diagnostic(&diagnostic)
+        .await?;
     Ok(AutoScopeAnalysisRefreshOutcome::Updated)
 }
 
@@ -812,5 +827,82 @@ mod auto_scope_analysis_tests {
         assert_eq!(breakdown.net_value_usdc, 1.5);
         assert_eq!(breakdown.row_pnl_usdc, 0.5);
         assert_eq!(breakdown.pnl_pct, Some(50.0));
+    }
+
+    #[test]
+    fn diagnostics_price_path_uses_outcome_bid_prices() {
+        let start = DateTime::parse_from_rfc3339("2026-02-28T16:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let snapshots = vec![
+            TradeBuilderMarketSecondSnapshot {
+                market_slug: "btc-updown-5m-1772296200".to_string(),
+                asset: "btc".to_string(),
+                window_start: start,
+                window_end: start + ChronoDuration::minutes(5),
+                second_ts: start + ChronoDuration::seconds(1),
+                ptb_ref_price: None,
+                chainlink_price: None,
+                yes_best_bid: Some(0.41),
+                yes_best_ask: Some(0.42),
+                yes_ask_depth_usdc: Some(100.0),
+                no_best_bid: Some(0.58),
+                no_best_ask: Some(0.59),
+                no_ask_depth_usdc: Some(100.0),
+                sample_count: 1,
+            },
+            TradeBuilderMarketSecondSnapshot {
+                market_slug: "btc-updown-5m-1772296200".to_string(),
+                asset: "btc".to_string(),
+                window_start: start,
+                window_end: start + ChronoDuration::minutes(5),
+                second_ts: start + ChronoDuration::seconds(2),
+                ptb_ref_price: None,
+                chainlink_price: None,
+                yes_best_bid: Some(0.37),
+                yes_best_ask: Some(0.38),
+                yes_ask_depth_usdc: Some(100.0),
+                no_best_bid: Some(0.62),
+                no_best_ask: Some(0.63),
+                no_ask_depth_usdc: Some(100.0),
+                sample_count: 1,
+            },
+        ];
+
+        let path = trade_builder_analysis_price_path(
+            &snapshots,
+            "Up",
+            Some(start),
+            Some(start + ChronoDuration::seconds(3)),
+        );
+
+        assert_eq!(path.sample_count, 2);
+        assert_eq!(path.best_price, Some(0.41));
+        assert_eq!(path.worst_price, Some(0.37));
+    }
+
+    #[test]
+    fn diagnostics_classifier_prioritizes_bad_entry_for_loss() {
+        let evidence = AutoScopeDiagnosticEvidence {
+            total_pnl_usdc: -1.0,
+            fee_drag_usdc: 0.05,
+            cost_basis_usdc: 10.0,
+            entry_slippage_usdc: Some(0.25),
+            exit_reason: Some("sl".to_string()),
+            gave_back_usdc: Some(0.0),
+            max_adverse_usdc: Some(-0.9),
+            open_to_trigger_ms: Some(10_000),
+            trigger_to_buy_fill_ms: Some(500),
+            submit_to_fill_ms: Some(500),
+            thin_liquidity_signal: false,
+            is_open_position: false,
+        };
+
+        let (primary, secondary, label, _) =
+            trade_builder_analysis_choose_diagnosis(&evidence);
+
+        assert_eq!(primary, "bad_entry_price");
+        assert_eq!(secondary, Some("market_reversal".to_string()));
+        assert_eq!(label, "Kotu giris fiyati");
     }
 }
