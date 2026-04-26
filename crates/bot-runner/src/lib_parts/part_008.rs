@@ -40,12 +40,17 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
     let ws = ClobWsClient::new(cfg.exchange.clob_ws_url.clone());
     let (snapshot_tx, snapshot_rx) =
         tokio::sync::mpsc::unbounded_channel::<MarketSecondSnapshotTick>();
+    let (volume_tx, volume_rx) =
+        tokio::sync::mpsc::unbounded_channel::<MarketTradeVolumeTick>();
     tokio::spawn(run_market_second_snapshot_recorder(
         repo.clone(),
         client.clone(),
         snapshot_rx,
     ));
+    tokio::spawn(run_market_trade_volume_recorder(repo.clone(), volume_rx));
     ws.set_tick_callback(build_market_second_snapshot_callback(snapshot_tx))
+        .await;
+    ws.set_trade_callback(build_market_trade_volume_callback(volume_tx))
         .await;
     let mut auto_claim_runtimes: HashMap<i64, FlowAutoClaimRuntime> = HashMap::new();
     let mut flow_runtime_caches = FlowRuntimeCaches::default();

@@ -5,18 +5,24 @@ import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { NODE_FIELD_SCHEMAS, createEmptyExitLadderRuleRow, createEmptyTimeExitRuleRow, type ExitLadderRuleRow, isPresetBuySellPlaceOrderMarker, isPresetPlaceOrderMarker, type PtbGapUnit, type PtbStopLossRuleRow, type TimeExitRuleRow } from '@/lib/trade-flow-config-mappers';
+import { NODE_FIELD_SCHEMAS, PTB_MODE_OPTIONS, createEmptyEntryTimingProfileRow, createEmptyExitLadderRuleRow, createEmptyTimeExitRuleRow, type EntryTimingProfileRow, type ExitLadderRuleRow, isPresetBuySellPlaceOrderMarker, isPresetPlaceOrderMarker, normalizePtbMode, type PtbGapUnit, type PtbIvTimeRuleRow, type PtbStopLossBumpLossRuleRow, type PtbStopLossRuleRow, type TimeExitRuleRow } from '@/lib/trade-flow-config-mappers';
 import { NODE_FIELD_HELP_CONTENT, NODE_TYPE_OPTIONS } from '../flow-canvas-constants';
 import { normalizeDateTimeInput } from '../flow-canvas-utils';
 import { Settings2, Trash2, Plus, Zap } from 'lucide-react';
+import { EntryTimingProfilesSection } from './entry-timing-profiles-section';
 import { EMPTY_SELECT_SENTINEL } from './shared';
 import { ExitLadderSection } from './exit-sections';
 import { ExecutionFloorProtectionSection } from './execution-floor-protection-section';
+import { appendPrimaryTakeProfitRuleRow } from './exit-ladder-state';
+import { isHiddenNodeFieldKey } from './hidden-node-field';
 import { MaxPriceProtectionSection } from './max-price-protection-section';
 import { PairLockAutoPreviewSection } from './pair-lock-auto-preview-section';
 import { PriceToBeatMaxPriceRelaxSection } from './price-to-beat-max-price-relax-section';
+import { PriceToBeatIvTimeRulesSection } from './price-to-beat-iv-time-rules-section';
+import { resolvePriceToBeatStopLossBumpUiState, updatePtbStopLossBumpLossRuleRowsFormState } from './price-to-beat-stop-loss-bump-state';
 import { PriceToBeatStopLossBumpSection } from './price-to-beat-stop-loss-bump-section';
 import { PtbStopLossSection } from './ptb-stop-loss-section';
+import { updateEntryTimingProfileRowsFormState, updatePtbIvTimeRuleRowsFormState, updatePtbStopLossRuleRowsFormState, updateTimeExitRuleRowsFormState } from './rule-row-state';
 import { TimeExitRulesSection } from './time-exit-rules-section';
 import { PairLockSummarySection, TriggerPairLockHint } from './pair-lock-binding-section';
 import { PairLockStaleConfigSection } from './pair-lock-stale-config-section';
@@ -63,8 +69,7 @@ export function NodeInspectorPanel({
   const triggerRepeatMode = (form.fields.repeatMode ?? '').trim().toLowerCase();
   const triggerCycleWindowMode = (form.fields.cycleWindowMode ?? '').trim().toLowerCase();
   const triggerPriceToBeatEnabled = (form.fields.priceToBeatTriggerEnabled ?? '').toString().trim().toLowerCase() === 'true';
-  const triggerPriceToBeatModeRaw = (form.fields.priceToBeatMode ?? '').toString().trim().toLowerCase();
-  const triggerPriceToBeatMode = triggerPriceToBeatModeRaw === 'auto_last_3_avg_excursion' || triggerPriceToBeatModeRaw === 'auto_vol_pct' ? triggerPriceToBeatModeRaw : 'manual';
+  const triggerPriceToBeatMode = normalizePtbMode(form.fields.priceToBeatMode);
   const placeOrderMaxTriggersRaw = Number(form.fields.maxTriggers ?? '');
   const placeOrderMaxTriggers = Number.isFinite(placeOrderMaxTriggersRaw) && placeOrderMaxTriggersRaw > 0 ? Math.min(20, Math.floor(placeOrderMaxTriggersRaw)) : 1;
   const placeOrderTriggerRows = form.triggerSizeRows || [];
@@ -115,7 +120,11 @@ export function NodeInspectorPanel({
     placeOrderCounterTpRuleRows = form.counterLegTpRuleRows || [],
     placeOrderSlRuleRows = form.slRuleRows || [],
     placeOrderPtbStopLossRuleRows = form.ptbStopLossRuleRows || [],
+    placeOrderPtbStopLossBumpLossRuleRows = form.ptbStopLossBumpLossRuleRows || [],
+    placeOrderPtbIvTimeRuleRows = form.ptbIvTimeRuleRows || [],
+    triggerEntryTimingProfileRows = form.entryTimingProfileRows || [],
     placeOrderTimeExitRuleRows = form.timeExitRuleRows || [];
+  const placeOrderBuyFillLockChecked = nodeTypeDraft === 'action.place_order' && (form.fields.buyFillLockEnabled ?? '').toString().trim().toLowerCase() === 'true';
   const ptbStopLossChecked = nodeTypeDraft === 'action.place_order' ? (form.fields.ptbStopLossEnabled ?? '').toString().trim().toLowerCase() === 'true' : false;
   const placeOrderHasAnyStopLossProtection =
     nodeTypeDraft === 'action.place_order' &&
@@ -130,7 +139,7 @@ export function NodeInspectorPanel({
     placeOrderSide === 'buy' &&
     placeOrderCounterLegEnabled &&
     (placeOrderCounterTpEnabled || placeOrderCounterTpRuleRows.length > 0);
-  const showSlLadderSection = nodeTypeDraft === 'action.place_order' && !placeOrderPairLockEnabled && placeOrderSide === 'buy' && (placeOrderSlEnabled || placeOrderSlRuleRows.length > 0);
+  const showSlLadderSection = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && (placeOrderSlEnabled || placeOrderSlRuleRows.length > 0);
   const showPtbStopLossSection = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy';
   const showTimeExitSection = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && !placeOrderPairLockEnabled;
   const placeOrderMaxPriceCentValue =
@@ -183,28 +192,15 @@ export function NodeInspectorPanel({
     (form.fields.priceToBeatGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
   const priceToBeatRetryChecked =
     (form.fields.retryOnPriceToBeatGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
-  const priceToBeatGuardModeRaw = (form.fields.priceToBeatMode ?? '').toString().trim().toLowerCase();
-  const priceToBeatGuardMode =
-    priceToBeatGuardModeRaw === 'auto_last_3_avg_excursion' ||
-    priceToBeatGuardModeRaw === 'auto_vol_pct'
-      ? priceToBeatGuardModeRaw
-      : 'manual';
+  const priceToBeatGuardMode = normalizePtbMode(form.fields.priceToBeatMode);
   const priceToBeatGuardUnit =
     (form.fields.priceToBeatMaxDiffUnit ?? '').toString().trim().toLowerCase() === 'cent'
       ? 'cent'
       : 'usd';
-  const priceToBeatStopLossBumpChecked =
-    (form.fields.priceToBeatStopLossBumpEnabled ?? '').toString().trim().toLowerCase() === 'true';
-  const priceToBeatStopLossBumpUnitRaw =
-    (form.fields.priceToBeatStopLossBumpUnit ?? '').toString().trim().toLowerCase();
-  const priceToBeatStopLossBumpUnit =
-    priceToBeatStopLossBumpUnitRaw === 'usd' || priceToBeatStopLossBumpUnitRaw === 'cent'
-      ? priceToBeatStopLossBumpUnitRaw
-      : priceToBeatGuardUnit;
-  const priceToBeatStopLossBumpScope =
-    (form.fields.priceToBeatStopLossBumpScope ?? '').toString().trim().toLowerCase() === 'global'
-      ? 'global'
-      : 'per_scope';
+  const priceToBeatStopLossBumpUi = resolvePriceToBeatStopLossBumpUiState(
+    form.fields,
+    priceToBeatGuardUnit
+  );
   const priceToBeatMaxPriceRelaxMinUnitRaw =
     (form.fields.priceToBeatMaxPriceRelaxMinUnit ?? '').toString().trim().toLowerCase();
   const priceToBeatMaxPriceRelaxMinUnit =
@@ -292,33 +288,28 @@ export function NodeInspectorPanel({
   };
   const updatePtbStopLossRuleRows = (
     updater: (rows: PtbStopLossRuleRow[]) => PtbStopLossRuleRow[]
-  ) => {
-    actions.onFormChange((prev) =>
-      prev
-        ? {
-            ...prev,
-            ptbStopLossRuleRows: updater([...(prev.ptbStopLossRuleRows || [])]),
-          }
-        : prev
-    );
-  };
-  const updateTimeExitRuleRows = (updater: (rows: TimeExitRuleRow[]) => TimeExitRuleRow[]) => {
-    actions.onFormChange((prev) =>
-      prev
-        ? {
-            ...prev,
-            timeExitRuleRows: updater([...(prev.timeExitRuleRows || [])]),
-          }
-        : prev
-    );
-  };
+  ) => actions.onFormChange((prev) => updatePtbStopLossRuleRowsFormState(prev, updater));
+  const updatePtbStopLossBumpLossRuleRows = (
+    updater: (rows: PtbStopLossBumpLossRuleRow[]) => PtbStopLossBumpLossRuleRow[]
+  ) => actions.onFormChange((prev) => updatePtbStopLossBumpLossRuleRowsFormState(prev, updater));
+  const updatePtbIvTimeRuleRows = (
+    updater: (rows: PtbIvTimeRuleRow[]) => PtbIvTimeRuleRow[]
+  ) => actions.onFormChange((prev) => updatePtbIvTimeRuleRowsFormState(prev, updater));
+  const updateEntryTimingProfileRows = (
+    updater: (rows: EntryTimingProfileRow[]) => EntryTimingProfileRow[]
+  ) => actions.onFormChange((prev) => updateEntryTimingProfileRowsFormState(prev, updater));
+  const updateTimeExitRuleRows = (updater: (rows: TimeExitRuleRow[]) => TimeExitRuleRow[]) =>
+    actions.onFormChange((prev) => updateTimeExitRuleRowsFormState(prev, updater));
   const visibleNodeSchema = nodeSchema.filter((field) => {
     if (nodeTypeDraft === 'action.place_order') {
       if (field.key === 'sizeMode') return !placeOrderPairLockEnabled;
       if (field.key === 'sizePct') return !placeOrderPairLockEnabled && placeOrderSizeMode === 'pct';
+      if (field.key === 'targetQty') return !placeOrderPairLockEnabled && placeOrderSizeMode === 'shares';
       if (field.key === 'sizeUsdc') {
-        return placeOrderPairLockEnabled || placeOrderSizeMode !== 'pct';
+        return placeOrderPairLockEnabled || (placeOrderSizeMode !== 'pct' && placeOrderSizeMode !== 'shares');
       }
+      if (field.key === 'buyFillLockEnabled') return placeOrderSide === 'buy';
+      if (field.key === 'buyFillLockGroup' || field.key === 'releaseBuyFillLockOnStopLoss') return placeOrderSide === 'buy' && placeOrderBuyFillLockChecked;
       const pairLockSizingVisibility = resolvePairLockSizingFieldVisibility(
         field.key,
         placeOrderPairLockEnabled,
@@ -419,42 +410,7 @@ export function NodeInspectorPanel({
       if (field.key === 'notifyOnSlHit') {
         return placeOrderHasAnyStopLossProtection;
       }
-      if (
-        field.key === 'ptbStopLossEnabled' ||
-        field.key === 'ptbStopLossGapUsd' ||
-        field.key === 'ptbStopLossGapUnit' ||
-        field.key === 'triggerPriceGuardEnabled' ||
-        field.key === 'retryOnTriggerPriceGuardBlock' ||
-        field.key === 'executionFloorGuardEnabled' ||
-        field.key === 'executionFloorPriceCent' ||
-        field.key === 'retryOnExecutionFloorGuardBlock' ||
-        field.key === 'priceToBeatGuardEnabled' ||
-        field.key === 'priceToBeatMode' ||
-        field.key === 'priceToBeatMaxDiff' ||
-        field.key === 'priceToBeatMaxDiffUnit' ||
-        field.key === 'priceToBeatStopLossBumpEnabled' ||
-        field.key === 'priceToBeatStopLossBumpAmount' ||
-        field.key === 'priceToBeatStopLossBumpUnit' ||
-        field.key === 'priceToBeatStopLossBumpScope' ||
-        field.key === 'priceToBeatStopLossBumpDecayWindows' ||
-        field.key === 'priceToBeatMaxPriceRelaxMissCount' ||
-        field.key === 'priceToBeatMaxPriceRelaxHistoryCount' ||
-        field.key === 'priceToBeatMaxPriceRelaxMinValue' ||
-        field.key === 'priceToBeatMaxPriceRelaxMinUnit' ||
-        field.key === 'priceToBeatMaxPriceRelaxMinDepthUsd' ||
-        field.key === 'priceToBeatMaxPriceRelaxStepMode' ||
-        field.key === 'priceToBeatMaxPriceRelaxStepValue' ||
-        field.key === 'priceToBeatMaxPriceRelaxStepUnit' ||
-        field.key === 'reentryCooldownSec' ||
-        field.key === 'reentrySkipCurrentWindow' ||
-        field.key === 'reentryThresholdDecay' ||
-        field.key === 'reentryMaxPriceTightenBps' ||
-        field.key === 'reentryPriceToBeatMaxDiff' ||
-        field.key === 'reentryPriceToBeatMaxDiffUnit' ||
-        field.key === 'ptbStopLossTimeDecayMode' ||
-        field.key === 'notifyOnPriceToBeatGapBlocked' ||
-        field.key === 'retryOnPriceToBeatGuardBlock'
-      ) {
+      if (isHiddenNodeFieldKey(field.key)) {
         return false;
       }
     }
@@ -697,15 +653,9 @@ export function NodeInspectorPanel({
                       actions.onUpdateField(field.key, e.target.checked ? 'true' : 'false');
                       if (
                         field.key === 'priceToBeatTriggerEnabled' &&
-                        e.target.checked &&
-                        !['manual', 'auto_last_3_avg_excursion', 'auto_vol_pct'].includes(
-                          (form.fields.priceToBeatMode ?? '')
-                            .toString()
-                            .trim()
-                            .toLowerCase()
-                        )
+                        e.target.checked
                       ) {
-                        actions.onUpdateField('priceToBeatMode', 'manual');
+                        actions.onUpdateField('priceToBeatMode', normalizePtbMode(form.fields.priceToBeatMode));
                       }
                       if (
                         field.key === 'priceToBeatTriggerEnabled' &&
@@ -981,16 +931,8 @@ export function NodeInspectorPanel({
                               'priceToBeatGuardEnabled',
                               e.target.checked ? 'true' : 'false'
                             );
-                            if (
-                              e.target.checked &&
-                              !['manual', 'auto_last_3_avg_excursion', 'auto_vol_pct'].includes(
-                                (form.fields.priceToBeatMode ?? '')
-                                  .toString()
-                                  .trim()
-                                  .toLowerCase()
-                              )
-                            ) {
-                              actions.onUpdateField('priceToBeatMode', 'manual');
+                            if (e.target.checked) {
+                              actions.onUpdateField('priceToBeatMode', normalizePtbMode(form.fields.priceToBeatMode));
                             }
                             if (
                               e.target.checked &&
@@ -1040,13 +982,11 @@ export function NodeInspectorPanel({
                               <SelectValue />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="manual">Manual</SelectItem>
-                              <SelectItem value="auto_last_3_avg_excursion">
-                                Auto: son 3 market excursion ort.
-                              </SelectItem>
-                              <SelectItem value="auto_vol_pct">
-                                Auto: volatility bazli yuzde
-                              </SelectItem>
+                              {PTB_MODE_OPTIONS.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
                             </SelectContent>
                           </Select>
                         </div>
@@ -1103,26 +1043,36 @@ export function NodeInspectorPanel({
                             gorulen uygun gap seviyesine kademeli olarak gevseyebilir.
                           </p>
                         )}
+                        {priceToBeatGuardMode === 'iv_mismatch_edge' && (
+                          <PriceToBeatIvTimeRulesSection
+                            rows={placeOrderPtbIvTimeRuleRows}
+                            fields={form.fields}
+                            onUpdateField={actions.onUpdateField}
+                            onUpdateRows={updatePtbIvTimeRuleRows}
+                          />
+                        )}
                         <PriceToBeatStopLossBumpSection
-                          enabled={priceToBeatStopLossBumpChecked}
+                          enabled={priceToBeatStopLossBumpUi.checked}
+                          mode={priceToBeatStopLossBumpUi.mode}
                           amount={form.fields.priceToBeatStopLossBumpAmount ?? ''}
                           maxValue={form.fields.priceToBeatStopLossBumpMaxValue ?? ''}
                           decayWindows={form.fields.priceToBeatStopLossBumpDecayWindows ?? ''}
-                          scopeMode={priceToBeatStopLossBumpScope}
-                          unit={priceToBeatStopLossBumpUnit}
+                          scopeMode={priceToBeatStopLossBumpUi.scope}
+                          unit={priceToBeatStopLossBumpUi.unit}
                           defaultUnit={priceToBeatGuardMode === 'manual' ? priceToBeatGuardUnit : 'usd'}
+                          lossRuleRows={placeOrderPtbStopLossBumpLossRuleRows}
                           onUpdateField={actions.onUpdateField}
+                          onUpdateLossRuleRows={updatePtbStopLossBumpLossRuleRows}
                         />
                         <PriceToBeatMaxPriceRelaxSection
+                          enabled={form.fields.priceToBeatMaxPriceRelaxEnabled ?? ''}
                           missCount={form.fields.priceToBeatMaxPriceRelaxMissCount ?? ''}
                           historyCount={form.fields.priceToBeatMaxPriceRelaxHistoryCount ?? ''}
                           minValue={form.fields.priceToBeatMaxPriceRelaxMinValue ?? ''}
                           minDepthUsd={form.fields.priceToBeatMaxPriceRelaxMinDepthUsd ?? ''}
-                          minUnit={priceToBeatMaxPriceRelaxMinUnit}
-                          stepMode={priceToBeatMaxPriceRelaxStepMode}
+                          minUnit={priceToBeatMaxPriceRelaxMinUnit} stepMode={priceToBeatMaxPriceRelaxStepMode}
                           stepValue={form.fields.priceToBeatMaxPriceRelaxStepValue ?? ''}
-                          stepUnit={priceToBeatMaxPriceRelaxStepUnit}
-                          onUpdateField={actions.onUpdateField}
+                          stepUnit={priceToBeatMaxPriceRelaxStepUnit} onUpdateField={actions.onUpdateField}
                         />
                         {placeOrderReentryChecked && (
                           <div className="space-y-2 rounded-md border border-slate-200/80 bg-slate-50/70 p-2">
@@ -1324,7 +1274,7 @@ export function NodeInspectorPanel({
                 description="Fiyat seviyeleri strict artar; boyut yüzdeleri orijinal buy fill üzerinden düşünülür."
                 rows={placeOrderTpRuleRows}
                 addLabel="TP Kademesi Ekle"
-                onAdd={() => updateTpRuleRows((rows) => [...rows, createEmptyExitLadderRuleRow()])}
+                onAdd={() => updateTpRuleRows(appendPrimaryTakeProfitRuleRow)}
                 onUpdate={(rowId, patch) =>
                   updateTpRuleRows((rows) =>
                     rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row))
@@ -1356,7 +1306,7 @@ export function NodeInspectorPanel({
 
             {showSlLadderSection && (
               <ExitLadderSection
-                title="Stop Loss Kademeleri"
+                title={placeOrderPairLockEnabled ? 'Ilk Bacak Stop Loss Kademeleri' : 'Stop Loss Kademeleri'}
                 description="Fiyat seviyeleri strict azalır; node seviyesindeki SL trigger mode tum kademelere ortak uygulanir."
                 rows={placeOrderSlRuleRows}
                 addLabel="SL Kademesi Ekle"
@@ -1409,6 +1359,14 @@ export function NodeInspectorPanel({
                 marketOutcomesLoading={marketOutcomesLoading}
                 actions={actions}
                 nodeType={nodeTypeDraft}
+              />
+            )}
+            {nodeTypeDraft === 'trigger.market_price' && triggerMarketMode === 'auto_scope' && triggerRepeatMode === 'once' && (
+              <EntryTimingProfilesSection
+                rows={triggerEntryTimingProfileRows}
+                onAdd={() => updateEntryTimingProfileRows((rows) => [...rows, createEmptyEntryTimingProfileRow()])}
+                onUpdate={(rowId, patch) => updateEntryTimingProfileRows((rows) => rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)))}
+                onRemove={(rowId) => updateEntryTimingProfileRows((rows) => rows.filter((row) => row.id !== rowId))}
               />
             )}
             {nodeTypeDraft === 'trigger.market_price' && triggerBindingMode === 'pair_lock_only' && (

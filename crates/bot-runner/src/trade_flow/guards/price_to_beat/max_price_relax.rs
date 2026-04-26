@@ -20,6 +20,10 @@ const NODE_STATE_LAST_NOTIFIED_THRESHOLD_USD: &str =
     "ptb_max_price_relax_last_notified_threshold_usd";
 const NODE_STATE_LAST_NOTIFIED_MARKET_SLUG: &str = "ptb_max_price_relax_last_notified_market_slug";
 
+pub(super) fn action_place_order_max_price_relax_enabled(node: &crate::TradeFlowNode) -> bool {
+    crate::node_config_bool(node, "priceToBeatMaxPriceRelaxEnabled").unwrap_or(true)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ActionPlaceOrderMaxPriceRelaxation {
     pub(super) applied: bool,
@@ -763,7 +767,8 @@ where
     if let Some(latest_qualified_candidate) = consecutive_qualified_candidates.first() {
         result.missed_market_slug = Some(latest_qualified_candidate.market_slug.clone());
         result.first_tradable_market_slug = Some(latest_qualified_candidate.market_slug.clone());
-        result.first_tradable_second_ts = latest_qualified_candidate.first_tradable_second_ts.clone();
+        result.first_tradable_second_ts =
+            latest_qualified_candidate.first_tradable_second_ts.clone();
         result.tradable_seconds_count = latest_qualified_candidate.tradable_seconds_count;
         result.max_fillability_score = Some(latest_qualified_candidate.max_fillability_score);
         result.quality_score = Some(latest_qualified_candidate.quality_score);
@@ -853,6 +858,10 @@ where
 async fn preview_action_place_order_max_price_relaxation_with_data_source<D>(data_source: &D, node: &crate::TradeFlowNode, context: &mut Value, run_id: i64, market_slug: &str, outcome_label: &str, evaluation: &mut PriceToBeatGuardEvaluation) -> Result<Option<ActionPlaceOrderMaxPriceRelaxation>>
 where D: MaxPriceRelaxationDataSource + Send + Sync,
 {
+    if !action_place_order_max_price_relax_enabled(node) {
+        return Ok(None);
+    }
+
     let allow_relax_application = evaluation.reason_code == "price_to_beat_gap_below_threshold";
     let relaxation = evaluate_relaxation_with_data_source(
         data_source,

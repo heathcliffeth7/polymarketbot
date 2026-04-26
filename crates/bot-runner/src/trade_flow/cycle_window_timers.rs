@@ -363,10 +363,23 @@ async fn trade_flow_next_trigger_market_price_timer_delay() -> Option<Duration> 
             if cycle_window_boundary_due_target(run_spec, 0, node_spec, 0, now).is_some() {
                 return Some(Duration::from_millis(0));
             }
+            if missed_market_notification_due_target(run_spec, 0, node_spec, 0, now).is_some() {
+                return Some(Duration::from_millis(0));
+            }
 
             if let Some((window_open_at, _)) = cycle_window_bounds(node_spec) {
                 if now < window_open_at {
                     let delay_ms = window_open_at
+                        .signed_duration_since(now)
+                        .num_milliseconds()
+                        .max(0) as u64;
+                    let delay = Duration::from_millis(delay_ms);
+                    next_delay = Some(next_delay.map_or(delay, |current| current.min(delay)));
+                }
+            }
+            if let Some((_, window_end_at)) = cycle_window_bounds(node_spec) {
+                if now < window_end_at {
+                    let delay_ms = window_end_at
                         .signed_duration_since(now)
                         .num_milliseconds()
                         .max(0) as u64;
@@ -698,12 +711,22 @@ async fn process_trade_flow_trigger_market_price_timers(
     let mut due_boundaries = Vec::new();
     let mut due_confirmation_token_ids = BTreeSet::new();
     let mut due_window_end_sells = Vec::new();
+    let mut due_missed_market_notifications = Vec::new();
     for (run_index, run_spec) in cache_snapshot.run_specs.iter().enumerate() {
         for (node_index, node_spec) in run_spec.nodes.iter().enumerate() {
             if let Some(boundary_target) =
                 cycle_window_boundary_due_target(run_spec, run_index, node_spec, node_index, now)
             {
                 due_boundaries.push(boundary_target);
+            }
+            if let Some(notification_target) = missed_market_notification_due_target(
+                run_spec,
+                run_index,
+                node_spec,
+                node_index,
+                now,
+            ) {
+                due_missed_market_notifications.push(notification_target);
             }
             if let Some(deadline) = cycle_window_confirmation_deadline(run_spec, node_spec) {
                 if deadline <= now {
@@ -720,6 +743,7 @@ async fn process_trade_flow_trigger_market_price_timers(
     if due_boundaries.is_empty()
         && due_confirmation_token_ids.is_empty()
         && due_window_end_sells.is_empty()
+        && due_missed_market_notifications.is_empty()
     {
         return Ok(false);
     }
@@ -1022,7 +1046,9 @@ async fn process_trade_flow_trigger_market_price_timers(
                     | TriggerMarketPriceGateMode::StandardAndPtb
             )
         ) {
-            if let Some(ptb_gate) = evaluate_trigger_market_price_ptb_gate_for_spec(&node_spec) {
+            if let Some(ptb_gate) =
+                evaluate_trigger_market_price_ptb_gate_for_spec(&node_spec, None, None)
+            {
                 ptb_gate_output = ptb_gate.to_value();
                 if !ptb_gate.passed {
                     if let Some(diagnostics) = diagnostics.as_ref() {
@@ -1079,6 +1105,27 @@ async fn process_trade_flow_trigger_market_price_timers(
             &target.window_mode,
             diagnostics.as_ref(),
             (!ptb_gate_output.is_null()).then_some(&ptb_gate_output),
+        )
+        .await?;
+    }
+
+    for target in due_missed_market_notifications {
+        let Some(node_spec) = run_specs
+            .get(target.run_index)
+            .and_then(|run_spec| run_spec.nodes.get(target.node_index))
+            .cloned()
+        else {
+            continue;
+        };
+        let Some(run_spec) = run_specs.get_mut(target.run_index) else {
+            continue;
+        };
+        touched |= maybe_send_missed_market_no_order_notification(
+            repo,
+            client,
+            run_spec,
+            &node_spec,
+            target.window_end_at,
         )
         .await?;
     }

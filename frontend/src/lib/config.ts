@@ -67,6 +67,9 @@ export async function readConfig(
   if (name === 'telegram') {
     return sanitizeTelegramConfigForRead(raw);
   }
+  if (name === 'strategy') {
+    return normalizeStrategyShape(raw);
+  }
   return raw;
 }
 
@@ -78,7 +81,7 @@ const STRATEGY_NUMERIC_KEYS = new Set([
   'leg_tp_pct', 'basket_tp_usdc', 'basket_sl_usdc',
   'force_flatten_sec_before_close',
 ]);
-const STRATEGY_BOOLEAN_KEYS = new Set(['flow_only', 'dual_side_enabled']);
+const STRATEGY_BOOLEAN_KEYS = new Set(['flow_only', 'dual_side_enabled', 'max_price_relax_enabled']);
 
 const RISK_NUMERIC_KEYS = new Set([
   'max_daily_loss_usdc', 'max_consecutive_losses',
@@ -755,6 +758,13 @@ function normalizeTelegramShape(source: Record<string, unknown>): Record<string,
   return {
     bot_token: String(source.bot_token ?? ''),
     chat_id: String(source.chat_id ?? ''),
+  };
+}
+
+function normalizeStrategyShape(source: Record<string, unknown>): Record<string, unknown> {
+  return {
+    max_price_relax_enabled: true,
+    ...source,
   };
 }
 

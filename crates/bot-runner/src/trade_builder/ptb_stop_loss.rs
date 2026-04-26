@@ -284,6 +284,7 @@ fn trade_builder_evaluate_ptb_stop_loss(
     } else {
         ptb_reference_price.unwrap_or_default() - current_chainlink_price
     };
+    // Negative thresholds intentionally mean "wait for parity, then overshoot against the position".
     let should_trigger = directional_gap <= threshold_gap_usd;
     Some(TradeBuilderPtbStopLossEvaluation {
         asset: Some(scope.asset.to_string()),
@@ -339,6 +340,15 @@ fn append_trade_builder_ptb_stop_loss_payload(
 mod trade_builder_ptb_stop_loss_tests {
     use super::*;
     use chrono::Utc;
+    use std::sync::{Mutex, MutexGuard};
+
+    static PTB_STOP_LOSS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_ptb_stop_loss_test_state() -> MutexGuard<'static, ()> {
+        PTB_STOP_LOSS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn ptb_stop_loss_requires_supported_market_scope() {
@@ -427,6 +437,7 @@ mod trade_builder_ptb_stop_loss_tests {
             reenter_on_sl_hit: false,
             reentry_max_attempts: 0,
             reentry_trigger_node_key: None,
+            notify_on_order_submitted: false,
             notify_on_fill: false,
             notify_on_order_not_filled: false,
             notify_on_trigger_guard_blocked: false,
@@ -441,8 +452,46 @@ mod trade_builder_ptb_stop_loss_tests {
         }
     }
 
+    fn seed_ptb_stop_loss_current_price(asset: &str, current_chainlink_price: f64) {
+        let now_ms = Utc::now().timestamp_millis();
+        trade_flow::guards::chainlink_price::seed_chainlink_price_test_ticks(
+            asset,
+            &[(now_ms - 250, current_chainlink_price), (now_ms, current_chainlink_price)],
+        )
+        .expect("seed chainlink ticks");
+    }
+
+    fn evaluate_test_ptb_stop_loss(
+        market_slug: &str,
+        asset: &str,
+        outcome_label: &str,
+        gap_usd: f64,
+        ptb_reference_price: f64,
+        current_chainlink_price: f64,
+    ) -> TradeBuilderPtbStopLossEvaluation {
+        let _guard = lock_ptb_stop_loss_test_state();
+        seed_ptb_stop_loss_current_price(asset, current_chainlink_price);
+        let order = test_ptb_stop_loss_order(
+            market_slug,
+            outcome_label,
+            gap_usd,
+            Some(ptb_reference_price),
+        );
+
+        trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval")
+    }
+
+    fn assert_option_f64_close(actual: Option<f64>, expected: f64) {
+        let actual = actual.expect("expected numeric value");
+        assert!(
+            (actual - expected).abs() <= 0.000001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     #[tokio::test]
     async fn ptb_stop_loss_triggers_when_up_gap_reverts_to_zero() {
+        let _guard = lock_ptb_stop_loss_test_state();
         let now_ms = Utc::now().timestamp_millis();
         trade_flow::guards::chainlink_price::seed_chainlink_price_test_ticks(
             "sol",
@@ -459,6 +508,7 @@ mod trade_builder_ptb_stop_loss_tests {
 
     #[tokio::test]
     async fn ptb_stop_loss_waits_for_negative_overshoot_gap() {
+        let _guard = lock_ptb_stop_loss_test_state();
         let now_ms = Utc::now().timestamp_millis();
         trade_flow::guards::chainlink_price::seed_chainlink_price_test_ticks(
             "eth",
@@ -473,8 +523,65 @@ mod trade_builder_ptb_stop_loss_tests {
         assert!(evaluation.should_trigger);
     }
 
+    #[test]
+    fn ptb_stop_loss_negative_gap_for_up_triggers_only_after_price_moves_10_below_reference() {
+        let market_slug = "eth-updown-5m-1774013100";
+        let blocked = evaluate_test_ptb_stop_loss(
+            market_slug,
+            "eth",
+            "Up",
+            -10.0,
+            100.0,
+            90.01,
+        );
+        assert_eq!(blocked.reason_code, "ptb_gap_threshold_not_met");
+        assert_option_f64_close(blocked.directional_gap, -9.99);
+        assert!(!blocked.should_trigger);
+
+        let triggered = evaluate_test_ptb_stop_loss(
+            market_slug,
+            "eth",
+            "Up",
+            -10.0,
+            100.0,
+            90.0,
+        );
+        assert_eq!(triggered.reason_code, "ptb_gap_threshold_hit");
+        assert_option_f64_close(triggered.directional_gap, -10.0);
+        assert!(triggered.should_trigger);
+    }
+
+    #[test]
+    fn ptb_stop_loss_negative_gap_for_down_triggers_only_after_price_moves_10_above_reference() {
+        let market_slug = "btc-updown-5m-1774013100";
+        let blocked = evaluate_test_ptb_stop_loss(
+            market_slug,
+            "btc",
+            "Down",
+            -10.0,
+            100.0,
+            109.99,
+        );
+        assert_eq!(blocked.reason_code, "ptb_gap_threshold_not_met");
+        assert_option_f64_close(blocked.directional_gap, -9.99);
+        assert!(!blocked.should_trigger);
+
+        let triggered = evaluate_test_ptb_stop_loss(
+            market_slug,
+            "btc",
+            "Down",
+            -10.0,
+            100.0,
+            110.0,
+        );
+        assert_eq!(triggered.reason_code, "ptb_gap_threshold_hit");
+        assert_option_f64_close(triggered.directional_gap, -10.0);
+        assert!(triggered.should_trigger);
+    }
+
     #[tokio::test]
     async fn ptb_stop_loss_blocks_when_down_gap_stays_above_threshold() {
+        let _guard = lock_ptb_stop_loss_test_state();
         let now_ms = Utc::now().timestamp_millis();
         trade_flow::guards::chainlink_price::seed_chainlink_price_test_ticks(
             "btc",

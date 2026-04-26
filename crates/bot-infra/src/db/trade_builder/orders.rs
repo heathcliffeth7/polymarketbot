@@ -17,8 +17,8 @@ const TRADE_BUILDER_ORDER_SELECT_COLUMNS: &str =
      staged_sl_retry_only_dust, staged_sl_retry_dust_metric, staged_sl_retry_dust_value, \
      staged_sl_reentry_use_sold_notional, staged_sl_reentry_only_after_all_stages, \
      sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, \
-     notify_on_fill, notify_on_order_not_filled, notify_on_trigger_guard_blocked, \
-     notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, \
+     notify_on_order_submitted, notify_on_fill, notify_on_order_not_filled, \
+     notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, \
      notify_on_max_price_blocked, last_guard_notification_reason, exit_ladder_kind, \
      exit_ladder_index, exit_ladder_size_pct";
 
@@ -42,8 +42,8 @@ const TRADE_BUILDER_ORDER_SELECT_COLUMNS_O_ALIAS: &str =
      o.staged_sl_retry_dust_value, o.staged_sl_reentry_use_sold_notional, \
      o.staged_sl_reentry_only_after_all_stages, \
      o.sl_trigger_price_mode, \
-     o.reenter_on_sl_hit, o.reentry_max_attempts, o.reentry_trigger_node_key, o.notify_on_fill, \
-     o.notify_on_order_not_filled, o.notify_on_trigger_guard_blocked, \
+     o.reenter_on_sl_hit, o.reentry_max_attempts, o.reentry_trigger_node_key, \
+     o.notify_on_order_submitted, o.notify_on_fill, o.notify_on_order_not_filled, o.notify_on_trigger_guard_blocked, \
      o.notify_on_execution_floor_blocked, o.notify_on_tp_hit, o.notify_on_sl_hit, \
      o.notify_on_max_price_blocked, o.last_guard_notification_reason, o.exit_ladder_kind, \
      o.exit_ladder_index, o.exit_ladder_size_pct";
@@ -188,6 +188,7 @@ fn map_trade_builder_order_row(row: sqlx::postgres::PgRow) -> TradeBuilderOrder 
         reenter_on_sl_hit: row.get("reenter_on_sl_hit"),
         reentry_max_attempts: row.get("reentry_max_attempts"),
         reentry_trigger_node_key: row.get("reentry_trigger_node_key"),
+        notify_on_order_submitted: row.get("notify_on_order_submitted"),
         notify_on_fill: row.get("notify_on_fill"),
         notify_on_order_not_filled: row.get("notify_on_order_not_filled"),
         notify_on_trigger_guard_blocked: row.get("notify_on_trigger_guard_blocked"),
@@ -253,6 +254,7 @@ impl PostgresRepository {
         reenter_on_sl_hit: bool,
         reentry_max_attempts: i32,
         reentry_trigger_node_key: Option<&str>,
+        notify_on_order_submitted: bool,
         notify_on_fill: bool,
         notify_on_order_not_filled: bool,
         notify_on_trigger_guard_blocked: bool,
@@ -275,14 +277,14 @@ impl PostgresRepository {
             trade_builder_ptb_stop_loss_rules_to_json(ptb_stop_loss_rules_json);
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO trade_builder_orders \
-              (trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, remaining_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, parent_order_id, tp_enabled, tp_price, tp_rules_json, sl_enabled, sl_price, sl_rules_json, time_exit_rules_json, fee_rate_bps, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, ptb_stop_loss_gap_usd, ptb_reference_price, ptb_stop_loss_rules_json, ptb_stop_loss_time_decay_mode, staged_sl_retry_only_dust, staged_sl_retry_dust_metric, staged_sl_retry_dust_value, staged_sl_reentry_use_sold_notional, staged_sl_reentry_only_after_all_stages, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_fill, notify_on_order_not_filled, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked, last_guard_notification_reason, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, exit_ladder_kind, exit_ladder_index, exit_ladder_size_pct, created_at, updated_at) \
+              (trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, remaining_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, parent_order_id, tp_enabled, tp_price, tp_rules_json, sl_enabled, sl_price, sl_rules_json, time_exit_rules_json, fee_rate_bps, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, ptb_stop_loss_gap_usd, ptb_reference_price, ptb_stop_loss_rules_json, ptb_stop_loss_time_decay_mode, staged_sl_retry_only_dust, staged_sl_retry_dust_metric, staged_sl_retry_dust_value, staged_sl_reentry_use_sold_notional, staged_sl_reentry_only_after_all_stages, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_order_submitted, notify_on_fill, notify_on_order_not_filled, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked, last_guard_notification_reason, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, exit_ladder_kind, exit_ladder_index, exit_ladder_size_pct, created_at, updated_at) \
              VALUES \
               ($1, (SELECT user_id FROM trades WHERE id = $1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 0, $23, $24, $25, $26, $27, $28, $29, $30, \
                $31, \
                COALESCE($32, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_definition_id FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
                COALESCE($33, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_run_id FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
                COALESCE($34, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_node_key FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
-               $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, \
+               $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, \
                NOW(), NOW()) \
              RETURNING id",
         )
@@ -333,6 +335,7 @@ impl PostgresRepository {
         .bind(reenter_on_sl_hit)
         .bind(reentry_max_attempts)
         .bind(reentry_trigger_node_key)
+        .bind(notify_on_order_submitted)
         .bind(notify_on_fill)
         .bind(notify_on_order_not_filled)
         .bind(notify_on_trigger_guard_blocked)
@@ -391,6 +394,7 @@ impl PostgresRepository {
         reentry_max_attempts: i32,
         reentry_trigger_node_key: Option<&str>,
         ptb_stop_loss_time_decay_mode: Option<&str>,
+        notify_on_order_submitted: bool,
         notify_on_fill: bool,
         notify_on_order_not_filled: bool,
         notify_on_trigger_guard_blocked: bool,
@@ -451,6 +455,7 @@ impl PostgresRepository {
             reenter_on_sl_hit,
             reentry_max_attempts,
             reentry_trigger_node_key,
+            notify_on_order_submitted,
             notify_on_fill,
             notify_on_order_not_filled,
             notify_on_trigger_guard_blocked,
@@ -754,6 +759,7 @@ impl PostgresRepository {
     pub async fn set_trade_builder_order_notification_flags(
         &self,
         builder_order_id: i64,
+        notify_on_order_submitted: bool,
         notify_on_fill: bool,
         notify_on_order_not_filled: bool,
         notify_on_trigger_guard_blocked: bool,
@@ -765,17 +771,19 @@ impl PostgresRepository {
         sqlx::query(
             "UPDATE trade_builder_orders \
              SET notify_on_fill = $2, \
-                 notify_on_order_not_filled = $3, \
-                 notify_on_trigger_guard_blocked = $4, \
-                 notify_on_execution_floor_blocked = $5, \
-                 notify_on_tp_hit = $6, \
-                 notify_on_sl_hit = $7, \
-                 notify_on_max_price_blocked = $8, \
+                 notify_on_order_submitted = $3, \
+                 notify_on_order_not_filled = $4, \
+                 notify_on_trigger_guard_blocked = $5, \
+                 notify_on_execution_floor_blocked = $6, \
+                 notify_on_tp_hit = $7, \
+                 notify_on_sl_hit = $8, \
+                 notify_on_max_price_blocked = $9, \
                  updated_at = NOW() \
              WHERE id = $1",
         )
         .bind(builder_order_id)
         .bind(notify_on_fill)
+        .bind(notify_on_order_submitted)
         .bind(notify_on_order_not_filled)
         .bind(notify_on_trigger_guard_blocked)
         .bind(notify_on_execution_floor_blocked)
@@ -1293,6 +1301,7 @@ mod tests {
             reenter_on_sl_hit: false,
             reentry_max_attempts: 0,
             reentry_trigger_node_key: None,
+            notify_on_order_submitted: false,
             notify_on_fill: false,
             notify_on_order_not_filled: false,
             notify_on_trigger_guard_blocked: false,

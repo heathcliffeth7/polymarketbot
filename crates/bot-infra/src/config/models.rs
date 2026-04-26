@@ -77,6 +77,8 @@ pub struct StrategyConfig {
     pub flow_only: bool,
     #[serde(default)]
     pub dual_side_enabled: bool,
+    #[serde(default = "default_max_price_relax_enabled")]
+    pub max_price_relax_enabled: bool,
     #[serde(default = "default_total_notional_usdc")]
     pub total_notional_usdc: f64,
     #[serde(default = "default_per_leg_initial_notional_usdc")]
@@ -501,7 +503,7 @@ impl AppConfig {
         let exchange: ExchangeConfig =
             load_json_merged_with_toml(settings.get("exchange"), &dir.join("exchange.toml"))?;
         let claim: ClaimConfig =
-            load_json_merged_with_toml(settings.get("claim"), &dir.join("claim.toml"))?;
+            load_json_or_toml_or_default(settings.get("claim"), &dir.join("claim.toml"))?;
         let telegram: TelegramConfig = load_json_or_default(settings.get("telegram"))?;
 
         validate(

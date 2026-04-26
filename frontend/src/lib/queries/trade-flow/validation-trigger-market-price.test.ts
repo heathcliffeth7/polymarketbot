@@ -61,6 +61,95 @@ test('validateTriggerMarketPriceNodeConfig accepts auto_vol_pct on supported aut
   );
 });
 
+test('validateTriggerMarketPriceNodeConfig accepts valid entry timing profiles on auto_scope once trigger', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_entry_profiles', 'btc_5m_updown', 'manual', {
+        priceToBeatTriggerMinGap: 10,
+        priceToBeatTriggerUnit: 'usd',
+        entryTimingProfiles: [
+          {
+            startRemainingSec: 90,
+            endRemainingSec: 45,
+            maxPriceCent: 60,
+            priceToBeatTriggerMinGap: 10,
+            sizeUsdc: 1.5,
+          },
+          {
+            startRemainingSec: 45,
+            endRemainingSec: 20,
+            maxPriceCent: 67,
+            priceToBeatTriggerMinGap: 18,
+            sizeUsdc: 1,
+          },
+        ],
+      }),
+    ],
+    edges: [],
+  });
+
+  const issues = collectTriggerIssues(graph, 'trigger_entry_profiles');
+  assert.equal(
+    issues.some((issue) => issue.code.startsWith('invalid_entry_timing_profile')),
+    false
+  );
+  assert.equal(
+    issues.some((issue) => issue.code === 'entry_timing_profiles_disallow_cycle_window'),
+    false
+  );
+});
+
+test('validateTriggerMarketPriceNodeConfig rejects entry timing profiles combined with cycleWindowMode', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_entry_cycle', 'btc_5m_updown', 'manual', {
+        priceToBeatTriggerMinGap: 10,
+        cycleWindowMode: 'custom_range',
+        cycleWindowStartSec: 230,
+        cycleWindowEndSec: 290,
+        entryTimingProfiles: [
+          {
+            startRemainingSec: 90,
+            endRemainingSec: 45,
+            maxPriceCent: 60,
+          },
+        ],
+      }),
+    ],
+    edges: [],
+  });
+
+  const issues = collectTriggerIssues(graph, 'trigger_entry_cycle');
+  assert.equal(
+    issues.some((issue) => issue.code === 'entry_timing_profiles_disallow_cycle_window'),
+    true
+  );
+});
+
+test('validateTriggerMarketPriceNodeConfig rejects overlapping entry timing profile windows', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_entry_overlap', 'btc_5m_updown', 'manual', {
+        priceToBeatTriggerMinGap: 10,
+        entryTimingProfiles: [
+          { startRemainingSec: 90, endRemainingSec: 30 },
+          { startRemainingSec: 45, endRemainingSec: 20 },
+        ],
+      }),
+    ],
+    edges: [],
+  });
+
+  const issues = collectTriggerIssues(graph, 'trigger_entry_overlap');
+  assert.equal(
+    issues.some((issue) => issue.code === 'overlapping_entry_timing_profiles'),
+    true
+  );
+});
+
 test('validateTriggerMarketPriceNodeConfig rejects auto_vol_pct on xrp auto_scope asset', () => {
   const graph = normalizeTradeFlowGraph({
     context: {},

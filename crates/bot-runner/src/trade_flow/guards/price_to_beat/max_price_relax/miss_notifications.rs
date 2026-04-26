@@ -147,10 +147,10 @@ pub(super) async fn maybe_notify_relax_miss_streak_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Utc;
     use anyhow::Result;
     use async_trait::async_trait;
     use std::collections::HashMap;
-    use crate::Utc;
 
     struct MockDataSource {
         snapshots: HashMap<String, Vec<TradeBuilderMarketSecondSnapshot>>,
@@ -448,8 +448,24 @@ mod tests {
             snapshots.insert(
                 market_slug.clone(),
                 vec![
-                    second_snapshot(&market_slug, 120, 0.79, ask_depth_usdc, 2_001.1, 2_000.0, "yes"),
-                    second_snapshot(&market_slug, 121, 0.79, ask_depth_usdc, 2_001.11, 2_000.0, "yes"),
+                    second_snapshot(
+                        &market_slug,
+                        120,
+                        0.79,
+                        ask_depth_usdc,
+                        2_001.1,
+                        2_000.0,
+                        "yes",
+                    ),
+                    second_snapshot(
+                        &market_slug,
+                        121,
+                        0.79,
+                        ask_depth_usdc,
+                        2_001.11,
+                        2_000.0,
+                        "yes",
+                    ),
                 ],
             );
         }
@@ -570,8 +586,24 @@ mod tests {
         let snapshots = HashMap::from([(
             previous_market_slug.to_string(),
             vec![
-                second_snapshot(previous_market_slug, 120, 0.79, 10.0, 2_001.1, 2_000.0, "yes"),
-                second_snapshot(previous_market_slug, 121, 0.79, 10.0, 2_001.11, 2_000.0, "yes"),
+                second_snapshot(
+                    previous_market_slug,
+                    120,
+                    0.79,
+                    10.0,
+                    2_001.1,
+                    2_000.0,
+                    "yes",
+                ),
+                second_snapshot(
+                    previous_market_slug,
+                    121,
+                    0.79,
+                    10.0,
+                    2_001.11,
+                    2_000.0,
+                    "yes",
+                ),
             ],
         )]);
 

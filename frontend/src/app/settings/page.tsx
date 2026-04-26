@@ -24,6 +24,7 @@ export default function SettingsPage() {
             title="Strategy Config"
             fields={[
               { key: 'dual_side_enabled', label: 'Dual Side Enabled', type: 'boolean' },
+              { key: 'max_price_relax_enabled', label: 'PTB Max Price Relax', type: 'boolean' },
               { key: 'total_notional_usdc', label: 'Total Notional (USDC)', type: 'number', min: 0.01, step: 0.01 },
               { key: 'per_leg_initial_notional_usdc', label: 'Per-Leg Initial Notional (USDC)', type: 'number', min: 0.01, step: 0.01 },
               { key: 'dca_interval_sec', label: 'DCA Interval (sec)', type: 'number', min: 1 },

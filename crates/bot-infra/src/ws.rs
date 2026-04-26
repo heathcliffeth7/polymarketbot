@@ -54,6 +54,17 @@ pub struct MarketDataSnapshot {
     pub last_source: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarketTradeTick {
+    pub token_id: String,
+    pub market: Option<String>,
+    pub price: f64,
+    pub size: f64,
+    pub side: Option<String>,
+    pub timestamp_ms: i64,
+    pub source_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarketSnapshotWsState {
     Seeded,
@@ -81,6 +92,7 @@ pub struct MarketSnapshotIntrospection {
 }
 
 pub type MarketTickCallback = Arc<dyn Fn(&str, &MarketDataSnapshot) + Send + Sync>;
+pub type MarketTradeCallback = Arc<dyn Fn(&MarketTradeTick) + Send + Sync>;
 
 struct ClobWsClientInner {
     ws_url: String,
@@ -90,6 +102,7 @@ struct ClobWsClientInner {
     dirty_tokens: Mutex<BTreeSet<String>>,
     desired_tokens: RwLock<BTreeSet<String>>,
     tick_callback: RwLock<Option<MarketTickCallback>>,
+    trade_callback: RwLock<Option<MarketTradeCallback>>,
     market_update_notify: Notify,
     market_task: Mutex<Option<JoinHandle<()>>>,
 }
@@ -120,6 +133,7 @@ impl ClobWsClient {
                 dirty_tokens: Mutex::new(BTreeSet::new()),
                 desired_tokens: RwLock::new(BTreeSet::new()),
                 tick_callback: RwLock::new(None),
+                trade_callback: RwLock::new(None),
                 market_update_notify: Notify::new(),
                 market_task: Mutex::new(None),
             }),
@@ -239,6 +253,10 @@ impl ClobWsClient {
 
     pub async fn set_tick_callback(&self, cb: MarketTickCallback) {
         *self.inner.tick_callback.write().await = Some(cb);
+    }
+
+    pub async fn set_trade_callback(&self, cb: MarketTradeCallback) {
+        *self.inner.trade_callback.write().await = Some(cb);
     }
 
     pub async fn take_dirty_market_tokens(&self) -> Vec<String> {
@@ -380,14 +398,18 @@ impl ClobWsClient {
         let fallback_ts = payload
             .get("timestamp")
             .or_else(|| payload.get("ts"))
-            .and_then(|value| value.as_i64())
+            .and_then(|value| parse_i64(Some(value)))
             .unwrap_or_else(|| Utc::now().timestamp_millis());
 
         let mut updates = Vec::new();
+        let mut trade_ticks = Vec::new();
         if let Some(update) =
             extract_snapshot_update(payload, fallback_ts, payload_event_name(payload))
         {
             updates.push(update);
+        }
+        if let Some(tick) = extract_market_trade_tick(payload, fallback_ts) {
+            trade_ticks.push(tick);
         }
 
         if let Some(changes) = payload
@@ -399,14 +421,18 @@ impl ClobWsClient {
                 {
                     updates.push(update);
                 }
+                if let Some(tick) = extract_market_trade_tick(change, fallback_ts) {
+                    trade_ticks.push(tick);
+                }
             }
         }
 
-        if updates.is_empty() {
+        if updates.is_empty() && trade_ticks.is_empty() {
             return;
         }
 
         let tick_cb = self.inner.tick_callback.read().await.clone();
+        let trade_cb = self.inner.trade_callback.read().await.clone();
         let mut updated_tokens = BTreeSet::new();
         let mut tick_snapshots = Vec::new();
         let mut cache = self.inner.cache.write().await;
@@ -434,6 +460,11 @@ impl ClobWsClient {
         if let Some(ref cb) = tick_cb {
             for (token_id, snapshot) in tick_snapshots {
                 cb(&token_id, &snapshot);
+            }
+        }
+        if let Some(ref cb) = trade_cb {
+            for tick in &trade_ticks {
+                cb(tick);
             }
         }
 
@@ -538,7 +569,7 @@ fn decode_event(channel: WsChannel, payload: Value) -> WsEvent {
         ts: payload
             .get("timestamp")
             .or_else(|| payload.get("ts"))
-            .and_then(|v| v.as_i64()),
+            .and_then(|v| parse_i64(Some(v))),
         payload,
         event_type,
     }
@@ -597,7 +628,7 @@ fn extract_snapshot_update(
     let updated_at_ms = payload
         .get("timestamp")
         .or_else(|| payload.get("ts"))
-        .and_then(|value| value.as_i64())
+        .and_then(|value| parse_i64(Some(value)))
         .unwrap_or(fallback_ts);
 
     Some(MarketSnapshotUpdate {
@@ -614,10 +645,64 @@ fn extract_snapshot_update(
     })
 }
 
+fn extract_market_trade_tick(payload: &Value, fallback_ts: i64) -> Option<MarketTradeTick> {
+    let event_name = payload_event_name(payload);
+    if !matches!(event_name, "last_trade_price" | "trade" | "fill") {
+        return None;
+    }
+    let token_id = payload
+        .get("asset_id")
+        .or_else(|| payload.get("assetId"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.starts_with("0x"))?
+        .to_string();
+    let price = parse_number(payload.get("price"))?;
+    let size = parse_number(payload.get("size"))?;
+    if !price.is_finite() || price <= 0.0 || !size.is_finite() || size <= 0.0 {
+        return None;
+    }
+    let timestamp_ms =
+        parse_i64(payload.get("timestamp").or_else(|| payload.get("ts"))).unwrap_or(fallback_ts);
+    Some(MarketTradeTick {
+        token_id,
+        market: payload
+            .get("market")
+            .or_else(|| payload.get("condition_id"))
+            .or_else(|| payload.get("conditionId"))
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string),
+        price,
+        size,
+        side: payload
+            .get("side")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string),
+        timestamp_ms,
+        source_id: payload
+            .get("id")
+            .or_else(|| payload.get("trade_id"))
+            .or_else(|| payload.get("tradeId"))
+            .or_else(|| payload.get("transaction_hash"))
+            .or_else(|| payload.get("transactionHash"))
+            .or_else(|| payload.get("hash"))
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string),
+    })
+}
+
 fn parse_number(value: Option<&Value>) -> Option<f64> {
     match value {
         Some(Value::Number(n)) => n.as_f64(),
         Some(Value::String(s)) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn parse_i64(value: Option<&Value>) -> Option<i64> {
+    match value {
+        Some(Value::Number(n)) => n.as_i64(),
+        Some(Value::String(s)) => s.parse::<i64>().ok(),
         _ => None,
     }
 }
@@ -733,6 +818,39 @@ mod tests {
         assert_eq!(seen[1].1.best_bid, Some(0.70));
         assert_eq!(seen[1].1.last_trade_price, Some(0.68));
         assert_eq!(seen[1].1.updated_at_ms, 12346);
+    }
+
+    #[tokio::test]
+    async fn trade_callback_receives_last_trade_price_with_size() {
+        let ws = ClobWsClient::new("wss://example.com/ws".to_string());
+        let seen = Arc::new(StdMutex::new(Vec::<MarketTradeTick>::new()));
+        let seen_cb = Arc::clone(&seen);
+        ws.set_trade_callback(Arc::new(move |tick| {
+            seen_cb
+                .lock()
+                .expect("trade callback mutex")
+                .push(tick.clone());
+        }))
+        .await;
+
+        ws.update_market_cache_from_payload(&json!({
+            "event_type": "last_trade_price",
+            "asset_id": "tok-yes",
+            "price": "0.79",
+            "size": "12.5",
+            "side": "BUY",
+            "timestamp": "12346",
+            "transaction_hash": "0xabc"
+        }))
+        .await;
+
+        let seen = seen.lock().expect("trade callback mutex");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].token_id, "tok-yes");
+        assert_eq!(seen[0].price, 0.79);
+        assert_eq!(seen[0].size, 12.5);
+        assert_eq!(seen[0].timestamp_ms, 12346);
+        assert_eq!(seen[0].source_id.as_deref(), Some("0xabc"));
     }
 
     #[tokio::test]

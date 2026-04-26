@@ -70,6 +70,7 @@ mod pair_lock_budget_tests {
             min_net_profit_usdc: 0.0,
             profit_safety_buffer_usdc: 0.0,
             orphan_grace_ms: 1500,
+            ignore_stop_loss_after_locked: false,
             notify_on_pair_locked: false,
             notify_on_pair_unwind: false,
             notify_on_pair_no_edge: false,

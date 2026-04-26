@@ -34,7 +34,6 @@ async fn execute_trigger_market_price(
         node.config.get("priceMode").and_then(|v| v.as_str()),
         WsPriceMode::Composite,
     );
-    let node_ptb_config = trigger_market_price_ptb_config_from_node(node);
     let pair_lock_only_mode = node_config_string(node, "bindingMode")
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("pair_lock_only"));
     // --- Early WS-sourced detection for auto_scope guard ---
@@ -327,6 +326,53 @@ async fn execute_trigger_market_price(
             repeat_idempotency_key: None,
         });
     }
+    let entry_timing_evaluated_at = Utc::now();
+    let entry_timing_profiles_enabled = trigger_market_entry_timing_profiles_enabled(node);
+    let entry_timing_remaining_ms = if entry_timing_profiles_enabled {
+        trigger_market_entry_timing_remaining_ms(&market_slug, entry_timing_evaluated_at)
+    } else {
+        None
+    };
+    let selected_entry_timing_profile = resolve_trigger_market_entry_timing_profile(
+        node,
+        &market_slug,
+        entry_timing_evaluated_at,
+    );
+    if entry_timing_profiles_enabled && selected_entry_timing_profile.is_none() {
+        let selected_entry_remaining_sec = entry_timing_remaining_ms.map(|remaining_ms| {
+            if remaining_ms <= 0 {
+                0
+            } else {
+                ((remaining_ms + 999) / 1000).max(0)
+            }
+        });
+        return Ok(TradeFlowNodeExecution {
+            output: json!({
+                "run_id": run.id,
+                "node_key": node.key,
+                "market_slug": market_slug,
+                "pass": false,
+                "reason": "entry_timing_profile_blocked",
+                "selectedEntryTimingProfile": Value::Null,
+                "selectedEntryRemainingSec": selected_entry_remaining_sec,
+                "once_mode": once_mode,
+                "once_scope": if once_scope_market { "market" } else { "run" },
+                "trigger_source": trigger_source
+            }),
+            routes: Vec::new(),
+            repeat_at: if ws_sourced || once_mode {
+                None
+            } else {
+                Some(Utc::now() + ChronoDuration::milliseconds(interval_ms))
+            },
+            repeat_idempotency_key: None,
+        });
+    }
+    let selected_entry_max_price = selected_entry_timing_profile
+        .as_ref()
+        .and_then(|profile| profile.max_price);
+    let node_ptb_config =
+        trigger_market_price_ptb_config_from_node(node, selected_entry_timing_profile.as_ref());
 
     // --- Multi-outcome conditions (outcomeConditions array) ---
     let outcome_conditions = node
@@ -430,6 +476,7 @@ async fn execute_trigger_market_price(
         }
         pass = ws_hard_ignore_reason.is_none();
         current_price = ws_price_from_step;
+        triggered_max_price = selected_entry_max_price;
         trigger_evaluation_mode = "pair_lock_only";
     } else if ws_execution_path == "cross_confirm_short_circuit" {
         let conf_token_id = ws_token_id_from_step.clone().unwrap_or_default();
@@ -488,6 +535,7 @@ async fn execute_trigger_market_price(
         current_price = conf_price;
         triggered_previous_price = conf_prev;
         effective_previous_price = conf_prev;
+        triggered_max_price = selected_entry_max_price;
         triggered_gate_mode = trigger_market_price_gate_mode(&triggered_condition, node_ptb_config);
         trigger_evaluation_mode = "cross_confirmed";
         pass = true;
@@ -571,6 +619,7 @@ async fn execute_trigger_market_price(
                 .map(|v| v / 100.0)
                 .or_else(|| cond.get("maxPrice").and_then(value_as_f64))
                 .filter(|v| *v > 0.0 && *v <= 1.0);
+            let cond_max_price = selected_entry_max_price.or(cond_max_price);
             if cond_token_id.is_empty() {
                 ws_soft_ignore_reason
                     .get_or_insert_with(|| WS_IGNORE_REASON_MISSING_CONDITION_TOKEN.to_string());
@@ -722,6 +771,9 @@ async fn execute_trigger_market_price(
                             node,
                             &market_slug,
                             &cond_outcome_label,
+                            selected_entry_timing_profile.as_ref(),
+                            ws_best_bid_from_step,
+                            ws_best_ask_from_step,
                         )
                         .unwrap_or_else(unsupported_price_to_beat_trigger_gate);
                         (ptb_gate.passed, eval_mode, ptb_gate.to_value())
@@ -746,6 +798,9 @@ async fn execute_trigger_market_price(
                             node,
                             &market_slug,
                             &cond_outcome_label,
+                            selected_entry_timing_profile.as_ref(),
+                            ws_best_bid_from_step,
+                            ws_best_ask_from_step,
                         )
                         .unwrap_or_else(unsupported_price_to_beat_trigger_gate);
                         (ptb_gate.passed, "ptb_only", ptb_gate.to_value())
@@ -773,13 +828,16 @@ async fn execute_trigger_market_price(
                 )
                 .then_some(tp.unwrap_or_default());
                 triggered_price = Some(cur);
-                triggered_max_price = matches!(
+                triggered_max_price = if matches!(
                     row_gate_mode,
                     TriggerMarketPriceGateMode::StandardOnly
                         | TriggerMarketPriceGateMode::StandardAndPtb
-                )
-                .then_some(cond_max_price)
-                .flatten();
+                ) || selected_entry_max_price.is_some()
+                {
+                    cond_max_price
+                } else {
+                    None
+                };
                 current_price = Some(cur);
                 triggered_previous_price = prev;
                 triggered_gate_mode = Some(row_gate_mode);
@@ -927,6 +985,7 @@ async fn execute_trigger_market_price(
         let legacy_max_price = node_config_f64(node, "maxPrice")
             .or_else(|| node_config_f64(node, "maxPriceCent").map(|v| v / 100.0))
             .filter(|v| *v > 0.0 && *v <= 1.0);
+        let legacy_max_price = selected_entry_max_price.or(legacy_max_price);
         let legacy_poly_delta_10s_cent =
             match (cur, token_id.as_deref().filter(|value| !value.is_empty())) {
                 (Some(cur_price), Some(tid)) => {
@@ -984,6 +1043,9 @@ async fn execute_trigger_market_price(
                             node,
                             &market_slug,
                             &legacy_outcome_label,
+                            selected_entry_timing_profile.as_ref(),
+                            ws_best_bid_from_step,
+                            ws_best_ask_from_step,
                         )
                         .unwrap_or_else(unsupported_price_to_beat_trigger_gate);
                         price_to_beat_trigger_gate_output = ptb_gate.to_value();
@@ -1003,6 +1065,9 @@ async fn execute_trigger_market_price(
                             node,
                             &market_slug,
                             &legacy_outcome_label,
+                            selected_entry_timing_profile.as_ref(),
+                            ws_best_bid_from_step,
+                            ws_best_ask_from_step,
                         )
                         .unwrap_or_else(unsupported_price_to_beat_trigger_gate);
                         price_to_beat_trigger_gate_output = ptb_gate.to_value();
@@ -1057,13 +1122,16 @@ async fn execute_trigger_market_price(
         triggered_trigger_price = trigger_price;
         triggered_price = current_price;
         triggered_previous_price = previous_price;
-        triggered_max_price = matches!(
+        triggered_max_price = if matches!(
             gate_mode,
             Some(TriggerMarketPriceGateMode::StandardOnly)
                 | Some(TriggerMarketPriceGateMode::StandardAndPtb)
-        )
-        .then_some(legacy_max_price)
-        .flatten();
+        ) || selected_entry_max_price.is_some()
+        {
+            legacy_max_price
+        } else {
+            None
+        };
         if pass {
             triggered_poly_delta_10s_cent = legacy_poly_delta_10s_cent;
         }
@@ -1212,6 +1280,7 @@ async fn execute_trigger_market_price(
         cycle_window_secs,
         cycle_window_open_at.clone(),
         cycle_window_end_at.clone(),
+        selected_entry_timing_profile.as_ref(),
         pass,
     );
     let mut protection_output = Value::Null;
@@ -1413,5 +1482,7 @@ fn unsupported_price_to_beat_trigger_gate(
         floor_usd: None,
         ceiling_usd: None,
         threshold_was_clamped: None,
+        signal_formula: None,
+        iv_mismatch_edge: None,
     }
 }

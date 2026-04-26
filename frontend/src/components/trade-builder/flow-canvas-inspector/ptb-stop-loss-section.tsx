@@ -54,10 +54,12 @@ export function PtbStopLossSection({
       {enabled && (
         <>
           <p className="text-[10px] leading-relaxed text-slate-400 italic">
-            Underlying directional gap izlenir. Up/Yes icin `current Chainlink - PTB`,
-            Down/No icin `PTB - current Chainlink`. `0 / 100` tek satir, eski hard PTB
-            kapanis mantigini staged sekilde temsil eder. Negatif gap, karsi yone ek
-            overshoot bekler. Negatif esiklerde zaman decay uygulanmaz.
+            Bu alan karsi token fiyati degil, underlying directional gap olarak calisir. Up/Yes
+            icin current Chainlink - PTB, Down/No icin PTB - current Chainlink izlenir.
+            -10, Up/Yes icin PTB referansinin 10 altini; Down/No icin PTB referansinin
+            10 ustunu bekler. 0 / 100 tek satir eski hard PTB kapanisini staged sekilde
+            temsil eder. Negatif esik, karsi yone overshoot bekler ve time decay
+            uygulanmaz.
           </p>
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">

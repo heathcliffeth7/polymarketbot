@@ -727,6 +727,16 @@ pub(crate) fn seed_price_to_beat_from_chainlink(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn clear_price_to_beat_test_state() {
+    let service = &POLYMARKET_PRICE_TO_BEAT_SERVICE;
+    service.cache.lock().clear();
+    service.fetch_inflight.lock().clear();
+    service.terminal_failures.lock().clear();
+    service.promotion_inflight.lock().clear();
+    service.dirty_market_slugs.lock().clear();
+}
+
 pub(crate) fn schedule_price_to_beat_promotion(market_slug: &str) {
     if POLYMARKET_PRICE_TO_BEAT_SERVICE.has_authoritative_snapshot(market_slug) {
         return;

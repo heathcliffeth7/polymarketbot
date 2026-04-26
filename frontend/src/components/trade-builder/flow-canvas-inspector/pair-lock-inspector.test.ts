@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   estimatePairLockAutoRemainingBudgetPreview,
+  isPairLockField,
   resolvePairLockStopLossFieldVisibility,
   resolvePairLockSizingFieldVisibility,
   resolvePairLockTakeProfitFieldVisibility,
@@ -88,6 +89,23 @@ test('resolvePairLockSizingFieldVisibility toggles manual and auto fields', () =
     }),
     true
   );
+});
+
+test('resolvePairLockSizingFieldVisibility shows edge strategy qty fields', () => {
+  const fields = { pairLockStrategy: 'edge_pairlock_v1', pairSizingMode: 'manual' };
+  assert.equal(resolvePairLockSizingFieldVisibility('pairLockStrategy', true, fields), true);
+  assert.equal(resolvePairLockSizingFieldVisibility('pairLockDecisionQty', true, fields), true);
+  assert.equal(
+    resolvePairLockSizingFieldVisibility('pairLockSingleEdgeThreshold', true, fields),
+    true
+  );
+  assert.equal(resolvePairLockSizingFieldVisibility('pairLockCostBuffer', true, fields), true);
+  assert.equal(resolvePairLockSizingFieldVisibility('counterLegSizeUsdc', true, fields), false);
+});
+
+test('isPairLockField includes locked pair stop-loss ignore toggle', () => {
+  assert.equal(isPairLockField('pairIgnoreStopLossAfterLocked'), true);
+  assert.equal(isPairLockField('pairLockStrategy'), true);
 });
 
 test('resolvePairLockStopLossFieldVisibility allows supported lead-leg stop-loss fields', () => {

@@ -288,24 +288,28 @@ SL tetiklenmedi. Pencere kapandi:
 
 ## 7. PTB Stop Loss (Fiyat Bazli Zarar Kes)
 
-**Ne yapar:** Sabit fiyat SL yerine PTB gap bazli SL. BTC fiyati PTB'ye donunce satar.
+**Ne yapar:** Sabit fiyat SL yerine PTB gap bazli SL. Karsi token fiyatina bakmaz; underlying fiyat ile PTB referansi arasindaki directional gap'i izleyip satar.
 
 ### Senaryo 1: Gap sifira iner → satis
 
 ```
 Market: eth-updown-5m-1774013100
-Up token alindi (BTC yukselecek bahsi)
-PTB = $2,000, alis aninda BTC = $2,005 (gap = +$5)
+Up token alindi (ETH yukselecek bahsi)
+PTB = $2,000, alis aninda ETH = $2,005 (gap = +$5)
 
 ptbStopLossEnabled = true
 ptbStopLossGapUsd = 0 (gap sifira inince sat)
 
-10sn sonra: BTC = $2,001 → gap = +$1 → bekle
-20sn sonra: BTC = $2,000 → gap = $0 → SATIS!
+10sn sonra: ETH = $2,001 → gap = +$1 → bekle
+20sn sonra: ETH = $2,000 → gap = $0 → SATIS!
 
-directional_gap (Up icin) = BTC - PTB = $2,000 - $2,000 = $0
+directional_gap (Up icin) = ETH - PTB = $2,000 - $2,000 = $0
 $0 <= $0 → TRIGGER → sat
 ```
+
+Kisa not:
+- Bu alan Down token fiyatini izlemez.
+- `ptbStopLossGapUsd = -10` ise Up/Yes pozisyonunda fiyat `PTB - 10` altina indiginde, Down/No pozisyonunda fiyat `PTB + 10` ustune ciktiginda satilir.
 
 ### Senaryo 2: Time decay = tighten — gectikce hassaslasir
 

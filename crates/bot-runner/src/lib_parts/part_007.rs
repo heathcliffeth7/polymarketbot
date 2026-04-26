@@ -660,16 +660,21 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         tokio::sync::mpsc::unbounded_channel::<TickTrigger>();
     let (snapshot_tx, snapshot_rx) =
         tokio::sync::mpsc::unbounded_channel::<MarketSecondSnapshotTick>();
+    let (volume_tx, volume_rx) =
+        tokio::sync::mpsc::unbounded_channel::<MarketTradeVolumeTick>();
     tokio::spawn(run_market_second_snapshot_recorder(
         repo.clone(),
         client.clone(),
         snapshot_rx,
     ));
+    tokio::spawn(run_market_trade_volume_recorder(repo.clone(), volume_rx));
     ws.set_tick_callback(build_combined_market_tick_callback(vec![
         build_tick_trigger_callback(tick_trigger_tx),
         build_market_second_snapshot_callback(snapshot_tx),
     ]))
     .await;
+    ws.set_trade_callback(build_market_trade_volume_callback(volume_tx))
+        .await;
     let mut auto_claim_runtimes: HashMap<i64, FlowAutoClaimRuntime> = HashMap::new();
     let mut flow_runtime_caches = FlowRuntimeCaches::default();
 

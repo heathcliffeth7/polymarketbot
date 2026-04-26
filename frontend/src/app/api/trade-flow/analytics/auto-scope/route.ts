@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth';
+import { resolveAutoScopeTradeAnalysisDateFilters } from '@/lib/queries/trade-flow/analysis-time-range';
 import { getAutoScopeTradeAnalysis } from '@/lib/queries/trade-flow';
 import type {
   AutoScopeTradeAnalysisPnlFilter,
@@ -9,13 +10,6 @@ import type {
 } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
-
-function parseOptionalDate(value: string | null): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed) return null;
-  const parsed = new Date(trimmed);
-  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
-}
 
 export async function GET(req: NextRequest) {
   try {
@@ -37,10 +31,11 @@ export async function GET(req: NextRequest) {
     const position =
       ((searchParams.get('position') || '').trim() ||
         'all') as AutoScopeTradeAnalysisPositionFilter;
-    const fromRaw = searchParams.get('from');
-    const toRaw = searchParams.get('to');
-    const from = parseOptionalDate(fromRaw);
-    const to = parseOptionalDate(toRaw);
+    const dateFilters = resolveAutoScopeTradeAnalysisDateFilters({
+      timeRangeRaw: searchParams.get('timeRange'),
+      fromRaw: searchParams.get('from'),
+      toRaw: searchParams.get('to'),
+    });
 
     if (!Number.isFinite(page) || page < 1) {
       return NextResponse.json({ error: 'page must be >= 1' }, { status: 400 });
@@ -48,11 +43,8 @@ export async function GET(req: NextRequest) {
     if (!Number.isFinite(limit) || limit < 1 || limit > 100) {
       return NextResponse.json({ error: 'limit must be in [1,100]' }, { status: 400 });
     }
-    if (fromRaw && !from) {
-      return NextResponse.json({ error: 'from must be a valid date' }, { status: 400 });
-    }
-    if (toRaw && !to) {
-      return NextResponse.json({ error: 'to must be a valid date' }, { status: 400 });
+    if (dateFilters.error) {
+      return NextResponse.json({ error: dateFilters.error }, { status: 400 });
     }
 
     const result = await getAutoScopeTradeAnalysis({
@@ -63,8 +55,8 @@ export async function GET(req: NextRequest) {
       sortDirection,
       pnl,
       position,
-      from,
-      to,
+      from: dateFilters.from,
+      to: dateFilters.to,
     });
 
     return NextResponse.json(result);

@@ -82,6 +82,17 @@ async fn send_trade_builder_notification(
     notification_type: &str,
     message: &str,
 ) -> bool {
+    send_trade_builder_notification_with_payload(repo, order, notification_type, message, None)
+        .await
+}
+
+async fn send_trade_builder_notification_with_payload(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    notification_type: &str,
+    message: &str,
+    extra_payload: Option<Value>,
+) -> bool {
     let flow_identity = build_trade_builder_flow_identity(repo, order).await;
     let message = if let Some((block, _)) = flow_identity.as_ref() {
         format!("{message}{block}")
@@ -117,16 +128,24 @@ async fn send_trade_builder_notification(
 
     match result {
         Ok(resp) if resp.status().is_success() => {
+            let mut event_payload = json!({
+                "notification_type": notification_type,
+                "message": message.as_str(),
+                "chat_id": chat_id,
+                "flow_identity": flow_identity.as_ref().map(|(_, payload)| payload.clone()),
+            });
+            if let (Some(target), Some(extra)) =
+                (event_payload.as_object_mut(), extra_payload.and_then(|payload| payload.as_object().cloned()))
+            {
+                for (key, value) in extra {
+                    target.insert(key, value);
+                }
+            }
             if let Err(err) = repo
                 .append_trade_builder_order_event(
                     order.id,
                     "notification_sent",
-                    &json!({
-                        "notification_type": notification_type,
-                        "message": message.as_str(),
-                        "chat_id": chat_id,
-                        "flow_identity": flow_identity.as_ref().map(|(_, payload)| payload.clone()),
-                    }),
+                    &event_payload,
                 )
                 .await
             {
@@ -270,7 +289,27 @@ async fn maybe_send_order_not_filled_notification(
     if !should_send_order_not_filled_notification(order) {
         return false;
     }
-    let message = build_order_not_filled_notification_message(order, reason_code, reason_message);
+    let events = match repo
+        .list_trade_builder_order_events_for_orders(&[order.id])
+        .await
+    {
+        Ok(events) => events,
+        Err(err) => {
+            warn!(
+                builder_order_id = order.id,
+                error = %err,
+                "TRADE_BUILDER_ORDER_NOT_FILLED_REASON_LOAD_FAILED"
+            );
+            Vec::new()
+        }
+    };
+    let guard_summary = build_order_not_filled_guard_summary(order, &events);
+    let message = build_order_not_filled_notification_message_with_guard(
+        order,
+        reason_code,
+        reason_message,
+        guard_summary.as_ref(),
+    );
     send_trade_builder_notification(repo, order, "order_not_filled", &message).await
 }
 
@@ -294,6 +333,9 @@ fn build_trade_builder_fill_notification(
     order: &TradeBuilderOrder,
     execution_price: f64,
     filled_qty: f64,
+    flow_created_payload: Option<&Value>,
+    submitted_payload: Option<&Value>,
+    fill_execution_analysis: Option<&TradeBuilderFillExecutionAnalysis>,
 ) -> Option<(&'static str, String)> {
     let notification_type = trade_builder_fill_notification_type(order)?;
     let (title, reason) = match notification_type {
@@ -308,25 +350,51 @@ fn build_trade_builder_fill_notification(
         _ => ("Emir Doldu", "Emir basariyla dolduruldu."),
     };
 
-    Some((
-        notification_type,
-        if order.side == "buy" && order.parent_order_id.is_none() {
-            format!(
-                "{title}\nSebep: {}\nMarket: {}\nFiyat: {:.4}\nNotional USDC: {:.2}\nAdet: {:.2}\nOutcome: {}",
-                reason,
-                order.market_slug,
-                execution_price,
-                order.size_usdc,
-                filled_qty,
-                order.outcome_label
-            )
-        } else {
-            format!(
-                "{title}\nSebep: {}\nMarket: {}\nFiyat: {:.4}\nMiktar: {:.2}\nOutcome: {}",
-                reason, order.market_slug, execution_price, filled_qty, order.outcome_label
-            )
-        },
-    ))
+    let mut message = if order.side == "buy"
+        && order.parent_order_id.is_none()
+        && normalize_trade_builder_size_basis(&order.size_basis) == TRADE_BUILDER_SIZE_BASIS_SHARES
+    {
+        format!(
+            "{title}\nSebep: {}\nMarket: {}\nFiyat: {:.4}\nSize Mode: shares\nTarget Qty: {:.2}\nEstimated Notional: {:.2} USDC\nAdet: {:.2}\nOutcome: {}",
+            reason,
+            order.market_slug,
+            execution_price,
+            order.target_qty.unwrap_or(filled_qty),
+            order.target_qty.unwrap_or(filled_qty) * execution_price,
+            filled_qty,
+            order.outcome_label
+        )
+    } else if order.side == "buy" && order.parent_order_id.is_none() {
+        format!(
+            "{title}\nSebep: {}\nMarket: {}\nFiyat: {:.4}\nNotional USDC: {:.2}\nAdet: {:.2}\nOutcome: {}",
+            reason,
+            order.market_slug,
+            execution_price,
+            order.size_usdc,
+            filled_qty,
+            order.outcome_label
+        )
+    } else {
+        format!(
+            "{title}\nSebep: {}\nMarket: {}\nFiyat: {:.4}\nMiktar: {:.2}\nOutcome: {}",
+            reason, order.market_slug, execution_price, filled_qty, order.outcome_label
+        )
+    };
+    if let Some(analysis) = fill_execution_analysis {
+        message.push_str(&build_trade_builder_fill_analysis_block(
+            order,
+            analysis,
+            flow_created_payload,
+            submitted_payload,
+        ));
+    }
+    if let Some(block) =
+        trade_builder_iv_mismatch_fill_formula_block(flow_created_payload, execution_price)
+    {
+        message.push_str(&block);
+    }
+
+    Some((notification_type, message))
 }
 
 fn build_trigger_guard_blocked_notification_message(
@@ -671,18 +739,37 @@ fn build_pair_lock_primary_guard_recovered_notification_message(
     )
 }
 
+#[cfg(test)]
 fn build_order_not_filled_notification_message(
     order: &TradeBuilderOrder,
     reason_code: &str,
     reason_message: &str,
+) -> String {
+    build_order_not_filled_notification_message_with_guard(order, reason_code, reason_message, None)
+}
+
+fn build_order_not_filled_notification_message_with_guard(
+    order: &TradeBuilderOrder,
+    reason_code: &str,
+    reason_message: &str,
+    guard_summary: Option<&TradeBuilderNoFillReasonSummary>,
 ) -> String {
     let title = if reason_code == "sl_submitted_but_unfilled_before_market_close" {
         "Stop Loss Doldurulamadi"
     } else {
         "Emir Icra Edilemedi"
     };
-    format!(
+    let mut message = format!(
         "{title}\nSebep Kodu: {}\nSebep: {}\nMarket: {}\nOutcome: {}\nSide: {}",
         reason_code, reason_message, order.market_slug, order.outcome_label, order.side
-    )
+    );
+    if let Some(summary) = guard_summary {
+        message.push_str(&build_no_fill_guard_summary_block(summary));
+    } else if matches!(
+        reason_code,
+        "outside_cycle_window" | "stale_market_cycle" | "ttl_expired"
+    ) {
+        message.push_str(build_no_fill_missing_guard_block());
+    }
+    message
 }

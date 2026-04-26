@@ -16,6 +16,8 @@ const TRADE_BUILDER_PAIR_QTY_TOLERANCE: f64 = 0.0001;
 struct ActionPlaceOrderPairLockConfig {
     max_total_price: f64,
     orphan_grace_ms: i64,
+    protective_unwind_enabled: bool,
+    ignore_stop_loss_after_locked: bool,
     notify_on_pair_locked: bool,
     notify_on_pair_unwind: bool,
     sizing_mode: ActionPlaceOrderPairLockSizingMode,
@@ -81,6 +83,8 @@ fn resolve_action_place_order_pair_lock_config(
     let pair_max_total_cent = node_config_f64(node, "pairMaxTotalCent")
         .or_else(|| node_config_f64(node, "pairTargetTotalCent"))
         .ok_or_else(|| anyhow::anyhow!("action.place_order pair_lock requires pairMaxTotalCent"))?;
+    let strategy = resolve_action_place_order_pair_lock_strategy(node)?;
+    let uses_edge_strategy = strategy == PAIR_LOCK_STRATEGY_EDGE_PAIRLOCK_V1;
     anyhow::ensure!(
         pair_max_total_cent > 0.0 && pair_max_total_cent < 100.0,
         "action.place_order pairMaxTotalCent must be in (0, 100)"
@@ -94,13 +98,18 @@ fn resolve_action_place_order_pair_lock_config(
     let sizing_mode = resolve_action_place_order_pair_lock_sizing_mode(node);
     let (total_budget_usdc, counter_leg_size_usdc) = match sizing_mode {
         ActionPlaceOrderPairLockSizingMode::Manual => {
-            let counter_leg_size_usdc = node_config_f64(node, "counterLegSizeUsdc")
-                .ok_or_else(|| anyhow::anyhow!("action.place_order pair_lock requires counterLegSizeUsdc > 0"))?;
-            anyhow::ensure!(
-                counter_leg_size_usdc > 0.0,
-                "action.place_order counterLegSizeUsdc must be > 0"
-            );
-            (None, Some(counter_leg_size_usdc))
+            let counter_leg_size_usdc = node_config_f64(node, "counterLegSizeUsdc");
+            if !uses_edge_strategy {
+                let counter_leg_size_usdc = counter_leg_size_usdc
+                    .ok_or_else(|| anyhow::anyhow!("action.place_order pair_lock requires counterLegSizeUsdc > 0"))?;
+                anyhow::ensure!(
+                    counter_leg_size_usdc > 0.0,
+                    "action.place_order counterLegSizeUsdc must be > 0"
+                );
+                (None, Some(counter_leg_size_usdc))
+            } else {
+                (None, counter_leg_size_usdc.filter(|value| *value > 0.0))
+            }
         }
         ActionPlaceOrderPairLockSizingMode::AutoRemainingBudget => {
             let total_budget_usdc = node_config_f64(node, "pairTotalBudgetUsdc")
@@ -119,6 +128,8 @@ fn resolve_action_place_order_pair_lock_config(
     Ok(Some(ActionPlaceOrderPairLockConfig {
         max_total_price: clamp_probability(pair_max_total_cent / 100.0),
         orphan_grace_ms,
+        protective_unwind_enabled: node_config_bool(node, "pairProtectiveUnwindEnabled").unwrap_or(true),
+        ignore_stop_loss_after_locked: node_config_bool(node, "pairIgnoreStopLossAfterLocked").unwrap_or(false),
         notify_on_pair_locked: node_config_bool(node, "notifyOnPairLocked").unwrap_or(false),
         notify_on_pair_unwind: node_config_bool(node, "notifyOnPairUnwind").unwrap_or(false),
         sizing_mode,
@@ -258,7 +269,7 @@ fn extract_source_trade_id(execution: &TradeFlowNodeExecution) -> Option<i64> {
 fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Value>) {
     for key in [
         "mode", "pairMaxTotalCent", "pairTargetTotalCent", "pairSizingMode", "pairTotalBudgetUsdc",
-        "pairOrphanGraceMs", "notifyOnPairLocked", "notifyOnPairUnwind", "counterLegEnabled",
+        "pairOrphanGraceMs", "pairProtectiveUnwindEnabled", "pairIgnoreStopLossAfterLocked", "notifyOnPairLocked", "notifyOnPairUnwind", "counterLegEnabled",
         "counterLegOutcomeLabel", "counterLegTriggerCondition", "counterLegTriggerPriceCent",
         "counterLegMaxPriceCent", "counterLegPriceToBeatGuardEnabled", "counterLegPriceToBeatMode",
         "counterLegPriceToBeatMaxDiff", "counterLegPriceToBeatMaxDiffUnit",
@@ -301,6 +312,9 @@ fn build_pair_lock_single_leg_node(
     config.insert("outcomeLabel".to_string(), json!(outcome_label));
     config.insert("reentryTriggerNodeKey".to_string(), json!(trigger_node_key));
     copy_pair_lock_primary_take_profit_fields(node, &mut config);
+    if let Some(value) = node.config.get("slRules") {
+        config.insert("slRules".to_string(), value.clone());
+    }
     if let Some(value) = node.config.get("ptbStopLossRules") {
         config.insert("ptbStopLossRules".to_string(), value.clone());
     }
@@ -377,6 +391,11 @@ fn build_pair_lock_counter_leg_node(
             config.remove(target_key);
         }
     }
+    if !pair_lock.protective_unwind_enabled {
+        config.insert("retryOnPriceToBeatGuardBlock".to_string(), json!(true));
+        config.insert("retryOnExecutionFloorGuardBlock".to_string(), json!(true));
+        config.insert("retryOnMaxPriceBlock".to_string(), json!(true));
+    }
 
     TradeFlowNode {
         key: format!("{}__counter", node.key),
@@ -416,6 +435,13 @@ async fn execute_action_place_order_pair_lock(
     let pair_lock = resolve_action_place_order_pair_lock_config(node)?
         .ok_or_else(|| anyhow::anyhow!("pair_lock config missing"))?;
     let trigger_node_key = resolve_pair_lock_direct_trigger_node_key(&node.key, graph)?;
+    if action_place_order_uses_edge_pairlock_strategy(node) {
+        return execute_action_place_order_pair_lock_edge_strategy(
+            repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
+            &pair_lock, &trigger_node_key,
+        )
+        .await;
+    }
 
     let market_slug = resolve_action_place_order_string(
         node,
@@ -667,6 +693,7 @@ async fn execute_action_place_order_pair_lock(
             0.0,
             0.0,
             pair_lock.orphan_grace_ms,
+            pair_lock.ignore_stop_loss_after_locked,
             pair_lock.notify_on_pair_locked,
             pair_lock.notify_on_pair_unwind,
             false,
@@ -712,6 +739,7 @@ async fn execute_action_place_order_pair_lock(
             "primary_leg_size_usdc": pair_lock.primary_leg_size_usdc,
             "counter_initial_size_usdc": pair_lock.counter_leg_size_usdc,
             "pair_orphan_grace_ms": pair_lock.orphan_grace_ms,
+            "ignore_stop_loss_after_locked": pair_lock.ignore_stop_loss_after_locked,
             "notify_on_pair_locked": pair_lock.notify_on_pair_locked,
             "notify_on_pair_unwind": pair_lock.notify_on_pair_unwind,
             "counter_outcome_label": counter.outcome_label,
@@ -925,7 +953,8 @@ async fn maybe_apply_trade_builder_pair_lock_runtime(
                             .unwrap_or(dynamic_cap),
                     );
                 }
-                if !pair_lock_counter_waits_until_market_end(&pair_lock, &order.market_slug)
+                if pair_lock.protective_unwind_enabled
+                    && !pair_lock_counter_waits_until_market_end(&pair_lock, &order.market_slug)
                     && now >= lead_filled_at + ChronoDuration::milliseconds(session.orphan_grace_ms)
                 {
                     let orders = repo
@@ -947,37 +976,6 @@ async fn maybe_apply_trade_builder_pair_lock_runtime(
     }
 
     Ok(false)
-}
-
-async fn maybe_abort_trade_builder_pair_session_for_terminal_order(
-    repo: &PostgresRepository,
-    order: &TradeBuilderOrder,
-    reason: &str,
-) -> Result<()> {
-    let Some(pair_session_id) = order.pair_session_id else {
-        return Ok(());
-    };
-    if !trade_builder_pair_lock_is_candidate_order(order) {
-        return Ok(());
-    }
-    let Some(session) = repo.get_trade_builder_pair_session(pair_session_id).await? else {
-        return Ok(());
-    };
-    if session.status != TRADE_BUILDER_PAIR_STATUS_WORKING || session.lead_order_id.is_none() {
-        return Ok(());
-    }
-    let orders = repo
-        .list_trade_builder_orders_by_pair_session(pair_session_id)
-        .await?;
-    schedule_trade_builder_pair_session_unwind(
-        repo,
-        &session,
-        &orders,
-        TRADE_BUILDER_PAIR_STATUS_UNWINDING,
-        reason,
-        None,
-    )
-    .await
 }
 
 fn trade_builder_pair_lock_estimated_fee_qty(
@@ -1125,6 +1123,7 @@ async fn create_trade_builder_pair_unwind_order(
             false,
             0,
             None,
+            false,
             false,
             false,
             false,
@@ -1343,6 +1342,7 @@ async fn maybe_handle_trade_builder_pair_lock_buy_fill(
         Some(common_qty),
     )
     .await?;
+    maybe_cancel_trade_builder_pair_lock_stop_loss_after_locked(repo, &session, &orders).await?;
     if let Some(reference_order) = orders
         .iter()
         .find(|candidate| candidate.id == session.lead_order_id.unwrap_or_default())

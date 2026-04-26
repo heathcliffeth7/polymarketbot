@@ -5,6 +5,7 @@ struct TradeBuilderStagedSlBehaviorConfig {
 
 #[derive(Debug, Clone, Copy)]
 struct ActionPlaceOrderNotificationAndRetryFlags {
+    notify_on_order_submitted: bool,
     notify_on_fill: bool,
     notify_on_order_not_filled: bool,
     notify_on_trigger_guard_blocked: bool,
@@ -21,6 +22,8 @@ fn resolve_action_place_order_notification_and_retry_flags(
     node: &TradeFlowNode,
 ) -> ActionPlaceOrderNotificationAndRetryFlags {
     ActionPlaceOrderNotificationAndRetryFlags {
+        notify_on_order_submitted: node_config_bool(node, "notifyOnOrderSubmitted")
+            .unwrap_or(false),
         notify_on_fill: node_config_bool(node, "notifyOnOrderPlaced").unwrap_or(false),
         notify_on_order_not_filled: node_config_bool(node, "notifyOnOrderNotFilled")
             .unwrap_or(false),
@@ -93,6 +96,10 @@ fn append_action_place_order_notification_and_retry_payload(
     flags: &ActionPlaceOrderNotificationAndRetryFlags,
 ) {
     payload.insert("notify_on_fill".to_string(), json!(flags.notify_on_fill));
+    payload.insert(
+        "notify_on_order_submitted".to_string(),
+        json!(flags.notify_on_order_submitted),
+    );
     payload.insert(
         "notify_on_order_not_filled".to_string(),
         json!(flags.notify_on_order_not_filled),

@@ -29,4 +29,32 @@ impl PostgresRepository {
             })
             .collect())
     }
+
+    pub async fn has_trade_flow_run_builder_order_for_node_market_token(
+        &self,
+        run_id: i64,
+        node_key: &str,
+        market_slug: &str,
+        token_id: &str,
+    ) -> Result<bool> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+               SELECT 1
+               FROM trade_builder_orders
+               WHERE origin_flow_run_id = $1
+                 AND origin_flow_node_key = $2
+                 AND market_slug = $3
+                 AND token_id = $4
+               LIMIT 1
+             )",
+        )
+        .bind(run_id)
+        .bind(node_key)
+        .bind(market_slug)
+        .bind(token_id)
+        .fetch_one(self.pool())
+        .await?;
+
+        Ok(exists)
+    }
 }

@@ -19,7 +19,6 @@ async fn refresh_trade_flow_ws_fast_path_cache(
     let mut fast_path_cache =
         build_trade_flow_ws_fast_path_cache(repo, run_id, definitions, user_cfg_cache).await?;
     persist_trade_flow_ws_run_specs_contexts(repo, &mut fast_path_cache.run_specs).await?;
-
     let run_count = fast_path_cache.run_specs.len();
     let token_count = fast_path_cache.token_targets.len();
     {
@@ -42,7 +41,6 @@ async fn refresh_trade_flow_ws_fast_path_cache(
     );
     Ok(())
 }
-
 async fn refresh_trade_flow_ws_fast_path_for_boundary(
     repo: &PostgresRepository,
     run_id: i64,
@@ -679,7 +677,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
         let mut ptb_gate_output = Value::Null;
 
         if matches!(gate_mode, Some(TriggerMarketPriceGateMode::PtbOnly)) {
-            if let Some(ptb_gate) = evaluate_trigger_market_price_ptb_gate_for_spec(&node_spec) {
+            if let Some(ptb_gate) = evaluate_trigger_market_price_ptb_gate_for_spec(&node_spec, price_best_bid, price_best_ask) {
                 ptb_gate_output = ptb_gate.to_value();
                 should_enqueue = ptb_gate.passed;
                 final_eval_mode = "ptb_only";
@@ -851,7 +849,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
         if should_enqueue
             && matches!(gate_mode, Some(TriggerMarketPriceGateMode::StandardAndPtb))
         {
-            if let Some(ptb_gate) = evaluate_trigger_market_price_ptb_gate_for_spec(&node_spec) {
+            if let Some(ptb_gate) = evaluate_trigger_market_price_ptb_gate_for_spec(&node_spec, price_best_bid, price_best_ask) {
                 ptb_gate_output = ptb_gate.to_value();
                 if !ptb_gate.passed {
                     should_enqueue = false;
@@ -1024,7 +1022,6 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
     }
     Ok(touched)
 }
-
 async fn build_trade_flow_ws_fast_path_cache(
     repo: &PostgresRepository,
     run_id: i64,
@@ -1032,6 +1029,7 @@ async fn build_trade_flow_ws_fast_path_cache(
     user_cfg_cache: &mut HashMap<i64, AppConfig>,
 ) -> Result<TradeFlowWsFastPathCache> {
     crate::trade_flow::guards::chainlink_price::ensure_chainlink_price_stream_started();
+    crate::trade_flow::guards::binance_price::ensure_binance_price_stream_started();
     let mut run_specs: Vec<WsOpenPositionPriceRunSpec> = Vec::new();
     let mut token_targets: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     let mut market_targets: HashMap<String, Vec<(usize, usize)>> = HashMap::new();

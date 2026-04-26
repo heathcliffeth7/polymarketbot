@@ -61,8 +61,10 @@ async fn shared_guard_evaluation_sets_relax_tracking_on_first_market() {
         &mut context,
         &node,
         1,
+        None,
         BTC_MARKET_5M,
         "Up",
+        None,
     )
     .await
     .expect("shared evaluation");
@@ -114,7 +116,14 @@ async fn shared_guard_evaluation_relaxes_after_tracked_fill_less_markets() {
         .start_time()
         .expect("current start");
     let mut snapshots = std::collections::HashMap::new();
-    for (offset, gap) in [(1, 1.25), (2, 1.05), (3, 1.30), (4, 1.10), (5, 1.40), (6, 1.35)] {
+    for (offset, gap) in [
+        (1, 1.25),
+        (2, 1.05),
+        (3, 1.30),
+        (4, 1.10),
+        (5, 1.40),
+        (6, 1.35),
+    ] {
         let market_start = current_start - crate::ChronoDuration::milliseconds(300_000 * offset);
         let market_slug = format!("eth-updown-5m-{}", market_start.timestamp());
         snapshots.insert(
@@ -139,8 +148,10 @@ async fn shared_guard_evaluation_relaxes_after_tracked_fill_less_markets() {
         &mut context,
         &node,
         1,
+        None,
         current_market_slug,
         "Up",
+        None,
     )
     .await
     .expect("shared evaluation");
@@ -171,11 +182,9 @@ async fn shared_guard_evaluation_relaxes_after_tracked_fill_less_markets() {
             .and_then(Value::as_bool),
         Some(false)
     );
-    assert!(
-        context
-            .pointer("/nodeState/action_1/ptb_current_effective_threshold_usd")
-            .is_none()
-    );
+    assert!(context
+        .pointer("/nodeState/action_1/ptb_current_effective_threshold_usd")
+        .is_none());
 }
 
 #[tokio::test]
@@ -193,8 +202,10 @@ async fn shared_guard_evaluation_skips_relax_preview_for_non_gap_reason() {
         &mut context,
         &node,
         1,
+        None,
         "unsupported-market",
         "Up",
+        None,
     )
     .await
     .expect("shared evaluation");
@@ -251,16 +262,16 @@ async fn shared_guard_evaluation_preview_persists_relaxed_effective_threshold() 
         "priceToBeatMaxPriceRelaxMinUnit": "cent"
     }));
     let mut context = json!({
-        "nodeState": {
-                "action_1": {
-                    "ptb_max_price_relax_tracking_start_market_slug": "eth-updown-5m-1774116100",
-                    "ptb_stop_loss_bump_count": 12,
-                    "ptb_stop_loss_bump_accumulated_usd": 3.0,
-                    "ptb_stop_loss_bump_last_increment_usd": 0.25,
-                    "ptb_stop_loss_bump_last_market_slug": "eth-updown-5m-1774117600"
-                }
+    "nodeState": {
+            "action_1": {
+                "ptb_max_price_relax_tracking_start_market_slug": "eth-updown-5m-1774116100",
+                "ptb_stop_loss_bump_count": 12,
+                "ptb_stop_loss_bump_accumulated_usd": 3.0,
+                "ptb_stop_loss_bump_last_increment_usd": 0.25,
+                "ptb_stop_loss_bump_last_market_slug": "eth-updown-5m-1774117600"
             }
-        });
+        }
+    });
     let current_start = crate::MarketCycleId(current_market_slug.to_string())
         .start_time()
         .expect("current start");
@@ -282,8 +293,10 @@ async fn shared_guard_evaluation_preview_persists_relaxed_effective_threshold() 
         &mut context,
         &node,
         1,
+        None,
         current_market_slug,
         "Up",
+        None,
     )
     .await
     .expect("shared evaluation");

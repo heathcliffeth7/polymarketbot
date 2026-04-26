@@ -59,6 +59,8 @@ test('validateActionPlaceOrderConfig accepts valid pair_lock config', () => {
           priceToBeatMaxDiffUnit: 'usd',
           pairMaxTotalCent: 90,
           pairOrphanGraceMs: 1500,
+          pairProtectiveUnwindEnabled: false,
+          pairIgnoreStopLossAfterLocked: true,
           pairSizingMode: 'manual',
           counterLegEnabled: true,
           counterLegSizeUsdc: 5,
@@ -77,6 +79,81 @@ test('validateActionPlaceOrderConfig accepts valid pair_lock config', () => {
   });
 
   const issues = collectActionIssues(graph, 'pair_buy');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig accepts edge_pairlock_v1 share qty config', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_pair_edge'),
+      {
+        key: 'pair_buy_edge',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          pairLockStrategy: 'edge_pairlock_v1',
+          side: 'buy',
+          executionMode: 'limit',
+          sizeMode: 'usdc',
+          sizeUsdc: 5,
+          priceToBeatGuardEnabled: true,
+          priceToBeatMode: 'iv_mismatch_edge',
+          pairMaxTotalCent: 95,
+          pairLockDecisionQty: 5,
+          pairLockSingleEdgeThreshold: 0.10,
+          pairLockCostBuffer: 0.005,
+          counterLegEnabled: true,
+          counterLegOutcomeLabel: 'opposite',
+        },
+      },
+    ],
+    edges: [{ key: 'edge_pair_edge', source: 'trigger_pair_edge', target: 'pair_buy_edge', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_edge');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig accepts pair_lock primary PTB bump loss table config', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_pair_bump_loss_table'),
+      {
+        key: 'pair_buy_bump_loss_table',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          side: 'buy',
+          executionMode: 'limit',
+          sizeMode: 'usdc',
+          sizeUsdc: 5,
+          pairMaxTotalCent: 90,
+          pairSizingMode: 'manual',
+          counterLegEnabled: true,
+          counterLegSizeUsdc: 5,
+          counterLegOutcomeLabel: 'opposite',
+          priceToBeatGuardEnabled: true,
+          priceToBeatMode: 'auto_vol_pct',
+          priceToBeatStopLossBumpEnabled: true,
+          priceToBeatStopLossBumpMode: 'loss_table',
+          priceToBeatStopLossBumpUnit: 'cent',
+          priceToBeatStopLossBumpLossRules: [
+            { lossUsd: 1, bumpValue: 25 },
+            { lossUsd: 2, bumpValue: 50 },
+          ],
+        },
+      },
+    ],
+    edges: [{ key: 'edge_pair_bump_loss_table', source: 'trigger_pair_bump_loss_table', target: 'pair_buy_bump_loss_table', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_bump_loss_table');
   assert.equal(issues.length, 0);
 });
 
@@ -112,7 +189,7 @@ test('validateActionPlaceOrderConfig accepts auto_remaining_budget pair_lock con
   assert.equal(issues.length, 0);
 });
 
-test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard/PTB stop-loss fields', () => {
+test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard, staged, and PTB stop-loss fields', () => {
   const graph = normalizeTradeFlowGraph({
     context: {},
     nodes: [
@@ -137,6 +214,10 @@ test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard/PTB stop-lo
           slEnabled: true,
           slPriceCent: 45,
           slTriggerPriceMode: 'composite_safe',
+          slRules: [
+            { priceCent: 45, sizePct: 60 },
+            { priceCent: 40, sizePct: 40 },
+          ],
           ptbStopLossEnabled: true,
           ptbStopLossGapUsd: 0,
           ptbStopLossGapUnit: 'usd',
@@ -687,7 +768,7 @@ test('validateActionPlaceOrderConfig still rejects non-zero reentry knobs in pai
   );
 });
 
-test('validateActionPlaceOrderConfig rejects staged and advanced stop-loss extensions in pair_lock mode', () => {
+test('validateActionPlaceOrderConfig rejects counter staged and advanced stop-loss extensions in pair_lock mode', () => {
   const graph = normalizeTradeFlowGraph({
     context: {},
     nodes: [
@@ -713,7 +794,7 @@ test('validateActionPlaceOrderConfig rejects staged and advanced stop-loss exten
           reenterOnSlHit: true,
           reentryMaxAttempts: 2,
           reentryCooldownSec: 15,
-          slRules: [{ priceCent: 40, sizePct: 100 }],
+          counterLegSlRules: [{ priceCent: 40, sizePct: 100 }],
           reentryMinPriceCent: 35,
         },
       },

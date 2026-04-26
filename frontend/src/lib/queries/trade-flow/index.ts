@@ -26,6 +26,11 @@ export {
   getRecentTradeFlowEvents,
 } from './definitions';
 export {
+  buildAutoScopeNoOrderSignalsCsv,
+  getAutoScopeNoOrderSignalsForExport,
+  getAutoScopeNoOrderSignalsForRun,
+} from './auto-scope-analysis-extras';
+export {
   buildAutoScopeTradeAnalysisCsv,
   getAutoScopeTradeAnalysis,
   getAutoScopeTradeDiagnostic,

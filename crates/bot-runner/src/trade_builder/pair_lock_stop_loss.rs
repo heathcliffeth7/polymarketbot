@@ -4,6 +4,7 @@ fn trade_builder_pair_lock_stop_loss_surface_active_from_session(
 ) -> bool {
     match session.status.as_str() {
         TRADE_BUILDER_PAIR_STATUS_WORKING => session.lead_order_id == Some(order_id),
+        TRADE_BUILDER_PAIR_STATUS_LOCKED if session.ignore_stop_loss_after_locked => false,
         TRADE_BUILDER_PAIR_STATUS_LOCKED => {
             session.primary_order_id == Some(order_id) || session.counter_order_id == Some(order_id)
         }
@@ -30,6 +31,31 @@ async fn trade_builder_pair_lock_stop_loss_surface_active(
     Ok(trade_builder_pair_lock_stop_loss_surface_active_from_session(
         &session, order.id,
     ))
+}
+
+async fn maybe_cancel_trade_builder_pair_lock_stop_loss_after_locked(
+    repo: &PostgresRepository,
+    session: &TradeBuilderPairSession,
+    orders: &[TradeBuilderOrder],
+) -> Result<()> {
+    if !session.ignore_stop_loss_after_locked {
+        return Ok(());
+    }
+    let canceled_stop_loss_child_ids =
+        cancel_trade_builder_pair_lock_stop_loss_children(repo, orders, "pair_locked_stop_loss_ignored")
+            .await?;
+    append_trade_builder_pair_lock_event(
+        repo,
+        session,
+        "pair_lock_locked_stop_loss_ignored",
+        json!({
+            "pair_session_id": session.id,
+            "reason": "pair_locked_stop_loss_ignored",
+            "canceled_stop_loss_child_ids": canceled_stop_loss_child_ids,
+        }),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn cancel_trade_builder_pair_lock_stop_loss_children(
@@ -263,6 +289,19 @@ async fn maybe_finalize_trade_builder_pair_lock_after_locked_leg_stop_loss_fill(
     if session.status != TRADE_BUILDER_PAIR_STATUS_LOCKED {
         return Ok(());
     }
+    if session.ignore_stop_loss_after_locked {
+        repo.append_trade_builder_order_event(
+            parent_order.id,
+            "pair_lock_locked_leg_stop_loss_ignored",
+            &json!({
+                "pair_session_id": session.id,
+                "sl_child_order_id": stop_loss_order.id,
+                "reason": "pair_locked_stop_loss_ignored",
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
 
     let orders = repo
         .list_trade_builder_orders_by_pair_session(pair_session_id)
@@ -334,6 +373,7 @@ mod pair_lock_stop_loss_tests {
             min_net_profit_usdc: 0.0,
             profit_safety_buffer_usdc: 0.0,
             orphan_grace_ms: 1500,
+            ignore_stop_loss_after_locked: false,
             notify_on_pair_locked: false,
             notify_on_pair_unwind: false,
             notify_on_pair_no_edge: false,
@@ -369,6 +409,14 @@ mod pair_lock_stop_loss_tests {
             &locked_session, 12
         ));
         assert!(trade_builder_pair_lock_stop_loss_surface_active_from_session(
+            &locked_session, 11
+        ));
+
+        locked_session.ignore_stop_loss_after_locked = true;
+        assert!(!trade_builder_pair_lock_stop_loss_surface_active_from_session(
+            &locked_session, 12
+        ));
+        assert!(!trade_builder_pair_lock_stop_loss_surface_active_from_session(
             &locked_session, 11
         ));
 

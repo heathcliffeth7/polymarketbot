@@ -526,6 +526,7 @@ async fn create_trade_builder_price_exit_child_order(
             false,
             0,
             None,
+            false,
             notify_on_hit,
             false,
             false,
@@ -658,6 +659,7 @@ async fn create_trade_builder_ptb_stop_loss_child_order(
             false,
             0,
             None,
+            false,
             parent_order.notify_on_sl_hit,
             false,
             false,
@@ -939,35 +941,70 @@ async fn finalize_builder_fill(
     } else {
         "armed"
     };
+    let flow_created_payload = load_trade_builder_latest_flow_payload(repo, order.id).await?;
+    let submitted_payload = load_trade_builder_latest_submitted_payload(repo, order.id).await?;
+    let fill_execution_analysis = resolve_trade_builder_fill_execution_analysis(
+        repo,
+        exchange_order_id,
+        execution_price,
+        actual_fill_qty.unwrap_or(canonical_entry_qty),
+    )
+    .await;
+    let fill_execution_payload = build_trade_builder_fill_execution_payload(
+        order,
+        &fill_execution_analysis,
+        flow_created_payload.as_ref(),
+        submitted_payload.as_ref(),
+    );
+    let mut filled_payload = json!({
+        "exchange_order_id": exchange_order_id,
+        "canonical_entry_qty": canonical_entry_qty,
+        "canonical_entry_qty_source": canonical_entry_qty_source,
+        "actual_fill_qty": actual_fill_qty,
+        "actual_fill_qty_source": actual_fill_qty_source,
+        "execution_price": execution_price,
+        "triggers_fired": next_trigger_count,
+        "max_triggers": order.max_triggers,
+        "next_status": next_status
+    });
+    if let (Some(target), Some(extra)) = (
+        filled_payload.as_object_mut(),
+        fill_execution_payload.as_object(),
+    ) {
+        for (key, value) in extra {
+            target.insert(key.clone(), value.clone());
+        }
+    }
 
     repo.clear_trade_builder_active_exchange_order(order.id, next_status)
         .await?;
-    repo.append_trade_builder_order_event(
-        order.id,
-        "filled",
-        &json!({
-            "exchange_order_id": exchange_order_id,
-            "canonical_entry_qty": canonical_entry_qty,
-            "canonical_entry_qty_source": canonical_entry_qty_source,
-            "actual_fill_qty": actual_fill_qty,
-            "actual_fill_qty_source": actual_fill_qty_source,
-            "execution_price": execution_price,
-            "triggers_fired": next_trigger_count,
-            "max_triggers": order.max_triggers,
-            "next_status": next_status
-        }),
-    )
-    .await?;
+    repo.append_trade_builder_order_event(order.id, "filled", &filled_payload)
+        .await?;
 
-    if let Some((notification_type, message)) =
-        build_trade_builder_fill_notification(order, execution_price, canonical_entry_qty)
-    {
+    if let Some((notification_type, message)) = build_trade_builder_fill_notification(
+        order,
+        execution_price,
+        canonical_entry_qty,
+        flow_created_payload.as_ref(),
+        submitted_payload.as_ref(),
+        Some(&fill_execution_analysis),
+    ) {
         send_trade_builder_notification(repo, order, notification_type, &message).await;
     }
 
-    let flow_created_payload = repo
-        .load_trade_builder_order_flow_created_payload(order.id)
-        .await?;
+    if let Err(err) = maybe_record_action_place_order_buy_fill_lock_fill(
+        repo,
+        order,
+        flow_created_payload.as_ref(),
+    )
+    .await
+    {
+        warn!(
+            builder_order_id = order.id,
+            error = %err,
+            "TRADE_BUILDER_BUY_FILL_LOCK_RECORD_FAILED"
+        );
+    }
     let is_window_end_auto_sell = flow_created_payload
         .as_ref()
         .and_then(|payload| payload.get("internal_mode"))
@@ -997,11 +1034,12 @@ async fn finalize_builder_fill(
         None
     };
     if let Some(parent_order) = parent_order.as_ref() {
+        let mut updated_parent_position = None;
         let applied_fill_qty = trade_builder_is_child_exit_sell(order)
             .then_some(persisted_fill_qty.or(Some(canonical_entry_qty)))
             .flatten();
         if trade_builder_is_child_exit_sell(order) {
-            let _ = apply_trade_builder_parent_position_child_fill(
+            updated_parent_position = apply_trade_builder_parent_position_child_fill(
                 repo,
                 parent_order,
                 applied_fill_qty,
@@ -1050,12 +1088,28 @@ async fn finalize_builder_fill(
                     "TRADE_BUILDER_REENTRY_SCHEDULE_FAILED"
                 );
             }
-            if let Err(err) = maybe_finalize_trade_builder_pair_lock_after_locked_leg_stop_loss_fill(
+            if let Err(err) = maybe_release_action_place_order_buy_fill_lock_on_stop_loss(
                 repo,
                 parent_order,
                 order,
+                updated_parent_position.as_ref(),
             )
             .await
+            {
+                warn!(
+                    builder_order_id = order.id,
+                    parent_builder_order_id = parent_order.id,
+                    error = %err,
+                    "TRADE_BUILDER_BUY_FILL_LOCK_RELEASE_FAILED"
+                );
+            }
+            if let Err(err) =
+                maybe_finalize_trade_builder_pair_lock_after_locked_leg_stop_loss_fill(
+                    repo,
+                    parent_order,
+                    order,
+                )
+                .await
             {
                 warn!(
                     builder_order_id = order.id,

@@ -1,4 +1,5 @@
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
+import { isPtbMode, normalizePtbMode, type PtbMode } from '@/lib/trade-flow-config-mappers/ptb-modes';
 import {
   countValidMarketPriceOutcomeConditions,
   hasProvidedValue,
@@ -10,6 +11,7 @@ import {
   toTrimmedString,
 } from './shared';
 import { pushNodeError } from './validation-core';
+import { validateTriggerMarketPriceEntryTimingProfiles } from './validation-trigger-market-price-entry-timing';
 
 function directOutgoingNodes(nodeKey: string, graph: TradeFlowGraph): TradeFlowNode[] {
   const nodeMap = new Map(graph.nodes.map((candidate) => [candidate.key, candidate]));
@@ -164,6 +166,7 @@ export function validateTriggerMarketPriceNodeConfig(
 
   const repeatMode = toTrimmedString(config.repeatMode).toLowerCase();
   const priceToBeatTriggerEnabled = toBooleanish(config.priceToBeatTriggerEnabled);
+  let normalizedPtbMode: PtbMode | null = null;
   if (config.priceToBeatTriggerEnabled != null && priceToBeatTriggerEnabled == null) {
     pushNodeError(
       issues,
@@ -186,19 +189,16 @@ export function validateTriggerMarketPriceNodeConfig(
       ? RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME[ptbMarketScope] || null
       : null;
     const ptbMode = toTrimmedString(config.priceToBeatMode).toLowerCase();
-    const normalizedPtbMode =
-      !ptbMode ||
-      ptbMode === 'manual' ||
-      ptbMode === 'auto_last_3_avg_excursion' ||
-      ptbMode === 'auto_vol_pct'
-        ? ptbMode || 'manual'
+    normalizedPtbMode =
+      !ptbMode || isPtbMode(ptbMode)
+        ? normalizePtbMode(ptbMode)
         : null;
     if (normalizedPtbMode == null) {
       pushNodeError(
         issues,
         node,
         'invalid_price_to_beat_mode',
-        'trigger.market_price priceToBeatMode must be manual, auto_last_3_avg_excursion, or auto_vol_pct.'
+        'trigger.market_price priceToBeatMode must be manual, auto_last_3_avg_excursion, auto_vol_pct, signal_formula, or iv_mismatch_edge.'
       );
     }
     if (normalizedPtbMode === 'auto_vol_pct' && ptbMarketScopeResolved?.asset === 'xrp') {
@@ -241,6 +241,13 @@ export function validateTriggerMarketPriceNodeConfig(
       }
     }
   }
+
+  validateTriggerMarketPriceEntryTimingProfiles(issues, node, config, {
+    autoScope,
+    repeatMode,
+    priceToBeatTriggerEnabled: priceToBeatTriggerEnabled === true,
+    normalizedPtbMode,
+  });
 
   if (Array.isArray(config.outcomeConditions) && !pairLockOnly) {
     for (const item of config.outcomeConditions) {

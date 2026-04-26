@@ -26,6 +26,7 @@ import type {
   AutoScopeTradeAnalysisSortBy,
   AutoScopeTradeAnalysisSortDirection,
   AutoScopeTradeAnalysisSummary,
+  AutoScopeTradeAnalysisTimeRange,
 } from '@/lib/types';
 
 const PAGE_SIZE = 50;
@@ -170,6 +171,7 @@ export function AutoScopeAnalysisTable() {
   const [pnlFilter, setPnlFilter] = useState<AutoScopeTradeAnalysisPnlFilter>('all');
   const [positionFilter, setPositionFilter] =
     useState<AutoScopeTradeAnalysisPositionFilter>('all');
+  const [timeRange, setTimeRange] = useState<AutoScopeTradeAnalysisTimeRange>('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [selectedRootOrderId, setSelectedRootOrderId] = useState<number | null>(null);
@@ -178,8 +180,9 @@ export function AutoScopeAnalysisTable() {
     sortOption === 'default' ? 'default' : 'pnl';
   const sortDirection: AutoScopeTradeAnalysisSortDirection =
     sortOption === 'pnl_asc' ? 'asc' : 'desc';
-  const from = dateStartIso(fromDate);
-  const to = dateEndIso(toDate);
+  const isCustomTimeRange = timeRange === 'custom';
+  const from = isCustomTimeRange ? dateStartIso(fromDate) : undefined;
+  const to = isCustomTimeRange ? dateEndIso(toDate) : undefined;
 
   const { data, error, isLoading } = useTradeFlowAutoScopeAnalysis({
     page,
@@ -188,6 +191,7 @@ export function AutoScopeAnalysisTable() {
     sortDirection,
     pnl: pnlFilter,
     position: positionFilter,
+    timeRange,
     from,
     to,
   });
@@ -206,6 +210,7 @@ export function AutoScopeAnalysisTable() {
     sortDirection,
     pnl: pnlFilter,
     position: positionFilter,
+    timeRange,
     from,
     to,
   });
@@ -214,9 +219,26 @@ export function AutoScopeAnalysisTable() {
     setPage(1);
   }
 
+  function handleTimeRangeChange(nextTimeRange: AutoScopeTradeAnalysisTimeRange) {
+    setTimeRange(nextTimeRange);
+    if (nextTimeRange !== 'custom') {
+      setFromDate('');
+      setToDate('');
+    }
+    resetPage();
+  }
+
   function exportCsv() {
     const a = document.createElement('a');
     a.href = `/api/trade-flow/analytics/auto-scope/export?${exportQuery}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  function exportNoOrderCsv() {
+    const a = document.createElement('a');
+    a.href = `/api/trade-flow/analytics/auto-scope/no-order/export?${exportQuery}`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -249,12 +271,39 @@ export function AutoScopeAnalysisTable() {
               <Download className="size-4" />
               CSV
             </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-zinc-700 text-zinc-200"
+              onClick={exportNoOrderCsv}
+            >
+              <Download className="size-4" />
+              No-Order CSV
+            </Button>
           </div>
         </div>
 
         <AutoScopeSummaryCards summary={summary} pagePnl={pagePnl} />
 
-        <div className="grid gap-2 md:grid-cols-5">
+        <div className="grid gap-2 md:grid-cols-6">
+          <label className="space-y-1 text-xs text-zinc-400">
+            <span>Zaman</span>
+            <select
+              value={timeRange}
+              onChange={(event) =>
+                handleTimeRangeChange(event.target.value as AutoScopeTradeAnalysisTimeRange)
+              }
+              className={filterSelectClassName()}
+            >
+              <option value="all">Tum zamanlar</option>
+              <option value="3h">Son 3 saat</option>
+              <option value="6h">Son 6 saat</option>
+              <option value="12h">Son 12 saat</option>
+              <option value="24h">Son 24 saat</option>
+              <option value="custom">Ozel tarih</option>
+            </select>
+          </label>
           <label className="space-y-1 text-xs text-zinc-400">
             <span>PnL</span>
             <select
@@ -290,6 +339,7 @@ export function AutoScopeAnalysisTable() {
             <Input
               type="date"
               value={fromDate}
+              disabled={!isCustomTimeRange}
               onChange={(event) => {
                 setFromDate(event.target.value);
                 resetPage();
@@ -302,6 +352,7 @@ export function AutoScopeAnalysisTable() {
             <Input
               type="date"
               value={toDate}
+              disabled={!isCustomTimeRange}
               onChange={(event) => {
                 setToDate(event.target.value);
                 resetPage();

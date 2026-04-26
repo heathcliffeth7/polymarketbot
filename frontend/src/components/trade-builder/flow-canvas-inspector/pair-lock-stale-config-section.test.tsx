@@ -16,6 +16,7 @@ function baseForm(): NodeConfigFormState {
     counterLegTpRuleRows: [],
     slRuleRows: [],
     ptbStopLossRuleRows: [],
+    ptbStopLossBumpLossRuleRows: [],
     timeExitRuleRows: [],
     expressionRows: [],
     expressionJoin: 'and',
@@ -63,6 +64,7 @@ test('PairLockStaleConfigSection ignores supported pair-lock stop-loss fields', 
   const form = baseForm();
   form.fields.slEnabled = 'true';
   form.fields.slPriceCent = '45';
+  form.slRuleRows = [{ id: 'sl-1', priceCent: '45', sizePct: '100' }];
   form.fields.ptbStopLossEnabled = 'true';
   form.fields.ptbStopLossGapUsd = '0';
   form.fields.ptbStopLossGapUnit = 'cent';

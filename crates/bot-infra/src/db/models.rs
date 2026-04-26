@@ -85,6 +85,43 @@ pub struct TradeBuilderMarketSecondSnapshot {
 }
 
 #[derive(Debug, Clone)]
+pub struct TradeBuilderMarketTradeTickInput {
+    pub market_slug: String,
+    pub asset: String,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    pub token_id: String,
+    pub outcome_side: String,
+    pub event_ts: DateTime<Utc>,
+    pub price: f64,
+    pub size: f64,
+    pub notional_usdc: f64,
+    pub side: Option<String>,
+    pub dedupe_key: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketTradeHourlyVolumeMedian {
+    pub hour_utc: i32,
+    pub median_volume_usdc: f64,
+    pub sample_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketTradeVolumeMedian {
+    pub median_volume_usdc: f64,
+    pub sample_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarketTradeVolumeSummary {
+    pub volume_10s: f64,
+    pub volume_30s: f64,
+    pub volume_60s: f64,
+    pub trade_count_60s: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct TradeBuilderOrder {
     pub id: i64,
     pub trade_id: i64,
@@ -156,6 +193,7 @@ pub struct TradeBuilderOrder {
     pub reenter_on_sl_hit: bool,
     pub reentry_max_attempts: i32,
     pub reentry_trigger_node_key: Option<String>,
+    pub notify_on_order_submitted: bool,
     pub notify_on_fill: bool,
     pub notify_on_order_not_filled: bool,
     pub notify_on_trigger_guard_blocked: bool,
@@ -182,6 +220,7 @@ pub struct TradeBuilderPairSession {
     pub min_net_profit_usdc: f64,
     pub profit_safety_buffer_usdc: f64,
     pub orphan_grace_ms: i64,
+    pub ignore_stop_loss_after_locked: bool,
     pub notify_on_pair_locked: bool,
     pub notify_on_pair_unwind: bool,
     pub notify_on_pair_no_edge: bool,

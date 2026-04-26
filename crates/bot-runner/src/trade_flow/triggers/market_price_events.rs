@@ -818,6 +818,7 @@ fn apply_trigger_market_price_context_updates(
     cycle_window_secs: Option<i64>,
     cycle_window_open_at: Option<DateTime<Utc>>,
     cycle_window_end_at: Option<DateTime<Utc>>,
+    selected_entry_timing_profile: Option<&TriggerMarketEntryTimingProfileSelection>,
     pass: bool,
 ) {
     if let Some(price) = current_price {
@@ -903,6 +904,7 @@ fn apply_trigger_market_price_context_updates(
                 .map(|value| json!(value.to_rfc3339()))
                 .unwrap_or(Value::Null),
         );
+        apply_trigger_market_entry_timing_context(context, selected_entry_timing_profile);
     }
 }
 
@@ -1032,6 +1034,7 @@ fn build_trigger_market_price_output(
     if !price_to_beat_trigger_gate.is_null() {
         append_trigger_market_price_ptb_gate(&mut output, price_to_beat_trigger_gate);
     }
+    append_trigger_market_entry_timing_output_fields(&mut output, context);
     output
 }
 

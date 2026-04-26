@@ -116,9 +116,10 @@ pub(crate) fn resolve_action_place_order_price_to_beat_guard_resolution(
             })?;
             (Some(threshold_value), threshold_unit)
         }
-        PriceToBeatMode::AutoLast3AvgExcursion | PriceToBeatMode::AutoVolPct => {
-            (None, PriceToBeatDiffUnit::Usd)
-        }
+        PriceToBeatMode::AutoLast3AvgExcursion
+        | PriceToBeatMode::AutoVolPct
+        | PriceToBeatMode::SignalFormula
+        | PriceToBeatMode::IvMismatchEdge => (None, PriceToBeatDiffUnit::Usd),
     };
 
     let (effective_mode, base_threshold_value, threshold_unit, reentry_override_active) =
@@ -234,7 +235,9 @@ pub(crate) fn resolve_action_place_order_price_to_beat_guard_resolution(
         current_effective_ptb_usd: effective_threshold_usd,
         stop_loss_bump_count: stop_loss_bump_state.count,
         stop_loss_bump_applied_count: stop_loss_bump_state.count,
-        stop_loss_bump_amount: stop_loss_bump_config.as_ref().map(|config| config.amount),
+        stop_loss_bump_amount: stop_loss_bump_config
+            .as_ref()
+            .and_then(|config| config.amount),
         stop_loss_bump_max_value: stop_loss_bump_config
             .as_ref()
             .and_then(|config| config.max_value),

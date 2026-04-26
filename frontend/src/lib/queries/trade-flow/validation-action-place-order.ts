@@ -1,4 +1,5 @@
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
+import { isPtbMode, normalizePtbMode, type PtbMode } from '@/lib/trade-flow-config-mappers/ptb-modes';
 import {
   findUniqueUpstreamMarketPriceTrigger,
   hasUpstreamAutoScopeMarketTrigger,
@@ -17,8 +18,10 @@ import {
   toTrimmedString,
 } from './shared';
 import { validateActionPlaceOrderExecutionFloorConfig } from './validation-action-place-order-execution-floor';
+import { validateActionPlaceOrderBuyFillLockConfig } from './validation-action-place-order-buy-fill-lock';
 import { validateActionPlaceOrderPairLockConfig } from './validation-action-place-order-pair';
 import { validateActionPlaceOrderPtbStopLossBumpConfig } from './validation-action-place-order-ptb-bump';
+import { validateActionPlaceOrderPtbIvTimeRulesConfig } from './validation-action-place-order-ptb-iv-time-rules';
 import { parsePtbStopLossRules, validateActionPlaceOrderPtbStopLossConfig } from './validation-action-place-order-ptb-stop-loss';
 import { validateActionPlaceOrderPtbV2Config } from './validation-action-place-order-ptb-v2';
 import { pushNodeError } from './validation-core';
@@ -258,12 +261,12 @@ export function validateActionPlaceOrderConfig(
   }
 
   const sizeModeRaw = String(config.sizeMode ?? '').trim().toLowerCase();
-  if (sizeModeRaw && sizeModeRaw !== 'usdc' && sizeModeRaw !== 'pct') {
+  if (sizeModeRaw && sizeModeRaw !== 'usdc' && sizeModeRaw !== 'pct' && sizeModeRaw !== 'shares') {
     pushNodeError(
       issues,
       node,
       'invalid_size_mode',
-      'action.place_order sizeMode must be usdc or pct.'
+      'action.place_order sizeMode must be usdc, pct, or shares.'
     );
   }
 
@@ -327,8 +330,10 @@ export function validateActionPlaceOrderConfig(
 
   const sizeUsdc = toFiniteNumber(config.sizeUsdc ?? config.targetNotionalUsdc);
   const sizePct = toFiniteNumber(config.sizePct ?? config.sizePercent);
+  const targetQty = toFiniteNumber(config.targetQty ?? config.target_qty);
   const hasTriggerSizes = triggerSizes.length > 0;
   const usesPctSizing = sizeModeRaw === 'pct' || (!hasTriggerSizes && sizeUsdc == null && sizePct != null);
+  const usesShareSizing = sizeModeRaw === 'shares' || (!hasTriggerSizes && sizeUsdc == null && targetQty != null);
   if (!hasTriggerSizes) {
     if (usesPctSizing) {
       if (sizePct == null || sizePct <= 0 || sizePct > 100) {
@@ -337,6 +342,15 @@ export function validateActionPlaceOrderConfig(
           node,
           'invalid_size_pct',
           'action.place_order sizePct must be in (0, 100].'
+        );
+      }
+    } else if (usesShareSizing) {
+      if (targetQty == null || targetQty <= 0) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_target_qty',
+          'action.place_order targetQty must be > 0 when sizeMode is shares.'
         );
       }
     } else if (sizeUsdc == null || sizeUsdc <= 0) {
@@ -911,11 +925,12 @@ export function validateActionPlaceOrderConfig(
     );
   }
 
+  validateActionPlaceOrderBuyFillLockConfig(issues, node, config, side);
+
   validateActionPlaceOrderExecutionFloorConfig(issues, node, graph, side, config);
 
   const priceToBeatGuardEnabled = toBooleanish(config.priceToBeatGuardEnabled);
-  let normalizedPriceToBeatMode: 'manual' | 'auto_last_3_avg_excursion' | 'auto_vol_pct' | null =
-    null;
+  let normalizedPriceToBeatMode: PtbMode | null = null;
   if (config.priceToBeatGuardEnabled != null && priceToBeatGuardEnabled == null) {
     pushNodeError(
       issues,
@@ -932,16 +947,10 @@ export function validateActionPlaceOrderConfig(
       'action.place_order priceToBeatGuardEnabled is only valid for side=buy.'
     );
   }
-  if (priceToBeatGuardEnabled === true) {
+	  if (priceToBeatGuardEnabled === true) {
     const ptbMode = String(config.priceToBeatMode ?? '').trim().toLowerCase();
-    if (
-      !ptbMode ||
-      ptbMode === 'manual' ||
-      ptbMode === 'auto_last_3_avg_excursion' ||
-      ptbMode === 'auto_vol_pct'
-    ) {
-      normalizedPriceToBeatMode =
-        (ptbMode || 'manual') as 'manual' | 'auto_last_3_avg_excursion' | 'auto_vol_pct';
+    if (!ptbMode || isPtbMode(ptbMode)) {
+      normalizedPriceToBeatMode = normalizePtbMode(ptbMode);
     } else {
       normalizedPriceToBeatMode = null;
     }
@@ -950,7 +959,7 @@ export function validateActionPlaceOrderConfig(
         issues,
         node,
         'invalid_price_to_beat_mode',
-        'action.place_order priceToBeatMode must be manual, auto_last_3_avg_excursion, or auto_vol_pct.'
+        'action.place_order priceToBeatMode must be manual, auto_last_3_avg_excursion, auto_vol_pct, signal_formula, or iv_mismatch_edge.'
       );
     }
     const effectiveMarketSlug = String(config.marketSlug ?? graphMarketSlug).trim().toLowerCase();
@@ -1012,8 +1021,15 @@ export function validateActionPlaceOrderConfig(
         'missing_price_to_beat_market',
         'priceToBeatGuardEnabled requires a 5m/15m updown market slug or an upstream trigger.market_price/runtime market resolver.'
       );
-    }
-  }
+	    }
+	  }
+  validateActionPlaceOrderPtbIvTimeRulesConfig(
+    issues,
+    node,
+    config,
+    priceToBeatGuardEnabled,
+    normalizedPriceToBeatMode
+  );
   if (config.reentryPriceToBeatMaxDiff != null && priceToBeatGuardEnabled !== true) {
     pushNodeError(
       issues,
@@ -1084,6 +1100,15 @@ export function validateActionPlaceOrderConfig(
     ptbStopLossEnabled === true
   );
 
+  const notifyOnOrderSubmitted = toBooleanish(config.notifyOnOrderSubmitted);
+  if (config.notifyOnOrderSubmitted != null && notifyOnOrderSubmitted == null) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_notify_on_order_submitted',
+      'action.place_order notifyOnOrderSubmitted must be boolean (true/false).'
+    );
+  }
   const notifyOnOrderPlaced = toBooleanish(config.notifyOnOrderPlaced);
   if (config.notifyOnOrderPlaced != null && notifyOnOrderPlaced == null) {
     pushNodeError(

@@ -82,6 +82,7 @@ import { useCanvasKeyboard } from '../flow-canvas-keyboard';
 import { exportGraphAsJson, importGraphFromFile } from '../flow-import-export';
 import { applyInheritedPlaceOrderMaxPriceConfig, normalizePresetPlaceOrderConfig } from './helpers';
 import { FlowCanvasEditorLayout } from './layout';
+import { validateNodeFormBeforeSave } from './node-form-validation';
 import { useCanvasSelection } from './use-canvas-selection';
 import { useMarketOutcomes } from './use-market-outcomes';
 import { useSelectedNodeUpstream } from './use-selected-node-upstream';
@@ -636,6 +637,11 @@ export function FlowCanvasEditorBody({
       parsedConfig = adv;
     } else {
       if (!nodeForm) return;
+      const nodeFormError = validateNodeFormBeforeSave(nextType, nodeForm);
+      if (nodeFormError) {
+        onError(nodeFormError);
+        return;
+      }
       parsedConfig = buildNodeConfigFromForm(nextType, nodeForm);
     }
     applyInheritedPlaceOrderMaxPriceConfig(

@@ -1,6 +1,21 @@
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionPlaceOrderPtbStopLossBumpMode {
+    Fixed,
+    LossTable,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ActionPlaceOrderPtbStopLossBumpLossRule {
+    loss_usd: f64,
+    bump_value: f64,
+    bump_usd: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct ActionPlaceOrderPtbStopLossBumpConfig {
-    amount: f64,
+    mode: ActionPlaceOrderPtbStopLossBumpMode,
+    amount: Option<f64>,
+    loss_rules: Vec<ActionPlaceOrderPtbStopLossBumpLossRule>,
     unit: trade_flow::guards::price_to_beat::PriceToBeatDiffUnit,
     max_value: Option<f64>,
     decay_windows: Option<i64>,
@@ -60,6 +75,15 @@ pub(crate) struct ActionPlaceOrderPtbStopLossBumpCurrentPtbSnapshot {
     pub(crate) value: f64,
     pub(crate) unit: String,
     pub(crate) usd: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ActionPlaceOrderPtbStopLossBumpLossMetrics {
+    realized_loss_usd: f64,
+    sell_qty: f64,
+    sell_notional_usdc: f64,
+    sell_fee_usdc: f64,
+    cost_basis_per_share: f64,
 }
 
 const FLOW_NODE_STATE_PTB_SL_BUMP_MAX_NOTIFIED: &str = "ptb_stop_loss_bump_max_notified";
@@ -139,10 +163,15 @@ pub(crate) async fn resolve_action_place_order_ptb_stop_loss_bump_live_ptb_snaps
         resolution.threshold_value,
         resolution.threshold_unit,
         outcome_label,
+        None,
     )
     .await;
     resolution.apply_metadata(&mut evaluation);
-    if resolution.effective_mode != trade_flow::guards::price_to_beat::PriceToBeatMode::Manual {
+    if matches!(
+        resolution.effective_mode,
+        trade_flow::guards::price_to_beat::PriceToBeatMode::AutoLast3AvgExcursion
+            | trade_flow::guards::price_to_beat::PriceToBeatMode::AutoVolPct
+    ) {
         trade_flow::guards::price_to_beat::apply_price_to_beat_risk_penalty(
             &mut evaluation,
             resolution.stop_loss_bump_usd,
@@ -180,6 +209,117 @@ fn resolve_action_place_order_ptb_stop_loss_bump_unit(
         .unwrap_or(trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Cent))
 }
 
+fn resolve_action_place_order_ptb_stop_loss_bump_mode(
+    node: &TradeFlowNode,
+) -> Result<ActionPlaceOrderPtbStopLossBumpMode> {
+    match node_config_string(node, "priceToBeatStopLossBumpMode")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("loss_table") => Ok(ActionPlaceOrderPtbStopLossBumpMode::LossTable),
+        Some("") | Some("fixed") | None => Ok(ActionPlaceOrderPtbStopLossBumpMode::Fixed),
+        Some(other) => anyhow::bail!(
+            "action.place_order priceToBeatStopLossBumpMode must be fixed or loss_table, got: {other}"
+        ),
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct ActionPlaceOrderPtbStopLossBumpLossRuleConfig {
+    loss_usd: f64,
+    bump_value: f64,
+}
+
+fn parse_action_place_order_ptb_stop_loss_bump_loss_rules(
+    node: &TradeFlowNode,
+    unit: trade_flow::guards::price_to_beat::PriceToBeatDiffUnit,
+) -> Result<Vec<ActionPlaceOrderPtbStopLossBumpLossRule>> {
+    let Some(raw_value) = node.config.get("priceToBeatStopLossBumpLossRules") else {
+        return Ok(Vec::new());
+    };
+    let rules: Vec<ActionPlaceOrderPtbStopLossBumpLossRuleConfig> =
+        serde_json::from_value(raw_value.clone()).context(
+            "action.place_order priceToBeatStopLossBumpLossRules must be an array",
+        )?;
+    anyhow::ensure!(
+        rules.len() <= TRADE_BUILDER_EXIT_LADDER_MAX_RULES,
+        "action.place_order priceToBeatStopLossBumpLossRules supports at most {} rules",
+        TRADE_BUILDER_EXIT_LADDER_MAX_RULES
+    );
+
+    let mut parsed = Vec::with_capacity(rules.len());
+    let mut previous_loss_usd = None;
+    for (index, rule) in rules.into_iter().enumerate() {
+        anyhow::ensure!(
+            rule.loss_usd.is_finite() && rule.loss_usd > 0.0,
+            "action.place_order priceToBeatStopLossBumpLossRules[{index}].lossUsd must be > 0"
+        );
+        anyhow::ensure!(
+            rule.bump_value.is_finite() && rule.bump_value > 0.0,
+            "action.place_order priceToBeatStopLossBumpLossRules[{index}].bumpValue must be > 0"
+        );
+        if let Some(previous_loss_usd) = previous_loss_usd {
+            anyhow::ensure!(
+                rule.loss_usd > previous_loss_usd,
+                "action.place_order priceToBeatStopLossBumpLossRules lossUsd values must be strictly increasing"
+            );
+        }
+        previous_loss_usd = Some(rule.loss_usd);
+        parsed.push(ActionPlaceOrderPtbStopLossBumpLossRule {
+            loss_usd: rule.loss_usd,
+            bump_value: rule.bump_value,
+            bump_usd: trade_flow::guards::price_to_beat::normalize_price_to_beat_threshold_usd(
+                rule.bump_value,
+                unit,
+            ),
+        });
+    }
+
+    Ok(parsed)
+}
+
+fn resolve_action_place_order_ptb_stop_loss_bump_decay_step_usd(
+    config: &ActionPlaceOrderPtbStopLossBumpConfig,
+) -> f64 {
+    match config.mode {
+        ActionPlaceOrderPtbStopLossBumpMode::Fixed => config
+            .amount
+            .map(|amount| {
+                trade_flow::guards::price_to_beat::normalize_price_to_beat_threshold_usd(
+                    amount,
+                    config.unit,
+                )
+            })
+            .unwrap_or(0.0),
+        ActionPlaceOrderPtbStopLossBumpMode::LossTable => config
+            .loss_rules
+            .iter()
+            .map(|rule| rule.bump_usd)
+            .fold(f64::INFINITY, f64::min)
+            .is_finite()
+            .then(|| {
+                config
+                    .loss_rules
+                    .iter()
+                    .map(|rule| rule.bump_usd)
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .unwrap_or(0.0),
+    }
+}
+
+fn resolve_action_place_order_ptb_stop_loss_bump_loss_rule(
+    rules: &[ActionPlaceOrderPtbStopLossBumpLossRule],
+    realized_loss_usd: f64,
+) -> Option<ActionPlaceOrderPtbStopLossBumpLossRule> {
+    rules
+        .iter()
+        .filter(|rule| realized_loss_usd + f64::EPSILON >= rule.loss_usd)
+        .last()
+        .cloned()
+}
+
 fn resolve_action_place_order_ptb_stop_loss_bump_config(
     node: &TradeFlowNode,
     side: &str,
@@ -197,25 +337,48 @@ fn resolve_action_place_order_ptb_stop_loss_bump_config(
         node_config_bool(node, "priceToBeatGuardEnabled").unwrap_or(false),
         "action.place_order priceToBeatStopLossBumpEnabled requires priceToBeatGuardEnabled=true"
     );
-    let amount = node_config_f64(node, "priceToBeatStopLossBumpAmount").unwrap_or(0.0);
-    anyhow::ensure!(
-        amount.is_finite() && amount > 0.0,
-        "action.place_order priceToBeatStopLossBumpAmount must be > 0"
-    );
+    let mode = resolve_action_place_order_ptb_stop_loss_bump_mode(node)?;
+    let amount = node_config_f64(node, "priceToBeatStopLossBumpAmount");
     let max_value = node_config_f64(node, "priceToBeatStopLossBumpMaxValue")
         .filter(|value| value.is_finite() && *value > 0.0);
-    if let Some(max_value) = max_value {
-        anyhow::ensure!(
-            max_value >= amount,
-            "action.place_order priceToBeatStopLossBumpMaxValue must be >= priceToBeatStopLossBumpAmount"
-        );
-    }
     let unit = resolve_action_place_order_ptb_stop_loss_bump_unit(node)?;
+    let loss_rules = parse_action_place_order_ptb_stop_loss_bump_loss_rules(node, unit)?;
+    match mode {
+        ActionPlaceOrderPtbStopLossBumpMode::Fixed => {
+            let amount = amount.unwrap_or(0.0);
+            anyhow::ensure!(
+                amount.is_finite() && amount > 0.0,
+                "action.place_order priceToBeatStopLossBumpAmount must be > 0"
+            );
+            anyhow::ensure!(
+                loss_rules.is_empty(),
+                "action.place_order priceToBeatStopLossBumpLossRules requires loss_table mode"
+            );
+            if let Some(max_value) = max_value {
+                anyhow::ensure!(
+                    max_value >= amount,
+                    "action.place_order priceToBeatStopLossBumpMaxValue must be >= priceToBeatStopLossBumpAmount"
+                );
+            }
+        }
+        ActionPlaceOrderPtbStopLossBumpMode::LossTable => {
+            anyhow::ensure!(
+                amount.is_none(),
+                "action.place_order priceToBeatStopLossBumpAmount is only supported in fixed mode"
+            );
+            anyhow::ensure!(
+                !loss_rules.is_empty(),
+                "action.place_order priceToBeatStopLossBumpLossRules must be set in loss_table mode"
+            );
+        }
+    }
     let decay_windows =
         node_config_i64(node, "priceToBeatStopLossBumpDecayWindows").filter(|value| *value > 0);
 
     Ok(Some(ActionPlaceOrderPtbStopLossBumpConfig {
+        mode,
         amount,
+        loss_rules,
         unit,
         max_value,
         decay_windows,
@@ -314,15 +477,6 @@ fn decayed_ptb_stop_loss_bump_usd(
     };
     let decay_steps = windows_since_last_sl / decay_windows;
     (accumulated_bump_usd - (base_bump_usd * decay_steps as f64)).max(0.0)
-}
-
-fn resolve_action_place_order_ptb_stop_loss_bump_base_usd(
-    config: &ActionPlaceOrderPtbStopLossBumpConfig,
-) -> f64 {
-    trade_flow::guards::price_to_beat::normalize_price_to_beat_threshold_usd(
-        config.amount,
-        config.unit,
-    )
 }
 
 pub(crate) fn resolve_action_place_order_ptb_stop_loss_bump_capped_usd(
@@ -458,9 +612,9 @@ pub(crate) fn resolve_action_place_order_ptb_stop_loss_bump_state(
             )
         }
     };
-    let base_bump_usd = config
+    let decay_step_usd = config
         .as_ref()
-        .map(resolve_action_place_order_ptb_stop_loss_bump_base_usd)
+        .map(resolve_action_place_order_ptb_stop_loss_bump_decay_step_usd)
         .unwrap_or(0.0);
     let count = decayed_ptb_stop_loss_bump_count(
         count,
@@ -470,7 +624,7 @@ pub(crate) fn resolve_action_place_order_ptb_stop_loss_bump_state(
     );
     let accumulated_bump_usd = decayed_ptb_stop_loss_bump_usd(
         accumulated_bump_usd,
-        base_bump_usd,
+        decay_step_usd,
         last_market_slug.as_deref(),
         market_slug,
         config.as_ref().and_then(|value| value.decay_windows),
@@ -1000,8 +1154,98 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
 
     let mut context = flow_run.context_json.clone();
     let updated_at = Utc::now();
-    let base_bump_usd = resolve_action_place_order_ptb_stop_loss_bump_base_usd(&config);
-    let bump_increment_usd = base_bump_usd;
+    let decay_step_usd = resolve_action_place_order_ptb_stop_loss_bump_decay_step_usd(&config);
+    let (
+        bump_increment_usd,
+        notification_bump_value,
+        loss_metrics,
+        matched_rule,
+        config_snapshot,
+    ) = match config.mode {
+        ActionPlaceOrderPtbStopLossBumpMode::Fixed => (
+            decay_step_usd,
+            config.amount.unwrap_or_default(),
+            None,
+            None,
+            action_place_order_ptb_stop_loss_bump_config_snapshot(
+                &config,
+                decay_step_usd,
+                Some(decay_step_usd),
+            ),
+        ),
+        ActionPlaceOrderPtbStopLossBumpMode::LossTable => {
+            let Some(loss_metrics) = maybe_resolve_action_place_order_ptb_stop_loss_bump_loss_metrics(
+                repo,
+                parent_order,
+                stop_loss_order,
+            )
+            .await?
+            else {
+                repo.append_trade_builder_order_event(
+                    parent_order.id,
+                    "ptb_stop_loss_bump_skipped",
+                    &json!({
+                        "reason": "loss_metrics_unavailable",
+                        "mode": action_place_order_ptb_stop_loss_bump_mode_as_str(config.mode),
+                        "sl_child_order_id": stop_loss_order.id,
+                        "flow_run_id": run_id,
+                        "node_key": action_node_key,
+                        "market_slug": &stop_loss_order.market_slug,
+                        "config_snapshot": action_place_order_ptb_stop_loss_bump_config_snapshot(
+                            &config,
+                            decay_step_usd,
+                            None,
+                        ),
+                    }),
+                )
+                .await?;
+                return Ok(());
+            };
+            let Some(matched_rule) = resolve_action_place_order_ptb_stop_loss_bump_loss_rule(
+                &config.loss_rules,
+                loss_metrics.realized_loss_usd,
+            ) else {
+                repo.append_trade_builder_order_event(
+                    parent_order.id,
+                    "ptb_stop_loss_bump_skipped",
+                    &json!({
+                        "reason": "loss_table_no_matching_rule",
+                        "mode": action_place_order_ptb_stop_loss_bump_mode_as_str(config.mode),
+                        "sl_child_order_id": stop_loss_order.id,
+                        "flow_run_id": run_id,
+                        "node_key": action_node_key,
+                        "market_slug": &stop_loss_order.market_slug,
+                        "loss_usd": loss_metrics.realized_loss_usd,
+                        "loss_metrics": {
+                            "sell_qty": loss_metrics.sell_qty,
+                            "sell_notional_usdc": loss_metrics.sell_notional_usdc,
+                            "sell_fee_usdc": loss_metrics.sell_fee_usdc,
+                            "cost_basis_per_share": loss_metrics.cost_basis_per_share,
+                        },
+                        "config_snapshot": action_place_order_ptb_stop_loss_bump_config_snapshot(
+                            &config,
+                            decay_step_usd,
+                            None,
+                        ),
+                    }),
+                )
+                .await?;
+                return Ok(());
+            };
+            let config_snapshot = action_place_order_ptb_stop_loss_bump_config_snapshot(
+                &config,
+                decay_step_usd,
+                Some(matched_rule.bump_usd),
+            );
+            (
+                matched_rule.bump_usd,
+                matched_rule.bump_value,
+                Some(loss_metrics),
+                Some(matched_rule),
+                config_snapshot,
+            )
+        }
+    };
     let previous_resolution =
         trade_flow::guards::price_to_beat::resolve_action_place_order_price_to_beat_guard_resolution(
             node,
@@ -1059,18 +1303,14 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
                 "node_key": action_node_key,
                 "market_slug": &stop_loss_order.market_slug,
                 "current_count": update.next_count,
-                "config_snapshot": {
-                    "enabled": true,
-                    "amount": config.amount,
-                    "unit": config.unit.as_str(),
-                    "base_bump_usd": base_bump_usd,
-                    "bump_increment_usd": bump_increment_usd,
-                    "decay_windows": config.decay_windows,
-                    "scope_mode": match config.scope_mode {
-                        ActionPlaceOrderPtbStopLossBumpScopeMode::Global => "global",
-                        ActionPlaceOrderPtbStopLossBumpScopeMode::PerScope => "per_scope",
-                    },
-                },
+                "mode": action_place_order_ptb_stop_loss_bump_mode_as_str(config.mode),
+                "loss_usd": loss_metrics.map(|metrics| metrics.realized_loss_usd),
+                "matched_rule": matched_rule.as_ref().map(|rule| json!({
+                    "loss_usd": rule.loss_usd,
+                    "bump_value": rule.bump_value,
+                    "bump_usd": rule.bump_usd,
+                })),
+                "config_snapshot": config_snapshot,
             }),
         )
         .await?;
@@ -1120,19 +1360,17 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
             "previous_accumulated_bump_usd": update.previous_accumulated_bump_usd,
             "next_accumulated_bump_usd": update.next_accumulated_bump_usd,
             "bump_increment_usd": update.applied_increment_usd,
+            "applied_increment_usd": update.applied_increment_usd,
+            "mode": action_place_order_ptb_stop_loss_bump_mode_as_str(config.mode),
+            "loss_usd": loss_metrics.map(|metrics| metrics.realized_loss_usd),
+            "matched_rule": matched_rule.as_ref().map(|rule| json!({
+                "loss_usd": rule.loss_usd,
+                "bump_value": rule.bump_value,
+                "bump_usd": rule.bump_usd,
+            })),
             "updated_at": updated_at.to_rfc3339(),
             "fast_path_cache_updated": cache_updated,
-            "config_snapshot": {
-                "enabled": true,
-                "amount": config.amount,
-                "unit": config.unit.as_str(),
-                "base_bump_usd": base_bump_usd,
-                "decay_windows": config.decay_windows,
-                "scope_mode": match config.scope_mode {
-                    ActionPlaceOrderPtbStopLossBumpScopeMode::Global => "global",
-                    ActionPlaceOrderPtbStopLossBumpScopeMode::PerScope => "per_scope",
-                },
-            },
+            "config_snapshot": config_snapshot,
         }),
     )
     .await?;
@@ -1152,7 +1390,7 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
         let mut messages = vec![
             trade_flow::guards::price_to_beat::build_price_to_beat_bump_increased_notification_message(
                 &stop_loss_order.market_slug,
-                config.amount,
+                notification_bump_value,
                 config.unit.as_str(),
                 update.next_count,
                 previous_capped_bump_usd,
@@ -1206,7 +1444,7 @@ async fn maybe_record_action_place_order_ptb_stop_loss_bump(
         let message =
             trade_flow::guards::price_to_beat::build_price_to_beat_bump_increased_notification_message(
                 &stop_loss_order.market_slug,
-                config.amount,
+                notification_bump_value,
                 config.unit.as_str(),
                 update.next_count,
                 previous_capped_bump_usd,

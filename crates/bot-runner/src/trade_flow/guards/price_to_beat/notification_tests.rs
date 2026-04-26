@@ -69,6 +69,8 @@ fn default_guard_evaluation() -> PriceToBeatGuardEvaluation {
         floor_usd: None,
         ceiling_usd: None,
         threshold_was_clamped: None,
+        signal_formula: None,
+        iv_mismatch_edge: None,
     }
 }
 
@@ -177,8 +179,8 @@ fn blocked_notification_shows_sl_bump_when_auto_threshold_is_lifted() {
 
 #[test]
 fn blocked_notification_uses_reentry_adjusted_base_when_deciding_sl_bump_visibility() {
-    let hidden_message = build_price_to_beat_guard_blocked_notification_message(
-        &PriceToBeatGuardEvaluation {
+    let hidden_message =
+        build_price_to_beat_guard_blocked_notification_message(&PriceToBeatGuardEvaluation {
             reason_code: "price_to_beat_gap_below_threshold".to_string(),
             market_slug: "eth-updown-5m-1776200100".to_string(),
             event_url: "https://polymarket.com/event/eth-updown-5m-1776200100".to_string(),
@@ -199,12 +201,11 @@ fn blocked_notification_uses_reentry_adjusted_base_when_deciding_sl_bump_visibil
             stop_loss_bump_unit: Some("cent".to_string()),
             stop_loss_bump_usd: 0.3,
             ..default_guard_evaluation()
-        },
-    );
+        });
     assert!(!hidden_message.contains("SL Bump:"));
 
-    let visible_message = build_price_to_beat_guard_blocked_notification_message(
-        &PriceToBeatGuardEvaluation {
+    let visible_message =
+        build_price_to_beat_guard_blocked_notification_message(&PriceToBeatGuardEvaluation {
             reason_code: "price_to_beat_gap_below_threshold".to_string(),
             market_slug: "eth-updown-5m-1776200100".to_string(),
             event_url: "https://polymarket.com/event/eth-updown-5m-1776200100".to_string(),
@@ -225,8 +226,7 @@ fn blocked_notification_uses_reentry_adjusted_base_when_deciding_sl_bump_visibil
             stop_loss_bump_unit: Some("cent".to_string()),
             stop_loss_bump_usd: 0.25,
             ..default_guard_evaluation()
-        },
-    );
+        });
     assert!(visible_message.contains("Re-entry Override: 50.00000000 cent (~0.50000000 USD)"));
     assert!(visible_message.contains("SL Bump: kademe 10.00000000 cent"));
 }

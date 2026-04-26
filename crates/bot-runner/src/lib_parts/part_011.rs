@@ -33,7 +33,9 @@ fn parse_market_price_ptb_trigger_config(
             enabled && min_gap.is_some()
         }
         crate::trade_flow::guards::price_to_beat::PriceToBeatMode::AutoLast3AvgExcursion
-        | crate::trade_flow::guards::price_to_beat::PriceToBeatMode::AutoVolPct => {
+        | crate::trade_flow::guards::price_to_beat::PriceToBeatMode::AutoVolPct
+        | crate::trade_flow::guards::price_to_beat::PriceToBeatMode::SignalFormula
+        | crate::trade_flow::guards::price_to_beat::PriceToBeatMode::IvMismatchEdge => {
             enabled
         }
     };

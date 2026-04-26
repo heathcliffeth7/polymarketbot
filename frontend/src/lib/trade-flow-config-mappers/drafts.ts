@@ -1,9 +1,12 @@
 import type {
   ConditionDraft,
   DrawdownRuleRow,
+  EntryTimingProfileRow,
   ExitLadderRuleRow,
   KeyValueDraft,
   OutcomeConditionRow,
+  PtbIvTimeRuleRow,
+  PtbStopLossBumpLossRuleRow,
   PtbStopLossRuleRow,
   TimeExitRuleRow,
 } from './types';
@@ -49,6 +52,36 @@ export function createEmptyExitLadderRuleRow(): ExitLadderRuleRow {
 
 export function createEmptyPtbStopLossRuleRow(): PtbStopLossRuleRow {
   return { id: createId('pr'), gapUsd: '', sizePct: '' };
+}
+
+export function createEmptyPtbStopLossBumpLossRuleRow(): PtbStopLossBumpLossRuleRow {
+  return { id: createId('pbl'), lossUsd: '', bumpValue: '' };
+}
+
+export function createEmptyPtbIvTimeRuleRow(): PtbIvTimeRuleRow {
+  return {
+    id: createId('piv'),
+    startRemainingSec: '',
+    endRemainingSec: '',
+    maxPriceCent: '',
+    minEdge: '',
+    minGapStrength: '',
+    minExpectedMoveUsd: '',
+    minGapStrengthMargin: '',
+    minGapUsdMargin: '',
+  };
+}
+
+export function createEmptyEntryTimingProfileRow(): EntryTimingProfileRow {
+  return {
+    id: createId('etp'),
+    startRemainingSec: '',
+    endRemainingSec: '',
+    maxPriceCent: '',
+    priceToBeatTriggerMinGap: '',
+    priceToBeatTriggerMaxGap: '',
+    sizeUsdc: '',
+  };
 }
 
 export function createEmptyTimeExitRuleRow(): TimeExitRuleRow {

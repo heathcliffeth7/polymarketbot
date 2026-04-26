@@ -127,7 +127,7 @@ test('validateActionPlaceOrderConfig rejects ptb stop-loss without gap value', (
   assert.ok(issues.some((issue) => issue.code === 'missing_ptb_stop_loss_config'));
 });
 
-test('validateActionPlaceOrderConfig accepts negative ptb stop-loss gap', () => {
+test('validateActionPlaceOrderConfig accepts negative ptb stop-loss gap for counter-direction overshoot semantics', () => {
   const graph = normalizeTradeFlowGraph({
     context: { sourceTradeId: 42 },
     nodes: [
@@ -143,7 +143,7 @@ test('validateActionPlaceOrderConfig accepts negative ptb stop-loss gap', () => 
           sizeMode: 'usdc',
           sizeUsdc: 10,
           ptbStopLossEnabled: true,
-          ptbStopLossGapUsd: -1,
+          ptbStopLossGapUsd: -10,
         },
       },
     ],

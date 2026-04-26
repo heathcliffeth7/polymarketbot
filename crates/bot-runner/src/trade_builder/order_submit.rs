@@ -232,6 +232,14 @@ async fn submit_trade_builder_trigger_order(
     anyhow::ensure!(size > 0.0, "computed builder order size is zero");
 
     let guard_eval_started = Instant::now();
+    let force_pair_counter_guard_waiting =
+        trade_builder_pair_lock_counter_forces_guard_waiting(repo, order).await?;
+    let retry_on_trigger_guard_block =
+        order.retry_on_trigger_guard_block || force_pair_counter_guard_waiting;
+    let retry_on_execution_floor_guard_block =
+        order.retry_on_execution_floor_guard_block || force_pair_counter_guard_waiting;
+    let retry_on_max_price_block =
+        order.retry_on_max_price_block || force_pair_counter_guard_waiting;
     let buy_guard_eval = evaluate_trade_builder_buy_guards(
         &order.execution_mode,
         order.pair_leg_role.as_deref(),
@@ -241,9 +249,9 @@ async fn submit_trade_builder_trigger_order(
         order.guard_trigger_price,
         order.max_price,
         order.best_ask_floor_price,
-        order.retry_on_trigger_guard_block,
-        order.retry_on_execution_floor_guard_block,
-        order.retry_on_max_price_block,
+        retry_on_trigger_guard_block,
+        retry_on_execution_floor_guard_block,
+        retry_on_max_price_block,
     );
     let trigger_guard_reference_price = buy_guard_eval.trigger_guard_reference_price;
     let trigger_guard_reference_source = buy_guard_eval.trigger_guard_reference_source;
@@ -326,7 +334,7 @@ async fn submit_trade_builder_trigger_order(
             execution_floor_payload.clone(),
             max_price_payload.clone(),
             Some("trigger_price"),
-            if order.retry_on_trigger_guard_block {
+            if retry_on_trigger_guard_block {
                 "waiting"
             } else {
                 "blocked"
@@ -334,7 +342,7 @@ async fn submit_trade_builder_trigger_order(
             "below_trigger_price_guard",
         )
         .await?;
-        if order.retry_on_trigger_guard_block {
+        if retry_on_trigger_guard_block {
             let notification_message = order
                 .notify_on_trigger_guard_blocked
                 .then(|| {
@@ -425,7 +433,7 @@ async fn submit_trade_builder_trigger_order(
             trigger_guard_reference_source,
             desired_price,
             guard_trigger_price = ?order.guard_trigger_price,
-            waiting = order.retry_on_trigger_guard_block,
+            waiting = retry_on_trigger_guard_block,
             reason_code = "below_trigger_price_guard",
             "TRADE_BUILDER_ORDER_TRIGGER_PRICE_BLOCKED"
         );
@@ -434,7 +442,8 @@ async fn submit_trade_builder_trigger_order(
 
     if let Some(reason_code) = execution_floor_reason {
         let candidate_reason = build_guard_notification_reason("execution_floor", reason_code);
-        let should_wait = trade_builder_execution_floor_should_wait(order, reason_code);
+        let should_wait = trade_builder_execution_floor_should_wait(order, reason_code)
+            || force_pair_counter_guard_waiting;
         append_trade_builder_guard_diagnostics_event(
             repo,
             order,
@@ -555,7 +564,7 @@ async fn submit_trade_builder_trigger_order(
             execution_floor_payload,
             max_price_payload,
             Some("max_price"),
-            if order.retry_on_max_price_block {
+            if retry_on_max_price_block {
                 "waiting"
             } else {
                 "blocked"
@@ -563,7 +572,7 @@ async fn submit_trade_builder_trigger_order(
             "above_max_price",
         )
         .await?;
-        if order.retry_on_max_price_block {
+        if retry_on_max_price_block {
             let notification_message = order.notify_on_max_price_blocked.then(|| {
                 build_max_price_waiting_notification_message(
                     order,
@@ -660,7 +669,7 @@ async fn submit_trade_builder_trigger_order(
             reference_price = max_price_reference,
             reference_price_source = max_price_reference_source,
             max_price = ?order.max_price,
-            waiting = order.retry_on_max_price_block,
+            waiting = retry_on_max_price_block,
             reason_code = "above_max_price",
             "TRADE_BUILDER_ORDER_MAX_PRICE_BLOCKED"
         );
@@ -1192,6 +1201,14 @@ async fn submit_trade_builder_trigger_order(
         },
         Some(&ack),
     );
+    let submit_flow_payload = load_trade_builder_latest_flow_payload(repo, order.id).await?;
+    trade_builder_append_submitted_telemetry(
+        raw.as_object_mut().expect("submitted payload"),
+        order,
+        submit_flow_payload.as_ref(),
+        submit_size,
+        desired_price,
+    );
 
     repo.upsert_order_by_exchange_id(
         order.trade_id,
@@ -1233,6 +1250,13 @@ async fn submit_trade_builder_trigger_order(
     }
     repo.append_trade_builder_order_event(order.id, "submitted", &raw)
         .await?;
+    maybe_send_trade_builder_submitted_notification(
+        repo,
+        order,
+        &raw,
+        submit_flow_payload.as_ref(),
+    )
+    .await?;
     maybe_record_trade_builder_buy_submit_observation(
         repo,
         run_id,
@@ -1247,6 +1271,14 @@ async fn submit_trade_builder_trigger_order(
     .await;
 
     if normalized_status == "filled" {
+        if let Err(err) = sync_recent_trade_builder_fills(repo, client).await {
+            warn!(
+                builder_order_id = order.id,
+                exchange_order_id = %exchange_order_id,
+                error = %err,
+                "TRADE_BUILDER_IMMEDIATE_FILL_SYNC_FAILED"
+            );
+        }
         let (
             canonical_entry_qty,
             canonical_entry_qty_source,

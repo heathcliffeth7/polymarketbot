@@ -16,6 +16,7 @@ fn map_trade_builder_pair_session_row(row: sqlx::postgres::PgRow) -> TradeBuilde
         min_net_profit_usdc: row.get("min_net_profit_usdc"),
         profit_safety_buffer_usdc: row.get("profit_safety_buffer_usdc"),
         orphan_grace_ms: row.get("orphan_grace_ms"),
+        ignore_stop_loss_after_locked: row.get("ignore_stop_loss_after_locked"),
         notify_on_pair_locked: row.get("notify_on_pair_locked"),
         notify_on_pair_unwind: row.get("notify_on_pair_unwind"),
         notify_on_pair_no_edge: row.get("notify_on_pair_no_edge"),
@@ -51,15 +52,16 @@ impl PostgresRepository {
         min_net_profit_usdc: f64,
         profit_safety_buffer_usdc: f64,
         orphan_grace_ms: i64,
+        ignore_stop_loss_after_locked: bool,
         notify_on_pair_locked: bool,
         notify_on_pair_unwind: bool,
         notify_on_pair_no_edge: bool,
     ) -> Result<i64> {
         let id = sqlx::query_scalar::<_, i64>(
             "INSERT INTO trade_builder_pair_sessions \
-              (user_id, flow_definition_id, flow_run_id, flow_node_key, market_slug, status, pair_target_total_cent, min_net_profit_usdc, profit_safety_buffer_usdc, orphan_grace_ms, notify_on_pair_locked, notify_on_pair_unwind, notify_on_pair_no_edge, created_at, updated_at) \
+              (user_id, flow_definition_id, flow_run_id, flow_node_key, market_slug, status, pair_target_total_cent, min_net_profit_usdc, profit_safety_buffer_usdc, orphan_grace_ms, ignore_stop_loss_after_locked, notify_on_pair_locked, notify_on_pair_unwind, notify_on_pair_no_edge, created_at, updated_at) \
              VALUES \
-              ($1, $2, $3, $4, $5, 'working', $6, $7, $8, $9, $10, $11, $12, NOW(), NOW()) \
+              ($1, $2, $3, $4, $5, 'working', $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()) \
              RETURNING id",
         )
         .bind(user_id)
@@ -71,6 +73,7 @@ impl PostgresRepository {
         .bind(min_net_profit_usdc)
         .bind(profit_safety_buffer_usdc)
         .bind(orphan_grace_ms)
+        .bind(ignore_stop_loss_after_locked)
         .bind(notify_on_pair_locked)
         .bind(notify_on_pair_unwind)
         .bind(notify_on_pair_no_edge)
@@ -86,7 +89,7 @@ impl PostgresRepository {
         let row = sqlx::query(
             "SELECT id, user_id, flow_definition_id, flow_run_id, flow_node_key, market_slug, \
                     status, pair_target_total_cent, min_net_profit_usdc, profit_safety_buffer_usdc, \
-                    orphan_grace_ms, notify_on_pair_locked, notify_on_pair_unwind, notify_on_pair_no_edge, primary_order_id, counter_order_id, lead_order_id, \
+                    orphan_grace_ms, ignore_stop_loss_after_locked, notify_on_pair_locked, notify_on_pair_unwind, notify_on_pair_no_edge, primary_order_id, counter_order_id, lead_order_id, \
                     primary_fill_qty, primary_fill_fee_qty, primary_net_qty, primary_avg_fill_price, \
                     counter_fill_qty, counter_fill_fee_qty, counter_net_qty, counter_avg_fill_price, \
                     lead_filled_at, locked_qty, projected_net_profit_usdc, last_error, created_at, updated_at \

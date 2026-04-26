@@ -276,6 +276,54 @@ min_claim_usdc = 2.5
 }
 
 #[test]
+fn strategy_max_price_relax_defaults_enabled_when_missing() {
+    let dir = TempConfigDir::new().unwrap();
+    write_base_app_config(dir.path()).unwrap();
+
+    let settings = HashMap::from([("exchange".to_string(), base_exchange_payload())]);
+    let cfg = AppConfig::load_from_user_settings(dir.path(), &settings).unwrap();
+
+    assert!(cfg.strategy.max_price_relax_enabled);
+}
+
+#[test]
+fn strategy_max_price_relax_can_be_disabled_from_user_settings() {
+    let dir = TempConfigDir::new().unwrap();
+    write_base_app_config(dir.path()).unwrap();
+
+    let settings = HashMap::from([
+        ("exchange".to_string(), base_exchange_payload()),
+        (
+            "strategy".to_string(),
+            json!({
+                "entry_price": 0.6,
+                "tp_pct": 0.12,
+                "base_sl_pct": 0.08,
+                "aggressive_sl_pct": 0.3,
+                "entry_window_sec": 180,
+                "max_hold_sec": 240,
+                "sl_renew_interval_ms": 2000,
+                "flow_only": true,
+                "dual_side_enabled": false,
+                "max_price_relax_enabled": false,
+                "total_notional_usdc": 10,
+                "per_leg_initial_notional_usdc": 5,
+                "dca_interval_sec": 20,
+                "dca_step_pct": 0.02,
+                "max_dca_levels_per_leg": 3,
+                "leg_tp_pct": 0.035,
+                "basket_tp_usdc": 0.35,
+                "basket_sl_usdc": -0.6,
+                "force_flatten_sec_before_close": 45
+            }),
+        ),
+    ]);
+    let cfg = AppConfig::load_from_user_settings(dir.path(), &settings).unwrap();
+
+    assert!(!cfg.strategy.max_price_relax_enabled);
+}
+
+#[test]
 fn app_config_load_from_user_settings_prefers_stored_claim_payload_over_toml() {
     let dir = TempConfigDir::new().unwrap();
     write_base_app_config(dir.path()).unwrap();

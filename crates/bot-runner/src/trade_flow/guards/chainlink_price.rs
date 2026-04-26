@@ -56,6 +56,12 @@ pub(crate) struct ChainlinkPriceWindowStats {
     pub(crate) sample_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ChainlinkPriceSample {
+    pub(crate) price: f64,
+    pub(crate) timestamp_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ChainlinkStalePriceDetails {
     pub(crate) provider_age_ms: i64,
@@ -377,6 +383,50 @@ impl ChainlinkPriceService {
             close_price: close.price,
             sample_count: samples.len(),
         })
+    }
+
+    fn get_price_samples(
+        &self,
+        asset: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<ChainlinkPriceSample>> {
+        anyhow::ensure!(
+            end_ms > start_ms,
+            "invalid chainlink sample range: start_ms={start_ms}, end_ms={end_ms}"
+        );
+        let symbol = asset_to_symbol(asset).ok_or_else(|| anyhow!("unsupported asset: {asset}"))?;
+        let state = self.state.read();
+        let entry = state
+            .get(symbol)
+            .ok_or_else(|| self.no_cached_price_error(symbol))?;
+        let mut samples = Vec::new();
+        let mut seen_timestamps = HashSet::new();
+        let mut push_sample = |sample: &CachedPrice| {
+            if sample.timestamp_ms < start_ms
+                || sample.timestamp_ms > end_ms
+                || !sample.value.is_finite()
+                || !seen_timestamps.insert(sample.timestamp_ms)
+            {
+                return;
+            }
+            samples.push(ChainlinkPriceSample {
+                price: sample.value,
+                timestamp_ms: sample.timestamp_ms,
+            });
+        };
+        for sample in entry.ticks.iter() {
+            push_sample(sample);
+        }
+        if let Some(latest) = entry.latest.as_ref() {
+            push_sample(latest);
+        }
+        samples.sort_by_key(|sample| sample.timestamp_ms);
+        anyhow::ensure!(
+            !samples.is_empty(),
+            "no cached chainlink samples for {symbol}"
+        );
+        Ok(samples)
     }
 
     fn no_cached_price_error(&self, symbol: &str) -> anyhow::Error {
@@ -831,6 +881,15 @@ pub(crate) fn get_chainlink_price_window_stats(
 ) -> Result<ChainlinkPriceWindowStats> {
     SERVICE.ensure_started();
     SERVICE.get_window_stats(asset, start_ms, end_ms)
+}
+
+pub(crate) fn get_chainlink_price_samples(
+    asset: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<Vec<ChainlinkPriceSample>> {
+    SERVICE.ensure_started();
+    SERVICE.get_price_samples(asset, start_ms, end_ms)
 }
 
 #[cfg(test)]

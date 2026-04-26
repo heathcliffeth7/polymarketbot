@@ -39,6 +39,37 @@ impl PostgresRepository {
         Ok(row.map(map_trade_builder_parent_position_row))
     }
 
+    pub async fn list_open_trade_builder_parent_positions_for_market(
+        &self,
+        user_id: i64,
+        market_slug: &str,
+        token_ids: &[String],
+    ) -> Result<Vec<TradeBuilderParentPosition>> {
+        if token_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows = sqlx::query(&format!(
+            "SELECT {TRADE_BUILDER_PARENT_POSITION_SELECT_COLUMNS} \
+             FROM trade_builder_parent_positions \
+             WHERE user_id = $1 \
+               AND market_slug = $2 \
+               AND token_id = ANY($3::text[]) \
+               AND current_qty > 0.0001 \
+             ORDER BY updated_at DESC"
+        ))
+        .bind(user_id)
+        .bind(market_slug)
+        .bind(token_ids)
+        .fetch_all(self.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(map_trade_builder_parent_position_row)
+            .collect())
+    }
+
     pub async fn upsert_trade_builder_parent_position(
         &self,
         input: &TradeBuilderParentPositionInput,

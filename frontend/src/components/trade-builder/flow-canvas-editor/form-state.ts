@@ -4,6 +4,7 @@ import {
   createEmptyKeyValueDraft,
   createEmptyOutcomeConditionRow,
   isPresetPlaceOrderMarker,
+  normalizePtbMode,
   normalizePtbStopLossGapUnit,
   type ConditionDraft,
   type DrawdownRuleRow,
@@ -11,6 +12,7 @@ import {
   type OutcomeConditionRow,
   type PrimitiveValueType,
 } from '@/lib/trade-flow-config-mappers';
+import { normalizePairLockStrategy } from '@/lib/trade-flow-config-mappers/pair-lock';
 import type {
   UpstreamFixedMarketResolution,
   UpstreamMaxPriceResolution,
@@ -45,10 +47,7 @@ function shouldResetDependentSelections(nodeType: string, key: string): boolean 
 }
 
 function normalizePairLockCounterPtbMode(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  return normalized === 'auto_last_3_avg_excursion' || normalized === 'auto_vol_pct'
-    ? normalized
-    : 'manual';
+  return normalizePtbMode(value);
 }
 
 function normalizePairLockCounterPtbUnit(value: string): 'usd' | 'cent' {
@@ -111,16 +110,40 @@ export function updateNodeFieldState(
           (next.fields.pairSizingMode ?? '').trim().toLowerCase() === 'auto_remaining_budget'
             ? 'auto_remaining_budget'
             : 'manual',
+        pairLockStrategy: normalizePairLockStrategy(next.fields.pairLockStrategy ?? ''),
         side: 'buy',
         executionMode: 'limit',
         kind: 'immediate',
         sizeMode: 'usdc',
         sizePct: '',
         counterLegEnabled: 'true',
+        pairProtectiveUnwindEnabled: 'true',
         counterLegOutcomeLabel:
           (next.fields.counterLegOutcomeLabel ?? '').trim() || 'opposite',
       };
       return { ...next, fields: nextFields };
+    }
+    if (nodeType === 'action.place_order' && key === 'pairLockStrategy') {
+      const pairLockStrategy = normalizePairLockStrategy(value);
+      const nextFields: Record<string, string> = {
+        ...next.fields,
+        pairLockStrategy,
+      };
+      if (pairLockStrategy === 'edge_pairlock_v1') {
+        nextFields.priceToBeatGuardEnabled = 'true';
+        nextFields.priceToBeatMode = 'iv_mismatch_edge';
+        nextFields.pairSizingMode = 'manual';
+        nextFields.counterLegEnabled = 'true';
+        nextFields.pairLockDecisionQty = (nextFields.pairLockDecisionQty ?? '').trim() || '5';
+        nextFields.pairLockSingleEdgeThreshold =
+          (nextFields.pairLockSingleEdgeThreshold ?? '').trim() || '0.10';
+        nextFields.pairLockCostBuffer = (nextFields.pairLockCostBuffer ?? '').trim() || '0.005';
+        nextFields.pairMaxTotalCent = (nextFields.pairMaxTotalCent ?? '').trim() || '95';
+      }
+      return {
+        ...next,
+        fields: nextFields,
+      };
     }
     if (
       nodeType === 'action.place_order' &&

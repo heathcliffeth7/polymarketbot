@@ -243,7 +243,7 @@ ptbStopLossEnabled = true
 ptbStopLossGapUsd = 0 (veya 5, 10, vb.)
 ```
 
-**PTB SL mantigi:** Fiyat PTB'ye donunce (gap <= threshold) satis yapilir.
+**PTB SL mantigi:** Karsi token fiyatina degil, directional gap'e bakilir. Up/Yes icin `current_chainlink_price - ptb_reference_price`, Down/No icin `ptb_reference_price - current_chainlink_price` hesaplanir; `gap <= threshold` oldugunda satis yapilir. Negatif threshold, parity sonrasinda karsi yone overshoot bekler.
 
 Kod kaynaklari: `crates/bot-runner/src/trade_builder/ptb_stop_loss.rs`
 

@@ -1,5 +1,15 @@
-use super::notification::{build_price_to_beat_guard_blocked_notification_message, build_price_to_beat_guard_recovered_notification_message, build_price_to_beat_guard_waiting_notification_message, build_price_to_beat_relax_changed_notification_message};
-use super::notification_state::{price_to_beat_guard_notification_phase, price_to_beat_guard_notification_seed_reason, price_to_beat_guard_waiting_state, set_price_to_beat_guard_notification_phase, set_price_to_beat_guard_notification_seed, set_price_to_beat_guard_waiting_state, PriceToBeatGuardNotificationPhase, PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY};
+use super::notification::{
+    build_price_to_beat_guard_blocked_notification_message,
+    build_price_to_beat_guard_recovered_notification_message,
+    build_price_to_beat_guard_waiting_notification_message,
+    build_price_to_beat_relax_changed_notification_message,
+};
+use super::notification_state::{
+    price_to_beat_guard_notification_phase, price_to_beat_guard_notification_seed_reason,
+    price_to_beat_guard_waiting_state, set_price_to_beat_guard_notification_phase,
+    set_price_to_beat_guard_notification_seed, set_price_to_beat_guard_waiting_state,
+    PriceToBeatGuardNotificationPhase, PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY,
+};
 use super::*;
 
 mod shared_eval;
@@ -74,9 +84,10 @@ fn default_guard_evaluation() -> PriceToBeatGuardEvaluation {
         floor_usd: None,
         ceiling_usd: None,
         threshold_was_clamped: None,
+        signal_formula: None,
+        iv_mismatch_edge: None,
     }
 }
-
 fn test_action_place_order_node(config: Value) -> crate::TradeFlowNode {
     crate::TradeFlowNode {
         key: "action_1".to_string(),
@@ -84,7 +95,6 @@ fn test_action_place_order_node(config: Value) -> crate::TradeFlowNode {
         config,
     }
 }
-
 fn default_trigger_gate_result() -> PriceToBeatTriggerGateResult {
     PriceToBeatTriggerGateResult {
         passed: false,
@@ -111,6 +121,8 @@ fn default_trigger_gate_result() -> PriceToBeatTriggerGateResult {
         floor_usd: None,
         ceiling_usd: None,
         threshold_was_clamped: None,
+        signal_formula: None,
+        iv_mismatch_edge: None,
     }
 }
 
@@ -127,9 +139,11 @@ fn assert_close_option(actual: Option<f64>, expected: f64, tolerance: f64) {
 }
 
 pub(crate) fn lock_price_to_beat_test_state() -> std::sync::MutexGuard<'static, ()> {
-    PRICE_TO_BEAT_TEST_LOCK
+    let guard = PRICE_TO_BEAT_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    crate::trade_flow::guards::polymarket_price_to_beat::clear_price_to_beat_test_state();
+    guard
 }
 
 fn seed_completed_market_history(
@@ -512,6 +526,7 @@ fn auto_vol_pct_blocks_xrp_markets() {
         None,
         None,
         PriceToBeatDiffUnit::Usd,
+        None,
     );
 
     assert!(!gate.passed);
@@ -706,6 +721,7 @@ fn trigger_gate_cache_miss_blocks_as_pending() {
         Some(30.0),
         Some(60.0),
         PriceToBeatDiffUnit::Usd,
+        None,
     );
     assert!(!gate.passed);
     assert_eq!(gate.reason, "price_to_beat_pending");
@@ -776,6 +792,7 @@ async fn auto_trigger_gate_uses_average_excursion_from_last_three_markets() {
         None,
         None,
         PriceToBeatDiffUnit::Usd,
+        None,
     );
 
     assert!(gate.passed);
@@ -844,6 +861,7 @@ async fn auto_trigger_gate_blocks_as_pending_when_three_completed_markets_are_mi
         None,
         None,
         PriceToBeatDiffUnit::Usd,
+        None,
     );
 
     assert!(!gate.passed);
@@ -891,6 +909,7 @@ async fn auto_guard_uses_dynamic_threshold_diagnostics() {
         None,
         PriceToBeatDiffUnit::Usd,
         "Up",
+        None,
     )
     .await;
 

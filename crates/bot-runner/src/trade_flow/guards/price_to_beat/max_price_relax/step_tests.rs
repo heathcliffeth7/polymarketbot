@@ -168,7 +168,7 @@ async fn quality_score_does_not_change_relax_credit() {
     let window_ms = 300_000_i64;
     let build_snapshots = |ask_depth_usdc: f64| {
         let mut snapshots = HashMap::new();
-        for offset in 1..=5 {
+        for offset in 1..=6 {
             let market_start =
                 current_start - crate::ChronoDuration::milliseconds(window_ms * offset);
             let market_slug = format!("eth-updown-5m-{}", market_start.timestamp());

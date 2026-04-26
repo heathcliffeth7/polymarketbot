@@ -1,15 +1,9 @@
 const PAIR_LOCK_PRIMARY_GUARD_RETRY_DELAY_MS: i64 = 150;
-const FLOW_NODE_STATE_PAIR_LOCK_PRIMARY_WAITING_MARKET_SLUG: &str =
-    "pair_lock_primary_waiting_market_slug";
-const FLOW_NODE_STATE_PAIR_LOCK_PRIMARY_WAITING_SIGNATURE: &str =
-    "pair_lock_primary_waiting_signature";
-const FLOW_NODE_STATE_PAIR_LOCK_PRIMARY_NOTIFICATION_MARKET_SLUG: &str =
-    "pair_lock_primary_notification_market_slug";
-const FLOW_NODE_STATE_PAIR_LOCK_PRIMARY_NOTIFICATION_REASON: &str =
-    "pair_lock_primary_notification_reason";
-const FLOW_NODE_STATE_PAIR_LOCK_PRIMARY_NOTIFICATION_SCOPE: &str =
-    "pair_lock_primary_notification_scope";
-
+const FLOW_NODE_STATE_PAIR_LOCK_PRIMARY_WAITING_MARKET_SLUG: &str = "pair_lock_primary_waiting_market_slug";
+const FLOW_NODE_STATE_PAIR_LOCK_PRIMARY_WAITING_SIGNATURE: &str = "pair_lock_primary_waiting_signature";
+const FLOW_NODE_STATE_PAIR_LOCK_PRIMARY_NOTIFICATION_MARKET_SLUG: &str = "pair_lock_primary_notification_market_slug";
+const FLOW_NODE_STATE_PAIR_LOCK_PRIMARY_NOTIFICATION_REASON: &str = "pair_lock_primary_notification_reason";
+const FLOW_NODE_STATE_PAIR_LOCK_PRIMARY_NOTIFICATION_SCOPE: &str = "pair_lock_primary_notification_scope";
 #[derive(Debug, Clone)]
 struct ActionPlaceOrderPairLockPrimaryCandidateEval {
     token_id: String,
@@ -19,7 +13,6 @@ struct ActionPlaceOrderPairLockPrimaryCandidateEval {
     quote: PairLockResolvedQuote,
     diagnostics: Value,
 }
-
 #[derive(Debug, Clone)]
 struct ActionPlaceOrderPairLockPrimarySelection {
     token_id: String,
@@ -27,7 +20,6 @@ struct ActionPlaceOrderPairLockPrimarySelection {
     selection_mode: &'static str,
     guard_reason: String,
 }
-
 #[derive(Debug, Clone)]
 struct ActionPlaceOrderPairLockPrimarySelectionAttempt {
     selection: Option<ActionPlaceOrderPairLockPrimarySelection>,
@@ -669,8 +661,13 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
                 context,
                 node,
                 run.id,
+                Some(run.definition_id),
                 market_slug,
                 outcome_label,
+                Some(crate::trade_flow::guards::price_to_beat::PriceToBeatSignalFormulaMarketInput {
+                    best_bid,
+                    best_ask,
+                }),
             )
             .await?;
         let ptb_log_snapshot = pair_lock_primary_ptb_evaluation_log_snapshot(
@@ -776,6 +773,28 @@ fn resolve_action_place_order_pair_lock_primary_selection_attempt(
             diagnostics,
         };
     }
+    if passing.len() == 2 {
+        let edge_a = pair_lock_primary_iv_edge(passing[0]);
+        let edge_b = pair_lock_primary_iv_edge(passing[1]);
+        if let (Some(edge_a), Some(edge_b)) = (edge_a, edge_b) {
+            if (edge_a - edge_b).abs() > f64::EPSILON {
+                let selected = if edge_a > edge_b { passing[0] } else { passing[1] };
+                return ActionPlaceOrderPairLockPrimarySelectionAttempt {
+                    selection: Some(ActionPlaceOrderPairLockPrimarySelection {
+                        token_id: selected.token_id.clone(),
+                        outcome_label: selected.outcome_label.clone(),
+                        selection_mode: "auto_guarded_iv_mismatch_edge",
+                        guard_reason: "selected_edge_passed".to_string(),
+                    }),
+                    waiting: false,
+                    failure_reason: None,
+                    yes_candidate: up_candidate,
+                    no_candidate: down_candidate,
+                    diagnostics,
+                };
+            }
+        }
+    }
     let failure_reason = if passing.is_empty() && !waiting.is_empty() {
         Some("pair_lock_primary_guard_waiting")
     } else if passing.is_empty() {
@@ -791,6 +810,12 @@ fn resolve_action_place_order_pair_lock_primary_selection_attempt(
         no_candidate: down_candidate,
         diagnostics,
     }
+}
+
+fn pair_lock_primary_iv_edge(candidate: &ActionPlaceOrderPairLockPrimaryCandidateEval) -> Option<f64> {
+    let guard = candidate.diagnostics.get("price_to_beat_guard")?;
+    (guard.get("threshold_mode").and_then(Value::as_str) == Some("iv_mismatch_edge"))
+        .then(|| guard.get("iv_mismatch_edge")?.get("edge").and_then(Value::as_f64))?
 }
 
 async fn resolve_action_place_order_pair_lock_primary_selection(
@@ -837,10 +862,21 @@ async fn resolve_action_place_order_pair_lock_primary_selection(
         down_label,
     )
     .await?;
-    Ok(resolve_action_place_order_pair_lock_primary_selection_attempt(
-        up_candidate,
-        down_candidate,
-    ))
+    let selection_attempt =
+        resolve_action_place_order_pair_lock_primary_selection_attempt(up_candidate, down_candidate);
+    if let Some(runtime) = ptb_runtime {
+        let selected = selection_attempt.selection.as_ref();
+        crate::trade_flow::guards::price_to_beat::maybe_emit_pair_lock_primary_iv_mismatch_edge_decision_event(
+            runtime.repo, run, context, node, market_slug,
+            selected.map(|selection| selection.selection_mode).unwrap_or("auto_guarded"),
+            selected.map(|selection| selection.token_id.as_str()),
+            selected.map(|selection| selection.outcome_label.as_str()),
+            selected.map(|selection| selection.guard_reason.as_str()),
+            selection_attempt.failure_reason, &selection_attempt.diagnostics,
+        )
+        .await?;
+    }
+    Ok(selection_attempt)
 }
 
 #[cfg(test)]
@@ -1164,10 +1200,7 @@ mod pair_lock_auto_primary_tests {
         assert!(pair_lock_primary_should_log_ptb_skip(&node, "waiting"));
         assert!(pair_lock_primary_should_log_ptb_skip(&node, "blocked"));
         assert!(!pair_lock_primary_should_log_ptb_skip(&node, "passed"));
-        assert!(!pair_lock_primary_should_log_ptb_skip(
-            &node_without_ptb,
-            "waiting"
-        ));
+        assert!(!pair_lock_primary_should_log_ptb_skip(&node_without_ptb, "waiting"));
     }
 
     #[test]
@@ -1230,6 +1263,8 @@ mod pair_lock_auto_primary_tests {
             floor_usd: None,
             ceiling_usd: None,
             threshold_was_clamped: None,
+            signal_formula: None,
+            iv_mismatch_edge: None,
         };
 
         let snapshot = pair_lock_primary_ptb_evaluation_log_snapshot(

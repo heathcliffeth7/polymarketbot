@@ -1,11 +1,21 @@
-import { isPairLockSupportedStopLossField } from '@/lib/trade-flow-config-mappers/pair-lock';
+import {
+  isPairLockSupportedStopLossField,
+  normalizePairLockStrategy,
+} from '@/lib/trade-flow-config-mappers/pair-lock';
+import { normalizePtbMode } from '@/lib/trade-flow-config-mappers';
 
 export function isPairLockField(key: string): boolean {
   return (
     key === 'pairMaxTotalCent' ||
+    key === 'pairLockStrategy' ||
+    key === 'pairLockDecisionQty' ||
+    key === 'pairLockSingleEdgeThreshold' ||
+    key === 'pairLockCostBuffer' ||
     key === 'pairSizingMode' ||
     key === 'pairTotalBudgetUsdc' ||
     key === 'pairOrphanGraceMs' ||
+    key === 'pairProtectiveUnwindEnabled' ||
+    key === 'pairIgnoreStopLossAfterLocked' ||
     key === 'notifyOnPairLocked' ||
     key === 'notifyOnPairUnwind' ||
     key === 'counterLegEnabled' ||
@@ -217,11 +227,29 @@ export function resolvePairLockSizingFieldVisibility(
   fields: Record<string, string>
 ): boolean | null {
   if (
+    key !== 'pairLockStrategy' &&
+    key !== 'pairLockDecisionQty' &&
+    key !== 'pairLockSingleEdgeThreshold' &&
+    key !== 'pairLockCostBuffer' &&
     key !== 'pairSizingMode' &&
     key !== 'pairTotalBudgetUsdc' &&
     key !== 'counterLegSizeUsdc'
   ) {
     return null;
+  }
+  if (key === 'pairLockStrategy') {
+    return pairLockEnabled;
+  }
+  const strategy = normalizePairLockStrategy(fields.pairLockStrategy ?? '');
+  if (
+    key === 'pairLockDecisionQty' ||
+    key === 'pairLockSingleEdgeThreshold' ||
+    key === 'pairLockCostBuffer'
+  ) {
+    return pairLockEnabled && strategy === 'edge_pairlock_v1';
+  }
+  if (strategy === 'edge_pairlock_v1') {
+    return false;
   }
   if (key === 'pairSizingMode') {
     return pairLockEnabled;
@@ -382,9 +410,7 @@ export function resolvePairLockCounterPtbVisibility(
   if (key === 'counterLegPriceToBeatMode') {
     return pairLockEnabled && guardEnabled;
   }
-  const normalizedMode = (fields.counterLegPriceToBeatMode ?? '').trim().toLowerCase();
-  const manualMode =
-    normalizedMode !== 'auto_last_3_avg_excursion' && normalizedMode !== 'auto_vol_pct';
+  const manualMode = normalizePtbMode(fields.counterLegPriceToBeatMode) === 'manual';
   return pairLockEnabled && guardEnabled && manualMode;
 }
 

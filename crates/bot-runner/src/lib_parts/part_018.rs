@@ -260,6 +260,10 @@ async fn execute_action_place_order(
             }
         }
     }
+    let price_to_beat_signal_market = Some(trade_flow::guards::price_to_beat::PriceToBeatSignalFormulaMarketInput {
+            best_bid: step_input_f64(step, &["wsBestBid", "ws_best_bid"]),
+            best_ask: step_input_f64(step, &["wsBestAsk", "ws_best_ask"]),
+    });
     if let Some(blocked_execution) =
         trade_flow::guards::maybe_block_action_place_order_price_to_beat_guard(
             repo,
@@ -273,6 +277,7 @@ async fn execute_action_place_order(
             &outcome_label,
             &side,
             &execution_mode,
+            price_to_beat_signal_market,
         )
         .await?
     {
@@ -293,8 +298,8 @@ async fn execute_action_place_order(
     };
     if let Some(mode) = size_mode.as_deref() {
         anyhow::ensure!(
-            matches!(mode, "usdc" | "pct"),
-            "action.place_order sizeMode must be usdc or pct"
+            matches!(mode, "usdc" | "pct" | "shares"),
+            "action.place_order sizeMode must be usdc, pct, or shares"
         );
     }
     let max_triggers = node_config_i64(node, "maxTriggers")
@@ -324,11 +329,21 @@ async fn execute_action_place_order(
         Vec::new()
     };
     let trigger_size_for_first_fire = trigger_sizes.first().copied();
+    let selected_entry_timing_profile = (!is_special_internal_sell)
+        .then(|| resolve_action_place_order_selected_entry_timing_profile_value(step, context))
+        .flatten();
+    let selected_entry_size_usdc = (!is_internal_time_exit)
+        .then(|| resolve_action_place_order_selected_entry_size_usdc(step, context)).flatten();
     let configured_size_usdc = if is_internal_time_exit {
         None
     } else {
-        node_config_f64(node, "sizeUsdc").or_else(|| node_config_f64(node, "targetNotionalUsdc"))
+        node_config_f64(node, "sizeUsdc")
+            .or_else(|| node_config_f64(node, "targetNotionalUsdc"))
+            .or(selected_entry_size_usdc)
     };
+    let configured_target_qty = (!is_internal_time_exit)
+        .then(|| action_place_order_target_qty(node))
+        .flatten();
     let configured_size_pct = if is_internal_time_exit {
         step_input_f64(step, &["remainingPct", "remaining_pct"])
     } else if is_window_end_auto_sell {
@@ -336,6 +351,7 @@ async fn execute_action_place_order(
     } else {
         node_config_f64(node, "sizePct").or_else(|| node_config_f64(node, "sizePercent"))
     };
+    let use_share_size = matches!(size_mode.as_deref(), Some("shares"));
     let use_pct_size = if trigger_size_for_first_fire.is_some() {
         if let Some(mode) = size_mode.as_deref() {
             mode == "pct"
@@ -364,14 +380,13 @@ async fn execute_action_place_order(
             !use_pct_size,
             "action.place_order sizePct requires sourceTradeId when sizeMode is pct"
         );
-        let seed_size_usdc = trigger_size_for_first_fire
-            .or(configured_size_usdc)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "action.place_order requires sizeUsdc/targetNotionalUsdc > 0 (or sizePct in pct mode)"
-                )
-            })?;
-        anyhow::ensure!(seed_size_usdc > 0.0, "action.place_order size must be > 0");
+        let seed_size_usdc = resolve_action_place_order_source_trade_seed_size_usdc(
+            trigger_size_for_first_fire,
+            configured_size_usdc,
+            configured_target_qty,
+            use_share_size,
+            reference_price,
+        )?;
         let ensured_source_trade_id = repo
             .ensure_manual_builder_source_trade(
                 run.user_id,
@@ -480,6 +495,13 @@ async fn execute_action_place_order(
     };
     if kind != "conditional" && kind != "immediate" {
         kind = "immediate".to_string();
+    }
+    if let Some(blocked_execution) = maybe_block_action_place_order_buy_fill_lock(
+        repo, run, node, context, &side, &market_slug, &token_id, &outcome_label,
+        &execution_mode, source_trade_id,
+    ).await?
+    {
+        return Ok(blocked_execution);
     }
     let expires_at = node_config_datetime(node, "expiresAt")?;
     let tp_rules = if is_special_internal_sell {
@@ -802,54 +824,19 @@ async fn execute_action_place_order(
             )
             .await?
         }
-    } else if use_pct_size {
-        let size_pct = trigger_size_for_first_fire
-            .or(configured_size_pct)
-            .ok_or_else(|| {
-                anyhow::anyhow!("action.place_order requires sizePct (0, 100] when sizeMode is pct")
-            })?;
-        anyhow::ensure!(
-            size_pct > 0.0 && size_pct <= 100.0,
-            "action.place_order sizePct must be in (0, 100]"
-        );
-        let source_notional = repo
-            .trade_notional_usdc(source_trade_id)
-            .await?
-            .unwrap_or(0.0);
-        anyhow::ensure!(
-            source_notional > 0.0,
-            "action.place_order sizePct requires source trade notional > 0"
-        );
-        let resolved = source_notional * (size_pct / 100.0);
-        anyhow::ensure!(
-            resolved > 0.0,
-            "action.place_order resolved size must be > 0"
-        );
-        ActionPlaceOrderSizing {
-            size_usdc: resolved,
-            size_basis: TRADE_BUILDER_SIZE_BASIS_NOTIONAL_USDC,
-            target_qty: None,
-            remaining_qty: None,
-            resolved_size_mode: "pct",
-            resolved_size_pct: Some(size_pct),
-        }
     } else {
-        let resolved = trigger_size_for_first_fire
-            .or(configured_size_usdc)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "action.place_order requires sizeUsdc/targetNotionalUsdc > 0 (or sizePct in pct mode)"
-                )
-            })?;
-        anyhow::ensure!(resolved > 0.0, "action.place_order size must be > 0");
-        ActionPlaceOrderSizing {
-            size_usdc: resolved,
-            size_basis: TRADE_BUILDER_SIZE_BASIS_NOTIONAL_USDC,
-            target_qty: None,
-            remaining_qty: None,
-            resolved_size_mode: "usdc",
-            resolved_size_pct: None,
-        }
+        resolve_action_place_order_buy_sizing(
+            repo,
+            source_trade_id,
+            trigger_size_for_first_fire,
+            configured_size_usdc,
+            configured_size_pct,
+            configured_target_qty,
+            use_pct_size,
+            use_share_size,
+            reference_price,
+        )
+        .await?
     };
     let persisted_trigger_price = if side == "buy"
         && kind == "immediate"
@@ -937,6 +924,7 @@ async fn execute_action_place_order(
         .await?;
         repo.set_trade_builder_order_notification_flags(
             existing_order.id,
+            flags.notify_on_order_submitted,
             flags.notify_on_fill,
             flags.notify_on_order_not_filled,
             flags.notify_on_trigger_guard_blocked,
@@ -980,6 +968,7 @@ async fn execute_action_place_order(
             "remaining_qty": sizing.remaining_qty,
             "eligible_after_at": eligible_after_at.as_ref().map(|value| value.to_rfc3339()),
             "eligible_before_at": eligible_before_at.as_ref().map(|value| value.to_rfc3339()),
+            "notify_on_order_submitted": flags.notify_on_order_submitted,
             "notify_on_fill": flags.notify_on_fill,
             "notify_on_order_not_filled": flags.notify_on_order_not_filled,
             "notify_on_trigger_guard_blocked": flags.notify_on_trigger_guard_blocked,
@@ -1028,6 +1017,7 @@ async fn execute_action_place_order(
             "size_usdc": sizing.size_usdc,
             "target_qty": sizing.target_qty,
             "remaining_qty": sizing.remaining_qty,
+            "notify_on_order_submitted": flags.notify_on_order_submitted,
             "notify_on_fill": flags.notify_on_fill,
             "notify_on_order_not_filled": flags.notify_on_order_not_filled,
             "notify_on_trigger_guard_blocked": flags.notify_on_trigger_guard_blocked,
@@ -1141,6 +1131,7 @@ async fn execute_action_place_order(
             reenter_on_sl_hit,
             reentry_max_attempts,
             reentry_trigger_node_key.as_deref(),
+            flags.notify_on_order_submitted,
             flags.notify_on_fill,
             flags.notify_on_order_not_filled,
             flags.notify_on_trigger_guard_blocked,
@@ -1170,6 +1161,13 @@ async fn execute_action_place_order(
     } else {
         "pending"
     };
+    let buy_fill_lock = (!is_special_internal_sell)
+        .then(|| resolve_action_place_order_buy_fill_lock_config(node, &side))
+        .transpose()?
+        .flatten()
+        .map(|config| config.to_value())
+        .unwrap_or(Value::Null);
+    let selected_entry_timing_profile_value = selected_entry_timing_profile.clone().unwrap_or(Value::Null);
     let mut flow_created_payload = serde_json::Map::new();
     flow_created_payload.insert("flow_run_id".to_string(), json!(run.id));
     flow_created_payload.insert("node_key".to_string(), json!(node.key));
@@ -1195,6 +1193,8 @@ async fn execute_action_place_order(
         json!(eligible_before_at.as_ref().map(|value| value.to_rfc3339())),
     );
     flow_created_payload.insert("trigger_sizes".to_string(), json!(trigger_sizes));
+    flow_created_payload.insert("selected_entry_timing_profile".to_string(), selected_entry_timing_profile_value.clone());
+    flow_created_payload.insert("buy_fill_lock".to_string(), buy_fill_lock.clone());
     flow_created_payload.insert("max_price".to_string(), json!(max_price));
     flow_created_payload.insert(
         "price_to_beat_guard".to_string(),
@@ -1363,6 +1363,8 @@ async fn execute_action_place_order(
     );
     output.insert("market_slug".to_string(), json!(market_slug));
     output.insert("token_id".to_string(), json!(token_id));
+    output.insert("selected_entry_timing_profile".to_string(), selected_entry_timing_profile_value);
+    output.insert("buy_fill_lock".to_string(), buy_fill_lock);
     output.insert("max_price".to_string(), json!(max_price));
     output.insert(
         "price_to_beat_guard".to_string(),

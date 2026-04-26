@@ -93,6 +93,10 @@ pub(crate) fn default_sl_renew_interval_ms() -> u64 {
     2000
 }
 
+pub(crate) fn default_max_price_relax_enabled() -> bool {
+    true
+}
+
 pub(crate) fn default_total_notional_usdc() -> f64 {
     10.0
 }

@@ -510,14 +510,23 @@ fn resolve_action_place_order_max_price(
     step: &TradeFlowRunStep,
     context: &Value,
 ) -> Option<f64> {
-    node_config_f64(node, "maxPriceCent")
+    let configured_max_price = node_config_f64(node, "maxPriceCent")
         .map(|value| value / 100.0)
         .or_else(|| node_config_f64(node, "maxPrice"))
         .or_else(|| step_input_f64(step, &["max_price", "maxPrice"]))
         // Global fallback for flows that insert logic nodes between trigger and place_order.
         .or_else(|| flow_context_f64(context, "maxPrice"))
         .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
-        .map(clamp_probability)
+        .map(clamp_probability);
+    let iv_time_rule_max_price = flow_context_f64(context, "priceToBeatIvSelectedMaxPrice")
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+        .map(clamp_probability);
+    match (configured_max_price, iv_time_rule_max_price) {
+        (Some(configured), Some(iv_rule)) => Some(configured.min(iv_rule)),
+        (Some(configured), None) => Some(configured),
+        (None, Some(iv_rule)) => Some(iv_rule),
+        (None, None) => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

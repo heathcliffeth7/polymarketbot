@@ -12,11 +12,19 @@ import type {
   AutoScopeTradeAnalysisSortBy,
   AutoScopeTradeAnalysisSortDirection,
   AutoScopeTradeAnalysisSummary,
+  AutoScopeTradePositionSnapshot,
+  AutoScopeTradeRiskFlags,
   TradeFlowNodeRuntimeResponse,
   TradeFlowNodeRuntimeRow,
   TradeFlowPtbStateResponse,
   TradeFlowPtbStateRow,
 } from '@/lib/types';
+import {
+  attachExtraToDiagnostic,
+  attachExtrasToRows,
+  getAutoScopeBlockedSignalsForRun,
+  getAutoScopeTradeAnalysisExtrasForRoots,
+} from './auto-scope-analysis-extras';
 
 export interface AutoScopeTradeAnalysisFilters {
   userId: number;
@@ -612,7 +620,12 @@ export async function getAutoScopeTradeAnalysisRowsForExport(
     where.params
   );
 
-  return rows.rows.map(mapAnalysisRow);
+  const mappedRows = rows.rows.map(mapAnalysisRow);
+  const extras = await getAutoScopeTradeAnalysisExtrasForRoots(
+    filters.userId,
+    mappedRows.map((row) => row.rootOrderId)
+  );
+  return attachExtrasToRows(mappedRows, extras);
 }
 
 const DIAGNOSTIC_SELECT = `SELECT
@@ -688,12 +701,25 @@ export async function getAutoScopeTradeDiagnostic(params: {
     ? mapDiagnostic(diagnosticRes.rows[0])
     : null;
   const rows = rowsRes.rows.map(mapAnalysisRow);
+  const extras = await getAutoScopeTradeAnalysisExtrasForRoots(params.userId, [
+    params.rootOrderId,
+  ]);
+  const extra = extras.get(params.rootOrderId);
+  const enrichedDiagnostic =
+    diagnostic && extra ? attachExtraToDiagnostic(diagnostic, extra) : diagnostic;
+  const enrichedRows = attachExtrasToRows(rows, extras);
+  const runId = enrichedDiagnostic?.runId ?? rows[0]?.runId ?? null;
+  const blockedSignals = await getAutoScopeBlockedSignalsForRun({
+    userId: params.userId,
+    runId,
+  });
 
   return {
-    diagnostic,
-    rows,
+    diagnostic: enrichedDiagnostic,
+    rows: enrichedRows,
+    blockedSignals,
     refreshedAt:
-      diagnostic?.updatedAt ?? rows[0]?.markPriceCapturedAt ?? new Date().toISOString(),
+      enrichedDiagnostic?.updatedAt ?? rows[0]?.markPriceCapturedAt ?? new Date().toISOString(),
   };
 }
 
@@ -702,6 +728,18 @@ function csvField(value: string | number | null): string {
   const text = String(value);
   if (!/[",\r\n]/.test(text)) return text;
   return `"${text.replaceAll('"', '""')}"`;
+}
+
+function csvRiskFlags(flags: AutoScopeTradeRiskFlags | undefined): string {
+  if (!flags) return '';
+  return flags.reasons.length > 0 ? flags.reasons.join('|') : 'none';
+}
+
+function csvPositionSnapshot(snapshot: AutoScopeTradePositionSnapshot | undefined): string {
+  if (!snapshot) return '';
+  const formatLeg = (leg: AutoScopeTradePositionSnapshot['before']) =>
+    `U=${leg.upQty};D=${leg.downQty};cost=${leg.costUsdc};floor=${leg.floorQty};floor_pnl=${leg.floorPnlUsdc}`;
+  return `before:${formatLeg(snapshot.before)} after:${formatLeg(snapshot.after)}`;
 }
 
 export function buildAutoScopeTradeAnalysisCsv(
@@ -745,6 +783,33 @@ export function buildAutoScopeTradeAnalysisCsv(
     'net_value_usdc',
     'row_pnl_usdc',
     'pnl_pct',
+    'required_q',
+    'q_margin',
+    'risk_flags',
+    'submitted_best_ask',
+    'submitted_estimated_avg_fill',
+    'submitted_vwap_slippage',
+    'submitted_target_qty',
+    'submitted_estimated_notional',
+    'submitted_q_final',
+    'submitted_model_book_gap',
+    'submitted_model_book_zone',
+    'submitted_participation_credit',
+    'fill_actual_price',
+    'fill_actual_qty',
+    'fill_actual_notional',
+    'fill_slippage_vs_vwap',
+    'fill_slippage_vs_best_ask',
+    'fill_source',
+    'if_up_pnl',
+    'if_down_pnl',
+    'ev_pnl',
+    'worst_pnl',
+    'position_before_after',
+    'tp_status',
+    'realized_pnl',
+    'mark_pnl',
+    'worst_case_pnl',
   ];
   const lines = [headers.map(csvField).join(',')];
 
@@ -788,6 +853,33 @@ export function buildAutoScopeTradeAnalysisCsv(
         row.netValueUsdc,
         row.rowPnlUsdc,
         row.pnlPct,
+        row.signalQuality?.requiredQ ?? null,
+        row.signalQuality?.qMargin ?? null,
+        csvRiskFlags(row.riskFlags),
+        row.executionTelemetry?.submittedBestAsk ?? null,
+        row.executionTelemetry?.submittedEstimatedAvgFill ?? null,
+        row.executionTelemetry?.submittedVwapSlippage ?? null,
+        row.executionTelemetry?.submittedTargetQty ?? null,
+        row.executionTelemetry?.submittedEstimatedNotional ?? null,
+        row.executionTelemetry?.submittedQFinal ?? null,
+        row.executionTelemetry?.submittedModelBookGap ?? null,
+        row.executionTelemetry?.submittedModelBookZone ?? null,
+        row.executionTelemetry?.submittedParticipationCredit ?? null,
+        row.executionTelemetry?.fillActualPrice ?? null,
+        row.executionTelemetry?.fillActualQty ?? null,
+        row.executionTelemetry?.fillActualNotional ?? null,
+        row.executionTelemetry?.fillSlippageVsVwap ?? null,
+        row.executionTelemetry?.fillSlippageVsBestAsk ?? null,
+        row.executionTelemetry?.fillSource ?? null,
+        row.scenarioPnl?.ifUpUsdc ?? null,
+        row.scenarioPnl?.ifDownUsdc ?? null,
+        row.scenarioPnl?.evUsdc ?? null,
+        row.scenarioPnl?.worstUsdc ?? null,
+        csvPositionSnapshot(row.positionSnapshot),
+        row.tpStatus?.status ?? null,
+        row.scenarioPnl?.realizedPnlUsdc ?? null,
+        row.scenarioPnl?.markPnlUsdc ?? null,
+        row.scenarioPnl?.worstUsdc ?? null,
       ]
         .map(csvField)
         .join(',')

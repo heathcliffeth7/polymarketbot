@@ -201,6 +201,18 @@ async fn maybe_prepare_trade_builder_pair_lock_auto_counter(
     let Some(remaining_budget_usdc) =
         trade_builder_pair_lock_remaining_budget_usdc(total_budget_usdc, session)
     else {
+        if maybe_skip_trade_builder_pair_protective_unwind(
+            repo,
+            session,
+            "pair_budget_exhausted",
+            TRADE_BUILDER_PAIR_STATUS_EXPIRED,
+        )
+        .await?
+        {
+            repo.set_trade_builder_order_status(order.id, "canceled", Some("pair_budget_exhausted"))
+                .await?;
+            return Ok(true);
+        }
         let orders = repo
             .list_trade_builder_orders_by_pair_session(session.id)
             .await?;
@@ -449,6 +461,7 @@ mod pair_lock_market_tests {
             reenter_on_sl_hit: false,
             reentry_max_attempts: 0,
             reentry_trigger_node_key: None,
+            notify_on_order_submitted: false,
             notify_on_fill: false,
             notify_on_order_not_filled: false,
             notify_on_trigger_guard_blocked: false,
@@ -520,6 +533,8 @@ mod pair_lock_market_tests {
         let pair_lock = ActionPlaceOrderPairLockConfig {
             max_total_price: 0.9,
             orphan_grace_ms: 0,
+            protective_unwind_enabled: true,
+            ignore_stop_loss_after_locked: false,
             notify_on_pair_locked: true,
             notify_on_pair_unwind: true,
             sizing_mode: ActionPlaceOrderPairLockSizingMode::AutoRemainingBudget,
@@ -548,6 +563,8 @@ mod pair_lock_market_tests {
         let mut pair_lock = ActionPlaceOrderPairLockConfig {
             max_total_price: 0.9,
             orphan_grace_ms: 0,
+            protective_unwind_enabled: true,
+            ignore_stop_loss_after_locked: false,
             notify_on_pair_locked: true,
             notify_on_pair_unwind: true,
             sizing_mode: ActionPlaceOrderPairLockSizingMode::Manual,
@@ -574,6 +591,8 @@ mod pair_lock_market_tests {
         let pair_lock = ActionPlaceOrderPairLockConfig {
             max_total_price: 0.9,
             orphan_grace_ms: 0,
+            protective_unwind_enabled: true,
+            ignore_stop_loss_after_locked: false,
             notify_on_pair_locked: true,
             notify_on_pair_unwind: true,
             sizing_mode: ActionPlaceOrderPairLockSizingMode::AutoRemainingBudget,
@@ -593,6 +612,7 @@ mod pair_lock_market_tests {
             min_net_profit_usdc: 0.0,
             profit_safety_buffer_usdc: 0.0,
             orphan_grace_ms: 0,
+            ignore_stop_loss_after_locked: false,
             notify_on_pair_locked: true,
             notify_on_pair_unwind: true,
             notify_on_pair_no_edge: false,
@@ -631,6 +651,8 @@ mod pair_lock_market_tests {
         let pair_lock = ActionPlaceOrderPairLockConfig {
             max_total_price: 0.9,
             orphan_grace_ms: 0,
+            protective_unwind_enabled: true,
+            ignore_stop_loss_after_locked: false,
             notify_on_pair_locked: true,
             notify_on_pair_unwind: true,
             sizing_mode: ActionPlaceOrderPairLockSizingMode::AutoRemainingBudget,
@@ -650,6 +672,7 @@ mod pair_lock_market_tests {
             min_net_profit_usdc: 0.0,
             profit_safety_buffer_usdc: 0.0,
             orphan_grace_ms: 0,
+            ignore_stop_loss_after_locked: false,
             notify_on_pair_locked: true,
             notify_on_pair_unwind: true,
             notify_on_pair_no_edge: false,

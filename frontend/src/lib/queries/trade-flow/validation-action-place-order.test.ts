@@ -76,6 +76,187 @@ test('validateActionPlaceOrderConfig accepts generic preset place_order when mul
   );
 });
 
+test('validateActionPlaceOrderConfig requires buyFillLockGroup when shared lock is enabled', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: { sourceTradeId: 42 },
+    nodes: [
+      {
+        key: 'buy_lock_missing_group',
+        type: 'action.place_order',
+        positionX: 0,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 10,
+          marketSlug: 'eth-updown-5m-1774013100',
+          tokenId: 'eth-up-token',
+          outcomeLabel: 'Up',
+          buyFillLockEnabled: true,
+        },
+      },
+    ],
+    edges: [],
+  });
+
+  const issues = collectActionIssues(graph, 'buy_lock_missing_group');
+  assert.equal(
+    issues.some((issue) => issue.code === 'missing_buy_fill_lock_group'),
+    true
+  );
+});
+
+test('validateActionPlaceOrderConfig accepts shares sizing with targetQty', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      {
+        key: 'buy_shares',
+        type: 'action.place_order',
+        positionX: 0,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'shares',
+          targetQty: 5,
+          marketSlug: 'eth-updown-5m-1774013100',
+          tokenId: 'eth-up-token',
+          outcomeLabel: 'Up',
+        },
+      },
+    ],
+    edges: [],
+  });
+
+  const issues = collectActionIssues(graph, 'buy_shares');
+  assert.equal(issues.some((issue) => issue.code === 'invalid_size_mode'), false);
+  assert.equal(issues.some((issue) => issue.code === 'invalid_target_qty'), false);
+});
+
+test('validateActionPlaceOrderConfig rejects non-boolean submitted notification flag', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      {
+        key: 'buy_submit_notify_invalid',
+        type: 'action.place_order',
+        positionX: 0,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'shares',
+          targetQty: 5,
+          marketSlug: 'eth-updown-5m-1774013100',
+          tokenId: 'eth-up-token',
+          outcomeLabel: 'Up',
+          notifyOnOrderSubmitted: 'maybe',
+        },
+      },
+    ],
+    edges: [],
+  });
+
+  const issues = collectActionIssues(graph, 'buy_submit_notify_invalid');
+  assert.equal(issues.some((issue) => issue.code === 'invalid_notify_on_order_submitted'), true);
+});
+
+test('validateActionPlaceOrderConfig rejects shares sizing without targetQty', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      {
+        key: 'buy_shares_missing_qty',
+        type: 'action.place_order',
+        positionX: 0,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'shares',
+          marketSlug: 'eth-updown-5m-1774013100',
+          tokenId: 'eth-up-token',
+          outcomeLabel: 'Up',
+        },
+      },
+    ],
+    edges: [],
+  });
+
+  const issues = collectActionIssues(graph, 'buy_shares_missing_qty');
+  assert.equal(issues.some((issue) => issue.code === 'invalid_target_qty'), true);
+});
+
+test('validateActionPlaceOrderConfig rejects stop-loss release flag without buy fill lock toggle', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: { sourceTradeId: 42 },
+    nodes: [
+      {
+        key: 'buy_lock_release_without_toggle',
+        type: 'action.place_order',
+        positionX: 0,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 10,
+          marketSlug: 'eth-updown-5m-1774013100',
+          tokenId: 'eth-up-token',
+          outcomeLabel: 'Up',
+          releaseBuyFillLockOnStopLoss: true,
+        },
+      },
+    ],
+    edges: [],
+  });
+
+  const issues = collectActionIssues(graph, 'buy_lock_release_without_toggle');
+  assert.equal(
+    issues.some((issue) => issue.code === 'buy_fill_lock_toggle_required'),
+    true
+  );
+});
+
+test('validateActionPlaceOrderConfig accepts shared buy fill lock config on buy node', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: { sourceTradeId: 42 },
+    nodes: [
+      {
+        key: 'buy_lock_ok',
+        type: 'action.place_order',
+        positionX: 0,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 10,
+          marketSlug: 'eth-updown-5m-1774013100',
+          tokenId: 'eth-up-token',
+          outcomeLabel: 'Up',
+          buyFillLockEnabled: true,
+          buyFillLockGroup: 'late-entry',
+          releaseBuyFillLockOnStopLoss: true,
+        },
+      },
+    ],
+    edges: [],
+  });
+
+  const issues = collectActionIssues(graph, 'buy_lock_ok');
+  assert.equal(
+    issues.some((issue) => issue.code === 'missing_buy_fill_lock_group'),
+    false
+  );
+  assert.equal(
+    issues.some((issue) => issue.code === 'buy_fill_lock_toggle_required'),
+    false
+  );
+});
+
 test('validateActionPlaceOrderConfig accepts auto_vol_pct on supported explicit market', () => {
   const graph = normalizeTradeFlowGraph({
     context: { sourceTradeId: 42 },
@@ -548,6 +729,115 @@ test('validateActionPlaceOrderConfig accepts auto PTB stop-loss bump config', ()
 
   const issues = collectActionIssues(graph, 'ptb_bump_auto');
   assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig accepts PTB stop-loss bump loss table config', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: { sourceTradeId: 42 },
+    nodes: [
+      buildAutoScopeTrigger('trigger_ptb_bump_loss_table'),
+      {
+        key: 'ptb_bump_loss_table',
+        type: 'action.place_order',
+        positionX: 200,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 10,
+          priceToBeatGuardEnabled: true,
+          priceToBeatMode: 'auto_vol_pct',
+          priceToBeatStopLossBumpEnabled: true,
+          priceToBeatStopLossBumpMode: 'loss_table',
+          priceToBeatStopLossBumpUnit: 'cent',
+          priceToBeatStopLossBumpLossRules: [
+            { lossUsd: 1, bumpValue: 25 },
+            { lossUsd: 2, bumpValue: 50 },
+            { lossUsd: 5, bumpValue: 100 },
+          ],
+        },
+      },
+    ],
+    edges: [{ key: 'edge_ptb_bump_loss_table', source: 'trigger_ptb_bump_loss_table', target: 'ptb_bump_loss_table', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'ptb_bump_loss_table');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig rejects mixed fixed and loss-table PTB bump config', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: { sourceTradeId: 42 },
+    nodes: [
+      buildAutoScopeTrigger('trigger_ptb_bump_mixed'),
+      {
+        key: 'ptb_bump_mixed',
+        type: 'action.place_order',
+        positionX: 200,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 10,
+          priceToBeatGuardEnabled: true,
+          priceToBeatMode: 'manual',
+          priceToBeatMaxDiff: 80,
+          priceToBeatMaxDiffUnit: 'cent',
+          priceToBeatStopLossBumpEnabled: true,
+          priceToBeatStopLossBumpMode: 'loss_table',
+          priceToBeatStopLossBumpAmount: 10,
+          priceToBeatStopLossBumpUnit: 'cent',
+          priceToBeatStopLossBumpLossRules: [{ lossUsd: 1, bumpValue: 25 }],
+        },
+      },
+    ],
+    edges: [{ key: 'edge_ptb_bump_mixed', source: 'trigger_ptb_bump_mixed', target: 'ptb_bump_mixed', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'ptb_bump_mixed');
+  assert.ok(
+    issues.some((issue) => issue.code === 'price_to_beat_stop_loss_bump_amount_only_in_fixed_mode')
+  );
+});
+
+test('validateActionPlaceOrderConfig rejects unsorted PTB bump loss table config', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: { sourceTradeId: 42 },
+    nodes: [
+      buildAutoScopeTrigger('trigger_ptb_bump_unsorted'),
+      {
+        key: 'ptb_bump_unsorted',
+        type: 'action.place_order',
+        positionX: 200,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 10,
+          priceToBeatGuardEnabled: true,
+          priceToBeatMode: 'auto_vol_pct',
+          priceToBeatStopLossBumpEnabled: true,
+          priceToBeatStopLossBumpMode: 'loss_table',
+          priceToBeatStopLossBumpUnit: 'cent',
+          priceToBeatStopLossBumpLossRules: [
+            { lossUsd: 2, bumpValue: 50 },
+            { lossUsd: 1, bumpValue: 25 },
+          ],
+        },
+      },
+    ],
+    edges: [{ key: 'edge_ptb_bump_unsorted', source: 'trigger_ptb_bump_unsorted', target: 'ptb_bump_unsorted', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'ptb_bump_unsorted');
+  assert.ok(
+    issues.some(
+      (issue) => issue.code === 'invalid_price_to_beat_stop_loss_bump_loss_rules_order'
+    )
+  );
 });
 
 test('validateActionPlaceOrderConfig accepts auto PTB relax config', () => {

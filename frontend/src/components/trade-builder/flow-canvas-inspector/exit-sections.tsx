@@ -112,10 +112,11 @@ export function PtbStopLossRuleSection({
         <p className="text-[11px] font-semibold text-slate-700">Kademeli PTB Stop-Loss</p>
       </div>
       <p className="text-[10px] leading-relaxed text-slate-400 italic">
-        Her kademe `gapUsd + sizePct` ile tanimlanir. Satirlar genisten dara dogru azalmalidir;
-        toplam satis yuzu `100` olmalidir. Pozitif deger PTB farki halen pozitifken stop bekler,
-        `0` parity demektir, negatif deger ise karsi yone overshoot bekler. Ornek:
-        `20 &gt; 0 &gt; -20`.
+        Her kademe gapUsd + sizePct ile tanimlanir. Bu alan karsi token fiyati degil,
+        directional gap esigidir. Satirlar genisten dara dogru azalmalidir; toplam satis
+        yuzu 100 olmalidir. 0 parity demektir. -10, secili birime gore Up/Yes icin
+        current &lt;= PTB - 10, Down/No icin current &gt;= PTB + 10 anlamina gelir. Ornek:
+        20 &gt; 0 &gt; -20.
       </p>
       <p className="text-[10px] leading-relaxed text-slate-400 italic">
         {isCentUnit

@@ -493,7 +493,9 @@ async fn reconcile_trade_builder_open_order(
                 Some(TradeBuilderTerminalFillQtySource::OrderInfoFilledSize.as_str()),
             )
             .await?;
-        } else if order.retry_on_max_price_block {
+        } else if order.retry_on_max_price_block
+            || trade_builder_pair_lock_counter_forces_guard_waiting(repo, &order).await?
+        {
             repo.clear_trade_builder_active_exchange_order(order.id, "canceled").await?;
             let candidate_reason = build_guard_notification_reason("max_price", "above_max_price");
             let notification_message = order.notify_on_max_price_blocked.then(|| {

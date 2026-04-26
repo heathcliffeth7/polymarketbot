@@ -472,7 +472,7 @@ SL tetiklendiginde hangi fiyat kaynagini kullanacagini belirler:
 
 ### 1.8 PTB Stop Loss (Fiyat Bazli Zarar Kes)
 
-Sabit fiyat SL yerine **PTB gap** bazli SL. Fiyat PTB'ye donunce sat.
+Sabit fiyat SL yerine **PTB gap** bazli SL. Karsi token fiyatina bakmadan, underlying fiyat ile PTB referansi arasindaki directional gap'i izleyip sat.
 
 #### Mantik
 
@@ -481,13 +481,12 @@ Up token alindi (BTC yukselecek seklinde bahis)
 PTB = $70,000
 
 BTC dustu: $70,000 → $69,998
-directional_gap = $70,000 - $69,998 = $2 (Up yonu icin pozitif gap kalmadi)
+directional_gap (Up icin) = $69,998 - $70,000 = -$2
 
 threshold_gap_usd = $0 (sifir, yani gap sifira inince sat)
 
-$2 <= $0 → HAYIR, bekle
+-$2 <= $0 → EVET → SATIS YAP
 BTC daha dustu: $69,995
-gap = $70,000 - $69,995 = $5 (ama bu negatif yon!)
 directional_gap (Up icin) = $69,995 - $70,000 = -$5
 
 -$5 <= $0 → EVET → SATIS YAP
@@ -498,7 +497,7 @@ directional_gap (Up icin) = $69,995 - $70,000 = -$5
 | Parametre | Aciklama | Ornek |
 |---|---|---|
 | `ptbStopLossEnabled` | PTB SL aktif mi | `true` |
-| `ptbStopLossGapUsd` | Gap threshold (USD) | `0.0`, `5.0`, `-20.0` |
+| `ptbStopLossGapUsd` | Directional gap threshold (USD). Negatif deger karsi yone overshoot bekler | `0.0`, `5.0`, `-20.0` |
 | `ptbStopLossTimeDecayMode` | Zamanla threshold degisimi | `"tighten"`, `"relax"`, `"none"` |
 | `ptbStopLossRules` | Kademeli PTB SL | JSON array |
 
@@ -520,6 +519,8 @@ relax: Threshold zamanla artar
 
 none: Sabit threshold
   Her zaman $5
+
+Not: Negatif thresholdlerde time decay uygulanmaz.
 ```
 
 #### Kademeli PTB SL
@@ -536,6 +537,10 @@ none: Sabit threshold
 ```
 Gap $12.5'in altina dusunce → %25 pozisyonu sat
 Gap $3.0'in altina dusunce → kalan %75'i sat
+
+`-10` ornegi:
+- Up/Yes icin fiyat PTB referansinin $10 altina indiginde sat
+- Down/No icin fiyat PTB referansinin $10 ustune ciktiginda sat
 ```
 
 ---

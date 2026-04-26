@@ -1,4 +1,5 @@
 import { PAIR_LOCK_UNSUPPORTED_EXIT_FIELD_KEYS } from '@/lib/trade-flow-config-mappers/pair-lock';
+import { isPtbMode } from '@/lib/trade-flow-config-mappers/ptb-modes';
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
 import { hasUpstreamAutoScopeMarketTrigger } from './graph';
 import {
@@ -171,6 +172,64 @@ export function validateActionPlaceOrderPairLockConfig(
       'action.place_order pair_lock only supports kind=immediate.'
     );
   }
+  const pairLockStrategy = toTrimmedString(config.pairLockStrategy).toLowerCase() || 'legacy';
+  if (pairLockStrategy !== 'legacy' && pairLockStrategy !== 'edge_pairlock_v1') {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_pair_lock_strategy',
+      'action.place_order pairLockStrategy must be legacy or edge_pairlock_v1.'
+    );
+  }
+  const usesEdgePairLock = pairLockStrategy === 'edge_pairlock_v1';
+  if (usesEdgePairLock) {
+    if (toBooleanish(config.priceToBeatGuardEnabled) !== true) {
+      pushNodeError(
+        issues,
+        node,
+        'edge_pairlock_requires_ptb_guard',
+        'action.place_order edge_pairlock_v1 requires priceToBeatGuardEnabled=true.'
+      );
+    }
+    if (toTrimmedString(config.priceToBeatMode).toLowerCase() !== 'iv_mismatch_edge') {
+      pushNodeError(
+        issues,
+        node,
+        'edge_pairlock_requires_iv_mismatch_edge',
+        'action.place_order edge_pairlock_v1 requires priceToBeatMode=iv_mismatch_edge.'
+      );
+    }
+    const pairLockDecisionQty = toFiniteNumber(config.pairLockDecisionQty);
+    if (config.pairLockDecisionQty != null && (pairLockDecisionQty == null || pairLockDecisionQty <= 0)) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_pair_lock_decision_qty',
+        'action.place_order pairLockDecisionQty must be > 0 for edge_pairlock_v1.'
+      );
+    }
+    const pairLockSingleEdgeThreshold = toFiniteNumber(config.pairLockSingleEdgeThreshold);
+    if (
+      config.pairLockSingleEdgeThreshold != null &&
+      (pairLockSingleEdgeThreshold == null || pairLockSingleEdgeThreshold < 0)
+    ) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_pair_lock_single_edge_threshold',
+        'action.place_order pairLockSingleEdgeThreshold must be >= 0 for edge_pairlock_v1.'
+      );
+    }
+    const pairLockCostBuffer = toFiniteNumber(config.pairLockCostBuffer);
+    if (config.pairLockCostBuffer != null && (pairLockCostBuffer == null || pairLockCostBuffer < 0)) {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_pair_lock_cost_buffer',
+        'action.place_order pairLockCostBuffer must be >= 0 for edge_pairlock_v1.'
+      );
+    }
+  }
   const sizeMode = toTrimmedString(config.sizeMode).toLowerCase();
   if (sizeMode === 'pct' || config.sizePct != null || config.sizePercent != null) {
     pushNodeError(
@@ -240,6 +299,8 @@ export function validateActionPlaceOrderPairLockConfig(
   }
 
   for (const [key, code] of [
+    ['pairProtectiveUnwindEnabled', 'invalid_pair_protective_unwind_enabled'],
+    ['pairIgnoreStopLossAfterLocked', 'invalid_pair_ignore_stop_loss_after_locked'],
     ['notifyOnPairLocked', 'invalid_notify_on_pair_locked'],
     ['notifyOnPairUnwind', 'invalid_notify_on_pair_unwind'],
     ['counterLegTpEnabled', 'invalid_counter_leg_tp_enabled'],
@@ -448,7 +509,7 @@ export function validateActionPlaceOrderPairLockConfig(
         'action.place_order pairTotalBudgetUsdc must be greater than the primary sizeUsdc.'
       );
     }
-  } else {
+  } else if (!usesEdgePairLock) {
     const counterLegSizeUsdc = toFiniteNumber(config.counterLegSizeUsdc);
     if (counterLegSizeUsdc == null || counterLegSizeUsdc <= 0) {
       pushNodeError(
@@ -538,17 +599,12 @@ export function validateActionPlaceOrderPairLockConfig(
   const counterLegPtbGuardEnabled = toBooleanish(config.counterLegPriceToBeatGuardEnabled);
   if (counterLegPtbGuardEnabled === true) {
     const counterPtbMode = toTrimmedString(config.counterLegPriceToBeatMode).toLowerCase();
-    if (
-      counterPtbMode &&
-      counterPtbMode !== 'manual' &&
-      counterPtbMode !== 'auto_last_3_avg_excursion' &&
-      counterPtbMode !== 'auto_vol_pct'
-    ) {
+    if (counterPtbMode && !isPtbMode(counterPtbMode)) {
       pushNodeError(
         issues,
         node,
         'invalid_counter_leg_price_to_beat_mode',
-        'action.place_order counterLegPriceToBeatMode must be manual, auto_last_3_avg_excursion, or auto_vol_pct.'
+        'action.place_order counterLegPriceToBeatMode must be manual, auto_last_3_avg_excursion, auto_vol_pct, signal_formula, or iv_mismatch_edge.'
       );
     }
     if (!counterPtbMode || counterPtbMode === 'manual') {
@@ -598,7 +654,7 @@ export function validateActionPlaceOrderPairLockConfig(
         issues,
         node,
         'pair_lock_disallows_exit_features',
-        'action.place_order pair_lock allows primary/counter take profit plus hard SL/PTB stop-loss and basic re-entry fields; classic staged SL exits, time exits, and advanced re-entry fields are not supported.'
+        'action.place_order pair_lock allows primary staged SL plus primary/counter take profit, hard SL/PTB stop-loss, and basic re-entry fields; counter staged exits, time exits, and advanced re-entry fields are not supported.'
       );
       break;
     }

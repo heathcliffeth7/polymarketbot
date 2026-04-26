@@ -115,7 +115,9 @@ fn stop_loss_bump_is_active(evaluation: &PriceToBeatGuardEvaluation) -> bool {
         return false;
     }
 
-    let baseline_usd = evaluation.base_threshold_usd.or(evaluation.auto_threshold_usd);
+    let baseline_usd = evaluation
+        .base_threshold_usd
+        .or(evaluation.auto_threshold_usd);
     let effective_usd = evaluation
         .current_effective_ptb_usd
         .or(Some(evaluation.threshold_usd))
@@ -166,11 +168,77 @@ fn build_price_to_beat_summary_block(evaluation: &PriceToBeatGuardEvaluation) ->
     }
     if stop_loss_bump_is_active(evaluation) {
         if let Some(stop_loss_bump_summary) = build_stop_loss_bump_summary(evaluation) {
-        lines.push(format!("SL Bump: {stop_loss_bump_summary}"));
+            lines.push(format!("SL Bump: {stop_loss_bump_summary}"));
         }
     }
 
     format!("\n{}", lines.join("\n"))
+}
+
+fn build_iv_mismatch_execution_summary(evaluation: &PriceToBeatGuardEvaluation) -> String {
+    let Some(iv) = evaluation
+        .iv_mismatch_edge
+        .as_ref()
+        .and_then(Value::as_object)
+    else {
+        return String::new();
+    };
+    let number = |key: &str| iv.get(key).and_then(Value::as_f64);
+    let text = |key: &str| iv.get(key).and_then(Value::as_str).unwrap_or("N/A");
+    let mut lines = Vec::new();
+    if iv.contains_key("depth_guard_result") {
+        lines.push("Depth:".to_string());
+        lines.push(format!(
+            "Best ask: {}",
+            format_optional_guard_number(number("depth_best_ask"))
+        ));
+        lines.push(format!(
+            "Target qty: {}",
+            format_optional_guard_number(number("intended_qty"))
+        ));
+        lines.push(format!(
+            "Estimated avg fill: {}",
+            format_optional_guard_number(number("estimated_avg_fill"))
+        ));
+        lines.push(format!(
+            "VWAP slippage: {}",
+            format_optional_guard_number(number("vwap_slippage"))
+        ));
+        lines.push(format!(
+            "Available best ask qty: {}",
+            format_optional_guard_number(number("available_qty_at_best_ask"))
+        ));
+        lines.push(format!(
+            "Levels used: {}",
+            format_optional_guard_number(number("depth_levels_used"))
+        ));
+        lines.push(format!("Result: {}", text("depth_guard_result")));
+    }
+    if iv.contains_key("model_book_gap") {
+        lines.push("Model-book:".to_string());
+        lines.push(format!(
+            "q_final: {}",
+            format_optional_guard_number(number("q_final"))
+        ));
+        lines.push(format!(
+            "selected_mid: {}",
+            format_optional_guard_number(number("selected_mid"))
+        ));
+        lines.push(format!(
+            "gap: {}",
+            format_optional_guard_number(number("model_book_gap"))
+        ));
+        lines.push(format!(
+            "threshold: {}",
+            format_optional_guard_number(number("too_good_threshold"))
+        ));
+        lines.push(format!("Result: {}", text("book_confirmation_result")));
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", lines.join("\n"))
+    }
 }
 
 fn format_current_ptb_summary(
@@ -216,9 +284,10 @@ pub(super) fn build_price_to_beat_guard_blocked_notification_message(
         })
         .unwrap_or_default();
     let summary_block = build_price_to_beat_summary_block(evaluation);
+    let execution_summary = build_iv_mismatch_execution_summary(evaluation);
 
     format!(
-        "{}\nSebep: {}{}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Status: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}{}\nLimit: {:.8} {} (~{:.8} USD){}",
+        "{}\nSebep: {}{}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Status: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}{}\nLimit: {:.8} {} (~{:.8} USD){}{}",
         "Price to Beat Korumasi Engelledi",
         reason,
         detail_line,
@@ -238,6 +307,7 @@ pub(super) fn build_price_to_beat_guard_blocked_notification_message(
         evaluation.threshold_unit,
         evaluation.threshold_usd,
         summary_block,
+        execution_summary,
     )
 }
 
@@ -255,8 +325,9 @@ pub(super) fn build_price_to_beat_guard_recovered_notification_message(
     recovered_from_reason_code: &str,
 ) -> String {
     let summary_block = build_price_to_beat_summary_block(evaluation);
+    let execution_summary = build_iv_mismatch_execution_summary(evaluation);
     format!(
-        "{}\nDurum: Price to Beat yeniden uygun hale geldi.\nOnceki Sebep: {}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Status: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}\nLimit: {:.8} {} (~{:.8} USD){}",
+        "{}\nDurum: Price to Beat yeniden uygun hale geldi.\nOnceki Sebep: {}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Status: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}\nLimit: {:.8} {} (~{:.8} USD){}{}",
         "Price to Beat Korumasi Gecti",
         recovered_from_reason_code,
         format_optional_direction(evaluation.direction.as_deref()),
@@ -274,6 +345,7 @@ pub(super) fn build_price_to_beat_guard_recovered_notification_message(
         evaluation.threshold_unit,
         evaluation.threshold_usd,
         summary_block,
+        execution_summary,
     )
 }
 

@@ -9,6 +9,7 @@ import type {
   AutoScopeTradeAnalysisResponse,
   AutoScopeTradeAnalysisSortBy,
   AutoScopeTradeAnalysisSortDirection,
+  AutoScopeTradeAnalysisTimeRange,
   PaginatedResponse,
   TradeFlowNodeRuntimeResponse,
   TradeFlowPtbStateResponse,
@@ -41,6 +42,7 @@ export interface TradeFlowAutoScopeAnalysisParams {
   sortDirection?: AutoScopeTradeAnalysisSortDirection;
   pnl?: AutoScopeTradeAnalysisPnlFilter;
   position?: AutoScopeTradeAnalysisPositionFilter;
+  timeRange?: AutoScopeTradeAnalysisTimeRange;
   from?: string;
   to?: string;
   enabled?: boolean;
@@ -49,6 +51,11 @@ export interface TradeFlowAutoScopeAnalysisParams {
 export function buildTradeFlowAutoScopeAnalysisQuery(
   params: TradeFlowAutoScopeAnalysisParams
 ): string {
+  const relativeTimeRange =
+    params.timeRange && params.timeRange !== 'all' && params.timeRange !== 'custom'
+      ? params.timeRange
+      : undefined;
+
   return buildSearchParams({
     page: params.page != null ? String(params.page) : undefined,
     limit: params.limit != null ? String(params.limit) : undefined,
@@ -56,8 +63,9 @@ export function buildTradeFlowAutoScopeAnalysisQuery(
     sortDirection: params.sortDirection,
     pnl: params.pnl,
     position: params.position,
-    from: params.from,
-    to: params.to,
+    timeRange: relativeTimeRange,
+    from: relativeTimeRange ? undefined : params.from,
+    to: relativeTimeRange ? undefined : params.to,
   });
 }
 
@@ -172,6 +180,7 @@ export function useTradeFlowAutoScopeAnalysis({
   sortDirection = 'desc',
   pnl = 'all',
   position = 'all',
+  timeRange = 'all',
   from,
   to,
   enabled = true,
@@ -183,6 +192,7 @@ export function useTradeFlowAutoScopeAnalysis({
     sortDirection,
     pnl,
     position,
+    timeRange,
     from,
     to,
   });

@@ -1,7 +1,12 @@
 import { toStringValue } from './utils';
 import { normalizePtbStopLossGapUnit } from './ptb-stop-loss';
+import { normalizePtbMode } from './ptb-modes';
 
 export const PAIR_LOCK_CONFIG_KEYS = [
+  'pairLockStrategy',
+  'pairLockDecisionQty',
+  'pairLockSingleEdgeThreshold',
+  'pairLockCostBuffer',
   'pairMaxTotalCent',
   'pairTargetTotalCent',
   'pairSizingMode',
@@ -9,6 +14,8 @@ export const PAIR_LOCK_CONFIG_KEYS = [
   'pairMinNetProfitUsdc',
   'pairProfitSafetyBufferUsdc',
   'pairOrphanGraceMs',
+  'pairProtectiveUnwindEnabled',
+  'pairIgnoreStopLossAfterLocked',
   'notifyOnPairLocked',
   'notifyOnPairUnwind',
   'notifyOnPairNoEdge',
@@ -64,7 +71,6 @@ export const PAIR_LOCK_SUPPORTED_STOP_LOSS_FIELD_KEYS = [
 ] as const;
 
 export const PAIR_LOCK_UNSUPPORTED_EXIT_FIELD_KEYS = [
-  'slRules',
   'timeExitRules',
   'stagedSlReentryOnlyAfterAllStages',
   'reentryMinPriceCent',
@@ -108,6 +114,12 @@ export function normalizePairLockSizingMode(value: string): 'manual' | 'auto_rem
     : 'manual';
 }
 
+export function normalizePairLockStrategy(value: string): 'legacy' | 'edge_pairlock_v1' {
+  return value.trim().toLowerCase() === 'edge_pairlock_v1'
+    ? 'edge_pairlock_v1'
+    : 'legacy';
+}
+
 export function applyPairLockFormDefaults(
   fields: Record<string, string>,
   cfg: Record<string, unknown>
@@ -118,6 +130,15 @@ export function applyPairLockFormDefaults(
     return;
   }
 
+  fields.pairLockStrategy = normalizePairLockStrategy(toStringValue(cfg.pairLockStrategy));
+  if (fields.pairLockStrategy === 'edge_pairlock_v1') {
+    fields.priceToBeatGuardEnabled = 'true';
+    fields.priceToBeatMode = 'iv_mismatch_edge';
+    if (!(fields.pairLockDecisionQty ?? '').trim()) fields.pairLockDecisionQty = '5';
+    if (!(fields.pairLockSingleEdgeThreshold ?? '').trim()) fields.pairLockSingleEdgeThreshold = '0.10';
+    if (!(fields.pairLockCostBuffer ?? '').trim()) fields.pairLockCostBuffer = '0.005';
+    if (!(fields.pairMaxTotalCent ?? '').trim()) fields.pairMaxTotalCent = '95';
+  }
   if (!(fields.pairMaxTotalCent ?? '').trim()) {
     fields.pairMaxTotalCent = toStringValue(cfg.pairMaxTotalCent ?? cfg.pairTargetTotalCent).trim();
   }
@@ -126,6 +147,9 @@ export function applyPairLockFormDefaults(
   }
   if (!(fields.pairOrphanGraceMs ?? '').trim()) {
     fields.pairOrphanGraceMs = '1500';
+  }
+  if (!(fields.pairProtectiveUnwindEnabled ?? '').trim()) {
+    fields.pairProtectiveUnwindEnabled = 'true';
   }
   fields.pairSizingMode = normalizePairLockSizingMode(toStringValue(cfg.pairSizingMode));
   if (
@@ -137,6 +161,24 @@ export function applyPairLockFormDefaults(
   applyExplicitCounterStopLossFormDefaults(fields);
 }
 
+function normalizePositiveNumberField(
+  config: Record<string, unknown>,
+  key: string,
+  fallback: number
+): void {
+  const value = Number(toStringValue(config[key]).trim());
+  config[key] = Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function normalizeNonNegativeNumberField(
+  config: Record<string, unknown>,
+  key: string,
+  fallback: number
+): void {
+  const value = Number(toStringValue(config[key]).trim());
+  config[key] = Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
 export function normalizePairLockBuildConfig(config: Record<string, unknown>): void {
   const pairLockMode = toStringValue(config.mode).trim().toLowerCase() === 'pair_lock';
   if (!pairLockMode) {
@@ -145,6 +187,21 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
       delete config[key];
     }
     return;
+  }
+
+  const pairLockStrategy = normalizePairLockStrategy(toStringValue(config.pairLockStrategy));
+  if (pairLockStrategy === 'edge_pairlock_v1') {
+    config.pairLockStrategy = 'edge_pairlock_v1';
+    config.priceToBeatGuardEnabled = true;
+    config.priceToBeatMode = 'iv_mismatch_edge';
+    normalizePositiveNumberField(config, 'pairLockDecisionQty', 5);
+    normalizeNonNegativeNumberField(config, 'pairLockSingleEdgeThreshold', 0.10);
+    normalizeNonNegativeNumberField(config, 'pairLockCostBuffer', 0.005);
+  } else {
+    delete config.pairLockStrategy;
+    delete config.pairLockDecisionQty;
+    delete config.pairLockSingleEdgeThreshold;
+    delete config.pairLockCostBuffer;
   }
 
   const pairMaxTotalCent = Number(toStringValue(config.pairMaxTotalCent ?? config.pairTargetTotalCent).trim());
@@ -170,7 +227,11 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
   }
 
   config.pairSizingMode = normalizePairLockSizingMode(toStringValue(config.pairSizingMode));
-  if (config.pairSizingMode === 'auto_remaining_budget') {
+  if (pairLockStrategy === 'edge_pairlock_v1') {
+    config.pairSizingMode = 'manual';
+    delete config.pairTotalBudgetUsdc;
+    delete config.counterLegSizeUsdc;
+  } else if (config.pairSizingMode === 'auto_remaining_budget') {
     const pairTotalBudgetUsdc = Number(toStringValue(config.pairTotalBudgetUsdc).trim());
     if (Number.isFinite(pairTotalBudgetUsdc) && pairTotalBudgetUsdc > 0) {
       config.pairTotalBudgetUsdc = pairTotalBudgetUsdc;
@@ -183,13 +244,7 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
   }
 
   if (config.counterLegPriceToBeatGuardEnabled === true) {
-    const counterLegPriceToBeatModeRaw = toStringValue(config.counterLegPriceToBeatMode).trim().toLowerCase();
-    config.counterLegPriceToBeatMode =
-      counterLegPriceToBeatModeRaw === 'auto_last_3_avg_excursion'
-        ? 'auto_last_3_avg_excursion'
-        : counterLegPriceToBeatModeRaw === 'auto_vol_pct'
-          ? 'auto_vol_pct'
-          : 'manual';
+    config.counterLegPriceToBeatMode = normalizePtbMode(config.counterLegPriceToBeatMode);
     if (config.counterLegPriceToBeatMode === 'manual') {
       const counterLegPriceToBeatUnitRaw = toStringValue(config.counterLegPriceToBeatMaxDiffUnit).trim().toLowerCase();
       config.counterLegPriceToBeatMaxDiffUnit = counterLegPriceToBeatUnitRaw === 'cent' ? 'cent' : 'usd';
@@ -207,9 +262,16 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
 export function normalizePairLockStopLossBuildConfig(
   config: Record<string, unknown>
 ): void {
-  const slEnabled = config.slEnabled === true;
+  const hardSlEnabled = config.slEnabled === true;
   const ptbStopLossEnabled = config.ptbStopLossEnabled === true;
-  const anyStopLossEnabled = slEnabled || ptbStopLossEnabled;
+  const hasStagedPrimarySl = Array.isArray(config.slRules) && config.slRules.length > 0;
+  const hasStagedPrimaryPtbStopLoss =
+    Array.isArray(config.ptbStopLossRules) && config.ptbStopLossRules.length > 0;
+  const anyStopLossEnabled =
+    hardSlEnabled ||
+    ptbStopLossEnabled ||
+    hasStagedPrimarySl ||
+    hasStagedPrimaryPtbStopLoss;
   const counterSlEnabled = config.counterLegSlEnabled === true;
   const counterPtbStopLossEnabled = config.counterLegPtbStopLossEnabled === true;
   const anyCounterStopLossEnabled = counterSlEnabled || counterPtbStopLossEnabled;
@@ -218,7 +280,7 @@ export function normalizePairLockStopLossBuildConfig(
     delete config[key];
   }
 
-  if (!slEnabled) {
+  if (!hardSlEnabled) {
     delete config.slEnabled;
     delete config.slPriceCent;
     delete config.slPrice;

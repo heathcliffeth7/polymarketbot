@@ -30,7 +30,7 @@ use bot_infra::reconcile::reconcile_tick_and_snapshot;
 use bot_infra::signer::ApiCredentials;
 use bot_infra::ws::{
     ClobWsClient, MarketDataSnapshot, MarketSnapshotIntrospection, MarketSnapshotWsState,
-    MarketTickCallback, WsChannel, WsEvent, WsEventType,
+    MarketTickCallback, MarketTradeCallback, MarketTradeTick, WsChannel, WsEvent, WsEventType,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ethers::{

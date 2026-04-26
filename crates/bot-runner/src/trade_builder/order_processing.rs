@@ -978,6 +978,7 @@ mod eligibility_window_tests {
             reenter_on_sl_hit: false,
             reentry_max_attempts: 0,
             reentry_trigger_node_key: None,
+            notify_on_order_submitted: false,
             notify_on_fill: false,
             notify_on_order_not_filled: false,
             notify_on_trigger_guard_blocked: false,

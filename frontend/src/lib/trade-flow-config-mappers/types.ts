@@ -2,6 +2,7 @@ export type PrimitiveValueType = 'string' | 'number' | 'boolean';
 export type ExpressionJoin = 'and' | 'or';
 export type ConditionOperator = '>' | '>=' | '<' | '<=' | '==' | '!=';
 export type PtbGapUnit = 'usd' | 'cent';
+export type PtbStopLossBumpMode = 'fixed' | 'loss_table';
 
 export interface KeyValueDraft {
   id: string;
@@ -46,6 +47,34 @@ export interface PtbStopLossRuleRow {
   sizePct: string;
 }
 
+export interface PtbStopLossBumpLossRuleRow {
+  id: string;
+  lossUsd: string;
+  bumpValue: string;
+}
+
+export interface PtbIvTimeRuleRow {
+  id: string;
+  startRemainingSec: string;
+  endRemainingSec: string;
+  maxPriceCent: string;
+  minEdge: string;
+  minGapStrength: string;
+  minExpectedMoveUsd: string;
+  minGapStrengthMargin: string;
+  minGapUsdMargin: string;
+}
+
+export interface EntryTimingProfileRow {
+  id: string;
+  startRemainingSec: string;
+  endRemainingSec: string;
+  maxPriceCent: string;
+  priceToBeatTriggerMinGap: string;
+  priceToBeatTriggerMaxGap: string;
+  sizeUsdc: string;
+}
+
 export interface TimeExitRuleRow {
   id: string;
   elapsedMinutes: string;
@@ -81,6 +110,9 @@ export interface NodeConfigFormState {
   counterLegTpRuleRows: ExitLadderRuleRow[];
   slRuleRows: ExitLadderRuleRow[];
   ptbStopLossRuleRows: PtbStopLossRuleRow[];
+  ptbStopLossBumpLossRuleRows: PtbStopLossBumpLossRuleRow[];
+  ptbIvTimeRuleRows?: PtbIvTimeRuleRow[];
+  entryTimingProfileRows?: EntryTimingProfileRow[];
   timeExitRuleRows: TimeExitRuleRow[];
   expressionRows: ConditionDraft[];
   expressionJoin: ExpressionJoin;

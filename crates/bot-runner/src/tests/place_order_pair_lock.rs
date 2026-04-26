@@ -9,6 +9,7 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
         "executionMode": "market",
         "sizeUsdc": 5,
         "pairMaxTotalCent": 90,
+        "pairIgnoreStopLossAfterLocked": true,
         "counterLegEnabled": true,
         "counterLegSizeUsdc": 5,
         "counterLegOutcomeLabel": "opposite",
@@ -19,6 +20,7 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
         "slEnabled": true,
         "slPriceCent": 45,
         "slTriggerPriceMode": "composite_safe",
+        "slRules": [{ "priceCent": 45.0, "sizePct": 60.0 }, { "priceCent": 40.0, "sizePct": 40.0 }],
         "ptbStopLossEnabled": true,
         "ptbStopLossGapUsd": 0.0,
         "ptbStopLossGapUnit": "usd",
@@ -32,6 +34,7 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
     let pair_lock = resolve_action_place_order_pair_lock_config(&node)
         .expect("pair lock config parse")
         .expect("pair lock config");
+    assert!(pair_lock.ignore_stop_loss_after_locked);
 
     let primary =
         build_pair_lock_single_leg_node(&node, "btc-updown-5m-1", "tok-up", "Up", "trigger_pair");
@@ -79,7 +82,6 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
                 .and_then(Value::as_str),
             Some("trigger_pair")
         );
-        assert!(candidate.config.get("slRules").is_none());
     }
 
     assert_eq!(
@@ -111,6 +113,7 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
             .and_then(Value::as_str),
         Some("composite_safe")
     );
+    assert_eq!(primary.config.get("slRules"), node.config.get("slRules"));
     assert_eq!(
         primary
             .config
@@ -155,6 +158,7 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
     assert!(counter.config.get("slEnabled").is_none());
     assert!(counter.config.get("slPriceCent").is_none());
     assert!(counter.config.get("slTriggerPriceMode").is_none());
+    assert!(counter.config.get("slRules").is_none());
     assert!(counter.config.get("ptbStopLossEnabled").is_none());
     assert!(counter.config.get("ptbStopLossGapUsd").is_none());
     assert!(counter.config.get("ptbStopLossGapUnit").is_none());
@@ -369,7 +373,80 @@ fn pair_lock_counter_leg_keeps_stop_loss_fields_empty_when_counter_fields_missin
     assert!(counter.config.get("notifyOnSlHit").is_none());
 }
 
-fn test_pair_lock_session(status: &str, primary_order_id: i64, counter_order_id: i64) -> TradeBuilderPairSession {
+#[test]
+fn pair_lock_protective_unwind_defaults_on() {
+    let node = test_node(json!({
+        "mode": "pair_lock",
+        "sizeUsdc": 5,
+        "pairMaxTotalCent": 90,
+        "counterLegEnabled": true,
+        "counterLegSizeUsdc": 5,
+    }));
+
+    let pair_lock = resolve_action_place_order_pair_lock_config(&node)
+        .expect("pair lock config parse")
+        .expect("pair lock config");
+
+    assert!(pair_lock.protective_unwind_enabled);
+}
+
+#[test]
+fn pair_lock_disabled_protective_unwind_forces_counter_guard_retries() {
+    let node = test_node(json!({
+        "mode": "pair_lock",
+        "sizeUsdc": 5,
+        "pairMaxTotalCent": 90,
+        "pairProtectiveUnwindEnabled": false,
+        "counterLegEnabled": true,
+        "counterLegSizeUsdc": 5,
+        "counterLegOutcomeLabel": "opposite",
+        "counterLegRetryOnMaxPriceBlock": false,
+        "counterLegRetryOnExecutionFloorGuardBlock": false,
+        "counterLegRetryOnPriceToBeatGuardBlock": false,
+    }));
+    let pair_lock = resolve_action_place_order_pair_lock_config(&node)
+        .expect("pair lock config parse")
+        .expect("pair lock config");
+    let counter = build_pair_lock_counter_leg_node(
+        &node,
+        "btc-updown-5m-1",
+        &ActionPlaceOrderPairResolvedCounterLeg {
+            token_id: "tok-down".to_string(),
+            outcome_label: "Down".to_string(),
+        },
+        &pair_lock,
+        "trigger_pair",
+    );
+
+    assert!(!pair_lock.protective_unwind_enabled);
+    assert_eq!(
+        counter
+            .config
+            .get("retryOnMaxPriceBlock")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        counter
+            .config
+            .get("retryOnExecutionFloorGuardBlock")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        counter
+            .config
+            .get("retryOnPriceToBeatGuardBlock")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+}
+
+fn test_pair_lock_session(
+    status: &str,
+    primary_order_id: i64,
+    counter_order_id: i64,
+) -> TradeBuilderPairSession {
     TradeBuilderPairSession {
         id: 17,
         user_id: 1,
@@ -382,6 +459,7 @@ fn test_pair_lock_session(status: &str, primary_order_id: i64, counter_order_id:
         min_net_profit_usdc: 0.0,
         profit_safety_buffer_usdc: 0.0,
         orphan_grace_ms: 1500,
+        ignore_stop_loss_after_locked: false,
         notify_on_pair_locked: false,
         notify_on_pair_unwind: false,
         notify_on_pair_no_edge: false,
@@ -414,10 +492,12 @@ fn pair_lock_locked_session_skips_ptb_stop_loss_bump_for_candidate_orders() {
 
     let locked_session = test_pair_lock_session(TRADE_BUILDER_PAIR_STATUS_LOCKED, 11, 12);
 
-    assert!(trade_builder_pair_lock_ptb_stop_loss_bump_should_skip_from_session(
-        &locked_session,
-        &counter,
-    ));
+    assert!(
+        trade_builder_pair_lock_ptb_stop_loss_bump_should_skip_from_session(
+            &locked_session,
+            &counter,
+        )
+    );
 }
 
 #[test]
@@ -429,10 +509,12 @@ fn pair_lock_working_session_keeps_ptb_stop_loss_bump_enabled_for_lead_candidate
 
     let working_session = test_pair_lock_session(TRADE_BUILDER_PAIR_STATUS_WORKING, 11, 12);
 
-    assert!(!trade_builder_pair_lock_ptb_stop_loss_bump_should_skip_from_session(
-        &working_session,
-        &lead,
-    ));
+    assert!(
+        !trade_builder_pair_lock_ptb_stop_loss_bump_should_skip_from_session(
+            &working_session,
+            &lead,
+        )
+    );
 }
 
 #[test]

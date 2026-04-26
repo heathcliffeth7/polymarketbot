@@ -2,6 +2,54 @@ import type { TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
 import { toBooleanish, toFiniteNumber } from './shared';
 import { pushNodeError } from './validation-core';
 
+interface ParsedPtbStopLossBumpLossRule {
+  lossUsd: number;
+  bumpValue: number;
+}
+
+function normalizePriceToBeatStopLossBumpModeValue(
+  value: unknown
+): 'fixed' | 'loss_table' | null {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'fixed' || normalized === 'loss_table') {
+    return normalized;
+  }
+  return null;
+}
+
+function parsePtbStopLossBumpLossRules(raw: unknown): {
+  isArray: boolean;
+  validRules: ParsedPtbStopLossBumpLossRule[];
+  invalidItem: boolean;
+} {
+  if (!Array.isArray(raw)) {
+    return { isArray: false, validRules: [], invalidItem: false };
+  }
+
+  const validRules: ParsedPtbStopLossBumpLossRule[] = [];
+  let invalidItem = false;
+  for (const item of raw) {
+    if (item == null || typeof item !== 'object' || Array.isArray(item)) {
+      invalidItem = true;
+      continue;
+    }
+    const lossUsd = toFiniteNumber((item as Record<string, unknown>).lossUsd);
+    const bumpValue = toFiniteNumber((item as Record<string, unknown>).bumpValue);
+    if (lossUsd == null || lossUsd <= 0 || bumpValue == null || bumpValue <= 0) {
+      invalidItem = true;
+      continue;
+    }
+    validRules.push({ lossUsd, bumpValue });
+  }
+
+  if (raw.length > 0 && validRules.length === 0) {
+    invalidItem = true;
+  }
+
+  return { isArray: true, validRules, invalidItem };
+}
+
 export function validateActionPlaceOrderPtbStopLossBumpConfig(
   issues: TradeFlowValidationIssue[],
   node: TradeFlowNode,
@@ -10,10 +58,20 @@ export function validateActionPlaceOrderPtbStopLossBumpConfig(
   priceToBeatGuardEnabled: boolean | null
 ) {
   const bumpEnabled = toBooleanish(config.priceToBeatStopLossBumpEnabled);
+  const bumpMode = normalizePriceToBeatStopLossBumpModeValue(
+    config.priceToBeatStopLossBumpMode
+  );
   const hasBumpAmount = config.priceToBeatStopLossBumpAmount != null;
   const hasBumpMaxValue = config.priceToBeatStopLossBumpMaxValue != null;
+  const hasBumpMode = config.priceToBeatStopLossBumpMode != null;
   const bumpUnit = String(config.priceToBeatStopLossBumpUnit ?? '').trim().toLowerCase();
   const hasBumpUnit = bumpUnit.length > 0;
+  const parsedLossRules = parsePtbStopLossBumpLossRules(
+    config.priceToBeatStopLossBumpLossRules
+  );
+  const hasBumpLossRules = config.priceToBeatStopLossBumpLossRules != null;
+  const relaxEnabled = toBooleanish(config.priceToBeatMaxPriceRelaxEnabled);
+  const hasRelaxEnabled = config.priceToBeatMaxPriceRelaxEnabled != null;
   const relaxMissCountRaw = String(config.priceToBeatMaxPriceRelaxMissCount ?? '').trim();
   const hasRelaxMissCount = relaxMissCountRaw.length > 0;
   const relaxHistoryCountRaw = String(config.priceToBeatMaxPriceRelaxHistoryCount ?? '').trim();
@@ -35,6 +93,7 @@ export function validateActionPlaceOrderPtbStopLossBumpConfig(
     .toLowerCase();
   const hasRelaxStepUnit = relaxStepUnit.length > 0;
   const hasRelaxConfig =
+    hasRelaxEnabled ||
     hasRelaxMissCount ||
     hasRelaxHistoryCount ||
     hasRelaxMinValue ||
@@ -49,6 +108,24 @@ export function validateActionPlaceOrderPtbStopLossBumpConfig(
       node,
       'invalid_price_to_beat_stop_loss_bump_enabled',
       'action.place_order priceToBeatStopLossBumpEnabled must be boolean (true/false).'
+    );
+  }
+
+  if (hasRelaxEnabled && relaxEnabled == null) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_price_to_beat_max_price_relax_enabled',
+      'action.place_order priceToBeatMaxPriceRelaxEnabled must be boolean (true/false).'
+    );
+  }
+
+  if (hasBumpMode && bumpMode == null) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_price_to_beat_stop_loss_bump_mode',
+      'action.place_order priceToBeatStopLossBumpMode must be fixed or loss_table.'
     );
   }
 
@@ -70,15 +147,8 @@ export function validateActionPlaceOrderPtbStopLossBumpConfig(
       );
     }
 
+    const effectiveBumpMode = bumpMode ?? 'fixed';
     const bumpAmount = toFiniteNumber(config.priceToBeatStopLossBumpAmount);
-    if (bumpAmount == null || bumpAmount <= 0) {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_price_to_beat_stop_loss_bump_amount',
-        'action.place_order priceToBeatStopLossBumpAmount must be > 0.'
-      );
-    }
     const bumpMaxValue = toFiniteNumber(config.priceToBeatStopLossBumpMaxValue);
     if (hasBumpMaxValue && (bumpMaxValue == null || bumpMaxValue <= 0)) {
       pushNodeError(
@@ -86,19 +156,6 @@ export function validateActionPlaceOrderPtbStopLossBumpConfig(
         node,
         'invalid_price_to_beat_stop_loss_bump_max_value',
         'action.place_order priceToBeatStopLossBumpMaxValue must be > 0.'
-      );
-    }
-    if (
-      bumpAmount != null &&
-      bumpAmount > 0 &&
-      bumpMaxValue != null &&
-      bumpMaxValue < bumpAmount
-    ) {
-      pushNodeError(
-        issues,
-        node,
-        'invalid_price_to_beat_stop_loss_bump_max_value_range',
-        'action.place_order priceToBeatStopLossBumpMaxValue must be >= priceToBeatStopLossBumpAmount.'
       );
     }
     if (bumpUnit !== 'usd' && bumpUnit !== 'cent') {
@@ -109,12 +166,82 @@ export function validateActionPlaceOrderPtbStopLossBumpConfig(
         'action.place_order priceToBeatStopLossBumpUnit must be usd or cent.'
       );
     }
-  } else if (hasBumpAmount || hasBumpMaxValue || hasBumpUnit) {
+    if (effectiveBumpMode === 'fixed') {
+      if (bumpAmount == null || bumpAmount <= 0) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_price_to_beat_stop_loss_bump_amount',
+          'action.place_order priceToBeatStopLossBumpAmount must be > 0.'
+        );
+      }
+      if (
+        bumpAmount != null &&
+        bumpAmount > 0 &&
+        bumpMaxValue != null &&
+        bumpMaxValue < bumpAmount
+      ) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_price_to_beat_stop_loss_bump_max_value_range',
+          'action.place_order priceToBeatStopLossBumpMaxValue must be >= priceToBeatStopLossBumpAmount.'
+        );
+      }
+      if (hasBumpLossRules || parsedLossRules.isArray) {
+        pushNodeError(
+          issues,
+          node,
+          'price_to_beat_stop_loss_bump_loss_rules_require_loss_table_mode',
+          'action.place_order priceToBeatStopLossBumpLossRules requires priceToBeatStopLossBumpMode=loss_table.'
+        );
+      }
+    } else {
+      if (hasBumpAmount) {
+        pushNodeError(
+          issues,
+          node,
+          'price_to_beat_stop_loss_bump_amount_only_in_fixed_mode',
+          'action.place_order priceToBeatStopLossBumpAmount is only valid when priceToBeatStopLossBumpMode=fixed.'
+        );
+      }
+      if (!parsedLossRules.isArray || parsedLossRules.validRules.length === 0) {
+        pushNodeError(
+          issues,
+          node,
+          'missing_price_to_beat_stop_loss_bump_loss_rules',
+          'action.place_order priceToBeatStopLossBumpMode=loss_table requires priceToBeatStopLossBumpLossRules.'
+        );
+      }
+      if (parsedLossRules.invalidItem) {
+        pushNodeError(
+          issues,
+          node,
+          'invalid_price_to_beat_stop_loss_bump_loss_rules',
+          'action.place_order priceToBeatStopLossBumpLossRules entries must provide positive lossUsd and bumpValue.'
+        );
+      }
+      for (let index = 1; index < parsedLossRules.validRules.length; index += 1) {
+        if (
+          parsedLossRules.validRules[index - 1].lossUsd >=
+          parsedLossRules.validRules[index].lossUsd
+        ) {
+          pushNodeError(
+            issues,
+            node,
+            'invalid_price_to_beat_stop_loss_bump_loss_rules_order',
+            'action.place_order priceToBeatStopLossBumpLossRules lossUsd values must be strictly increasing.'
+          );
+          break;
+        }
+      }
+    }
+  } else if (hasBumpAmount || hasBumpMaxValue || hasBumpUnit || hasBumpMode || hasBumpLossRules) {
     pushNodeError(
       issues,
       node,
       'price_to_beat_stop_loss_bump_requires_toggle',
-      'priceToBeatStopLossBumpAmount/max/unit require priceToBeatStopLossBumpEnabled=true.'
+      'priceToBeatStopLossBump mode/amount/lossRules/max/unit require priceToBeatStopLossBumpEnabled=true.'
     );
   }
 

@@ -1,10 +1,11 @@
 'use client';
 
-import { X } from 'lucide-react';
+import { Download, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useTradeFlowAutoScopeTradeDiagnostic } from '@/hooks/use-trade-flow';
 import {
   formatDuration,
+  formatDateTime,
   formatPercent,
   formatPnl,
   formatPrice,
@@ -43,6 +44,24 @@ function compactMetricValue(value: unknown): string {
   return String(value);
 }
 
+function formatNullablePnl(value: number | null | undefined): string {
+  return value == null ? '-' : formatPnl(value);
+}
+
+function formatFlagList(flags: string[] | undefined): string {
+  return flags && flags.length > 0 ? flags.join(', ') : 'none';
+}
+
+function formatPositionLeg(leg: {
+  upQty: number;
+  downQty: number;
+  costUsdc: number;
+  floorQty: number;
+  floorPnlUsdc: number;
+}): string {
+  return `U ${formatQty(leg.upQty)} / D ${formatQty(leg.downQty)} / Cost ${formatUsdc(leg.costUsdc)} / Floor ${formatQty(leg.floorQty)} / ${formatPnl(leg.floorPnlUsdc)}`;
+}
+
 export function AutoScopeDiagnosticsPanel({
   rootOrderId,
   onClose,
@@ -52,6 +71,14 @@ export function AutoScopeDiagnosticsPanel({
 
   const diagnostic = data?.diagnostic ?? null;
   const rows = data?.rows ?? [];
+  const blockedSignals = data?.blockedSignals ?? [];
+  const signalRunId = diagnostic?.runId ?? rows[0]?.runId ?? null;
+  const hasNoOrderSignals = blockedSignals.some((signal) => signal.noOrderTelemetry);
+
+  function exportNoOrderCsv() {
+    if (!signalRunId) return;
+    window.location.href = `/api/trade-flow/analytics/auto-scope/no-order/export?runId=${signalRunId}`;
+  }
 
   return (
     <div className="rounded-md border border-zinc-800 bg-zinc-950 p-4">
@@ -112,6 +139,85 @@ export function AutoScopeDiagnosticsPanel({
             <DetailMetric label="Fee Drag" value={formatUsdc(diagnostic.feeDragUsdc)} />
             <DetailMetric label="PnL %" value={formatPercent(diagnostic.pnlPct)} />
           </div>
+
+          {diagnostic.signalQuality && (
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <DetailMetric
+                label="Required q"
+                value={compactMetricValue(diagnostic.signalQuality.requiredQ)}
+              />
+              <DetailMetric
+                label="q Margin"
+                value={compactMetricValue(diagnostic.signalQuality.qMargin)}
+                className={
+                  (diagnostic.signalQuality.qMargin ?? 0) >= 0
+                    ? 'text-emerald-300'
+                    : 'text-red-300'
+                }
+              />
+              <DetailMetric label="q" value={compactMetricValue(diagnostic.signalQuality.q)} />
+              <DetailMetric
+                label="Karar"
+                value={diagnostic.signalQuality.decisionReason ?? '-'}
+              />
+              <DetailMetric
+                label="Cost"
+                value={compactMetricValue(diagnostic.signalQuality.cost)}
+              />
+              <DetailMetric
+                label="Threshold"
+                value={compactMetricValue(diagnostic.signalQuality.dynamicThreshold)}
+              />
+              <DetailMetric
+                label="Edge"
+                value={compactMetricValue(
+                  diagnostic.signalQuality.edgeAdjusted ?? diagnostic.signalQuality.edge
+                )}
+              />
+              <DetailMetric
+                label="Risk Flags"
+                value={formatFlagList(diagnostic.riskFlags?.reasons)}
+              />
+            </div>
+          )}
+
+          {diagnostic.scenarioPnl && (
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <DetailMetric label="If Up" value={formatNullablePnl(diagnostic.scenarioPnl.ifUpUsdc)} />
+              <DetailMetric label="If Down" value={formatNullablePnl(diagnostic.scenarioPnl.ifDownUsdc)} />
+              <DetailMetric label="EV" value={formatNullablePnl(diagnostic.scenarioPnl.evUsdc)} />
+              <DetailMetric label="Worst" value={formatNullablePnl(diagnostic.scenarioPnl.worstUsdc)} className="text-red-300" />
+              <DetailMetric label="Realized PnL" value={formatPnl(diagnostic.scenarioPnl.realizedPnlUsdc)} />
+              <DetailMetric label="Mark PnL" value={formatPnl(diagnostic.scenarioPnl.markPnlUsdc)} />
+              <DetailMetric label="Open Cost" value={formatUsdc(diagnostic.scenarioPnl.openCostUsdc)} />
+              <DetailMetric
+                label="q Up / Down"
+                value={`${compactMetricValue(diagnostic.scenarioPnl.qUp)} / ${compactMetricValue(diagnostic.scenarioPnl.qDown)}`}
+              />
+            </div>
+          )}
+
+          {diagnostic.positionSnapshot && (
+            <div className="grid gap-2 xl:grid-cols-2">
+              <DetailMetric
+                label="Position Before"
+                value={formatPositionLeg(diagnostic.positionSnapshot.before)}
+              />
+              <DetailMetric
+                label="Position After"
+                value={formatPositionLeg(diagnostic.positionSnapshot.after)}
+              />
+            </div>
+          )}
+
+          {diagnostic.tpStatus && (
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <DetailMetric label="TP Status" value={diagnostic.tpStatus.status} />
+              <DetailMetric label="TP Orders" value={String(diagnostic.tpStatus.orderCount)} />
+              <DetailMetric label="TP Filled Qty" value={formatQty(diagnostic.tpStatus.filledQty)} />
+              <DetailMetric label="TP Realized" value={formatPnl(diagnostic.tpStatus.realizedPnlUsdc)} />
+            </div>
+          )}
 
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <DetailMetric label="Entry Ref" value={formatPrice(diagnostic.entryReferencePrice)} />
@@ -181,6 +287,56 @@ export function AutoScopeDiagnosticsPanel({
               ))}
             </div>
           )}
+
+          <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-xs font-medium text-zinc-200">Blocked Signal Log</p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1 border-zinc-700 px-2 text-[11px]"
+                onClick={exportNoOrderCsv}
+                disabled={!signalRunId || !hasNoOrderSignals}
+              >
+                <Download className="size-3" />
+                No-Order CSV
+              </Button>
+            </div>
+            {blockedSignals.length === 0 ? (
+              <p className="text-xs text-zinc-500">Bu run icin blocked sinyal bulunamadi.</p>
+            ) : (
+              <div className="space-y-2">
+                {blockedSignals.map((signal, index) => (
+                  <div
+                    key={`${signal.eventType}-${signal.createdAt}-${index}`}
+                    className="grid gap-2 rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs md:grid-cols-6"
+                  >
+                    <span className="text-zinc-400">{formatDateTime(signal.createdAt)}</span>
+                    <span className="text-zinc-300">{signal.eventType}</span>
+                    <span className="text-zinc-400">{signal.nodeKey ?? '-'}</span>
+                    <span className="text-zinc-400">{signal.outcomeLabel ?? '-'}</span>
+                    <span className="text-amber-300">{signal.reasonCode ?? '-'}</span>
+                    <span className="font-mono text-zinc-400">
+                      q_margin {compactMetricValue(signal.signalQuality?.qMargin)} / flags{' '}
+                      {formatFlagList(signal.riskFlags.reasons)}
+                    </span>
+                    {signal.noOrderTelemetry && (
+                      <span className="font-mono text-zinc-400 md:col-span-6">
+                        status {signal.noOrderTelemetry.finalActionStatus ?? '-'} / floor{' '}
+                        {compactMetricValue(signal.noOrderTelemetry.bestAskAtWindowEnd)} {'<'}{' '}
+                        {compactMetricValue(signal.noOrderTelemetry.executionFloor)} / dist{' '}
+                        {compactMetricValue(signal.noOrderTelemetry.floorDistance)} / liquidity{' '}
+                        {signal.noOrderTelemetry.liquidityRegime ?? '-'} / ratio{' '}
+                        {compactMetricValue(signal.noOrderTelemetry.hourlyVolumeRatio)} / book{' '}
+                        {signal.noOrderTelemetry.bookSide ?? '-'}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       ) : (
         <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-500">

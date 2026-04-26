@@ -170,7 +170,7 @@ export function validateActionPlaceOrderPtbStopLossConfig(
         'action.place_order ptbStopLossEnabled=true requires ptbStopLossGapUsd or ptbStopLossRules.'
       );
     } else if (ptbStopLossGapUsd != null && ptbStopLossGapUsd < 0) {
-      // Negative gap is allowed to wait for overshoot past parity.
+      // Negative gap is allowed; it means waiting for counter-direction overshoot past parity/PTB reference.
     }
 
     const effectiveMarketSlug = String(config.marketSlug ?? graphMarketSlug).trim().toLowerCase();

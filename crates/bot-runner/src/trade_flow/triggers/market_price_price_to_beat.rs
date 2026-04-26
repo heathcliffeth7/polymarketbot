@@ -33,6 +33,7 @@ fn trigger_market_price_ptb_config_from_spec(
 
 fn trigger_market_price_ptb_config_from_node(
     node: &TradeFlowNode,
+    selected_entry_timing_profile: Option<&TriggerMarketEntryTimingProfileSelection>,
 ) -> Option<TriggerMarketPricePtbConfig> {
     if node.node_type != "trigger.market_price" || node_market_mode(node) != "auto_scope" {
         return None;
@@ -44,14 +45,18 @@ fn trigger_market_price_ptb_config_from_node(
         node_config_string(node, "priceToBeatMode").as_deref(),
     )
     .unwrap_or(crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual);
-    let min_gap = node_config_f64(node, "priceToBeatTriggerMinGap")
+    let min_gap = selected_entry_timing_profile
+        .and_then(|profile| profile.price_to_beat_trigger_min_gap)
+        .or_else(|| node_config_f64(node, "priceToBeatTriggerMinGap"))
         .filter(|value| value.is_finite() && *value > 0.0);
     if matches!(mode, crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual)
         && min_gap.is_none()
     {
         return None;
     }
-    let max_gap = node_config_f64(node, "priceToBeatTriggerMaxGap")
+    let max_gap = selected_entry_timing_profile
+        .and_then(|profile| profile.price_to_beat_trigger_max_gap)
+        .or_else(|| node_config_f64(node, "priceToBeatTriggerMaxGap"))
         .filter(|value| value.is_finite() && *value > 0.0)
         .filter(|value| min_gap.map(|min_gap| *value >= min_gap).unwrap_or(false));
     let unit = crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::parse(
@@ -83,7 +88,17 @@ fn evaluate_trigger_market_price_ptb_gate(
     market_slug: &str,
     outcome_label: &str,
     ptb_config: TriggerMarketPricePtbConfig,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
 ) -> crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
+    let signal_config = Some(
+        crate::trade_flow::guards::price_to_beat::PriceToBeatSignalFormulaConfig::taker(
+            crate::trade_flow::guards::price_to_beat::PriceToBeatSignalFormulaMarketInput {
+                best_bid,
+                best_ask,
+            },
+        ),
+    );
     crate::trade_flow::guards::price_to_beat::evaluate_price_to_beat_trigger_gate(
         market_slug,
         outcome_label,
@@ -91,17 +106,22 @@ fn evaluate_trigger_market_price_ptb_gate(
         ptb_config.min_gap,
         ptb_config.max_gap,
         ptb_config.unit,
+        signal_config,
     )
 }
 
 fn evaluate_trigger_market_price_ptb_gate_for_spec(
     node_spec: &WsOpenPositionPriceNodeSpec,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
 ) -> Option<crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult> {
     let ptb_config = trigger_market_price_ptb_config_from_spec(node_spec)?;
     Some(evaluate_trigger_market_price_ptb_gate(
         node_spec.market_slug.as_deref().unwrap_or_default(),
         &node_spec.outcome_label,
         ptb_config,
+        best_bid,
+        best_ask,
     ))
 }
 
@@ -109,12 +129,18 @@ fn evaluate_trigger_market_price_ptb_gate_for_node(
     node: &TradeFlowNode,
     market_slug: &str,
     outcome_label: &str,
+    selected_entry_timing_profile: Option<&TriggerMarketEntryTimingProfileSelection>,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
 ) -> Option<crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult> {
-    let ptb_config = trigger_market_price_ptb_config_from_node(node)?;
+    let ptb_config =
+        trigger_market_price_ptb_config_from_node(node, selected_entry_timing_profile)?;
     Some(evaluate_trigger_market_price_ptb_gate(
         market_slug,
         outcome_label,
         ptb_config,
+        best_bid,
+        best_ask,
     ))
 }
 

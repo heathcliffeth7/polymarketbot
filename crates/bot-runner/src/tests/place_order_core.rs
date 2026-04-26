@@ -105,6 +105,18 @@ fn pair_lock_config_allows_market_execution_in_validation_contract() {
 }
 
 #[test]
+fn place_order_share_sizing_targets_fixed_qty() {
+    let sizing =
+        resolve_action_place_order_share_sizing(None, Some(5.0), Some(0.61)).expect("share sizing");
+
+    assert_eq!(sizing.size_basis, TRADE_BUILDER_SIZE_BASIS_SHARES);
+    assert_eq!(sizing.target_qty, Some(5.0));
+    assert_eq!(sizing.remaining_qty, Some(5.0));
+    assert_eq!(sizing.resolved_size_mode, "shares");
+    assert!((sizing.size_usdc - 3.05).abs() < 0.000001);
+}
+
+#[test]
 fn place_order_existing_order_rearms_matching_sell_error() {
     let mut order = test_builder_order("sell", Some(9));
     order.status = "error".to_string();

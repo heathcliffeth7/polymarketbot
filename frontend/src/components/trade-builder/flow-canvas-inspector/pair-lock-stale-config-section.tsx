@@ -25,7 +25,6 @@ function collectPairLockStaleEntries(form: NodeConfigFormState): string[] {
     })
     .filter((value): value is string => !!value);
 
-  if (form.slRuleRows.length > 0) entries.push(`slRules=${form.slRuleRows.length}`);
   if (form.timeExitRuleRows.length > 0) {
     entries.push(`timeExitRules=${form.timeExitRuleRows.length}`);
   }
@@ -78,7 +77,6 @@ export function PairLockStaleConfigSection({
             return {
               ...prev,
               fields: nextFields,
-              slRuleRows: [],
               timeExitRuleRows: [],
             };
           })

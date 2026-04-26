@@ -1,7 +1,9 @@
 mod analysis;
 mod inventory;
+mod market_trade_ticks;
 mod orders;
 mod pair_sessions;
+mod participation;
 mod positions;
 mod second_snapshots;
 mod workflows;

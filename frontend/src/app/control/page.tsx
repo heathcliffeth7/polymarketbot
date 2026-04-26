@@ -4,6 +4,7 @@ import { PageShell } from '@/components/layout/page-shell';
 import { BotControlPanel } from '@/components/control/bot-control-panel';
 import { ModeSwitch } from '@/components/control/mode-switch';
 import { KillSwitchToggle } from '@/components/control/kill-switch-toggle';
+import { RelaxToggle } from '@/components/control/relax-toggle';
 
 export default function ControlPage() {
   return (
@@ -13,8 +14,9 @@ export default function ControlPage() {
           <BotControlPanel />
           <ModeSwitch />
         </div>
-        <div>
+        <div className="space-y-4">
           <KillSwitchToggle />
+          <RelaxToggle />
         </div>
       </div>
     </PageShell>

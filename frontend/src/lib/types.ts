@@ -249,6 +249,7 @@ export interface StrategyConfig {
   entry_window_sec: number;
   max_hold_sec: number;
   sl_renew_interval_ms: number;
+  max_price_relax_enabled: boolean;
 }
 
 export interface RiskConfig {
@@ -622,6 +623,13 @@ export type AutoScopeTradeAnalysisSortBy = 'default' | 'pnl';
 export type AutoScopeTradeAnalysisSortDirection = 'asc' | 'desc';
 export type AutoScopeTradeAnalysisPnlFilter = 'all' | 'loss' | 'profit';
 export type AutoScopeTradeAnalysisPositionFilter = 'all' | 'realized' | 'open';
+export type AutoScopeTradeAnalysisTimeRange =
+  | 'all'
+  | '3h'
+  | '6h'
+  | '12h'
+  | '24h'
+  | 'custom';
 export type AutoScopeTradeAnalysisValuationKind = 'realized' | 'mark_to_market';
 export type AutoScopeTradeDiagnosisCode =
   | 'bad_entry_price'
@@ -688,7 +696,152 @@ export interface AutoScopeTradeDiagnostic {
   diagnosisDetail: string;
   dataQualityFlags: string[];
   compactMetrics: Record<string, unknown>;
+  signalQuality?: AutoScopeTradeSignalQuality | null;
+  riskFlags?: AutoScopeTradeRiskFlags;
+  scenarioPnl?: AutoScopeTradeScenarioPnl;
+  executionTelemetry?: AutoScopeTradeExecutionTelemetry | null;
+  positionSnapshot?: AutoScopeTradePositionSnapshot;
+  tpStatus?: AutoScopeTradeTpStatus;
   updatedAt: string;
+}
+
+export interface AutoScopeTradeSignalQuality {
+  mode: string | null;
+  decisionReason: string | null;
+  passed: boolean | null;
+  selectedSide: string | null;
+  candidateSide: string | null;
+  q: number | null;
+  qUp: number | null;
+  qDown: number | null;
+  cost: number | null;
+  threshold: number | null;
+  dynamicThreshold: number | null;
+  requiredQ: number | null;
+  qMargin: number | null;
+  edge: number | null;
+  edgeAdjusted: number | null;
+  secondsLeft: number | null;
+}
+
+export interface AutoScopeTradeRiskFlags {
+  highPrice: boolean;
+  stale: boolean;
+  fallingKnife: boolean;
+  chop: boolean;
+  reasons: string[];
+}
+
+export interface AutoScopeTradeScenarioPnl {
+  ifUpUsdc: number | null;
+  ifDownUsdc: number | null;
+  evUsdc: number | null;
+  worstUsdc: number | null;
+  realizedPnlUsdc: number;
+  markPnlUsdc: number;
+  openCostUsdc: number;
+  qUp: number | null;
+  qDown: number | null;
+}
+
+export interface AutoScopeTradeExecutionTelemetry {
+  submittedBestAsk: number | null;
+  submittedEstimatedAvgFill: number | null;
+  submittedVwapSlippage: number | null;
+  submittedTargetQty: number | null;
+  submittedEstimatedNotional: number | null;
+  submittedQFinal: number | null;
+  submittedModelBookGap: number | null;
+  submittedModelBookZone: string | null;
+  submittedParticipationCredit: number | null;
+  fillActualPrice: number | null;
+  fillActualQty: number | null;
+  fillActualNotional: number | null;
+  fillSlippageVsVwap: number | null;
+  fillSlippageVsBestAsk: number | null;
+  fillSource: string | null;
+}
+
+export interface AutoScopeTradePositionLegSnapshot {
+  upQty: number;
+  downQty: number;
+  costUsdc: number;
+  floorQty: number;
+  floorPnlUsdc: number;
+}
+
+export interface AutoScopeTradePositionSnapshot {
+  before: AutoScopeTradePositionLegSnapshot;
+  after: AutoScopeTradePositionLegSnapshot;
+  basis: 'current_analysis_rows';
+}
+
+export type AutoScopeTradeTpLifecycleStatus =
+  | 'disabled'
+  | 'open'
+  | 'partial'
+  | 'filled'
+  | 'canceled'
+  | 'expired'
+  | 'unknown';
+
+export interface AutoScopeTradeTpStatus {
+  configured: boolean;
+  status: AutoScopeTradeTpLifecycleStatus;
+  orderCount: number;
+  openOrderCount: number;
+  filledQty: number;
+  targetQty: number | null;
+  remainingQty: number | null;
+  averagePrice: number | null;
+  realizedPnlUsdc: number;
+}
+
+export interface AutoScopeTradeBlockedSignal {
+  eventType: string;
+  createdAt: string;
+  nodeKey: string | null;
+  marketSlug: string | null;
+  outcomeLabel: string | null;
+  reasonCode: string | null;
+  reasonDetail: string | null;
+  signalQuality: AutoScopeTradeSignalQuality | null;
+  riskFlags: AutoScopeTradeRiskFlags;
+  noOrderTelemetry: AutoScopeNoOrderTelemetry | null;
+}
+
+export interface AutoScopeNoOrderTelemetry {
+  orderCreated: boolean | null;
+  orderSubmitted: boolean | null;
+  orderFilled: boolean | null;
+  finalActionStatus: string | null;
+  lastGuardName: string | null;
+  lastGuardCode: string | null;
+  lastGuardState: string | null;
+  executionFloor: number | null;
+  bestAskAtWindowEnd: number | null;
+  floorDistance: number | null;
+  floorWaitMs: number | null;
+  liquidityRegime: string | null;
+  hourlyVolumeRatio: number | null;
+  volume30s: number | null;
+  tradeCount60s: number | null;
+  quoteSnapshotSource: string | null;
+  bookDataStatus: string | null;
+  quoteMissingReason: string | null;
+  selectedBid: number | null;
+  selectedAsk: number | null;
+  selectedMid: number | null;
+  upBid: number | null;
+  upAsk: number | null;
+  downBid: number | null;
+  downAsk: number | null;
+  bookSide: string | null;
+  upMid: number | null;
+  downMid: number | null;
+  bookMidDiff: number | null;
+  whyNoOrderSummary: string | null;
+  humanReadableReason: string | null;
 }
 
 export interface AutoScopeTradeAnalysisDiagnosisBreakdown {
@@ -737,6 +890,12 @@ export interface AutoScopeTradeAnalysisRow {
   diagnosisLabel: string | null;
   entryQualityScore: number | null;
   exitQualityScore: number | null;
+  signalQuality?: AutoScopeTradeSignalQuality | null;
+  riskFlags?: AutoScopeTradeRiskFlags;
+  scenarioPnl?: AutoScopeTradeScenarioPnl;
+  executionTelemetry?: AutoScopeTradeExecutionTelemetry | null;
+  positionSnapshot?: AutoScopeTradePositionSnapshot;
+  tpStatus?: AutoScopeTradeTpStatus;
 }
 
 export interface AutoScopeTradeAnalysisSummary {
@@ -778,6 +937,7 @@ export interface AutoScopeTradeAnalysisResponse
 export interface AutoScopeTradeDiagnosticResponse {
   diagnostic: AutoScopeTradeDiagnostic | null;
   rows: AutoScopeTradeAnalysisRow[];
+  blockedSignals: AutoScopeTradeBlockedSignal[];
   refreshedAt: string;
 }
 

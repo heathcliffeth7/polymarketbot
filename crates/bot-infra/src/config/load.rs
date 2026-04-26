@@ -57,8 +57,8 @@ pub(crate) fn load_json_or_toml_or_default<T: for<'de> Deserialize<'de> + Defaul
 }
 
 /// Load config by merging DB-stored JSON with TOML file fallback.
-/// TOML provides the base values; DB non-empty/truthy values override.
-/// Empty strings, `false`, and null in DB are treated as "not set" and
+/// TOML provides the base values; DB non-empty values override.
+/// Empty strings and null in DB are treated as "not set" and
 /// fall back to the TOML value. This handles seeded configs where
 /// sensitive fields are intentionally cleared.
 pub(crate) fn load_json_merged_with_toml<T>(payload: Option<&Value>, path: &Path) -> Result<T>
@@ -85,9 +85,9 @@ where
 /// Merge two JSON objects: `base` (TOML) overlaid with non-empty `overlay` (DB) values.
 /// Rules per field:
 /// - DB value is string and non-empty → use DB
-/// - DB value is bool `true` → use DB
+/// - DB value is bool → use DB
 /// - DB value is number → use DB
-/// - DB value is bool `false`, empty string, or null → use base (TOML)
+/// - DB value is empty string or null → use base (TOML)
 /// - Both are objects → recurse
 fn merge_json_values(mut base: Value, overlay: Value) -> Value {
     let Some(base_map) = base.as_object_mut() else {
@@ -105,7 +105,6 @@ fn merge_json_values(mut base: Value, overlay: Value) -> Value {
             }
             (Some(_), Value::Null) => continue, // keep base
             (Some(_), Value::String(s)) if s.is_empty() => continue, // keep base
-            (Some(_), Value::Bool(false)) => continue, // keep base for seeded defaults
             _ => overlay_val.clone(),
         };
         base_map.insert(key.clone(), merged_val);
