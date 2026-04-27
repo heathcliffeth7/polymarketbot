@@ -1128,6 +1128,23 @@ async fn process_trade_flow_trigger_market_price_timers(
             target.window_end_at,
         )
         .await?;
+        if let Err(err) = auto_tune::maybe_record_trade_flow_auto_tune_market(
+            repo,
+            client,
+            run_spec,
+            &node_spec,
+            target.window_end_at,
+        )
+        .await
+        {
+            warn!(
+                run_id,
+                flow_run_id = run_spec.run_id,
+                node_key = %node_spec.node_key,
+                error = %err,
+                "AUTO_TUNE_ADVICE_WRITE_FAILED"
+            );
+        }
     }
 
     // Window-end auto-sell processing

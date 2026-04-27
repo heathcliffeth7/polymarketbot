@@ -598,31 +598,59 @@ fn build_no_order_base_diagnosis_payload(
             "liquidity_regime": "UNKNOWN",
         })
     });
-    let waiting_condition = if execution_floor.is_some() {
+    let is_action_failed = summary.scope == "action_failed";
+    let action_error = summary.payload.get("action_error").and_then(Value::as_str);
+    let action_node_key = summary.payload.get("action_node_key").and_then(Value::as_str);
+    let waiting_condition = if is_action_failed {
+        "action.place_order validation"
+    } else if execution_floor.is_some() {
         "best_ask >= floor"
     } else {
         "guard_condition_passed"
     };
-    let condition_current = match (best_ask_at_window_end, execution_floor) {
-        (Some(best_ask), Some(floor)) => Some(format!("{best_ask:.4} < {floor:.4}")),
-        _ => None,
+    let condition_current = if is_action_failed {
+        Some(
+            action_error
+                .unwrap_or("action.place_order failed before builder order creation")
+                .to_string(),
+        )
+    } else {
+        match (best_ask_at_window_end, execution_floor) {
+            (Some(best_ask), Some(floor)) => Some(format!("{best_ask:.4} < {floor:.4}")),
+            _ => None,
+        }
     };
-    let protection_result = if summary.scope == "execution_floor"
+    let protection_result = if is_action_failed {
+        Some("builder order was not created because action.place_order failed")
+    } else if summary.scope == "execution_floor"
         && floor_distance.map(|value| value < 0.0).unwrap_or(false)
     {
         Some("entry avoided because selected side collapsed below floor")
     } else {
         None
     };
-    let why_no_order_summary = match (best_ask_at_window_end, execution_floor) {
-        (Some(best_ask), Some(floor)) => format!(
-            "{outcome_label} best ask {best_ask:.4} was below required floor {floor:.4} until window ended."
-        ),
-        _ => format!(
-            "{outcome_label} guard condition did not pass before the market window ended."
-        ),
+    let why_no_order_summary = if is_action_failed {
+        format!(
+            "action.place_order failed before builder order creation: {}",
+            action_error.unwrap_or("unknown action failure")
+        )
+    } else {
+        match (best_ask_at_window_end, execution_floor) {
+            (Some(best_ask), Some(floor)) => format!(
+                "{outcome_label} best ask {best_ask:.4} was below required floor {floor:.4} until window ended."
+            ),
+            _ => format!(
+                "{outcome_label} guard condition did not pass before the market window ended."
+            ),
+        }
     };
-    let human_readable_reason = if summary.scope == "execution_floor" {
+    let human_readable_reason = if is_action_failed {
+        format!(
+            "Trigger passed, but action.place_order failed before creating a builder order{}{}.",
+            action_node_key.map(|value| format!(" on {value}")).unwrap_or_default(),
+            action_error.map(|value| format!(": {value}")).unwrap_or_default()
+        )
+    } else if summary.scope == "execution_floor" {
         "Selected side did not recover to the execution floor before window end.".to_string()
     } else {
         format!(
@@ -631,14 +659,29 @@ fn build_no_order_base_diagnosis_payload(
             summary.decision.as_deref().unwrap_or("blocked")
         )
     };
+    let final_action_status = if is_action_failed {
+        "ACTION_FAILED"
+    } else {
+        "NO_ORDER"
+    };
+    let order_status_reason = if is_action_failed {
+        "action_failed_before_builder_order"
+    } else {
+        "guard_waiting_until_window_end"
+    };
+    let condition_result = if is_action_failed {
+        "action_failed_before_order_creation"
+    } else {
+        "condition_not_met_until_window_end"
+    };
 
     let mut payload = json!({
         "order_created": false,
         "order_submitted": false,
         "order_filled": false,
         "order_not_created": true,
-        "final_action_status": "NO_ORDER",
-        "order_status_reason": "guard_waiting_until_window_end",
+        "final_action_status": final_action_status,
+        "order_status_reason": order_status_reason,
         "market_slug": market_slug,
         "token_id": token_id,
         "outcome_label": outcome_label,
@@ -661,8 +704,11 @@ fn build_no_order_base_diagnosis_payload(
         "max_best_ask_during_wait": no_order_json_f64(max_best_ask),
         "waiting_condition": waiting_condition,
         "condition_current": condition_current,
-        "condition_result": "condition_not_met_until_window_end",
+        "condition_result": condition_result,
         "protection_result": protection_result,
+        "action_node_key": action_node_key,
+        "action_error": action_error,
+        "action_step_id": summary.payload.get("action_step_id").cloned(),
         "why_no_order_summary": why_no_order_summary,
         "human_readable_reason": human_readable_reason,
     });
@@ -814,8 +860,11 @@ fn build_missed_market_no_order_diagnosis_message_block(diagnosis: &Value) -> St
     let last_guard_scope = no_order_diag_str(diagnosis, "last_guard_scope");
     let is_execution_floor = last_guard_scope == Some("execution_floor");
     let is_trigger_condition = last_guard_scope == Some("trigger_condition");
+    let is_action_failed = last_guard_scope == Some("action_failed");
     lines.push("Nihai Karar".to_string());
-    lines.push(if is_trigger_condition {
+    lines.push(if is_action_failed {
+        "Karar: NO ORDER - action failed".to_string()
+    } else if is_trigger_condition {
         "Karar: NO ORDER - trigger condition not met".to_string()
     } else if is_execution_floor {
         "Karar: NO ORDER - protected block".to_string()
@@ -831,10 +880,16 @@ fn build_missed_market_no_order_diagnosis_message_block(diagnosis: &Value) -> St
             "Hayir"
         }
     ));
-    lines.push(format!(
-        "Ana sebep: {} beklenirken market/window kapandi.",
-        no_order_diag_str(diagnosis, "last_guard_name").unwrap_or("Guard")
-    ));
+    if is_action_failed {
+        lines.push(
+            "Ana sebep: action.place_order fail oldu; builder order olusmadi.".to_string(),
+        );
+    } else {
+        lines.push(format!(
+            "Ana sebep: {} beklenirken market/window kapandi.",
+            no_order_diag_str(diagnosis, "last_guard_name").unwrap_or("Guard")
+        ));
+    }
     lines.push(String::new());
     lines.push("Son Engel".to_string());
     lines.push(format!(
@@ -849,6 +904,14 @@ fn build_missed_market_no_order_diagnosis_message_block(diagnosis: &Value) -> St
         "Guard state: {}",
         no_order_diag_str(diagnosis, "last_guard_state").unwrap_or("N/A")
     ));
+    if is_action_failed {
+        if let Some(node_key) = no_order_diag_str(diagnosis, "action_node_key") {
+            lines.push(format!("Action Node: {node_key}"));
+        }
+        if let Some(error) = no_order_diag_str(diagnosis, "action_error") {
+            lines.push(format!("Hata: {error}"));
+        }
+    }
     if is_execution_floor {
         lines.push(format!(
             "Floor wait: {} ms",

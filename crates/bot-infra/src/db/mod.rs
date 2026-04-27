@@ -15,6 +15,7 @@ mod risk;
 mod runs;
 mod trade_builder;
 mod trade_flow;
+mod trade_flow_auto_tune;
 mod trade_flow_overlap;
 mod trade_flow_runtime_snapshots;
 mod trade_flow_steps;

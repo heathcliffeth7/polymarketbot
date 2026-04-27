@@ -18,6 +18,12 @@ include!("lib_parts/part_012.rs");
 include!("trade_flow/cycle_window_timers.rs");
 include!("trade_flow/missed_market_no_order_diagnosis.rs");
 include!("trade_flow/missed_market_notifications.rs");
+mod auto_tune {
+    include!("trade_flow/auto_tune/types.rs");
+    include!("trade_flow/auto_tune/json_helpers.rs");
+    include!("trade_flow/auto_tune/advice_engine.rs");
+    include!("trade_flow/auto_tune/summary_builder.rs");
+}
 include!("trade_flow/ws_fast_path.rs");
 include!("trade_flow/overlap_audit.rs");
 include!("lib_parts/part_013.rs");

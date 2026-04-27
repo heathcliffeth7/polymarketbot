@@ -177,6 +177,59 @@ fn build_default_missed_market_summary(
     )
 }
 
+fn action_failed_no_order_reason_code(error_text: &str) -> &'static str {
+    let normalized = error_text.to_ascii_lowercase();
+    if normalized.contains("requires sizeusdc > 0") {
+        "action_failed_size_usdc_missing"
+    } else {
+        "action_failed"
+    }
+}
+
+fn action_failed_text(step: &TradeFlowRunStep) -> String {
+    step.error_text
+        .as_deref()
+        .or_else(|| {
+            step.output_json
+                .as_ref()
+                .and_then(|output| output.get("error"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("action.place_order failed before order creation")
+        .to_string()
+}
+
+fn build_action_failed_missed_market_summary(
+    node_spec: &WsOpenPositionPriceNodeSpec,
+    market_slug: &str,
+    window_end_at: DateTime<Utc>,
+    step: &TradeFlowRunStep,
+) -> TradeBuilderNoFillReasonSummary {
+    let error_text = action_failed_text(step);
+    no_fill_summary(
+        "action_failed",
+        action_failed_no_order_reason_code(&error_text),
+        Some("failed"),
+        json!({
+            "market_slug": market_slug,
+            "token_id": node_spec.token_id,
+            "outcome_label": node_spec.outcome_label,
+            "trigger_condition": node_spec.trigger_condition,
+            "trigger_price": node_spec.trigger_price,
+            "max_price": node_spec.max_price,
+            "window_end_at": window_end_at.to_rfc3339(),
+            "action_node_key": step.node_key,
+            "action_node_type": step.node_type,
+            "action_step_id": step.id,
+            "action_step_status": step.status,
+            "action_error": error_text,
+            "started_at": step.started_at.map(|value| value.to_rfc3339()),
+            "ended_at": step.ended_at.map(|value| value.to_rfc3339()),
+        }),
+        Some("action_step_failed"),
+    )
+}
+
 fn build_missed_market_no_order_notification_message(
     node_spec: &WsOpenPositionPriceNodeSpec,
     window_end_at: DateTime<Utc>,
@@ -184,18 +237,32 @@ fn build_missed_market_no_order_notification_message(
 ) -> String {
     let is_trigger_condition =
         diagnosis.get("last_guard_scope").and_then(Value::as_str) == Some("trigger_condition");
-    let title = if is_trigger_condition {
+    let is_action_failed =
+        diagnosis.get("last_guard_scope").and_then(Value::as_str) == Some("action_failed");
+    let title = if is_action_failed {
+        "Emir Acilmadi - Action Failed"
+    } else if is_trigger_condition {
         "Emir Acilmadi - Trigger Sarti Saglanmadi"
     } else {
         "Emir Acilmadi - Guard Beklerken Window Kapandi"
     };
-    let reason = if is_trigger_condition {
+    let reason = if is_action_failed {
+        "Trigger gecti; action.place_order fail oldu ve builder order olusturmadi."
+    } else if is_trigger_condition {
         "Trigger sarti market/window bitene kadar gecmedi; action.place_order order olusturmadi."
     } else {
         "Market/window bitti; action.place_order order olusturmadan kapandi."
     };
+    let reason_code = if is_action_failed {
+        diagnosis
+            .get("last_guard_code")
+            .and_then(Value::as_str)
+            .unwrap_or(MISSED_MARKET_NO_ORDER_REASON_CODE)
+    } else {
+        MISSED_MARKET_NO_ORDER_REASON_CODE
+    };
     let mut message = format!(
-        "{title}\nSebep Kodu: {MISSED_MARKET_NO_ORDER_REASON_CODE}\nSebep: {reason}\nMarket: {}\nOutcome: {}\nSide: buy\nToken: {}\nWindow End: {}",
+        "{title}\nSebep Kodu: {reason_code}\nSebep: {reason}\nMarket: {}\nOutcome: {}\nSide: buy\nToken: {}\nWindow End: {}",
         node_spec.market_slug.as_deref().unwrap_or("N/A"),
         node_spec.outcome_label,
         node_spec.token_id,
@@ -325,6 +392,17 @@ async fn maybe_send_missed_market_no_order_notification(
             &node_spec.token_id,
         )
         .await?;
+    let failed_action_steps = repo
+        .list_failed_place_order_steps_for_nodes_market_token(
+            run_spec.run_id,
+            &action_node_keys,
+            market_slug,
+            &node_spec.token_id,
+        )
+        .await?;
+    let action_failure_summary = failed_action_steps
+        .last()
+        .map(|step| build_action_failed_missed_market_summary(node_spec, market_slug, window_end_at, step));
     let action_output_summary = action_steps
         .iter()
         .rev()
@@ -337,6 +415,7 @@ async fn maybe_send_missed_market_no_order_notification(
             )
         });
     let summary = action_output_summary
+        .or(action_failure_summary)
         .or_else(|| {
             latest_trade_flow_no_fill_summary(
                 &events,
@@ -346,6 +425,8 @@ async fn maybe_send_missed_market_no_order_notification(
             )
         })
         .unwrap_or_else(|| build_default_missed_market_summary(node_spec, window_end_at));
+    let mut diagnosis_steps = action_steps.clone();
+    diagnosis_steps.extend(failed_action_steps);
     let diagnosis = build_missed_market_no_order_diagnosis_payload(
         repo,
         client,
@@ -355,7 +436,7 @@ async fn maybe_send_missed_market_no_order_notification(
         &node_spec.outcome_label,
         window_end_at,
         &summary,
-        &action_steps,
+        &diagnosis_steps,
     )
     .await;
     let Some(run) = repo.get_trade_flow_run(run_spec.run_id).await? else {
