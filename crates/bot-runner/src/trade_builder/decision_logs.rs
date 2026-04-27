@@ -420,6 +420,17 @@ fn trade_builder_spawn_ptb_stop_loss_triggered_log(
         },
     );
     trade_builder_spawn_post_sl_followups(repo, order, sl_event_id);
+    let repo = repo.clone();
+    let order = order.clone();
+    tokio::spawn(async move {
+        refresh_trade_builder_auto_scope_analysis_snapshot_after_fill(
+            &repo,
+            &order,
+            None,
+            execution_price,
+        )
+        .await;
+    });
 }
 
 fn trade_builder_spawn_post_sl_followups(
@@ -510,6 +521,18 @@ fn trade_builder_spawn_post_sl_followups(
                     ..TradeBuilderDecisionLogOptions::default()
                 },
             );
+            let mark_price = order
+                .last_seen_price
+                .or(order.working_price)
+                .or(order.trigger_price)
+                .unwrap_or(0.0);
+            refresh_trade_builder_auto_scope_analysis_snapshot_after_fill(
+                &repo,
+                &order,
+                None,
+                mark_price,
+            )
+            .await;
         });
     }
 }

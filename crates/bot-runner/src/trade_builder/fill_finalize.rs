@@ -1374,25 +1374,13 @@ async fn finalize_builder_fill(
         );
     }
 
-    let snapshot_root_order_id = parent_order
-        .as_ref()
-        .map(|parent| parent.id)
-        .unwrap_or(order.id);
-    let snapshot_mark_price = order.last_seen_price.or(Some(execution_price));
-    if let Err(err) = refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
+    refresh_trade_builder_auto_scope_analysis_snapshot_after_fill(
         repo,
-        snapshot_root_order_id,
-        snapshot_mark_price,
+        order,
+        parent_order.as_ref(),
+        execution_price,
     )
-    .await
-    {
-        warn!(
-            builder_order_id = order.id,
-            root_builder_order_id = snapshot_root_order_id,
-            error = %err,
-            "AUTO_SCOPE_ANALYSIS_REFRESH_FAILED"
-        );
-    }
+    .await;
 
     Ok(())
 }

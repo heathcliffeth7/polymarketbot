@@ -614,9 +614,13 @@ export interface TradeFlowEvent {
   created_at: string;
 }
 
-export type AutoScopeTradeAnalysisRowType = 'sell_exit' | 'open_position';
+export type AutoScopeTradeAnalysisRowType =
+  | 'sell_exit'
+  | 'open_position'
+  | 'pending_analysis';
 export type AutoScopeTradeAnalysisPositionState =
   | 'open'
+  | 'pending_analysis'
   | 'closed_market_ended'
   | 'closed_exit';
 export type AutoScopeTradeAnalysisSortBy = 'default' | 'pnl';
@@ -650,7 +654,8 @@ export type AutoScopeTradeAnalysisExitReason =
   | 'sl'
   | 'window_end_auto_sell'
   | 'other'
-  | 'open_position';
+  | 'open_position'
+  | 'pending_analysis';
 
 export interface AutoScopeTradeDiagnostic {
   rootOrderId: number;

@@ -1,6 +1,9 @@
 const AUTO_SCOPE_ANALYSIS_BACKFILL_LIMIT: i64 = 25;
+const AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_DELAYS_SECS: [u64; 4] = [1, 3, 8, 20];
 
 static AUTO_SCOPE_ANALYSIS_BACKFILL_CHECKED_ROOTS: LazyLock<parking_lot::Mutex<HashSet<i64>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(HashSet::new()));
+static AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_ROOTS: LazyLock<parking_lot::Mutex<HashSet<i64>>> =
     LazyLock::new(|| parking_lot::Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone)]
@@ -32,7 +35,105 @@ struct SelectedAutoScopeTriggerEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutoScopeAnalysisRefreshOutcome {
     Updated,
-    Skipped,
+    Skipped(&'static str),
+}
+
+impl AutoScopeAnalysisRefreshOutcome {
+    fn event_type(self) -> &'static str {
+        match self {
+            Self::Updated => "AUTO_SCOPE_ANALYSIS_REFRESH_UPDATED",
+            Self::Skipped(_) => "AUTO_SCOPE_ANALYSIS_REFRESH_SKIPPED",
+        }
+    }
+
+    fn skip_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Updated => None,
+            Self::Skipped(reason) => Some(reason),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AutoScopeAnalysisRefreshContext {
+    trigger: &'static str,
+    retry_attempt_no: u8,
+    max_retry_attempts: u8,
+}
+
+impl AutoScopeAnalysisRefreshContext {
+    fn direct(trigger: &'static str) -> Self {
+        Self {
+            trigger,
+            retry_attempt_no: 0,
+            max_retry_attempts: AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_DELAYS_SECS.len() as u8,
+        }
+    }
+
+    fn retry(trigger: &'static str, retry_attempt_no: u8) -> Self {
+        Self {
+            trigger,
+            retry_attempt_no,
+            max_retry_attempts: AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_DELAYS_SECS.len() as u8,
+        }
+    }
+}
+
+fn auto_scope_analysis_refresh_should_retry(reason: &str) -> bool {
+    matches!(reason, "missing_buy_fill_metrics" | "zero_buy_fill_qty")
+}
+
+fn trade_builder_spawn_auto_scope_analysis_refresh_log(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    event_type: &'static str,
+    context: AutoScopeAnalysisRefreshContext,
+    mark_price_override: Option<f64>,
+    skip_reason: Option<&str>,
+) {
+    trade_builder_spawn_decision_log(
+        repo,
+        order,
+        event_type,
+        json!({
+            "refresh_trigger": context.trigger,
+            "retry_attempt_no": context.retry_attempt_no,
+            "max_retry_attempts": context.max_retry_attempts,
+            "mark_price_override": mark_price_override,
+            "skip_reason": skip_reason,
+        }),
+        TradeBuilderDecisionLogOptions {
+            idempotency_key: Some(format!(
+                "{event_type}:{}:{}:{}",
+                order.id, context.trigger, context.retry_attempt_no
+            )),
+            ..TradeBuilderDecisionLogOptions::default()
+        },
+    );
+}
+
+async fn skip_trade_builder_auto_scope_analysis_snapshot(
+    repo: &PostgresRepository,
+    root_order: Option<&TradeBuilderOrder>,
+    root_builder_order_id: i64,
+    context: AutoScopeAnalysisRefreshContext,
+    mark_price_override: Option<f64>,
+    reason: &'static str,
+) -> Result<AutoScopeAnalysisRefreshOutcome> {
+    repo.delete_trade_flow_auto_scope_analysis_rows_for_root(root_builder_order_id)
+        .await?;
+    if let Some(order) = root_order {
+        let outcome = AutoScopeAnalysisRefreshOutcome::Skipped(reason);
+        trade_builder_spawn_auto_scope_analysis_refresh_log(
+            repo,
+            order,
+            outcome.event_type(),
+            context,
+            mark_price_override,
+            outcome.skip_reason(),
+        );
+    }
+    Ok(AutoScopeAnalysisRefreshOutcome::Skipped(reason))
 }
 
 fn trade_builder_analysis_event_priority(event_type: &str) -> i32 {
@@ -417,38 +518,71 @@ fn trade_builder_analysis_mark_price(
     (fallback_buy_price, root_order.updated_at)
 }
 
-async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
+async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_context(
     repo: &PostgresRepository,
     root_builder_order_id: i64,
     mark_price_override: Option<f64>,
+    context: AutoScopeAnalysisRefreshContext,
 ) -> Result<AutoScopeAnalysisRefreshOutcome> {
     let Some(root_order) = repo.get_trade_builder_order(root_builder_order_id).await? else {
-        repo.delete_trade_flow_auto_scope_analysis_rows_for_root(root_builder_order_id)
-            .await?;
-        return Ok(AutoScopeAnalysisRefreshOutcome::Skipped);
+        return skip_trade_builder_auto_scope_analysis_snapshot(
+            repo,
+            None,
+            root_builder_order_id,
+            context,
+            mark_price_override,
+            "root_order_not_found",
+        )
+        .await;
     };
+    trade_builder_spawn_auto_scope_analysis_refresh_log(
+        repo,
+        &root_order,
+        "AUTO_SCOPE_ANALYSIS_REFRESH_ATTEMPTED",
+        context,
+        mark_price_override,
+        None,
+    );
 
     if root_order.side != "buy"
         || root_order.parent_order_id.is_some()
         || root_order.origin_flow_run_id.is_none()
     {
-        repo.delete_trade_flow_auto_scope_analysis_rows_for_root(root_builder_order_id)
-            .await?;
-        return Ok(AutoScopeAnalysisRefreshOutcome::Skipped);
+        return skip_trade_builder_auto_scope_analysis_snapshot(
+            repo,
+            Some(&root_order),
+            root_builder_order_id,
+            context,
+            mark_price_override,
+            "not_root_buy_order",
+        )
+        .await;
     }
 
     let Some(run) = repo
         .get_trade_flow_run(root_order.origin_flow_run_id.unwrap_or_default())
         .await?
     else {
-        repo.delete_trade_flow_auto_scope_analysis_rows_for_root(root_builder_order_id)
-            .await?;
-        return Ok(AutoScopeAnalysisRefreshOutcome::Skipped);
+        return skip_trade_builder_auto_scope_analysis_snapshot(
+            repo,
+            Some(&root_order),
+            root_builder_order_id,
+            context,
+            mark_price_override,
+            "missing_flow_run",
+        )
+        .await;
     };
     let Some(version) = repo.get_trade_flow_version(run.version_id).await? else {
-        repo.delete_trade_flow_auto_scope_analysis_rows_for_root(root_builder_order_id)
-            .await?;
-        return Ok(AutoScopeAnalysisRefreshOutcome::Skipped);
+        return skip_trade_builder_auto_scope_analysis_snapshot(
+            repo,
+            Some(&root_order),
+            root_builder_order_id,
+            context,
+            mark_price_override,
+            "missing_flow_version",
+        )
+        .await;
     };
     let graph = parse_trade_flow_graph(&version)?;
     let Some(action_node_key) = root_order
@@ -457,14 +591,26 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        repo.delete_trade_flow_auto_scope_analysis_rows_for_root(root_builder_order_id)
-            .await?;
-        return Ok(AutoScopeAnalysisRefreshOutcome::Skipped);
+        return skip_trade_builder_auto_scope_analysis_snapshot(
+            repo,
+            Some(&root_order),
+            root_builder_order_id,
+            context,
+            mark_price_override,
+            "missing_action_node_key",
+        )
+        .await;
     };
     if !trade_builder_analysis_has_upstream_auto_scope_trigger(&graph, action_node_key) {
-        repo.delete_trade_flow_auto_scope_analysis_rows_for_root(root_builder_order_id)
-            .await?;
-        return Ok(AutoScopeAnalysisRefreshOutcome::Skipped);
+        return skip_trade_builder_auto_scope_analysis_snapshot(
+            repo,
+            Some(&root_order),
+            root_builder_order_id,
+            context,
+            mark_price_override,
+            "missing_auto_scope_trigger",
+        )
+        .await;
     }
 
     let child_orders = repo
@@ -508,14 +654,26 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
         &fill_summaries_by_exchange_id,
     );
     let Some(buy_avg_price) = buy_metrics.avg_price else {
-        repo.delete_trade_flow_auto_scope_analysis_rows_for_root(root_builder_order_id)
-            .await?;
-        return Ok(AutoScopeAnalysisRefreshOutcome::Skipped);
+        return skip_trade_builder_auto_scope_analysis_snapshot(
+            repo,
+            Some(&root_order),
+            root_builder_order_id,
+            context,
+            mark_price_override,
+            "missing_buy_fill_metrics",
+        )
+        .await;
     };
     if buy_metrics.qty <= 0.0 {
-        repo.delete_trade_flow_auto_scope_analysis_rows_for_root(root_builder_order_id)
-            .await?;
-        return Ok(AutoScopeAnalysisRefreshOutcome::Skipped);
+        return skip_trade_builder_auto_scope_analysis_snapshot(
+            repo,
+            Some(&root_order),
+            root_builder_order_id,
+            context,
+            mark_price_override,
+            "zero_buy_fill_qty",
+        )
+        .await;
     }
 
     let trigger_events = repo
@@ -710,7 +868,131 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root(
     repo.upsert_trade_flow_auto_scope_analysis_rows(&rows).await?;
     repo.upsert_trade_flow_auto_scope_trade_diagnostic(&diagnostic)
         .await?;
+    trade_builder_spawn_auto_scope_analysis_refresh_log(
+        repo,
+        &root_order,
+        AutoScopeAnalysisRefreshOutcome::Updated.event_type(),
+        context,
+        mark_price_override,
+        None,
+    );
     Ok(AutoScopeAnalysisRefreshOutcome::Updated)
+}
+
+fn schedule_trade_builder_auto_scope_analysis_refresh_retry(
+    repo: &PostgresRepository,
+    root_builder_order_id: i64,
+    mark_price_override: Option<f64>,
+    initial_reason: &'static str,
+) {
+    if !auto_scope_analysis_refresh_should_retry(initial_reason) {
+        return;
+    }
+
+    {
+        let mut active_roots = AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_ROOTS.lock();
+        if !active_roots.insert(root_builder_order_id) {
+            return;
+        }
+    }
+
+    let repo = repo.clone();
+    tokio::spawn(async move {
+        let mut last_reason = initial_reason;
+        for (index, delay_s) in AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_DELAYS_SECS
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            sleep(Duration::from_secs(delay_s)).await;
+            let retry_attempt_no = (index + 1) as u8;
+            let result = refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_context(
+                &repo,
+                root_builder_order_id,
+                mark_price_override,
+                AutoScopeAnalysisRefreshContext::retry(
+                    "retry_after_skip",
+                    retry_attempt_no,
+                ),
+            )
+            .await;
+
+            match result {
+                Ok(AutoScopeAnalysisRefreshOutcome::Updated) => break,
+                Ok(AutoScopeAnalysisRefreshOutcome::Skipped(reason)) => {
+                    last_reason = reason;
+                    if !auto_scope_analysis_refresh_should_retry(reason) {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        root_builder_order_id,
+                        retry_attempt_no,
+                        error = %err,
+                        "AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_FAILED"
+                    );
+                }
+            }
+        }
+
+        AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_ROOTS
+            .lock()
+            .remove(&root_builder_order_id);
+        if auto_scope_analysis_refresh_should_retry(last_reason) {
+            warn!(
+                root_builder_order_id,
+                skip_reason = last_reason,
+                "AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_EXHAUSTED"
+            );
+        }
+    });
+}
+
+async fn refresh_trade_builder_auto_scope_analysis_snapshot_after_fill(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    parent_order: Option<&TradeBuilderOrder>,
+    execution_price: f64,
+) {
+    let root_builder_order_id = parent_order
+        .map(|parent| parent.id)
+        .or(order.parent_order_id)
+        .unwrap_or(order.id);
+    let mark_price_override = order.last_seen_price.or(Some(execution_price));
+    let result = refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_context(
+        repo,
+        root_builder_order_id,
+        mark_price_override,
+        AutoScopeAnalysisRefreshContext::direct("order_fill"),
+    )
+    .await;
+
+    match result {
+        Ok(AutoScopeAnalysisRefreshOutcome::Updated) => {}
+        Ok(AutoScopeAnalysisRefreshOutcome::Skipped(reason)) => {
+            schedule_trade_builder_auto_scope_analysis_refresh_retry(
+                repo,
+                root_builder_order_id,
+                mark_price_override,
+                reason,
+            );
+        }
+        Err(err) => {
+            warn!(
+                builder_order_id = order.id,
+                root_builder_order_id,
+                error = %err,
+                "AUTO_SCOPE_ANALYSIS_REFRESH_FAILED"
+            );
+            schedule_trade_builder_auto_scope_analysis_refresh_retry(
+                repo,
+                root_builder_order_id,
+                mark_price_override,
+                "missing_buy_fill_metrics",
+            );
+        }
+    }
 }
 
 async fn maybe_backfill_trade_builder_auto_scope_analysis_snapshots(
@@ -730,15 +1012,32 @@ async fn maybe_backfill_trade_builder_auto_scope_analysis_snapshots(
             }
         }
 
-        let result =
-            refresh_trade_builder_auto_scope_analysis_snapshot_for_root(repo, root_order_id, None)
-                .await;
+        let result = refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_context(
+            repo,
+            root_order_id,
+            None,
+            AutoScopeAnalysisRefreshContext::direct("backfill_cycle"),
+        )
+        .await;
         match result {
-            Ok(AutoScopeAnalysisRefreshOutcome::Updated)
-            | Ok(AutoScopeAnalysisRefreshOutcome::Skipped) => {
+            Ok(AutoScopeAnalysisRefreshOutcome::Updated) => {
                 AUTO_SCOPE_ANALYSIS_BACKFILL_CHECKED_ROOTS
                     .lock()
                     .insert(root_order_id);
+            }
+            Ok(AutoScopeAnalysisRefreshOutcome::Skipped(reason)) => {
+                if auto_scope_analysis_refresh_should_retry(reason) {
+                    schedule_trade_builder_auto_scope_analysis_refresh_retry(
+                        repo,
+                        root_order_id,
+                        None,
+                        reason,
+                    );
+                } else {
+                    AUTO_SCOPE_ANALYSIS_BACKFILL_CHECKED_ROOTS
+                        .lock()
+                        .insert(root_order_id);
+                }
             }
             Err(err) => {
                 warn!(

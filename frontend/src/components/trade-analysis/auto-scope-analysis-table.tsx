@@ -113,6 +113,7 @@ function formatScore(value: number | null): string {
 }
 
 function exitReasonLabel(row: AutoScopeTradeAnalysisRow): string {
+  if (row.positionState === 'pending_analysis') return 'Pending Analysis';
   if (row.positionState === 'closed_market_ended') return 'Kapali (Market End)';
   if (row.positionState === 'open') return 'Acik Pozisyon';
   switch (row.exitReason) {
@@ -128,6 +129,11 @@ function exitReasonLabel(row: AutoScopeTradeAnalysisRow): string {
 }
 
 function exitMetaLabel(row: AutoScopeTradeAnalysisRow): string {
+  if (row.positionState === 'pending_analysis') {
+    return row.buyFilledAt
+      ? `Fill geldi: ${formatDateTime(row.buyFilledAt)}`
+      : 'Forensic refresh bekleniyor';
+  }
   if (row.positionState === 'closed_market_ended') {
     return row.marketEndAt
       ? `Market bitti: ${formatDateTime(row.marketEndAt)}`

@@ -25,6 +25,7 @@ import {
   getAutoScopeBlockedSignalsForRun,
   getAutoScopeTradeAnalysisExtrasForRoots,
 } from './auto-scope-analysis-extras';
+import { getPendingAutoScopeAnalysisRows } from './auto-scope-analysis-pending';
 
 export interface AutoScopeTradeAnalysisFilters {
   userId: number;
@@ -266,10 +267,11 @@ function deriveMarketEndAtFromSlug(marketSlug: string): string | null {
 }
 
 function derivePositionState(
-  rowType: AutoScopeTradeAnalysisRowDb['row_type'],
+  rowType: AutoScopeTradeAnalysisRow['rowType'],
   marketEndAt: string | null,
   nowIso: string
 ): AutoScopeTradeAnalysisPositionState {
+  if (rowType === 'pending_analysis') return 'pending_analysis';
   if (rowType === 'sell_exit') return 'closed_exit';
   const marketEnd = parseDate(marketEndAt);
   const now = parseDate(nowIso);
@@ -577,10 +579,20 @@ export async function getAutoScopeTradeAnalysis(
     ),
   ]);
 
-  const total = Number(countRes.rows[0]?.total || 0);
+  const pendingRows =
+    page === 1
+      ? await getPendingAutoScopeAnalysisRows(filters, limit, pnlFilter, positionFilter)
+      : [];
+  const total = Number(countRes.rows[0]?.total || 0) + pendingRows.length;
+  const mappedRows = dataRes.rows.map(mapAnalysisRow);
+  const visibleRows = [...pendingRows, ...mappedRows].slice(0, limit);
+  const extras = await getAutoScopeTradeAnalysisExtrasForRoots(
+    filters.userId,
+    visibleRows.map((row) => row.rootOrderId)
+  );
 
   return {
-    data: dataRes.rows.map(mapAnalysisRow),
+    data: attachExtrasToRows(visibleRows, extras),
     total,
     page,
     limit,
