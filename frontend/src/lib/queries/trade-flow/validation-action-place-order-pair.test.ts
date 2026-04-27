@@ -189,6 +189,67 @@ test('validateActionPlaceOrderConfig accepts auto_remaining_budget pair_lock con
   assert.equal(issues.length, 0);
 });
 
+test('validateActionPlaceOrderConfig rejects pair_lock shares sizing even with targetQty', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_pair_shares'),
+      {
+        key: 'pair_buy_shares',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          side: 'buy',
+          executionMode: 'limit',
+          sizeMode: 'shares',
+          targetQty: 5,
+          pairMaxTotalCent: 90,
+          pairSizingMode: 'auto_remaining_budget',
+          pairTotalBudgetUsdc: 10,
+          counterLegEnabled: true,
+        },
+      },
+    ],
+    edges: [{ key: 'edge_pair_shares', source: 'trigger_pair_shares', target: 'pair_buy_shares', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_shares');
+  assert.ok(issues.some((issue) => issue.code === 'pair_lock_requires_usdc_sizing'));
+  assert.ok(issues.some((issue) => issue.code === 'pair_lock_requires_size_usdc'));
+});
+
+test('validateActionPlaceOrderConfig rejects pair_lock without primary USDC sizing', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_pair_missing_size'),
+      {
+        key: 'pair_buy_missing_size',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          side: 'buy',
+          executionMode: 'limit',
+          sizeMode: 'usdc',
+          targetQty: 5,
+          pairMaxTotalCent: 90,
+          pairSizingMode: 'auto_remaining_budget',
+          pairTotalBudgetUsdc: 10,
+          counterLegEnabled: true,
+        },
+      },
+    ],
+    edges: [{ key: 'edge_pair_missing_size', source: 'trigger_pair_missing_size', target: 'pair_buy_missing_size', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_missing_size');
+  assert.ok(issues.some((issue) => issue.code === 'pair_lock_requires_size_usdc'));
+});
+
 test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard, staged, and PTB stop-loss fields', () => {
   const graph = normalizeTradeFlowGraph({
     context: {},

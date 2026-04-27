@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,8 @@ pub async fn spawn_mock_exchange() -> Result<MockExchangeHandle> {
     let app = Router::new()
         .route("/midpoint", get(get_midpoint))
         .route("/fee-rate", get(get_fee_rate))
+        .route("/clob-markets/:condition_id", get(get_clob_market))
+        .route("/markets-by-token/:token_id", get(get_market_by_token))
         .route("/order", post(post_order).delete(delete_order))
         .route("/data/order/:id", get(get_order))
         .route("/data/orders", get(get_orders))
@@ -121,13 +123,80 @@ async fn get_fee_rate() -> impl IntoResponse {
     Json(json!({ "fee_rate_bps": 1000 }))
 }
 
+async fn get_clob_market(Path(condition_id): Path<String>) -> impl IntoResponse {
+    let yes_token_id = condition_id.clone();
+    let no_token_id = format!("{condition_id}-no");
+    Json(json!({
+        "condition_id": condition_id,
+        "t": [
+            { "t": yes_token_id, "o": "YES" },
+            { "t": no_token_id, "o": "NO" }
+        ],
+        "mts": 0.01,
+        "mos": 5.0,
+        "nr": false,
+        "fd": { "r": 0.0, "e": 0.0, "to": true },
+        "mbf": 0,
+        "tbf": 0
+    }))
+}
+
+async fn get_market_by_token(Path(token_id): Path<String>) -> impl IntoResponse {
+    Json(json!({ "condition_id": token_id }))
+}
+
 async fn post_order(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+) -> Response {
     // Handle both old flat format and new EIP-712 nested format
     let (market, side, price, size, client_order_id) = if let Some(order) = body.get("order") {
-        // New EIP-712 format: { "order": { "tokenId", "side", "makerAmount", "takerAmount" }, "owner", "orderType" }
+        let required_fields = [
+            "salt",
+            "maker",
+            "signer",
+            "tokenId",
+            "makerAmount",
+            "takerAmount",
+            "side",
+            "signatureType",
+            "timestamp",
+            "metadata",
+            "builder",
+            "signature",
+        ];
+        let missing_fields = required_fields
+            .iter()
+            .copied()
+            .filter(|field| order.get(field).is_none())
+            .collect::<Vec<_>>();
+        if !missing_fields.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "missing CLOB V2 order fields",
+                    "fields": missing_fields
+                })),
+            )
+                .into_response();
+        }
+        let forbidden_fields = ["nonce", "feeRateBps", "taker"]
+            .iter()
+            .copied()
+            .filter(|field| order.get(field).is_some())
+            .collect::<Vec<_>>();
+        if !forbidden_fields.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "legacy CLOB fields are not accepted in V2 orders",
+                    "fields": forbidden_fields
+                })),
+            )
+                .into_response();
+        }
+
+        // V2 EIP-712 format: { "order": { "tokenId", "side", "makerAmount", "takerAmount", ... }, "owner", "orderType" }
         let token_id = order
             .get("tokenId")
             .and_then(|v| v.as_str())
@@ -230,6 +299,7 @@ async fn post_order(
         "orderID": id,
         "status": g.orders.get(&id).map(|x| x.status.clone()).unwrap_or_else(|| "open".to_string())
     }))
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]

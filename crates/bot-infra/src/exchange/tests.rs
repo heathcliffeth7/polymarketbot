@@ -1,5 +1,6 @@
 use super::clob::{
-    extract_best_bid_ask_from_book, extract_order_book_from_book, parse_fee_rate_bps_response,
+    extract_best_bid_ask_from_book, extract_order_book_from_book, parse_clob_market_info_response,
+    parse_fee_rate_bps_response,
 };
 use super::parse::{parse_gamma_market, parse_gamma_market_any, parse_yes_no_token_ids};
 use super::{ClobHttpClient, ClobRestClient, OrderBookLevel, PlaceOrderRequest};
@@ -33,7 +34,15 @@ async fn place_and_reconcile_against_mock_exchange() -> Result<()> {
         Some(Address::from_low_u64_be(7)),
         137,
         None,
+        None,
     );
+
+    let market_info = client
+        .get_clob_market_info_by_token("tok-yes")
+        .await?
+        .expect("mock market info");
+    assert_eq!(market_info.min_order_size, Some(5.0));
+    assert_eq!(market_info.min_tick_size, Some(0.01));
 
     let ack = client
         .place_order(&PlaceOrderRequest {
@@ -110,6 +119,7 @@ fn parse_gamma_market_any_supports_neg_risk_arbitrary_slug() {
         "negRisk": true,
         "orderPriceMinTickSize": 0.001,
         "orderMinSize": 5,
+        "conditionId": "0xcondition",
         "makerBaseFee": 0,
         "clobTokenIds": [
             "tok-yes",
@@ -121,6 +131,7 @@ fn parse_gamma_market_any_supports_neg_risk_arbitrary_slug() {
     let parsed = parse_gamma_market_any(&market).expect("market");
     assert_eq!(parsed.slug, "lal-bil-bar-2026-03-08-bar");
     assert!(parsed.neg_risk);
+    assert_eq!(parsed.condition_id.as_deref(), Some("0xcondition"));
     assert_eq!(parsed.order_price_min_tick_size, Some(0.001));
     assert_eq!(parsed.order_min_size, Some(5.0));
     assert_eq!(parsed.yes_token_id.as_deref(), Some("tok-yes"));
@@ -160,10 +171,35 @@ fn effective_exchange_address_uses_neg_risk_override() {
         Some(neg_risk_addr),
         137,
         None,
+        None,
     );
 
     assert_eq!(client.effective_exchange_address(false), standard_addr);
     assert_eq!(client.effective_exchange_address(true), neg_risk_addr);
+}
+
+#[test]
+fn parse_clob_market_info_supports_v2_shape() {
+    let raw = json!({
+        "t": [
+            { "t": "tok-yes", "o": "YES" },
+            { "t": "tok-no", "o": "NO" }
+        ],
+        "mts": 0.001,
+        "mos": 5,
+        "nr": true,
+        "fd": { "r": 2.5, "e": 2, "to": true }
+    });
+
+    let parsed = parse_clob_market_info_response(&raw, "0xcondition").expect("market info");
+
+    assert_eq!(parsed.condition_id, "0xcondition");
+    assert_eq!(parsed.tokens.len(), 2);
+    assert!(parsed.has_token("tok-yes"));
+    assert_eq!(parsed.min_tick_size, Some(0.001));
+    assert_eq!(parsed.min_order_size, Some(5.0));
+    assert!(parsed.neg_risk);
+    assert_eq!(parsed.fee_details.as_ref().map(|fee| fee.rate), Some(2.5));
 }
 
 #[test]

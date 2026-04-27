@@ -66,6 +66,7 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
             .resolve_gnosis_safe_address()
             .map(|s| s.parse::<Address>().context("parse gnosis_safe_address"))
             .transpose()?;
+        let builder_code = cfg.exchange.resolve_builder_code()?;
         let client = ClobHttpClient::from_credentials(
             cfg.exchange.clob_base_url.clone(),
             Some(cfg.claim.data_api_base_url.clone()),
@@ -77,6 +78,7 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
             neg_risk_exchange_address,
             cfg.exchange.chain_id,
             gnosis_safe,
+            builder_code,
         );
         run_clob_auth_preflight(run_id, repo, &client, &creds, credential_source).await;
         clob_client = Some(client);
@@ -640,6 +642,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         .resolve_gnosis_safe_address()
         .map(|s| s.parse::<Address>().context("parse gnosis_safe_address"))
         .transpose()?;
+    let builder_code = cfg.exchange.resolve_builder_code()?;
     let client = ClobHttpClient::from_credentials(
         cfg.exchange.clob_base_url.clone(),
         Some(cfg.claim.data_api_base_url.clone()),
@@ -651,6 +654,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         neg_risk_exchange_address,
         cfg.exchange.chain_id,
         gnosis_safe,
+        builder_code,
     );
     run_clob_auth_preflight(run_id, repo, &client, &creds, credential_source).await;
     run_daily_pnl_startup_check(run_id, repo, cfg.risk.max_daily_loss_usdc).await?;

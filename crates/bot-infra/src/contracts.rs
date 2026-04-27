@@ -1,7 +1,7 @@
 use crate::db::PostgresRepository;
 use crate::exchange::{
-    ClobRestClient, FillInfo, OrderAck, OrderBookSnapshot, OrderInfo, PlaceOrderRequest,
-    PriceHistoryPoint, PriceSnapshot,
+    ClobMarketInfo, ClobRestClient, FillInfo, OrderAck, OrderBookSnapshot, OrderInfo,
+    PlaceOrderRequest, PriceHistoryPoint, PriceSnapshot,
 };
 pub use crate::market_data::MarketDataProvider;
 use anyhow::Result;
@@ -30,6 +30,9 @@ pub trait OrderExecutor: Send + Sync {
         Ok(Vec::new())
     }
     async fn fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>>;
+    async fn clob_market_info_by_token(&self, _token_id: &str) -> Result<Option<ClobMarketInfo>> {
+        Ok(None)
+    }
     async fn place(&self, req: &PlaceOrderRequest) -> Result<OrderAck>;
     async fn cancel(&self, exchange_order_id: &str) -> Result<()>;
     async fn status(&self, exchange_order_id: &str) -> Result<OrderInfo>;
@@ -80,6 +83,10 @@ where
 
     async fn fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>> {
         ClobRestClient::get_fee_rate_bps(self, token_id).await
+    }
+
+    async fn clob_market_info_by_token(&self, token_id: &str) -> Result<Option<ClobMarketInfo>> {
+        ClobRestClient::get_clob_market_info_by_token(self, token_id).await
     }
 
     async fn cancel(&self, exchange_order_id: &str) -> Result<()> {

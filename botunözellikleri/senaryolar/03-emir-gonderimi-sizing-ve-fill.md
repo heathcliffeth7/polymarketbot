@@ -166,3 +166,143 @@ Bu guard'lar PTB'den bağımsızdır. PTB geçse bile max price veya execution f
 - Existing order reuse sebebiyle yeni order açılmıyor olabilir mi?
 - Fill lock açıkken aynı markette ikinci buy gerçekten isteniyor mu?
 - Sell flow'unda source trade ve kalan pozisyon mevcut mu?
+
+## Action İçindeki Karar Noktaları
+
+Action node'u tek bir "order gönder" komutu gibi görünse de içeride birkaç ayrı karar verir:
+
+1. Bağlam çözümü: market, token, outcome, source trade.
+2. Güvenlik: stale market ve side/execution uyumu.
+3. Giriş kalitesi: max price, execution floor, PTB, underlying.
+4. Idempotency: existing order reuse veya rearm.
+5. Büyüklük: USDC, pct, trigger size veya profile fallback.
+6. Lifecycle: immediate submit, conditional pending, TP/SL çocuk emirleri.
+
+Bu kararlar ayrı ayrı loglanmadığında operatör "order yok" der. Doğru teşhis, hangi adımda durduğunu bulmaktır.
+
+## Sizing Önceliği İçin Pratik Örnek
+
+Durum:
+
+- Trigger entry profile `selectedEntrySizeUsdc=8` üretmiş.
+- Action config içinde `sizeUsdc=10` var.
+
+Beklenen:
+
+- Action explicit değer olan 10 USDC kullanır.
+- Profile fallback kullanılmaz.
+
+Durum:
+
+- Trigger `selectedEntrySizeUsdc=8`.
+- Action config içinde `sizeUsdc` yok.
+- Action buy ve USDC sizing bekliyor.
+
+Beklenen:
+
+- Action 8 USDC fallback kullanabilir.
+
+Operatör hatası:
+
+- UI'da profile size değiştirip action'daki explicit `sizeUsdc` değerini unutmak.
+
+## Fill ve Submit Ayrımı
+
+Submit aşaması:
+
+```text
+builder order oluşturuldu
+should_inline_submit=true
+CLOB submit denendi
+notifyOnOrderSubmitted mesajı geldi
+```
+
+Fill aşaması:
+
+```text
+CLOB order matched
+fill event geldi
+pozisyon oluştu
+TP/SL child order kurulabilir
+notifyOnFill veya fill mesajı geldi
+```
+
+Submit mesajı fill garantisi değildir. Özellikle limit order, hızlı market ve düşük depth durumlarında submit sonrası fill olmayabilir.
+
+## Sayısal Örnek: Max Price ve Fill
+
+Action config:
+
+```json
+{
+  "executionMode": "limit",
+  "maxPrice": 0.60,
+  "sizeUsdc": 20
+}
+```
+
+Orderbook:
+
+```text
+ask 0.59 depth 4 USDC
+ask 0.61 depth 20 USDC
+```
+
+Yorum:
+
+- Best ask max price altında görünüyor.
+- Ama 20 USDC almak için 0.61 seviyesine çıkmak gerekebilir.
+- Execution floor veya depth guard açıksa block edebilir.
+- Guard yoksa partial fill veya kötü fill riski oluşur.
+
+## Existing Order Reuse Detayı
+
+Reuse istenen bir davranıştır. Aynı flow aynı markette tekrar tetiklendiğinde her seferinde yeni order açmak exposure'ı şişirebilir.
+
+Reuse olduğunda:
+
+- Yeni builder order id beklenmeyebilir.
+- Mevcut pending/active order döndürülebilir.
+- Operator bunu "action çalışmadı" diye yorumlamamalıdır.
+
+Rearm farklıdır:
+
+- Özellikle sell tarafında failed order tekrar kullanılabilir.
+- Pozisyon kalanı yeniden hesaplanmalıdır.
+- Rearm sonrası eski hata sebebinin devam edip etmediği kontrol edilmelidir.
+
+## Buy Fill Lock Detaylı Örnek
+
+Durum:
+
+1. BTC 5m Up için 10 USDC buy fill oldu.
+2. Aynı markette fiyat tekrar trigger koşulunu geçti.
+3. `buyFillLockEnabled=true`.
+4. `releaseBuyFillLockOnStopLoss=false`.
+
+Beklenen:
+
+- İkinci buy block edilir.
+- Bu block, risk azaltma davranışıdır.
+
+Eğer SL sonrası tekrar giriş isteniyorsa:
+
+```json
+{
+  "buyFillLockEnabled": true,
+  "releaseBuyFillLockOnStopLoss": true,
+  "reenterOnSlHit": true
+}
+```
+
+Bu durumda kilit sadece stop-loss sonrası kontrollü re-entry için açılabilir.
+
+## Yanlış Yorumlar
+
+| Yanlış yorum | Doğru yorum |
+|---|---|
+| Builder order oluştuysa pozisyon açıldı | Fill event olmadan pozisyon oluşmaz |
+| Conditional order yok demektir | Pending lifecycle bekliyor olabilir |
+| Profile size çalışmıyor | Action explicit size override ediyor olabilir |
+| Reuse bug'dır | Aynı bağlamda duplicate order engelleniyor olabilir |
+| Fill lock order sistemini bozuyor | Aynı markette ikinci buy riskini engelliyor |

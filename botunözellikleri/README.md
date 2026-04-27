@@ -42,3 +42,54 @@ Bu klasör Polymarket botunun trade flow, guard, pair lock, çıkış, analiz ve
 - Bu klasördeki dosyalar el yazımı dokümandır; her dosya 1500 satır altında kalmalıdır.
 - Yeni özellik eklenirse önce ilgili senaryo dosyası güncellenir, sonra gerekirse `referans/` ve `ornekler/` tamamlanır.
 - Eski tek dosyalı referansın yerini artık bu index ve alt klasörler alır.
+
+## Kullanıcı Tipine Göre Okuma Yolu
+
+### Yeni Başlayan
+
+1. Önce bu dosyadaki hızlı haritayı oku.
+2. [node-ozellikleri.md](./node-ozellikleri.md) ile iki ana node'un rolünü ayır.
+3. [01-market-dongusu-ve-auto-scope.md](./senaryolar/01-market-dongusu-ve-auto-scope.md) ile 5 dakikalık market mantığını öğren.
+4. [03-emir-gonderimi-sizing-ve-fill.md](./senaryolar/03-emir-gonderimi-sizing-ve-fill.md) ile trigger sonrası order'ın nasıl oluştuğunu takip et.
+
+Bu rota botun "neden önce market seçiyor, sonra trigger çalışıyor, sonra order üretiyor" sırasını anlatır. Strateji kararlarına geçmeden önce bu sıralama net olmalıdır.
+
+### Operatör
+
+1. Canlı sorunu önce [troubleshooting-checklist.md](./ornekler/troubleshooting-checklist.md) ile sınıflandır.
+2. Sorun hangi kategoriye düşüyorsa ilgili `senaryolar/` dosyasına geç.
+3. Telegram mesajı varsa [09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) ile event/notification farkını oku.
+4. Config'i değiştirmeden önce [config-receteleri.md](./ornekler/config-receteleri.md) içindeki güvenli örneğe bak.
+
+Operatör için amaç teori değil, doğru teşhistir. "Order yok" demeden önce trigger, action, guard, submit ve fill aşamaları ayrı ayrı kontrol edilmelidir.
+
+### Strateji Tasarlayan
+
+1. [10-volatility-capture-stratejileri.md](./senaryolar/10-volatility-capture-stratejileri.md) ile stratejinin EV risklerini oku.
+2. Entry kalitesi için [02-giris-trigger-ve-zamanlama.md](./senaryolar/02-giris-trigger-ve-zamanlama.md) ve [04-ptb-guard-ve-iv-mismatch.md](./senaryolar/04-ptb-guard-ve-iv-mismatch.md) dosyalarını birlikte değerlendir.
+3. Exit kalitesi için [06-tp-sl-time-exit-ve-reentry.md](./senaryolar/06-tp-sl-time-exit-ve-reentry.md) dosyasını kullan.
+4. Çift taraflı strateji için [07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) dosyasındaki tek bacak ve lock risklerini kontrol et.
+
+Strateji tasarımında en sık hata tek bir guard'ı "kâr makinesi" gibi görmektir. Guard'lar sadece kötü girişleri azaltır; fill kalitesi, fee, depth ve exit davranışı hâlâ sonucu belirler.
+
+### Debug Yapan Geliştirici
+
+1. [kaynak-haritasi.md](./kaynak-haritasi.md) ile hangi dokümanın hangi kod alanına dayandığını bul.
+2. [referans/trigger-market-price.md](./referans/trigger-market-price.md) ve [referans/action-place-order.md](./referans/action-place-order.md) dosyalarıyla config/output alanlarını eşleştir.
+3. [referans/terimler-eventler-ve-telemetri.md](./referans/terimler-eventler-ve-telemetri.md) ile event payload okuma sırasını izle.
+
+Geliştirici için kritik ayrım şudur: trigger'ın `pass=true` üretmesi, action'ın order oluşturacağı anlamına gelmez. Runtime davranışı trigger output, action guard payload ve builder order lifecycle birlikte okunarak anlaşılır.
+
+## Doküman Okurken Kullanılacak Ortak Mantık
+
+Her özellik için şu sırayı takip et:
+
+1. Bu özellik hangi riski azaltıyor?
+2. Hangi config alanı özelliği açıyor?
+3. Hangi alanlar birlikte zorunlu veya anlamlı?
+4. Başarılı akışta hangi event/telemetry görülür?
+5. Block akışında hangi alan sorunu gösterir?
+6. Retry varsa block terminal mi geçici mi?
+7. Bu özelliğin başka bir guard ile çakışma ihtimali var mı?
+
+Bu sıra kullanılmazsa aynı belirti yanlış yorumlanabilir. Örneğin "PTB block" sanılan bir durum aslında max price block olabilir; "fill yok" sanılan bir durum aslında conditional pending order olabilir.

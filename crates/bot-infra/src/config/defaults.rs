@@ -62,11 +62,11 @@ pub(crate) fn default_exchange_chain_id() -> u64 {
 }
 
 pub(crate) fn default_exchange_ctf_exchange_address() -> String {
-    "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E".to_string()
+    "0xE111180000d2663C0091e4f400237545B87B996B".to_string()
 }
 
 pub(crate) fn default_neg_risk_ctf_exchange_address() -> String {
-    "0xC5d563A36AE78145C45a50134d48A1215220f80a".to_string()
+    "0xe2222d279d744050d28e00520010520000310F59".to_string()
 }
 
 pub(crate) fn default_tp_pct() -> f64 {
@@ -170,7 +170,7 @@ pub(crate) fn default_claim_ctf_contract_address() -> String {
 }
 
 pub(crate) fn default_claim_collateral_token_address() -> String {
-    "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".to_string()
+    "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB".to_string()
 }
 
 pub(crate) fn default_claim_discovery_interval_sec() -> u64 {

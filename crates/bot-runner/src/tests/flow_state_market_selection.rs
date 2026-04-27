@@ -589,6 +589,7 @@ fn candidate_slugs_cover_prev_current_and_future_5m_windows() {
 fn gamma_market_for_test(slug: &str) -> GammaMarket {
     GammaMarket {
         slug: slug.to_string(),
+        condition_id: None,
         end_date_iso: None,
         active: true,
         closed: false,

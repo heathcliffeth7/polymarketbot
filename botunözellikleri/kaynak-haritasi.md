@@ -38,3 +38,34 @@ Bu dosya `botunözellikleri/` altındaki yeni dokümantasyonun hangi repo içi n
 - Sadece strateji yorumu değiştiyse `senaryolar/10-volatility-capture-stratejileri.md` yeterli olabilir.
 - Yeni config alanı UI validation'da görünüyorsa [referans/action-place-order.md](./referans/action-place-order.md) veya [referans/trigger-market-price.md](./referans/trigger-market-price.md) içine eklenmelidir.
 - Yeni telemetry alanı analytics'e çıktıysa [referans/terimler-eventler-ve-telemetri.md](./referans/terimler-eventler-ve-telemetri.md) ve [senaryolar/09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) güncellenmelidir.
+
+## Değişiklik Yaparken İzlenecek Yol
+
+1. Önce kod değişikliğinin hangi runtime davranışı etkilediğini belirle.
+2. Etkilenen config alanları varsa `referans/` dosyasına ekle.
+3. Operatörün canlıda göreceği sonuç değişiyorsa ilgili `senaryolar/` dosyasına örnek akış ekle.
+4. Kopyalanabilir ayar gerekiyorsa `ornekler/config-receteleri.md` içine küçük ama çalışan örnek koy.
+5. Yeni hata veya block nedeni oluştuysa `ornekler/troubleshooting-checklist.md` içine teşhis adımı ekle.
+6. Yeni telemetry alanı varsa `referans/terimler-eventler-ve-telemetri.md` içinde alanın ne zaman dolu olduğunu açıkla.
+
+Bu sıra dokümanın iki farklı probleme düşmesini engeller: sadece alan listesi olup davranışı anlatmamak veya sadece senaryo anlatıp gerçek config adını vermemek.
+
+## Koddan Dokümana Eşleme Örnekleri
+
+| Kodda görülen değişiklik | Dokümanda güncellenecek yer |
+|---|---|
+| Yeni `priceToBeatIv*` alanı | `referans/action-place-order.md`, `senaryolar/04-ptb-guard-ve-iv-mismatch.md` |
+| Yeni `notifyOn*` alanı | `referans/action-place-order.md`, `senaryolar/09-telegram-telemetri-ve-analiz.md` |
+| Pair lock validation değişikliği | `senaryolar/07-pair-lock-ve-edge-pairlock.md`, `ornekler/troubleshooting-checklist.md` |
+| Yeni analytics column | `referans/terimler-eventler-ve-telemetri.md`, `senaryolar/09-telegram-telemetri-ve-analiz.md` |
+| Yeni risk guard | `senaryolar/08-risk-guardlari-ve-hata-durumlari.md`, `ornekler/config-receteleri.md` |
+
+## Güncellik Kontrolü
+
+Bu dokümanlar kaynak kodun birebir otomatik çıktısı değildir. Bu yüzden yeni bir alan eklenince üç kontrol yapılmalıdır:
+
+- Frontend validation alanı kabul ediyor mu?
+- Runtime bu alanı gerçekten okuyor mu?
+- Event veya analytics payload operatöre bu kararın sonucunu gösteriyor mu?
+
+Üçünden biri eksikse dokümanda "var" diye anlatmak yanıltıcı olur. Özellikle UI'da görünen ama runtime tarafından kullanılmayan alanlar net olarak ayrıştırılmalıdır.

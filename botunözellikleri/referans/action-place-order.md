@@ -226,3 +226,129 @@ Pair telemetry:
   "notifyOnPriceToBeatGapBlocked": true
 }
 ```
+
+## Alanların Runtime Etkisi
+
+| Alan grubu | Runtime etkisi | Hata olduğunda belirti |
+|---|---|---|
+| Market/token çözümü | Hangi token için order üretileceğini belirler | Sell source yok, stale market veya yanlış outcome |
+| Sizing | Order notional/qty hesaplar | Beklenen büyüklükten farklı order |
+| Max price | Pahalı buy girişini engeller | Max price block |
+| Execution floor | Orderbook kalitesini kontrol eder | Best ask/depth block |
+| PTB guard | Entry edge/gap kalitesini kontrol eder | PTB block veya IV edge block |
+| Risk gate | Sistem limitlerini uygular | RiskDecision block |
+| TP/SL | Fill sonrası exit child order üretir | Pozisyon açık ama exit yok |
+| Pair lock | YES/NO lifecycle kurar | Pair no decision veya orphan leg |
+| Notification | Operatöre mesaj yollar | Event var ama Telegram yok |
+
+## Immediate ve Conditional Ayrımı
+
+`kind="immediate"`:
+
+- Action çalışınca order submit için hazır olur.
+- Guard geçerse `should_inline_submit=true` görülebilir.
+- Submit ve fill ayrı aşamalardır.
+
+`kind="conditional"`:
+
+- Builder order pending kalabilir.
+- Kendi trigger fiyatını bekler.
+- Operatör bunu no-order sanmamalıdır.
+
+Conditional flow'larda canlı debug için builder order status mutlaka okunmalıdır.
+
+## Buy Flow İçin Adım Adım Referans
+
+```text
+1. Context çöz
+2. Stale market kontrol et
+3. Buy guard'ları çalıştır
+4. source trade oluştur veya bul
+5. existing order kontrol et
+6. sizing hesapla
+7. risk gate çalıştır
+8. builder order oluştur
+9. notification flag'lerini snapshot al
+10. immediate submit veya pending lifecycle'a bırak
+```
+
+Her adım ayrı bir failure noktasıdır. Örneğin source trade oluşmadan sell order beklemek hatalıdır; risk gate block ederken PTB config değiştirmek etkisizdir.
+
+## Sell Flow İçin Adım Adım Referans
+
+```text
+1. sourceTradeId çöz
+2. Pozisyon kalan qty hesapla
+3. Sell size pct veya full close kararını uygula
+4. Existing failed sell varsa rearm değerlendir
+5. Builder sell order oluştur
+6. Submit/fill lifecycle'a geç
+```
+
+Sell flow'unda en sık hata source trade veya pozisyon bağlamının olmamasıdır. Buy tarafındaki otomatik source oluşturma davranışı sell için aynı şekilde düşünülmemelidir.
+
+## Pair Lock İçin Geçerli Minimum Yapı
+
+Trigger:
+
+```json
+{
+  "type": "trigger.market_price",
+  "config": {
+    "marketMode": "auto_scope",
+    "marketScope": "btc_5m_updown",
+    "bindingMode": "pair_lock_only"
+  }
+}
+```
+
+Action:
+
+```json
+{
+  "mode": "pair_lock",
+  "side": "buy",
+  "executionMode": "market",
+  "sizeUsdc": 10,
+  "pairMaxTotalCent": 96
+}
+```
+
+`edge_pairlock_v1` eklenirse:
+
+```json
+{
+  "pairLockStrategy": "edge_pairlock_v1",
+  "priceToBeatGuardEnabled": true,
+  "priceToBeatMode": "iv_mismatch_edge"
+}
+```
+
+Bu üç alan eksikse edge pairlock beklenmemelidir.
+
+## Sık Config Çakışmaları
+
+| Çakışma | Sonuç |
+|---|---|
+| Pair lock + `sizePct` | Validation hatası veya unsupported davranış |
+| Bump açık + PTB guard kapalı | Bump anlamlı değildir |
+| Relax config + PTB guard kapalı | Relax çalışmaz |
+| `reentrySkipCurrentWindow=true` + re-entry kapalı | Validation hatası |
+| `ptbStopLossTimeDecayMode` + PTB SL kapalı | Geçersiz kombinasyon |
+| Notify flag kapalı | Event olabilir ama Telegram gelmez |
+
+## Debug İçin Minimum Payload
+
+Action davranışı incelenirken şu alanlar birlikte alınmalıdır:
+
+- `node_key`
+- `market_slug`
+- `token_id`
+- `side`
+- `execution_mode`
+- `kind`
+- `size_usdc` veya `target_qty`
+- guard decision payload
+- `builder_order_id`
+- `source_trade_id`
+- retry/notification flags

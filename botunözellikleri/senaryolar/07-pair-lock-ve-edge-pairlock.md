@@ -193,3 +193,111 @@ Pair lock analizinde şu alanlar aranır:
 - `pairMaxTotalCent` çok sıkı olduğu için hiç pair kurulmuyor olabilir mi?
 - Tek bacak fill riskine karşı protective unwind açık mı?
 - Locked session sonrası SL/TP kuralları iki bacağı bozuyor mu?
+
+## Pair Lock Neyi Çözmeye Çalışır?
+
+Binary markette YES ve NO tokenlarının resolution toplamı 1 USDC'dir. Eğer iki bacağı toplamda 1 USDC altında alabilirsen teorik olarak kilitli pozisyon oluşur. Ancak fee, spread, partial fill ve zaman riski bu teoriyi zorlaştırır.
+
+Pair lock bu yüzden sadece "YES+NO < 1" kontrolü değildir. Pratikte şu sorulara cevap verir:
+
+- İki bacak gerçekten fill olabilir mi?
+- Tek bacak fill olursa ne yapılacak?
+- Counter leg aynı market window içinde mi?
+- Toplam maliyet fee ve buffer sonrası hâlâ mantıklı mı?
+- Locked olduktan sonra SL/TP kuralları pair'i bozacak mı?
+
+## Sayısal Maliyet Örneği
+
+```text
+YES ask = 0.47
+NO ask = 0.48
+raw pair total = 0.95
+fee/buffer etkisi = 0.01
+effective pair total = 0.96
+pairMaxTotalCent = 96
+```
+
+Bu örnekte pair sınırda kabul edilebilir. Ancak ask seviyelerinin depth'i hedef qty için yetmiyorsa effective cost daha yüksek olabilir. Bu yüzden pair lock kararında sadece best ask değil, hedef qty ve depth de önemlidir.
+
+## Orphan Leg Riski
+
+Orphan leg şu durumda oluşur:
+
+1. Lead bacak fill olur.
+2. Counter bacak submit edilemez veya fill olmaz.
+3. Market hareket eder.
+4. Lead artık tek taraflı risk taşır.
+
+Koruma seçenekleri:
+
+- Counter retry beklemek.
+- `pairProtectiveUnwindEnabled=true` ile lead'i satmaya çalışmak.
+- Single edge stratejisinde bu riski bilinçli kabul etmek.
+
+Operatör, orphan durumunu hata olarak değil lifecycle durumu olarak okumalıdır. Hata, orphan'ın plansız ve telemetry'siz kalmasıdır.
+
+## `edge_pairlock_v1` Kararlarını Yorumlama
+
+`position_counter_lock`:
+
+- Botun elinde açık tek bacak vardır.
+- Counter uygun maliyette bulunmuştur.
+- Amaç yeni trade değil, mevcut riski kilitlemektir.
+
+`fresh_equal_pair`:
+
+- Açık pozisyon yoktur.
+- İki bacak birlikte alınabilir.
+- Amaç düşük toplam maliyetle yeni pair kurmaktır.
+
+`single_edge`:
+
+- Pair toplamı uygun değildir.
+- Seçili bacakta model edge güçlüdür.
+- Bot tek taraflı risk almayı kabul eder.
+
+No decision:
+
+- Pair maliyeti yüksek.
+- Tek taraf edge yetersiz.
+- Depth veya veri kalitesi uygun değil.
+- Botun hiçbir şey yapmaması doğru davranış olabilir.
+
+## Lock Sonrası Exit Politikası
+
+Locked pair oluştuğunda normal SL davranışı dikkatli ele alınmalıdır. Bir bacak SL ile satılırsa pair koruması bozulabilir.
+
+Bu yüzden:
+
+- `pairIgnoreStopLossAfterLocked=true` locked pair için SL/PTB-SL yüzeyini kapatabilir.
+- `pairProtectiveUnwindEnabled` orphan veya bozuk lock için güvenlik sağlar.
+- Counter leg TP/SL alanları primary leg alanlarından ayrı düşünülmelidir.
+
+## Pair Lock Debug Örneği
+
+Belirti:
+
+- Pair lock node çalışıyor.
+- Order oluşmuyor.
+
+Kontrol:
+
+1. Upstream trigger `bindingMode="pair_lock_only"` mi?
+2. Action `mode="pair_lock"` mi?
+3. `pairLockStrategy` valid mi?
+4. `edge_pairlock_v1` ise `priceToBeatMode="iv_mismatch_edge"` mi?
+5. YES/NO tokenları aynı market window'a mı ait?
+6. `pairMaxTotalCent` effective cost'u karşılıyor mu?
+7. `pair_lock_edge_decision` alanı no decision mı?
+
+Bu sıralama uygulanmadan pair max total artırmak risklidir; asıl sorun token binding veya depth olabilir.
+
+## Yanlış Yorumlar
+
+| Yanlış yorum | Doğru yorum |
+|---|---|
+| Pair lock her zaman iki bacak açar | `single_edge` bilinçli tek taraf kararı olabilir |
+| No decision hata | Maliyet/edge yetersizse beklenen sonuçtur |
+| Locked pair artık risksiz | Fee, exit ve resolution operasyon riski kalır |
+| Counter leg geç kaldıysa bot bozuk | Market/depth/maliyet uygun olmayabilir |
+| SL her zaman açık kalmalı | Locked pair'de SL pair yapısını bozabilir |

@@ -3,6 +3,7 @@ use super::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GammaMarket {
     pub slug: String,
+    pub condition_id: Option<String>,
     pub end_date_iso: Option<String>,
     pub active: bool,
     pub closed: bool,
@@ -36,6 +37,38 @@ pub struct OrderBookLevel {
 pub struct OrderBookSnapshot {
     pub bids: Vec<OrderBookLevel>,
     pub asks: Vec<OrderBookLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClobMarketToken {
+    pub token_id: String,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClobMarketFeeDetails {
+    pub rate: f64,
+    pub exponent: f64,
+    pub taker_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClobMarketInfo {
+    pub condition_id: String,
+    pub tokens: Vec<ClobMarketToken>,
+    pub min_tick_size: Option<f64>,
+    pub min_order_size: Option<f64>,
+    pub maker_base_fee_bps: Option<u64>,
+    pub taker_base_fee_bps: Option<u64>,
+    pub fee_details: Option<ClobMarketFeeDetails>,
+    pub neg_risk: bool,
+}
+
+impl ClobMarketInfo {
+    pub fn has_token(&self, token_id: &str) -> bool {
+        let token_id = token_id.trim();
+        !token_id.is_empty() && self.tokens.iter().any(|token| token.token_id == token_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +160,15 @@ pub trait ClobRestClient: Send + Sync {
     }
 
     async fn get_fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>>;
+    async fn get_clob_market_info(&self, _condition_id: &str) -> Result<Option<ClobMarketInfo>> {
+        Ok(None)
+    }
+    async fn get_clob_market_info_by_token(
+        &self,
+        _token_id: &str,
+    ) -> Result<Option<ClobMarketInfo>> {
+        Ok(None)
+    }
     async fn place_order(&self, req: &PlaceOrderRequest) -> Result<OrderAck>;
     async fn cancel_order(&self, exchange_order_id: &str) -> Result<()>;
     async fn get_order(&self, exchange_order_id: &str) -> Result<OrderInfo>;

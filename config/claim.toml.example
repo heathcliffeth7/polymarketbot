@@ -13,7 +13,7 @@ execution_mode = "direct" # or "builder_relayer" for gasless Safe claims via fro
 
 chain_id = 137
 ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-collateral_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+collateral_token_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 
 discovery_interval_sec = 30
 positions_page_size = 200

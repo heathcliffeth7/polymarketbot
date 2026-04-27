@@ -125,6 +125,12 @@ pub(crate) fn validate(
         is_hex_address(&exchange.neg_risk_ctf_exchange_address),
         "neg_risk_ctf_exchange_address must be a valid 0x address"
     );
+    if !exchange.builder_code.trim().is_empty() {
+        anyhow::ensure!(
+            is_hex_bytes32(&exchange.builder_code),
+            "builder_code must be a bytes32 0x hex value"
+        );
+    }
     anyhow::ensure!(
         exchange.resolve_signer_private_key().is_ok(),
         "signer_private_key required"
@@ -259,6 +265,13 @@ pub(crate) fn is_hex_address(raw: &str) -> bool {
 }
 
 pub(crate) fn is_hex_private_key(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    trimmed.starts_with("0x")
+        && trimmed.len() == 66
+        && trimmed[2..].chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+pub(crate) fn is_hex_bytes32(raw: &str) -> bool {
     let trimmed = raw.trim();
     trimmed.starts_with("0x")
         && trimmed.len() == 66

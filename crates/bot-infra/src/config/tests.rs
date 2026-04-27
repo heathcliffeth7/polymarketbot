@@ -165,7 +165,10 @@ fn base_exchange_payload() -> serde_json::Value {
         "builder_api_key": "",
         "builder_api_secret": "",
         "builder_api_passphrase": "",
-        "ctf_exchange_address": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+        "builder_code": "",
+        "builder_code_env": "",
+        "ctf_exchange_address": "0xE111180000d2663C0091e4f400237545B87B996B",
+        "neg_risk_ctf_exchange_address": "0xe2222d279d744050d28e00520010520000310F59",
         "signer_private_key": "0x1111111111111111111111111111111111111111111111111111111111111111",
         "signer_private_key_env": "",
         "api_address_env": "",
@@ -250,7 +253,7 @@ private_key = "0x222222222222222222222222222222222222222222222222222222222222222
 private_key_env = ""
 chain_id = 137
 ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-collateral_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+collateral_token_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 discovery_interval_sec = 30
 positions_page_size = 200
 positions_max_pages = 5
@@ -342,7 +345,7 @@ private_key = "0x222222222222222222222222222222222222222222222222222222222222222
 private_key_env = ""
 chain_id = 137
 ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-collateral_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+collateral_token_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 discovery_interval_sec = 30
 positions_page_size = 200
 positions_max_pages = 5
@@ -369,7 +372,7 @@ min_claim_usdc = 2.5
                 "private_key_env": "",
                 "chain_id": 137,
                 "ctf_contract_address": "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
-                "collateral_token_address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                "collateral_token_address": "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
                 "discovery_interval_sec": 30,
                 "positions_page_size": 200,
                 "positions_max_pages": 5,
@@ -405,7 +408,7 @@ private_key = "0x222222222222222222222222222222222222222222222222222222222222222
 private_key_env = ""
 chain_id = 137
 ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-collateral_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+collateral_token_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 discovery_interval_sec = 30
 positions_page_size = 200
 positions_max_pages = 5
@@ -433,7 +436,7 @@ min_claim_usdc = 2.5
                 "private_key_env": "",
                 "chain_id": 137,
                 "ctf_contract_address": "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
-                "collateral_token_address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                "collateral_token_address": "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
                 "discovery_interval_sec": 30,
                 "positions_page_size": 200,
                 "positions_max_pages": 5,
@@ -468,7 +471,7 @@ private_key = "0x222222222222222222222222222222222222222222222222222222222222222
 private_key_env = ""
 chain_id = 137
 ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-collateral_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+collateral_token_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 discovery_interval_sec = 30
 positions_page_size = 200
 positions_max_pages = 5
@@ -506,7 +509,7 @@ private_key = "0x222222222222222222222222222222222222222222222222222222222222222
 private_key_env = ""
 chain_id = 137
 ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-collateral_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+collateral_token_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 discovery_interval_sec = 30
 positions_page_size = 200
 positions_max_pages = 5

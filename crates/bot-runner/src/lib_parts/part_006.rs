@@ -151,6 +151,7 @@ fn build_synthetic_markets_from_cache(
             }
             Some(GammaMarket {
                 slug,
+                condition_id: None,
                 end_date_iso: None,
                 active: true,
                 closed: false,

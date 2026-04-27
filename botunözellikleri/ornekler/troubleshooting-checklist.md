@@ -164,3 +164,75 @@ Bir sorunu incelerken şu bilgileri birlikte topla:
 | Exit/re-entry | [../senaryolar/06-tp-sl-time-exit-ve-reentry.md](../senaryolar/06-tp-sl-time-exit-ve-reentry.md) |
 | Pair lock | [../senaryolar/07-pair-lock-ve-edge-pairlock.md](../senaryolar/07-pair-lock-ve-edge-pairlock.md) |
 | Bildirim/analytics | [../senaryolar/09-telegram-telemetri-ve-analiz.md](../senaryolar/09-telegram-telemetri-ve-analiz.md) |
+
+## 13. Hızlı Karar Ağacı
+
+```text
+Sorun var
+  -> Pozisyon açıldı mı?
+      evet -> exit/re-entry/pair lifecycle incele
+      hayır -> submit var mı?
+          evet -> fill/liquidity/limit price incele
+          hayır -> builder order var mı?
+              evet -> pending/reuse/conditional incele
+              hayır -> action guard veya trigger routing incele
+```
+
+Bu karar ağacı ilk ayrımı doğru yapar: sorun entry öncesi mi, submit sonrası mı, fill sonrası mı?
+
+## 14. Belirtiye Göre İlk Üç Kontrol
+
+| Belirti | 1 | 2 | 3 |
+|---|---|---|---|
+| Trigger yok | Market scope | Fiyat koşulu | WS/polling staleness |
+| Trigger var, action yok | Edge bağlantısı | Node route | Flow state |
+| Action var, order yok | Guard block | Risk gate | Fill lock/reuse |
+| Submit var, fill yok | Limit price | Depth | CLOB status |
+| Fill var, TP yok | TP config | Source trade | Child order event |
+| SL sonrası tekrar girmiyor | Re-entry attempt | Cooldown | Current window skip |
+| Pair lock yok | Binding mode | Pair max total | Edge decision |
+| Relax yok | Global toggle | Miss count | Min depth |
+
+## 15. Guard Block Sonrası Ne Değiştirilir?
+
+| Block | Önce bak | Sonra değiştir |
+|---|---|---|
+| Max price | Best ask ve selected max | Entry profile veya max price relax |
+| PTB manual | Gap ve threshold | Min gap veya bump/relax |
+| IV edge | Edge, regime, Binance, depth | IV time rule veya protection ayarları |
+| Execution floor | Depth ve VWAP | Size veya floor threshold |
+| Risk gate | Limit ve exposure | Size veya risk limit |
+| Stale market | Window ve slug | Auto-scope/boundary ayarı |
+
+Config'i doğrudan gevşetmeden önce block'un doğru sınıfta olduğundan emin ol. Yanlış guard'ı değiştirmek sorunu çözmez.
+
+## 16. Canlı Olay Notu Şablonu
+
+```text
+Tarih/saat:
+Market slug:
+Window kalan süre:
+Flow/node:
+Beklenen:
+Görülen:
+Trigger pass:
+Action event:
+Guard decision:
+Builder order:
+Submit:
+Fill:
+Telegram mesajı:
+Analytics query aralığı:
+İlk şüphe:
+```
+
+Bu şablon ekip içi debug için yeterli bağlam sağlar. Özellikle market slug ve window kalan süre yazılmadan 5m market sorunları sağlıklı incelenemez.
+
+## 17. Güvenli Müdahale Sırası
+
+1. Önce sadece gözlemle: bildirim ve analytics'i aç.
+2. Sonra size küçült: kötü ayar büyük zarara dönüşmesin.
+3. Sonra guard sebebini düzelt: max price, PTB, depth veya risk.
+4. En son strateji davranışını değiştir: re-entry, relax, pair lock, TP/SL.
+
+Bu sıra ters yapılırsa bir debug değişikliği gerçek strateji riskini artırabilir.

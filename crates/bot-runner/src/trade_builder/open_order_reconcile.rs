@@ -808,7 +808,9 @@ async fn reconcile_trade_builder_open_order(
         }
     }
 
-    let market_spec = resolve_trade_builder_market_spec(cfg, &order.market_slug, &order.token_id).await;
+    let market_spec =
+        resolve_trade_builder_market_spec_with_client(client, cfg, &order.market_slug, &order.token_id)
+            .await;
     if maybe_handle_trade_builder_share_submit_below_market_min(
         repo,
         &order,

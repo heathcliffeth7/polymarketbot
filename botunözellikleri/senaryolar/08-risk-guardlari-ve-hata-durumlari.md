@@ -178,3 +178,118 @@ Retry açıkken block final failure değildir; bot yeniden schedule edebilir.
 - Analytics zaman aralığı doğru market window'larını kapsıyor mu?
 - Aynı anda max price, PTB ve execution floor block'ları karıştırılıyor mu?
 - Bump/relax effective threshold'u değiştirmiş mi?
+
+## Block, Skip ve Retry Farkı
+
+| Sonuç | Anlam | Operatör yorumu |
+|---|---|---|
+| Block | Guard karar verdi ve order üretmedi | Config veya market şartı incelenir |
+| Skip | Bu cycle'da işlem yapılmadı | Stale market, idempotency veya uygun olmayan bağlam olabilir |
+| Retry | Şart geçici kötü, tekrar denenecek | Terminal failure değildir |
+| Reuse | Yeni order yerine mevcut order kullanıldı | Duplicate order engellenmiş olabilir |
+| Pending | Order var ama submit/fill bekliyor | Conditional lifecycle kontrol edilir |
+
+Bu ayrım yapılmazsa her şey "order yok" kategorisine düşer ve yanlış config değişikliği yapılır.
+
+## Guard Katmanlarını Birlikte Okuma
+
+Bir action payload'ında birden fazla guard bilgisi olabilir. Operatör şu soruyu sormalıdır:
+
+```text
+Order'ı durduran ilk kesin karar hangisi?
+```
+
+Örnek:
+
+- Trigger price uygun.
+- Max price pahalı.
+- PTB hesaplanmış ama order zaten max price'ta block olmuş.
+
+Bu durumda PTB değerlerini değiştirmek sorunu çözmez. İlk terminal block max price ise max price veya relax tarafına bakılır.
+
+## Sayısal Örnek: Üç Guard Aynı Anda
+
+```text
+selected max price = 0.62
+best ask = 0.64
+PTB gap = 35 USD
+manual PTB min = 20 USD
+execution depth = yeterli
+```
+
+Yorum:
+
+- PTB pass.
+- Execution floor pass.
+- Max price block.
+
+Doğru aksiyon:
+
+- `maxPrice`/entry profile tavanı veya max price relax incelenir.
+- PTB min gap düşürülmez.
+
+Ters örnek:
+
+```text
+selected max price = 0.66
+best ask = 0.61
+PTB gap = 12 USD
+manual PTB min = 20 USD
+execution depth = yeterli
+```
+
+Yorum:
+
+- Max price pass.
+- Execution floor pass.
+- PTB block.
+
+Doğru aksiyon:
+
+- PTB threshold, IV edge, bump veya underlying veri kalitesi incelenir.
+
+## Retry Ayarlarının Riski
+
+Retry kullanışlıdır ama sınırsız retry kötü piyasa koşulunda gereksiz gürültü üretir.
+
+İyi retry:
+
+- Guard geçici bir sebeple block ediyor.
+- Market hızlı düzelebilir.
+- Retry interval makul.
+- Telegram gürültüsü kontrol altında.
+
+Riskli retry:
+
+- Max price tavanı bilinçli olarak düşük.
+- PTB threshold stratejik olarak sıkı.
+- Retry sürekli aynı block'u üretiyor.
+- Operatör gerçek sorunu göremiyor.
+
+Bu yüzden retry açılırken analytics ve notification birlikte düşünülmelidir.
+
+## Risk Gate Detaylı Okuma
+
+Risk gate genellikle strateji kalitesinden değil, sistem limitlerinden bahseder.
+
+Bakılacak sorular:
+
+- Aynı markette mevcut exposure var mı?
+- Günlük limit doldu mu?
+- Market başına notional limiti aşıldı mı?
+- Minimum order büyüklüğü altında mı kalındı?
+- Sell order exposure azaltıyor mu?
+
+Risk gate block'u PTB veya price guard gibi optimize edilmez. Burada doğru aksiyon limit politikasını veya sizing'i gözden geçirmektir.
+
+## Debug İçin Event Sırası
+
+1. Trigger event.
+2. Action started event.
+3. Guard decision event.
+4. Builder order created/reused event.
+5. Submit event.
+6. Fill event.
+7. Exit child order event.
+
+Bu sıralamada ilk eksik halka kök neden adayını verir. Örneğin submit event yoksa fill tarafına bakmak zaman kaybıdır.

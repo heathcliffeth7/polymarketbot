@@ -54,6 +54,33 @@ fn trade_builder_market_spec_cache_put(market_slug: &str, spec: TradeBuilderMark
     }
 }
 
+fn trade_builder_market_spec_from_clob_info(info: &bot_infra::exchange::ClobMarketInfo) -> TradeBuilderMarketSpec {
+    TradeBuilderMarketSpec {
+        neg_risk: info.neg_risk,
+        order_price_min_tick_size: normalize_trade_builder_market_spec_number(info.min_tick_size),
+        order_min_size: normalize_trade_builder_market_spec_number(info.min_order_size),
+    }
+}
+
+async fn resolve_trade_builder_market_spec_with_client(
+    client: &dyn OrderExecutor,
+    cfg: &AppConfig,
+    market_slug: &str,
+    token_id: &str,
+) -> Option<TradeBuilderMarketSpec> {
+    if !token_id.trim().is_empty() {
+        if let Ok(Some(info)) = client.clob_market_info_by_token(token_id).await {
+            let spec = trade_builder_market_spec_from_clob_info(&info);
+            if !market_slug.trim().is_empty() {
+                trade_builder_market_spec_cache_put(&market_slug.trim().to_ascii_lowercase(), spec);
+            }
+            return Some(spec);
+        }
+    }
+
+    resolve_trade_builder_market_spec(cfg, market_slug, token_id).await
+}
+
 async fn resolve_trade_builder_market_spec(
     cfg: &AppConfig,
     market_slug: &str,

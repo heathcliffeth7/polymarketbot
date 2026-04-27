@@ -206,3 +206,131 @@ Kullanım:
 - `priceToBeatIvTimeRules` kalan süreyi kapsıyor mu?
 - Block sebebi edge yetersizliği mi, depth mi, Binance mı, book mu?
 - Max price ve PTB ayrı guard'lar olduğu için hangisi block etmiş ayrıştırıldı mı?
+
+## Klasik PTB ile IV Edge Arasındaki Fark
+
+Klasik PTB genellikle şunu sorar:
+
+```text
+Underlying fiyat, marketin price-to-beat seviyesine göre yeterince avantajlı mı?
+```
+
+`iv_mismatch_edge` ise daha geniş sorar:
+
+```text
+Token'ın implied probability fiyatı, underlying hareketi ve orderbook sinyaliyle kıyaslandığında pozitif edge veriyor mu?
+```
+
+Bu fark pratikte şuna yol açar:
+
+- Manual PTB pass ederken IV edge block edebilir.
+- Çünkü manual gap yeterli olsa bile book karşı yönü destekliyor olabilir.
+- Ya da depth yetersiz olduğu için best ask seviyesi gerçek alım maliyetini temsil etmiyor olabilir.
+
+## Sayısal Örnek: İyi Görünen Ama Block Edilen Giriş
+
+Durum:
+
+```text
+Up ask = 0.57
+Manual PTB gap = 28 USD
+Manual min gap = 20 USD
+Binance yönü = aşağı
+Opposite book mid = 0.62
+Depth ile beklenen avg fill = 0.66
+```
+
+Manual PTB yorumu:
+
+- 28 USD > 20 USD, pass edebilir.
+
+IV edge yorumu:
+
+- Binance ters.
+- Opposite book güçlü.
+- Hedef büyüklükte avg fill pahalı.
+- `adaptive_regime=orange` veya `red`.
+- Edge threshold altına düşer ve block edebilir.
+
+Bu durumda block, fiyatı kaçırmak değil kötü sinyal birleşimini filtrelemektir.
+
+## Formula Okuma İçin Basit Model
+
+Telemetry'deki alanları şu şekilde düşün:
+
+| Alan | Pratik anlam |
+|---|---|
+| `q` | Modelin ham kazanma olasılığı tahmini |
+| `q_final` | Penalty/credit sonrası son olasılık |
+| `cost` | Ask, fee ve buffer sonrası efektif maliyet |
+| `edge` | `q_final - cost` gibi okunabilecek net avantaj |
+| `threshold` | Minimum kabul edilen edge |
+| `dynamic_threshold` | Rejim ve penalty sonrası efektif threshold |
+| `gap_strength` | Underlying hareketinin yeterliliği |
+| `required_gap_strength` | Bu giriş için gereken gap gücü |
+
+Bu alanlar tek başına değil birlikte okunur. `edge` yüksek ama `gap_strength` düşükse model fiyatı ucuz görse bile hareket teyidi yetersiz olabilir.
+
+## Time Rule Tasarım Rehberi
+
+Geç marketlerde üç risk artar:
+
+1. Fill için zaman azalır.
+2. Resolution'a yaklaştıkça fiyat daha sert sıçrayabilir.
+3. Yanlış yönde kalırsa exit şansı azalır.
+
+Bu yüzden geç time rule genellikle:
+
+- Daha yüksek `minEdge`.
+- Daha yüksek `minGapStrength`.
+- Daha yüksek `minExpectedMoveUsd`.
+- Daha net Binance same direction şartı.
+- Daha düşük veya dikkatli `maxPriceCent`.
+
+Eğer geç time rule sadece `maxPriceCent` değerini yükseltiyorsa ama risk şartlarını artırmıyorsa, strateji geç FOMO'ya dönüşebilir.
+
+## Depth Guard Neden Gerekli?
+
+Best ask küçük order için anlamlıdır, ama hedef order büyükse yanıltıcıdır.
+
+Örnek:
+
+```text
+hedef order = 30 USDC
+ask 0.55 depth 3 USDC
+ask 0.60 depth 7 USDC
+ask 0.69 depth 20 USDC
+```
+
+Best ask 0.55 görünür. Ancak 30 USDC order'ın ortalama maliyeti 0.65 civarına çıkabilir. `priceToBeatIvDepthMaxSlippage` bu farkı sınırlamak için vardır.
+
+## Binance Staleness Yorumu
+
+Binance veya external spot verisi stale ise modelin underlying hareket teyidi zayıflar.
+
+Örnek:
+
+- `priceToBeatIvBinanceMaxStaleMs=2000`.
+- Gelen Binance tick yaşı 4800 ms.
+
+Beklenen:
+
+- Same direction teyidi güvenilir sayılmaz.
+- Penalty uygulanabilir veya block oluşabilir.
+
+Bu durum botun Polymarket tarafını görmediği anlamına gelmez; external teyit taze olmadığı için karar kalitesi düşmüştür.
+
+## Block Sebebini Ayırma
+
+PTB block içinde farklı alt sebepler vardır:
+
+| Alt sebep | Nasıl anlaşılır |
+|---|---|
+| Edge düşük | `edge < threshold` veya `edge < dynamic_threshold` |
+| Gap zayıf | `gap_strength < required_gap_strength` |
+| Binance ters/stale | `binance_same_direction=false` veya staleness yüksek |
+| Depth fail | `depth_guard_result` fail veya slippage yüksek |
+| Red regime | `adaptive_regime=red` ve red block açık |
+| Model/book ayrışması | model-book gap warn/hard alanları |
+
+Operatör önce bu alt sebebi bulmalı, sonra config değiştirmelidir.

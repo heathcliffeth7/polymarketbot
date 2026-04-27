@@ -177,3 +177,73 @@ Beklenen:
 - Pair lock için upstream trigger tek ve doğrudan olmalıdır.
 - Auto-scope boundary anında birkaç saniyelik veri gecikmesi normaldir.
 - Trigger pass, action order garantisi değildir; downstream guard'lar ayrıca block edebilir.
+
+## Alanların Karar Etkisi
+
+| Alan | Karar etkisi | Yanlış ayar belirtisi |
+|---|---|---|
+| `marketMode` | Sabit market mi auto-scope mu belirler | Eski markete bakma veya hiç market bulamama |
+| `marketScope` | Auto-scope ailesini seçer | BTC yerine ETH/SOL marketi izleme |
+| `outcomeLabel` | Up/Down veya YES/NO token seçer | Ters yönde token bağlanması |
+| `bindingMode` | Fiyat trigger mı, pair binding mi belirler | Pair lock action validation hatası |
+| `triggerCondition` | Fiyat geçiş mantığını seçer | Çok sık veya hiç tetiklenmeme |
+| `repeatMode` | Tek sefer mi tekrar mı belirler | Double entry veya beklenen retry'nin olmaması |
+| `entryTimingProfiles` | Kalan süreye göre action input üretir | Max price veya size beklenen gibi değişmez |
+
+## Config Tasarım Kuralları
+
+Auto-scope alım flow'u:
+
+- `marketMode="auto_scope"` kullan.
+- `marketScope` açık ver.
+- `repeatMode="once"` ile duplicate giriş riskini azalt.
+- Entry timing kullanıyorsan action explicit size/max price override'larını kontrol et.
+
+Pair lock flow'u:
+
+- Trigger fiyat koşulu yerine `bindingMode="pair_lock_only"` kullan.
+- Downstream tek action node olmalı.
+- Action `mode="pair_lock"` ile uyumlu olmalı.
+
+Debug flow'u:
+
+- Önce basit trigger ile market ve token çözümünü doğrula.
+- Sonra entry timing veya PTB trigger gate ekle.
+- En son action guard'ları sıkılaştır.
+
+## Örnek: Trigger Output'tan Action'a Aktarım
+
+Trigger output:
+
+```json
+{
+  "pass": true,
+  "marketSlug": "btc-updown-5m-1800000000",
+  "tokenId": "123",
+  "outcomeLabel": "Up",
+  "selectedEntryMaxPrice": 0.64,
+  "selectedEntrySizeUsdc": 8
+}
+```
+
+Action tarafında beklenen:
+
+- `marketSlug`, `tokenId`, `outcomeLabel` config'te yoksa context'ten çözülür.
+- Action explicit `maxPrice` vermiyorsa `selectedEntryMaxPrice` kullanılabilir.
+- Action explicit `sizeUsdc` vermiyorsa `selectedEntrySizeUsdc` fallback olabilir.
+
+Bu aktarımın çalışması için trigger ve action aynı flow context içinde bağlı olmalıdır.
+
+## Sık Validasyon Sorunları
+
+| Sorun | Açıklama |
+|---|---|
+| Entry profile çakışması | Aynı kalan süre iki profile girer |
+| Entry profile boşluğu | Bazı kalan sürelerde hiçbir profil yoktur |
+| Pair lock upstream hatası | Trigger `bindingMode="pair_lock_only"` değildir |
+| Repeat ile level trigger | Aynı koşul sürekli true olduğu için çoklu tetik riski |
+| Fixed market + auto-scope beklentisi | `marketMode` sabit olduğu için yeni window'a geçmez |
+
+## Operasyonel Kural
+
+Trigger dosyası debug edilirken önce market ve token doğrulanır, sonra fiyat koşulu incelenir. Çünkü doğru fiyat koşulu yanlış token üzerinde çalışıyorsa downstream bütün kararlar teknik olarak doğru ama stratejik olarak hatalı olur.

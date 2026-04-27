@@ -189,3 +189,145 @@ Pratik:
 - Time exit window sonuna çok mu yakın?
 - Re-entry aynı window içinde zarar serisine dönüşüyor mu?
 - `reentrySkipCurrentWindow` ve bump birlikte kullanılıyor mu?
+
+## Entry Sonrası Lifecycle
+
+Bir buy fill olduğunda bot artık sadece pozisyon tutmaz; aynı zamanda çıkış planı kurar.
+
+Tipik lifecycle:
+
+```text
+buy fill
+  -> source trade güncellenir
+  -> pozisyon qty hesaplanır
+  -> TP child order hazırlanır
+  -> SL child order hazırlanır
+  -> PTB SL kuralı varsa izleme başlar
+  -> time exit schedule varsa zamanlayıcı kurulur
+  -> re-entry policy snapshot alınır
+```
+
+Bu nedenle fill sonrası TP/SL gelmiyorsa sadece "exit yok" diye bakma. Önce buy fill gerçekten oluştu mu, source trade bağlandı mı, child order oluşturma event'i var mı kontrol et.
+
+## TP ve SL Aynı Anda Varken Öncelik
+
+TP ve SL piyasa hareketine göre yarışır. Staged yapıda bu yarış daha karmaşıktır.
+
+Örnek:
+
+```text
+pozisyon = 100 share
+TP1 = 65 cent, size 50
+TP2 = 80 cent, size 50
+SL1 = 45 cent, size 50
+SL2 = 35 cent, size 50
+```
+
+Akış:
+
+1. Fiyat 65'e çıkar, TP1 50 share satar.
+2. Kalan pozisyon 50 share.
+3. Fiyat 45'e düşer, SL1 artık kalan pozisyona göre hesaplanmalıdır.
+4. `slSiblingPolicy="resize_remaining"` ise kardeş emirler kalan qty ile uyumlu hale gelir.
+
+Yanlış sibling policy, kalan pozisyondan daha fazla sell denemesine veya korumasız pozisyona yol açabilir.
+
+## SL Trigger Mode Seçimi
+
+`best_bid`:
+
+- En hızlı sinyali verir.
+- Spread genişse veya bid kısa süreli düşerse gereksiz SL tetikleyebilir.
+
+`composite_safe`:
+
+- Daha dayanıklıdır.
+- Çok hızlı düşüşte geç kalabilir.
+
+`composite_fast`:
+
+- Safe ile best bid arasında agresif davranış sağlar.
+- Momentum stratejilerinde kullanılabilir ama noise riski vardır.
+
+Operatör kararı:
+
+- Amaç sermayeyi hızlı korumaksa `best_bid`.
+- Amaç fake wick yüzünden çıkmamaksa `composite_safe`.
+- İkisi arasında denge isteniyorsa `composite_fast`.
+
+## PTB Stop-Loss Sayısal Örnek
+
+Up token alındı:
+
+```text
+entry sırasında PTB gap = +35 USD
+ptbStopLossGapUsd = 0
+current gap = -2 USD
+```
+
+Yorum:
+
+- Token fiyatı hâlâ SL seviyesine gelmemiş olabilir.
+- Ama underlying avantaj bitmiş ve tersine geçmiş olabilir.
+- PTB stop-loss pozisyonu kapatmayı deneyebilir.
+
+Bu özellik, token fiyatının geç tepki verdiği durumlarda underlying bozulmayı erken yakalamak için kullanılır.
+
+## Time Exit ve Window End Farkı
+
+Time exit:
+
+- Pozisyon açıldıktan sonra geçen süreye göre çalışır.
+- "Bu trade 3 dakika açık kaldı, yarısını azalt" gibi davranır.
+
+Window end auto-sell:
+
+- Market kapanışına kalan süreye göre çalışır.
+- "Bu market bitiyor, elde pozisyon kalmasın" davranışıdır.
+
+İkisi birlikte kullanılabilir. Time exit erken risk azaltır; window end auto-sell son güvenlik ağıdır.
+
+## Re-Entry Riskleri
+
+Re-entry kârlı olabilir ama zarar serisini de büyütebilir.
+
+Riskli kurulum:
+
+```json
+{
+  "reenterOnSlHit": true,
+  "reentryMaxAttempts": 5,
+  "reentrySkipCurrentWindow": false,
+  "reentryCooldownSec": 0
+}
+```
+
+Problem:
+
+- Aynı chop window içinde arka arkaya giriş yapılabilir.
+- Her giriş aynı kötü piyasa koşuluna yakalanabilir.
+- SL serisi kısa sürede büyür.
+
+Daha kontrollü kurulum:
+
+```json
+{
+  "reenterOnSlHit": true,
+  "reentryMaxAttempts": 2,
+  "reentrySkipCurrentWindow": true,
+  "reentryCooldownSec": 10,
+  "reentryMaxPriceTightenBps": 500
+}
+```
+
+Bu yapı aynı window'u atlar, girişleri sınırlar ve yeniden giriş fiyatını sıkılaştırır.
+
+## Yanlış Yorumlar
+
+| Yanlış yorum | Doğru yorum |
+|---|---|
+| SL vurduysa strateji kesin kötü | SL beklenen risk kontrolüdür; oran ve slippage önemlidir |
+| TP kurulduysa kâr garanti | TP order fill olmak zorundadır |
+| Re-entry daha çok şans demektir | Re-entry kötü ortamda zarar tekrarına dönüşebilir |
+| PTB SL token fiyatı SL ile aynı | PTB SL underlying gap bozulmasını izler |
+| Time exit ve window end aynı şey | Biri pozisyon süresine, diğeri market kapanışına bakar |

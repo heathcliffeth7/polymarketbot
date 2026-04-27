@@ -49,3 +49,102 @@ Bu özet şu yerel kaynaklarla uyumludur:
 - [problemler/sl-ve-giris-kalite-analizi.md](../problemler/sl-ve-giris-kalite-analizi.md)
 - [problemler/vol-capture-sorunlar.md](../problemler/vol-capture-sorunlar.md)
 - [yapılcak/yapılacak.md](../yapılcak/yapılacak.md)
+
+## Özelliklerin Pratik Etkisi
+
+### `entryTimingProfiles`
+
+Bu özellik tek bir market içinde tek bir giriş kuralı kullanma zorunluluğunu kaldırır. 5 dakikalık marketin ilk 2 dakikası ile son 45 saniyesi aynı risk profiline sahip değildir. Erken bölümde fiyatın ucuz olması daha önemlidir; geç bölümde ise hareketin güçlü ve doğrulanmış olması daha önemlidir.
+
+Pratik sonuç:
+
+- Erken bölümde düşük `maxPriceCent` ve küçük `sizeUsdc` kullanılabilir.
+- Geç bölümde daha yüksek `maxPriceCent` verilebilir ama PTB min gap veya IV edge şartı artırılır.
+- Action node explicit size vermiyorsa profile size fallback olur.
+
+Yanlış kullanım:
+
+- Profil aralıkları çakışırsa hangi profilin seçileceği belirsizleşir.
+- Her profile aynı max price verilirse özellik sadece karmaşıklık ekler.
+- Geç profile daha pahalı fiyat verilip edge şartı artırılmazsa kötü fiyattan momentum kovalanabilir.
+
+### `iv_mismatch_edge`
+
+Klasik PTB gap, underlying fiyat ile market fiyatı arasındaki farkı ölçer. `iv_mismatch_edge` bunu daha ileri götürür: token'ın implied probability'si ile Chainlink/Binance/orderbook sinyalini birlikte değerlendirir.
+
+Pratik sonuç:
+
+- Book karşı yöne işaret ediyorsa iyi görünen fiyat block edilebilir.
+- Binance stale veya ters yöndeyse edge cezalandırılır.
+- Depth yetersizse best ask iyi görünse bile order engellenebilir.
+- Adaptive rejim green/orange/red ile risk seviyesi okunabilir.
+
+Yanlış kullanım:
+
+- Sadece `priceToBeatMode="iv_mismatch_edge"` yazıp veri tazeliği ve depth ayarlarını düşünmemek.
+- Orange/red block'ları "bot çalışmıyor" diye yorumlamak.
+- Max price block ile IV edge block'u karıştırmak.
+
+### PTB Bump
+
+PTB bump, zarar sonrası botun aynı kalitede giriş almaya devam etmesini engeller. SL serisi varsa sistemin daha seçici hale gelmesi istenir.
+
+Pratik sonuç:
+
+- Ardışık PTB stop-loss sonrası threshold artar.
+- `per_scope` seçilirse sadece ilgili asset/timeframe/direction etkilenir.
+- `loss_table` seçilirse büyük zarar daha büyük sıkılaşma üretir.
+
+Yanlış kullanım:
+
+- Global scope ile bir asset'teki kötü seri yüzünden tüm flow'ları sıkılaştırmak.
+- Bump max value vermeyip botu uzun süre aşırı seçici bırakmak.
+- Relax ile birlikte effective threshold'un son halini okumamak.
+
+### Max Price Relax
+
+Relax, "bot hiç trade almıyor" problemini çözmek için vardır. Ancak sadece çok miss oldu diye gevşemez; geçmiş marketlerde gerçekten tradeable fırsat olup olmadığını da arar.
+
+Pratik sonuç:
+
+- Miss count dolunca geçmiş marketler incelenir.
+- Min depth sağlanmışsa relax credit üretilebilir.
+- Global `strategy.max_price_relax_enabled` kapalıysa node config tek başına yetmez.
+
+Yanlış kullanım:
+
+- Depth yokken fiyat uygun sanmak.
+- Relax'ı SL serisi yaşayan stratejide açıp risk artırmak.
+- Analytics'teki `relax_miss_reason` alanını okumadan config değiştirmek.
+
+### `edge_pairlock_v1`
+
+Bu strateji pair lock kararını sadece toplam maliyete bırakmaz. Açık pozisyonu counter ile kilitleme, iki bacağı birlikte açma veya tek taraflı edge alma kararını sıraya koyar.
+
+Pratik sonuç:
+
+- Açık tek bacak varsa önce counter lock denenir.
+- Yeni pair toplam maliyeti uygunsa fresh equal pair açılır.
+- Pair uygun değil ama tek bacak edge güçlü ise single edge seçilebilir.
+- Hiçbiri uygun değilse no decision üretir.
+
+Yanlış kullanım:
+
+- Single edge kararını hatalı pair lock sanmak.
+- `iv_mismatch_edge` zorunluluğunu atlamak.
+- Protective unwind kapalıyken orphan riskini göz ardı etmek.
+
+### No-Order Analytics
+
+No-order analytics, "neden trade yok" sorusunu sadece log okuyarak değil, guard ve market kalitesiyle cevaplamayı hedefler.
+
+Pratik sonuç:
+
+- Fiyat uygun ama depth yetersiz mi görülebilir.
+- Relax credit neden oluşmadı anlaşılabilir.
+- Tradeable saniye sayısı ve fillability skoru takip edilebilir.
+
+Yanlış kullanım:
+
+- Zaman aralığını yanlış seçip farklı marketleri birlikte değerlendirmek.
+- Submit yok ile fill yok durumlarını aynı kategoriye koymak.

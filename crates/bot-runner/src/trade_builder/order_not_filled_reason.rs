@@ -31,6 +31,7 @@ fn no_fill_scope_label(scope: &str) -> &'static str {
         "trigger_price" => "Tetik Fiyat",
         "runtime_price" => "Runtime Fiyat",
         "trigger_condition" => "Trigger Condition",
+        "action_failed" => "Action Failed",
         _ => "Bilinmeyen Engel",
     }
 }

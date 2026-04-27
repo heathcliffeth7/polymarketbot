@@ -130,3 +130,89 @@ Bir sorunu raporlarken şu alanları birlikte al:
 - Builder order id varsa status.
 - Telegram mesajı veya event id.
 - Analytics zaman aralığı.
+
+## Örnek Payload Yorumlama
+
+Örnek PTB block:
+
+```json
+{
+  "node_type": "action.place_order",
+  "market_slug": "btc-updown-5m-1800000000",
+  "side": "buy",
+  "price_to_beat_guard": {
+    "threshold_mode": "iv_mismatch_edge",
+    "edge": 0.04,
+    "dynamic_threshold": 0.08,
+    "adaptive_regime": "orange",
+    "binance_same_direction": false
+  }
+}
+```
+
+Yorum:
+
+- Action çalışmış.
+- Buy order PTB guard aşamasında durmuş.
+- Edge 0.04, gereken threshold 0.08.
+- Orange rejim ve Binance ters yön kararı sıkılaştırmış.
+- Max price veya risk gate değil, IV edge kaynaklı block okunmalıdır.
+
+Örnek max price block:
+
+```json
+{
+  "node_type": "action.place_order",
+  "selected_entry_max_price": 0.62,
+  "best_ask": 0.65,
+  "max_price_guard": {
+    "decision": "blocked"
+  }
+}
+```
+
+Yorum:
+
+- Trigger profile 0.62 tavan üretmiş.
+- Best ask 0.65.
+- PTB iyi olsa bile order gönderilmemesi beklenir.
+
+## Event Zamanı ve Market Zamanı
+
+Event timestamp ile market window timestamp aynı şey değildir.
+
+- Event timestamp: Botun olayı kaydettiği an.
+- Market window: Polymarket 5m marketinin başlangıç/bitiş aralığı.
+- Provider timestamp: Chainlink/Binance gibi external verinin kendi zamanı.
+
+Staleness sorunlarında bu üç zaman ayrıştırılmalıdır. Event yeni olabilir ama provider timestamp eski olabilir. Bu durumda bot çalışıyor, fakat karar verisi taze değildir.
+
+## Telemetry Alanı Boşsa Ne Anlama Gelir?
+
+Boş alan her zaman hata değildir.
+
+| Boş alan | Muhtemel sebep |
+|---|---|
+| `iv_mismatch_edge` yok | PTB mode IV edge değildir veya guard çalışmamıştır |
+| `builder_order_id` yok | Order creation aşamasına gelinmemiştir |
+| `pair_session_id` yok | Pair lock flow'u değildir veya pair başlamamıştır |
+| `relax_credit_usd` yok | Relax config kapalı veya PTB guard çalışmamıştır |
+| Fill alanları yok | Submit/fill aşamasına gelinmemiştir |
+
+Boş alan yorumlanırken önce ilgili feature'ın açık olup olmadığı kontrol edilmelidir.
+
+## Teşhis Cümlesi Kurma
+
+İyi teşhis:
+
+```text
+BTC 5m Up 12:00 window'unda trigger pass olmuş, action çalışmış, max price guard best ask 0.65 > selected max 0.62 nedeniyle block etmiş. Submit yok, fill yok beklenen.
+```
+
+Zayıf teşhis:
+
+```text
+Bot almadı.
+```
+
+İyi teşhis hem son başarılı aşamayı hem de durduran kararı söyler.

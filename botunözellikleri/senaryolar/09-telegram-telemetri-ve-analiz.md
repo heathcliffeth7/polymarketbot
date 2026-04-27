@@ -155,3 +155,128 @@ Pratik:
 - Analytics zaman aralığı doğru marketleri kapsıyor mu?
 - Relax açık sanılıyor ama global toggle kapalı mı?
 - Pair lock mesajında decision ve session id takip edildi mi?
+
+## Telegram Mesajı Nasıl Okunmalı?
+
+Telegram hızlı sinyal verir ama tam kaynak değildir. Her mesaj için şu üç soru sorulmalıdır:
+
+1. Bu mesaj hangi lifecycle aşamasına ait?
+2. Mesaj order oluştuğunu mu, submit denendiğini mi, fill olduğunu mu söylüyor?
+3. Aynı olayın detay payload'ı analytics/event tarafında var mı?
+
+Örnek:
+
+```text
+Order submitted
+market = BTC 5m Up
+best ask = 0.61
+submitted price = 0.62
+```
+
+Bu mesajdan çıkarılabilecekler:
+
+- Guard'lar submit'e kadar geçmiştir.
+- CLOB'a gönderim denenmiştir.
+- Fill henüz garanti değildir.
+
+Çıkarılamayacaklar:
+
+- Pozisyon açıldı.
+- TP/SL kuruldu.
+- Trade kârda.
+
+## No-Order Analizi İçin Karar Ağacı
+
+```text
+No order görüldü
+  -> trigger pass var mı?
+      yok -> trigger/market/zamanlama incele
+      var -> action event var mı?
+          yok -> routing/downstream aktivasyon incele
+          var -> guard block var mı?
+              var -> guard tipine git
+              yok -> existing order/reuse/fill lock/risk gate incele
+```
+
+Guard tipine göre:
+
+- Max price block: entry profile, `maxPrice`, relax.
+- PTB block: PTB threshold, IV edge, bump, Binance/depth.
+- Execution floor block: orderbook depth ve best ask.
+- Risk block: limit ve sizing.
+- Stale skip: auto-scope/window geçişi.
+
+## Analytics Alanlarını Birlikte Okuma
+
+Tek alanla karar verme:
+
+```text
+relax_credit_usd = 0
+```
+
+Eksik yorum olabilir. Şunlarla birlikte okunmalı:
+
+```text
+relax_miss_reason
+tradable_seconds_count
+price_ok_depth_fail_count
+max_fillability_score
+quality_score
+```
+
+Örnek:
+
+- `relax_credit_usd=0`.
+- `price_ok_depth_fail_count=12`.
+- `tradable_seconds_count=0`.
+
+Yorum:
+
+- Fiyat bazen uygun görünmüş ama depth yetersiz.
+- Relax'ı artırmak yerine min depth veya order size değerlendirilmelidir.
+
+## Zaman Aralığı Hatası
+
+5 dakikalık marketlerde yanlış zaman aralığı en yaygın analiz hatalarından biridir.
+
+Kötü analiz:
+
+- Son 24 saat tüm BTC 5m marketlerini birlikte okumak.
+- Farklı volatilite rejimlerini karıştırmak.
+- Pair session id olmadan pair lock sonuçlarını toplamak.
+
+Daha iyi analiz:
+
+- Önce sorunlu market slug.
+- Sonra aynı asset/timeframe için 30-60 dakikalık çevre.
+- Sonra gerekirse gün içi trend.
+
+## Bildirim Gürültüsünü Yönetme
+
+Debug döneminde tüm `notifyOn*` alanlarını açmak yararlı olabilir. Ancak canlıda bu gürültü üretir.
+
+Öneri:
+
+- Yeni flow testinde block bildirimlerini aç.
+- Stabil flow'da sadece submit/fill/TP/SL kritik mesajlarını bırak.
+- Pair lock flow'larında `notifyOnPairLocked` ve `notifyOnPairUnwind` açık kalsın.
+- Çok sık PTB block varsa analytics'e güven, Telegram gürültüsünü azalt.
+
+## Olayı Raporlama Formatı
+
+Bir problemi incelerken şu format yeterli kanıt sağlar:
+
+```text
+marketSlug:
+window time:
+trigger node:
+action node:
+expected behavior:
+actual message/event:
+guard decision:
+builder order id:
+fill status:
+analytics time range:
+```
+
+Bu format olmadan "bot almadı" veya "pair lock çalışmadı" cümlesi teknik olarak eksiktir.

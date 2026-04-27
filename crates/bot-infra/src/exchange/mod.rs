@@ -1,6 +1,6 @@
 use crate::signer::{
-    domain_separator_for_exchange, sign_order_eip712_with_domain_separator, unix_now_secs,
-    ApiCredentials, ClobHeaderSigner, HeaderSigner,
+    domain_separator_for_exchange, sign_order_eip712_with_domain_separator, unix_now_millis,
+    unix_now_secs, ApiCredentials, ClobHeaderSigner, HeaderSigner,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -11,7 +11,10 @@ use ethers::{
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use uuid::Uuid;
 
 mod clob;
@@ -26,8 +29,9 @@ pub use clob::ClobHttpClient;
 pub use gamma::GammaHttpClient;
 pub(crate) use http::build_http_client;
 pub use models::{
-    ClobRestClient, FillInfo, GammaClient, GammaMarket, OrderAck, OrderBookLevel,
-    OrderBookSnapshot, OrderInfo, PlaceOrderRequest, PriceHistoryPoint, PriceSnapshot,
+    ClobMarketFeeDetails, ClobMarketInfo, ClobMarketToken, ClobRestClient, FillInfo, GammaClient,
+    GammaMarket, OrderAck, OrderBookLevel, OrderBookSnapshot, OrderInfo, PlaceOrderRequest,
+    PriceHistoryPoint, PriceSnapshot,
 };
 pub(crate) use parse::{
     data_api_position_matches_token, parse_f64_value, parse_gamma_market, parse_gamma_market_any,

@@ -209,3 +209,149 @@ Kullanım:
 
 - Yeni stratejiyi canlı izlerken kısa süreli aç.
 - Gürültü fazla olursa sadece ilgili block tipini açık bırak.
+
+## 8. Conservative Entry Profili
+
+Amaç: Az ama daha kaliteli trade almak.
+
+```json
+{
+  "side": "buy",
+  "executionMode": "market",
+  "sizeUsdc": 5,
+  "maxPrice": 0.58,
+  "priceToBeatGuardEnabled": true,
+  "priceToBeatMode": "iv_mismatch_edge",
+  "priceToBeatIvProtectionMode": "adaptive",
+  "priceToBeatIvRequireBinanceSameDirection": true,
+  "priceToBeatIvDepthGuardEnabled": true,
+  "priceToBeatIvDepthMaxSlippage": 0.02,
+  "reenterOnSlHit": false,
+  "notifyOnOrderSubmitted": true,
+  "notifyOnPriceToBeatGapBlocked": true
+}
+```
+
+Ne zaman kullanılır:
+
+- Yeni strateji denenirken.
+- SL serisi varsa.
+- Düşük depth döneminde.
+
+Beklenen yan etki:
+
+- Trade sayısı azalır.
+- No-order sayısı artabilir.
+
+## 9. Aggressive Momentum Profili
+
+Amaç: Geç window'da güçlü hareketi yakalamak.
+
+```json
+{
+  "side": "buy",
+  "executionMode": "market",
+  "sizeUsdc": 8,
+  "maxPrice": 0.68,
+  "priceToBeatGuardEnabled": true,
+  "priceToBeatMode": "iv_mismatch_edge",
+  "priceToBeatIvProtectionMode": "adaptive",
+  "priceToBeatIvRequireBinanceSameDirection": true,
+  "priceToBeatIvMomentumProtectionEnabled": true,
+  "priceToBeatIvDepthGuardEnabled": true,
+  "tpRules": [
+    {"priceCent": 78, "sizePct": 50},
+    {"priceCent": 92, "sizePct": 50}
+  ],
+  "slRules": [
+    {"priceCent": 50, "sizePct": 100}
+  ],
+  "timeExitRules": [
+    {"elapsedMinutes": 1.5, "remainingPct": 50}
+  ]
+}
+```
+
+Dikkat:
+
+- Daha pahalı giriş kabul ettiği için IV edge ve depth şartları açık olmalıdır.
+- Time exit yoksa geç giriş resolution riskini artırır.
+
+## 10. SL Serisi Sonrası Fren Profili
+
+```json
+{
+  "priceToBeatGuardEnabled": true,
+  "priceToBeatStopLossBumpEnabled": true,
+  "priceToBeatStopLossBumpMode": "fixed",
+  "priceToBeatStopLossBumpAmount": 10,
+  "priceToBeatStopLossBumpMaxValue": 40,
+  "priceToBeatStopLossBumpUnit": "cent",
+  "priceToBeatStopLossBumpScope": "per_scope",
+  "priceToBeatStopLossBumpDecayWindows": 3,
+  "reentrySkipCurrentWindow": true,
+  "reentryMaxPriceTightenBps": 500
+}
+```
+
+Ne yapar:
+
+- Aynı scope'ta SL sonrası girişleri sıkılaştırır.
+- Yeni window'lar geçtikçe etki azalır.
+- Re-entry aynı window'da daha dikkatli hale gelir.
+
+## 11. Relax Debug Profili
+
+Amaç: Bot gerçekten fırsat mı kaçırıyor, yoksa depth mi yok anlamak.
+
+```json
+{
+  "priceToBeatGuardEnabled": true,
+  "priceToBeatMaxPriceRelaxEnabled": true,
+  "priceToBeatMaxPriceRelaxMissCount": 3,
+  "priceToBeatMaxPriceRelaxHistoryCount": 10,
+  "priceToBeatMaxPriceRelaxMinValue": 55,
+  "priceToBeatMaxPriceRelaxMinUnit": "cent",
+  "priceToBeatMaxPriceRelaxMinDepthUsd": 20,
+  "priceToBeatMaxPriceRelaxStepMode": "percent",
+  "priceToBeatMaxPriceRelaxStepValue": 5,
+  "notifyOnMaxPriceBlocked": true,
+  "notifyOnPriceToBeatGapBlocked": true
+}
+```
+
+Bakılacak analytics:
+
+- `relax_miss_reason`
+- `tradable_seconds_count`
+- `price_ok_depth_fail_count`
+- `max_fillability_score`
+
+## 12. Pair Lock Güvenli Başlangıç Profili
+
+```json
+{
+  "mode": "pair_lock",
+  "pairLockStrategy": "edge_pairlock_v1",
+  "side": "buy",
+  "executionMode": "market",
+  "kind": "immediate",
+  "sizeUsdc": 5,
+  "pairMaxTotalCent": 95,
+  "pairLockDecisionQty": 5,
+  "pairLockSingleEdgeThreshold": 0.12,
+  "pairLockCostBuffer": 0.0075,
+  "priceToBeatGuardEnabled": true,
+  "priceToBeatMode": "iv_mismatch_edge",
+  "pairProtectiveUnwindEnabled": true,
+  "pairIgnoreStopLossAfterLocked": true,
+  "notifyOnPairLocked": true,
+  "notifyOnPairUnwind": true
+}
+```
+
+Ne zaman kullanılır:
+
+- Önce küçük notional ile pair lock davranışı doğrulanırken.
+- Orphan riskini azaltmak istenirken.
+- Locked pair sonrası normal SL'nin pair yapısını bozması istenmiyorsa.

@@ -150,3 +150,71 @@ Pair lock flow'larında upstream trigger genellikle `bindingMode="pair_lock_only
 - Auto-scope flow'unda sabit `marketSlug` eski markete kilitlemiyor mu?
 - Pair lock kullanılıyorsa upstream trigger `bindingMode="pair_lock_only"` mi?
 - Pencere sonu pozisyon taşıma riskine karşı `autoSellOnWindowEnd` ve exit kuralları açık mı?
+
+## Detaylı Zaman Çizelgesi
+
+Örnek 5 dakikalık BTC marketi:
+
+| Zaman | Kalan süre | Botun beklenen davranışı |
+|---|---:|---|
+| 12:00:00 | 300 sn | Yeni window başlar, auto-scope candidate slug üretir |
+| 12:00:05 | 295 sn | Gamma/WS tokenları doğrulanır, context güncellenir |
+| 12:00:30 | 270 sn | Erken entry profile aktif olabilir |
+| 12:02:30 | 150 sn | Orta bölümde PTB/IV edge daha anlamlı hale gelir |
+| 12:04:00 | 60 sn | Geç entry profile veya time exit kararları öne çıkar |
+| 12:04:30 | 30 sn | Yeni buy genellikle risklidir; window end sell hazırlanabilir |
+| 12:05:00 | 0 sn | Market kapanır, yeni window candidate aranmaya başlar |
+
+Bu tablo kesin config değildir; market döngüsünü okumak için referans ritimdir. Bazı flow'lar ilk 30 saniyeyi tamamen pas geçerken bazı momentum flow'ları sadece son 90 saniyeyi izleyebilir.
+
+## Auto-Scope Seçimi Nasıl Düşünülmeli?
+
+Auto-scope üç ayrı işi birleştirir:
+
+1. Geçerli zamanı market window'una hizalamak.
+2. Bu window için olası slug'ları üretmek.
+3. Üretilen slug'ın gerçekten Polymarket tarafında var olduğunu doğrulamak.
+
+Bu üç adımın herhangi biri gecikirse trigger geç çalışır. Özellikle boundary anlarında "bot marketi kaçırdı" demeden önce marketin gerçekten publish edilip edilmediği kontrol edilmelidir.
+
+## Sayısal Örnek: Stale Market Engeli
+
+Durum:
+
+- Eski market: `btc-updown-5m-1800000000`.
+- Yeni market: `btc-updown-5m-1800000300`.
+- Trigger eski marketten `pass=true` üretmiş.
+- Action çalıştığında sistem zamanı yeni window içinde.
+
+Beklenen davranış:
+
+```text
+action.place_order
+  -> context marketSlug eski
+  -> auto-scope current market yeni
+  -> stale market detected
+  -> buy order üretilmez
+  -> context refresh veya retry beklenir
+```
+
+Bu koruma olmasaydı bot kapanmış veya kapanmak üzere olan markete buy gönderebilirdi. Bu yüzden stale market skip trade kaçırma gibi görünse de güvenlik davranışıdır.
+
+## Yanlış Yorumlar
+
+| Yanlış yorum | Daha doğru okuma |
+|---|---|
+| Boundary'de 3 saniye order yoksa bot bozuk | Yeni market henüz doğrulanmamış olabilir |
+| Auto-scope varken `marketSlug` önemsiz | Output'taki slug canlı teşhis için hâlâ ana kanıttır |
+| Pair lock her markette counter bulmalı | Counter leg aynı window ve uygun maliyette olmalı |
+| Window end sell garanti çıkış sağlar | Sell order üretilir, ama fill orderbook'a bağlıdır |
+
+## Canlı Debug Akışı
+
+1. Sorun yaşanan timestamp'i market boundary'ye göre konumlandır.
+2. `marketSlug` eski window mu yeni window mu kontrol et.
+3. Trigger event içinde `remainingSec` veya window bilgisi varsa not al.
+4. Action event içinde stale skip var mı bak.
+5. Pair lock ise `pair_session_id` aynı market window'una mı bağlı kontrol et.
+6. Window end sell bekleniyorsa açık pozisyon ve sell order status bilgisini birlikte oku.
+
+Bu akış özellikle "bot bazen ilk saniyelerde almıyor" şikayetinde gereklidir. İlk saniyelerde veri geçişinin güvenli doğrulanması, hatalı hızlı girişten daha değerlidir.

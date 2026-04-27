@@ -152,6 +152,8 @@ pub struct ExchangeConfig {
     #[serde(default)]
     pub builder_api_passphrase_env: String,
     #[serde(default)]
+    pub builder_code_env: String,
+    #[serde(default)]
     pub ctf_exchange_address: String,
     #[serde(default = "default_neg_risk_ctf_exchange_address")]
     pub neg_risk_ctf_exchange_address: String,
@@ -169,6 +171,8 @@ pub struct ExchangeConfig {
     pub builder_api_secret: String,
     #[serde(default)]
     pub builder_api_passphrase: String,
+    #[serde(default)]
+    pub builder_code: String,
 }
 
 impl Default for ExchangeConfig {
@@ -189,6 +193,7 @@ impl Default for ExchangeConfig {
             builder_api_key_env: String::new(),
             builder_api_secret_env: String::new(),
             builder_api_passphrase_env: String::new(),
+            builder_code_env: String::new(),
             ctf_exchange_address: default_exchange_ctf_exchange_address(),
             neg_risk_ctf_exchange_address: default_neg_risk_ctf_exchange_address(),
             signer_private_key: String::new(),
@@ -198,6 +203,7 @@ impl Default for ExchangeConfig {
             builder_api_key: String::new(),
             builder_api_secret: String::new(),
             builder_api_passphrase: String::new(),
+            builder_code: String::new(),
         }
     }
 }
@@ -321,6 +327,27 @@ impl ExchangeConfig {
             }
         }
         Err(anyhow::anyhow!("builder_api_passphrase not configured"))
+    }
+
+    pub fn resolve_builder_code(&self) -> Result<Option<String>> {
+        let value = if !self.builder_code.trim().is_empty() {
+            decrypt_config_string_if_needed("exchange.builder_code", &self.builder_code)?
+        } else if !self.builder_code_env.trim().is_empty() {
+            env::var(&self.builder_code_env).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            value.starts_with("0x")
+                && value.len() == 66
+                && value[2..].chars().all(|ch| ch.is_ascii_hexdigit()),
+            "builder_code must be a bytes32 0x hex value"
+        );
+        Ok(Some(value))
     }
 }
 

@@ -65,3 +65,50 @@ Yeni bir flow tasarlarken sırayla şu kararları ver:
 7. SL sonrası re-entry, bump veya max price relax kullanılacak mı?
 8. Pair lock gerekiyorsa legacy mi `edge_pairlock_v1` mi?
 9. Telegram ve analytics alanları operatörün ihtiyacına göre açık mı?
+
+## Node'lar Arası Sorumluluk Ayrımı
+
+`trigger.market_price` ve `action.place_order` birbirine benzeyen fiyat alanları taşıyabilir, ama sorumlulukları aynı değildir.
+
+`trigger.market_price` kararları:
+
+- Hangi market izlenecek?
+- Hangi token/outcome bağlama yazılacak?
+- Fiyat koşulu geçti mi?
+- Kalan süreye göre hangi entry profile seçilecek?
+- Pair lock için YES/NO tokenları çözüldü mü?
+
+`action.place_order` kararları:
+
+- Bu sinyale gerçekten order üretilecek mi?
+- Order buy mı sell mi?
+- Büyüklük nereden hesaplanacak?
+- Fiyat, depth, PTB, risk ve re-entry guard'ları geçiyor mu?
+- TP/SL/time exit/pair lock çocuk emirleri nasıl kurulacak?
+
+Bu ayrım canlı debug sırasında çok önemlidir. Trigger'ın başarılı olması "trade açıldı" anlamına gelmez. Trigger sadece downstream için bağlam ve izin üretir; action ise bu bağlamı order lifecycle'a dönüştürür.
+
+## Uçtan Uca Örnek Okuma
+
+Bir BTC 5m Up flow'u şu şekilde düşünülmelidir:
+
+1. Auto-scope aktif BTC 5m marketini çözer.
+2. Trigger Up fiyatını takip eder.
+3. Entry timing kalan süreye göre profil seçer.
+4. Trigger `pass=true` üretir ve `marketSlug`, `tokenId`, `outcomeLabel`, seçili max price ve size bilgilerini context'e yazar.
+5. Action bu context'i alır.
+6. Action önce stale market kontrolü yapar.
+7. Sonra max price, execution floor ve PTB guard çalışır.
+8. Risk gate izin verirse builder order oluşur.
+9. `kind="immediate"` ise submit denenir.
+10. Fill gelirse TP/SL/re-entry/pair logic devreye girer.
+
+Bu zincirde sorun ararken "son başarılı halka" bulunmalıdır. Eğer trigger output var ama action event yoksa routing veya downstream aktivasyonuna bakılır. Action event var ama builder order yoksa guard block'a bakılır. Builder order var ama fill yoksa CLOB submit, limit price ve liquidity incelenir.
+
+## Dokümanların Birbirine Bağlanma Şekli
+
+- `senaryolar/` davranışı anlatır.
+- `referans/` alan isimlerini ve config/output ilişkisini netleştirir.
+- `ornekler/` kopyalanabilir reçete ve debug akışı verir.
+
+Bir dosyada kavram anlatılıp başka dosyada config örneği veriliyorsa linkler bilinçli olarak ayrıdır. Amaç aynı uzun dosyada her şeyi tekrarlamak değil, operatörün sorun tipine göre doğru derinliğe inmesini sağlamaktır.

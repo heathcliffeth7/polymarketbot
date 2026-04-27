@@ -669,6 +669,7 @@
     fn gamma_market_for_test(slug: &str) -> GammaMarket {
         GammaMarket {
             slug: slug.to_string(),
+            condition_id: None,
             end_date_iso: None,
             active: true,
             closed: false,

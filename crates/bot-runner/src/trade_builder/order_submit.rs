@@ -918,7 +918,15 @@ async fn submit_trade_builder_trigger_order(
     let market_spec = trade_builder_runtime_snapshot_from_order(order)
         .filter(|snapshot| trade_builder_runtime_snapshot_is_fresh(snapshot, submit_started_at))
         .and_then(|snapshot| trade_builder_market_spec_from_runtime_snapshot(&snapshot))
-        .or(resolve_trade_builder_market_spec(cfg, &order.market_slug, &order.token_id).await);
+        .or(
+            resolve_trade_builder_market_spec_with_client(
+                client,
+                cfg,
+                &order.market_slug,
+                &order.token_id,
+            )
+            .await,
+        );
     if maybe_handle_trade_builder_share_submit_below_market_min(
         repo,
         order,

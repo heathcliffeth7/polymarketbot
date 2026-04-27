@@ -117,6 +117,11 @@ fn parse_gamma_market_impl(
     );
     Some(GammaMarket {
         slug,
+        condition_id: item
+            .get("conditionId")
+            .or_else(|| item.get("condition_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         end_date_iso: item
             .get("endDate")
             .or_else(|| item.get("end_date_iso"))

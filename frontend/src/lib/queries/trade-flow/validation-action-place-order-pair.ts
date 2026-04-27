@@ -231,12 +231,12 @@ export function validateActionPlaceOrderPairLockConfig(
     }
   }
   const sizeMode = toTrimmedString(config.sizeMode).toLowerCase();
-  if (sizeMode === 'pct' || config.sizePct != null || config.sizePercent != null) {
+  if (sizeMode !== 'usdc' || config.sizePct != null || config.sizePercent != null) {
     pushNodeError(
       issues,
       node,
       'pair_lock_requires_usdc_sizing',
-      'action.place_order pair_lock only supports USDC sizing.'
+      'action.place_order pair_lock requires sizeMode=usdc and does not support pct/shares sizing.'
     );
   }
   const maxTriggers = toFiniteNumber(config.maxTriggers);
@@ -488,6 +488,14 @@ export function validateActionPlaceOrderPairLockConfig(
   }
 
   const primaryLegSizeUsdc = toFiniteNumber(config.sizeUsdc ?? config.targetNotionalUsdc);
+  if (primaryLegSizeUsdc == null || primaryLegSizeUsdc <= 0) {
+    pushNodeError(
+      issues,
+      node,
+      'pair_lock_requires_size_usdc',
+      'action.place_order pair_lock requires sizeUsdc/targetNotionalUsdc > 0 for primary sizing.'
+    );
+  }
   if (pairSizingMode === 'auto_remaining_budget') {
     const pairTotalBudgetUsdc = toFiniteNumber(config.pairTotalBudgetUsdc);
     if (pairTotalBudgetUsdc == null || pairTotalBudgetUsdc <= 0) {

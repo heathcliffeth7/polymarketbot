@@ -174,3 +174,133 @@ PTB guard payload'ında şu alanlar aranır:
 - Relax node config'i PTB guard ile birlikte mi?
 - Analytics'te miss reason fiyat mı, depth mi, disable mı?
 - Bump ve relax aynı anda çalışıyorsa effective threshold'un son hali okunuyor mu?
+
+## Bump ve Relax Birlikte Nasıl Okunur?
+
+Bump ve relax zıt yönde çalışır:
+
+- Bump, kötü sonuç sonrası threshold'u yukarı iter.
+- Relax, kaçan fırsat sonrası threshold'u aşağı çeker.
+
+Bu yüzden operatör base threshold yerine effective threshold okumalıdır.
+
+Örnek:
+
+```text
+base PTB threshold = 80 cent
+SL bump = +20 cent
+relax credit = -10 cent
+effective threshold = 90 cent
+```
+
+Bu durumda "relax açık ama hâlâ çok sıkı" yorumu doğru olabilir; çünkü bump etkisi relax'tan büyüktür.
+
+## Scope Seçimi
+
+`priceToBeatStopLossBumpScope="global"`:
+
+- Tüm ilgili flow'larda etki geniş olabilir.
+- BTC'deki kötü seri ETH/SOL davranışını etkileyebilir.
+- Çok merkezi risk kontrolü isteyen kurulumlarda kullanılır.
+
+`priceToBeatStopLossBumpScope="per_scope"`:
+
+- Asset/timeframe/direction bazlı daha lokal davranır.
+- BTC 5m Up kötü seri yaşarsa sadece o scope sıkılaşır.
+- Operasyonel olarak daha açıklanabilir sonuç verir.
+
+Pratik varsayılan: kısa market stratejilerinde `per_scope` daha okunabilir ve daha az sürprizlidir.
+
+## Loss Table Tasarım Örneği
+
+Kötü örnek:
+
+```json
+{
+  "priceToBeatStopLossBumpLossRules": [
+    {"lossUsd": 5, "bumpValue": 40},
+    {"lossUsd": 1, "bumpValue": 10}
+  ]
+}
+```
+
+Problem:
+
+- `lossUsd` artan sırada değil.
+- Validation hata üretmelidir.
+
+Daha iyi örnek:
+
+```json
+{
+  "priceToBeatStopLossBumpLossRules": [
+    {"lossUsd": 1, "bumpValue": 10},
+    {"lossUsd": 2.5, "bumpValue": 20},
+    {"lossUsd": 5, "bumpValue": 40}
+  ]
+}
+```
+
+Yorum:
+
+- Küçük zarar sadece hafif sıkılaştırır.
+- Büyük zarar botun aynı ortamda tekrar kolay girmesini engeller.
+
+## Relax Kalite Kontrolü
+
+Relax sadece "çok miss oldu" diye açılmamalıdır. Şu sorular cevaplanmalıdır:
+
+1. Miss edilen markette fiyat gerçekten tavan altına indi mi?
+2. O saniyede yeterli depth var mıydı?
+3. Fiyat uygun görünen an sadece 1 saniyelik anomali miydi?
+4. Relax sonrası oluşacak giriş hâlâ PTB/IV açısından mantıklı mı?
+5. Son relax denemeleri SL oranını artırdı mı?
+
+Bu sorulara bakmadan relax step artırmak, botu kötü likiditeye doğru iter.
+
+## Sayısal Relax Örneği
+
+Config:
+
+```text
+miss count = 3
+history count = 8
+min value = 55 cent
+step mode = percent
+step value = 5
+min depth = 20 USDC
+```
+
+Durum:
+
+- Son 4 markette order yok.
+- 2 markette fiyat 60 cent altını gördü.
+- Sadece 1 markette 20 USDC üstü depth vardı.
+
+Beklenen:
+
+- Relax sınırlı credit üretir veya kalite düşükse üretmez.
+- `price_ok_depth_fail_count` yüksekse sorun fiyat değil depth'tir.
+- `tradable_seconds_count` düşükse fırsat pratikte yakalanabilir olmayabilir.
+
+## Bump Sonrası Bildirim Nasıl Okunur?
+
+Bump bildirimi varsa şu ayrım yapılır:
+
+- Yeni SL bump count kaç?
+- Bu bump bu markette uygulanmış mı?
+- Bump cap'e ulaşılmış mı?
+- Current market excluded mı?
+- Increment USD/cent olarak ne kadar?
+
+Özellikle `stop_loss_bump_current_market_excluded` benzeri alanlar, mevcut marketin bump hesabına dahil edilip edilmediğini anlamak için önemlidir.
+
+## Karar Rehberi
+
+| Belirti | Muhtemel ayar |
+|---|---|
+| SL serisi artıyor | Bump aç veya bump amount artır |
+| Bot hiç trade almıyor | Relax analytics'e bak, gerekirse relax aç |
+| Relax sonrası kötü fill | Min depth ve step değerini sıkılaştır |
+| Bir asset tüm sistemi etkiliyor | Bump scope'u `per_scope` yap |
+| Bump hiç azalmıyor | `priceToBeatStopLossBumpDecayWindows` ekle veya azalt |

@@ -17,6 +17,10 @@ pub struct ClobHttpClient {
     address: String,
     api_key: String,
     gnosis_safe: Option<Address>,
+    builder_code_hex: String,
+    builder_code: [u8; 32],
+    market_info_by_condition: Arc<Mutex<HashMap<String, ClobMarketInfo>>>,
+    market_condition_by_token: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ClobHttpClient {
@@ -31,12 +35,16 @@ impl ClobHttpClient {
         neg_risk_exchange_address: Option<Address>,
         chain_id: u64,
         gnosis_safe: Option<Address>,
+        builder_code: Option<String>,
     ) -> Self {
         let address = creds.address.clone();
         let api_key = creds.key.clone();
         let domain_separator = domain_separator_for_exchange(chain_id, exchange_address);
         let neg_risk_domain_separator = neg_risk_exchange_address
             .map(|address| domain_separator_for_exchange(chain_id, address));
+        let builder_code =
+            parse_bytes32_hex(builder_code.as_deref().unwrap_or_default()).unwrap_or([0u8; 32]);
+        let builder_code_hex = bytes32_to_hex(builder_code);
         Self {
             base_url,
             positions_base_url,
@@ -53,6 +61,10 @@ impl ClobHttpClient {
             address,
             api_key,
             gnosis_safe,
+            builder_code_hex,
+            builder_code,
+            market_info_by_condition: Arc::new(Mutex::new(HashMap::new())),
+            market_condition_by_token: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -139,6 +151,59 @@ impl ClobHttpClient {
             self.domain_separator
         }
     }
+
+    fn cache_market_info(&self, info: &ClobMarketInfo) {
+        if let Ok(mut by_condition) = self.market_info_by_condition.lock() {
+            by_condition.insert(info.condition_id.clone(), info.clone());
+        }
+        if let Ok(mut by_token) = self.market_condition_by_token.lock() {
+            for token in &info.tokens {
+                by_token.insert(token.token_id.clone(), info.condition_id.clone());
+            }
+        }
+    }
+
+    fn cached_market_info_by_condition(&self, condition_id: &str) -> Option<ClobMarketInfo> {
+        self.market_info_by_condition
+            .lock()
+            .ok()?
+            .get(condition_id)
+            .cloned()
+    }
+
+    fn cached_market_info_by_token(&self, token_id: &str) -> Option<ClobMarketInfo> {
+        let condition_id = self
+            .market_condition_by_token
+            .lock()
+            .ok()?
+            .get(token_id)?
+            .clone();
+        self.cached_market_info_by_condition(&condition_id)
+    }
+}
+
+fn parse_bytes32_hex(raw: &str) -> Option<[u8; 32]> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some([0u8; 32]);
+    }
+    let hex = trimmed.strip_prefix("0x")?;
+    if hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (idx, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[idx * 2..idx * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+fn bytes32_to_hex(bytes: [u8; 32]) -> String {
+    bytes.iter().fold("0x".to_string(), |mut out, byte| {
+        use std::fmt::Write;
+        write!(out, "{byte:02x}").unwrap();
+        out
+    })
 }
 
 fn parse_price_history_point(raw: &Value) -> Option<PriceHistoryPoint> {
@@ -175,6 +240,92 @@ pub(super) fn parse_fee_rate_bps_response(raw: &serde_json::Value) -> Option<u64
         .or_else(|| raw.get("base_fee"))
         .or_else(|| raw.get("baseFee"))
         .and_then(parse_fee_rate_bps_value)
+}
+
+fn parse_clob_token(raw: &Value) -> Option<ClobMarketToken> {
+    let token_id = raw
+        .get("t")
+        .or_else(|| raw.get("token_id"))
+        .or_else(|| raw.get("tokenId"))
+        .and_then(Value::as_str)?
+        .to_string();
+    let outcome = raw
+        .get("o")
+        .or_else(|| raw.get("outcome"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Some(ClobMarketToken { token_id, outcome })
+}
+
+pub(super) fn parse_clob_market_info_response(
+    raw: &Value,
+    fallback_condition_id: &str,
+) -> Option<ClobMarketInfo> {
+    let condition_id = raw
+        .get("condition_id")
+        .or_else(|| raw.get("conditionId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback_condition_id)
+        .to_string();
+    if condition_id.trim().is_empty() {
+        return None;
+    }
+    let tokens = raw
+        .get("t")
+        .or_else(|| raw.get("tokens"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(parse_clob_token)
+        .collect::<Vec<_>>();
+    let fee_details =
+        raw.get("fd")
+            .or_else(|| raw.get("fee_details"))
+            .map(|fd| ClobMarketFeeDetails {
+                rate: fd
+                    .get("r")
+                    .or_else(|| fd.get("rate"))
+                    .and_then(parse_f64_value)
+                    .unwrap_or(0.0),
+                exponent: fd
+                    .get("e")
+                    .or_else(|| fd.get("exponent"))
+                    .and_then(parse_f64_value)
+                    .unwrap_or(0.0),
+                taker_only: fd
+                    .get("to")
+                    .or_else(|| fd.get("taker_only"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            });
+    Some(ClobMarketInfo {
+        condition_id,
+        tokens,
+        min_tick_size: raw
+            .get("mts")
+            .or_else(|| raw.get("min_tick_size"))
+            .and_then(parse_f64_value),
+        min_order_size: raw
+            .get("mos")
+            .or_else(|| raw.get("min_order_size"))
+            .and_then(parse_f64_value),
+        maker_base_fee_bps: raw
+            .get("mbf")
+            .or_else(|| raw.get("maker_base_fee_bps"))
+            .and_then(parse_fee_rate_bps_value),
+        taker_base_fee_bps: raw
+            .get("tbf")
+            .or_else(|| raw.get("taker_base_fee_bps"))
+            .and_then(parse_fee_rate_bps_value),
+        fee_details,
+        neg_risk: raw
+            .get("nr")
+            .or_else(|| raw.get("neg_risk"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 fn parse_order_book_levels(raw: &serde_json::Value, side_key: &str) -> Vec<OrderBookLevel> {
@@ -334,9 +485,76 @@ impl ClobRestClient for ClobHttpClient {
             .collect())
     }
 
+    async fn get_clob_market_info(&self, condition_id: &str) -> Result<Option<ClobMarketInfo>> {
+        let condition_id = condition_id.trim();
+        if condition_id.is_empty() {
+            return Ok(None);
+        }
+        if let Some(cached) = self.cached_market_info_by_condition(condition_id) {
+            return Ok(Some(cached));
+        }
+
+        let request_path = format!("/clob-markets/{condition_id}");
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), request_path);
+        let response = self.http.get(url).send().await?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let raw: serde_json::Value = response.json().await?;
+        let info = parse_clob_market_info_response(&raw, condition_id);
+        if let Some(info) = info.as_ref() {
+            self.cache_market_info(info);
+        }
+        Ok(info)
+    }
+
+    async fn get_clob_market_info_by_token(
+        &self,
+        token_id: &str,
+    ) -> Result<Option<ClobMarketInfo>> {
+        let token_id = token_id.trim();
+        if token_id.is_empty() {
+            return Ok(None);
+        }
+        if let Some(cached) = self.cached_market_info_by_token(token_id) {
+            return Ok(Some(cached));
+        }
+
+        let request_path = format!("/markets-by-token/{token_id}");
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), request_path);
+        let response = self.http.get(url).send().await?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+
+        let raw: serde_json::Value = response.json().await?;
+        let condition_id = raw
+            .get("condition_id")
+            .or_else(|| raw.get("conditionId"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if condition_id.is_empty() {
+            return Ok(None);
+        }
+        self.get_clob_market_info(&condition_id).await
+    }
+
     async fn get_fee_rate_bps(&self, token_id: &str) -> Result<Option<u64>> {
         if token_id.trim().is_empty() {
             return Ok(None);
+        }
+        if let Some(info) = self.get_clob_market_info_by_token(token_id).await? {
+            if info.has_token(token_id) {
+                if let Some(taker_base_fee_bps) = info.taker_base_fee_bps {
+                    return Ok(Some(taker_base_fee_bps));
+                }
+                if let Some(details) = info.fee_details {
+                    return Ok(Some(details.rate.max(0.0).round() as u64));
+                }
+            }
         }
         let request_path = format!("/fee-rate?token_id={token_id}");
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), request_path);
@@ -392,8 +610,9 @@ impl ClobRestClient for ClobHttpClient {
             None => (eoa, eoa, 0),
         };
 
-        let fee_rate_bps = req.fee_rate_bps;
         let effective_exchange_address = self.effective_exchange_address(req.neg_risk);
+        let order_timestamp = U256::from(unix_now_millis()? as u64);
+        let metadata = [0u8; 32];
         let sign_started = std::time::Instant::now();
         let signature = match sign_order_eip712_with_domain_separator(
             &self.wallet,
@@ -405,8 +624,10 @@ impl ClobRestClient for ClobHttpClient {
             maker_amount,
             taker_amount,
             side_u8,
-            fee_rate_bps,
             sig_type,
+            order_timestamp,
+            metadata,
+            self.builder_code,
         ) {
             Ok(signature) => signature,
             Err(err) => {
@@ -440,15 +661,15 @@ impl ClobRestClient for ClobHttpClient {
                 "salt": salt_u64,
                 "maker": maker_str,
                 "signer": signer_str,
-                "taker": "0x0000000000000000000000000000000000000000",
                 "tokenId": token_id.to_string(),
                 "makerAmount": maker_amount.to_string(),
                 "takerAmount": taker_amount.to_string(),
                 "side": side_str,
                 "expiration": "0",
-                "nonce": "0",
-                "feeRateBps": fee_rate_bps.to_string(),
                 "signatureType": sig_type as i64,
+                "timestamp": order_timestamp.to_string(),
+                "metadata": bytes32_to_hex(metadata),
+                "builder": self.builder_code_hex.clone(),
                 "signature": signature,
             },
             "owner": self.api_key,
@@ -461,11 +682,12 @@ impl ClobRestClient for ClobHttpClient {
             token_id = %token_id,
             maker_amount = %maker_amount,
             taker_amount = %taker_amount,
-            fee_rate_bps,
             salt = %salt,
+            timestamp = %order_timestamp,
             maker = %maker_str,
             signer = %signer_str,
             sig_type,
+            builder = %self.builder_code_hex,
             exchange = %effective_exchange_address,
             chain_id = self.chain_id,
             order_type = normalized_order_type,

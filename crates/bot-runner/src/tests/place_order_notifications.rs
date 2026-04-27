@@ -955,6 +955,78 @@ fn missed_market_no_order_trigger_condition_hides_floor_and_explains_book_status
 }
 
 #[test]
+fn missed_market_no_order_diagnosis_reports_action_failure_before_trigger_fallback() {
+    let window_end_at = Utc::now();
+    let summary = no_fill_summary(
+        "action_failed",
+        "action_failed_size_usdc_missing",
+        Some("failed"),
+        json!({
+            "market_slug": "btc-updown-5m-1",
+            "token_id": "down-token",
+            "outcome_label": "Down",
+            "action_node_key": "action_nvevn1",
+            "action_error": "action.place_order pair_lock requires sizeUsdc > 0",
+            "action_step_id": 5881383
+        }),
+        Some("action_step_failed"),
+    );
+    let diagnosis = build_no_order_base_diagnosis_payload(
+        "btc-updown-5m-1",
+        "down-token",
+        "Down",
+        window_end_at,
+        &summary,
+        &[],
+        None,
+        None,
+        Some(json!({
+            "liquidity_regime": "UNKNOWN",
+            "trade_count_60s": 0
+        })),
+    );
+    let node_spec = WsOpenPositionPriceNodeSpec {
+        node_key: "trigger_market".to_string(),
+        node_type: "trigger.market_price".to_string(),
+        once_mode: true,
+        once_scope_market: false,
+        pair_lock_only_monitor: false,
+        auto_scope: true,
+        price_mode: WsPriceMode::Midpoint,
+        market_slug: Some("btc-updown-5m-1".to_string()),
+        token_id: "down-token".to_string(),
+        outcome_label: "Down".to_string(),
+        trigger_condition: "cross_below".to_string(),
+        trigger_price: 0.0,
+        max_price: None,
+        price_to_beat_trigger_enabled: false,
+        price_to_beat_mode: crate::trade_flow::guards::price_to_beat::PriceToBeatMode::Manual,
+        price_to_beat_trigger_min_gap: None,
+        price_to_beat_trigger_max_gap: None,
+        price_to_beat_trigger_unit:
+            crate::trade_flow::guards::price_to_beat::PriceToBeatDiffUnit::Usd,
+        protection_mode: TRIGGER_PROTECTION_MODE_OFF.to_string(),
+        protection_asset: None,
+        confirmation_ms: None,
+        cycle_window_mode: None,
+        cycle_window_secs: None,
+        cycle_window_start_sec: None,
+        cycle_window_end_sec: None,
+        auto_sell_on_window_end: false,
+    };
+    let message =
+        build_missed_market_no_order_notification_message(&node_spec, window_end_at, &diagnosis);
+
+    assert!(message.contains("Emir Acilmadi - Action Failed"));
+    assert!(message.contains("Sebep Kodu: action_failed_size_usdc_missing"));
+    assert!(message.contains("Karar: NO ORDER - action failed"));
+    assert!(message.contains("Son Engel: Action Failed"));
+    assert!(message.contains("Action Node: action_nvevn1"));
+    assert!(message.contains("Hata: action.place_order pair_lock requires sizeUsdc > 0"));
+    assert!(!message.contains("Trigger Sarti Saglanmadi"));
+}
+
+#[test]
 fn missed_market_no_order_diagnosis_tracks_floor_wait_history() {
     let base_at = Utc::now();
     let output_at = |best_ask: f64, ended_at: DateTime<Utc>, id: i64| TradeFlowRunStep {
