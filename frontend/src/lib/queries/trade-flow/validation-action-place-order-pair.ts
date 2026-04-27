@@ -18,6 +18,11 @@ interface ParsedExitLadderRule {
   sizePct: number;
 }
 
+interface ParsedRemainingWindow {
+  startRemainingSec: number;
+  endRemainingSec: number;
+}
+
 function parseExitLadderRules(raw: unknown): {
   isArray: boolean;
   validRules: ParsedExitLadderRule[];
@@ -123,6 +128,54 @@ function safeParseJson(raw: string): unknown {
   } catch {
     return null;
   }
+}
+
+function parseValidIvTimeRuleWindows(raw: unknown): ParsedRemainingWindow[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      if (!isRecord(item)) return null;
+      const startRemainingSec = toFiniteNumber(item.startRemainingSec);
+      const endRemainingSec = toFiniteNumber(item.endRemainingSec);
+      if (
+        startRemainingSec == null ||
+        endRemainingSec == null ||
+        startRemainingSec <= endRemainingSec
+      ) {
+        return null;
+      }
+      return { startRemainingSec, endRemainingSec };
+    })
+    .filter((item): item is ParsedRemainingWindow => item != null);
+}
+
+function remainingWindowsOverlap(
+  left: ParsedRemainingWindow,
+  right: ParsedRemainingWindow
+): boolean {
+  return Math.max(left.endRemainingSec, right.endRemainingSec) <
+    Math.min(left.startRemainingSec, right.startRemainingSec);
+}
+
+function biasedHedgeEntryRemainingWindow(
+  triggerConfig: Record<string, unknown>,
+  biasedHedge: Record<string, unknown>
+): ParsedRemainingWindow | null {
+  const marketScope = toTrimmedString(triggerConfig.marketScope).toLowerCase();
+  if (marketScope !== 'btc_5m_updown') return null;
+  const cycleStartSec = toFiniteNumber(triggerConfig.cycleWindowStartSec) ?? 30;
+  const cycleEndSec = toFiniteNumber(triggerConfig.cycleWindowEndSec);
+  const disableNewPrimaryAfterSec = toFiniteNumber(biasedHedge.disableNewPrimaryAfterSec) ?? 180;
+  const entryEndSec = Math.min(
+    cycleEndSec ?? disableNewPrimaryAfterSec,
+    disableNewPrimaryAfterSec
+  );
+  if (cycleStartSec < 0 || entryEndSec <= cycleStartSec) return null;
+  const windowSec = 300;
+  return {
+    startRemainingSec: windowSec - cycleStartSec,
+    endRemainingSec: windowSec - entryEndSec,
+  };
 }
 
 export function validateActionPlaceOrderPairLockConfig(
@@ -365,6 +418,20 @@ export function validateActionPlaceOrderPairLockConfig(
     const timeExitRules = parseBiasedTimeExitRules(biasedHedgeStop.timeExitRules);
     if (!timeExitRules || timeExitRules.length === 0) {
       pushNodeError(issues, node, 'biased_hedge_time_exit_required', 'biasedHedgeStop.timeExitRules cannot be empty.');
+    }
+    const explicitIvWindows = parseValidIvTimeRuleWindows(config.priceToBeatIvTimeRules);
+    const entryIvWindow = biasedHedgeEntryRemainingWindow(directTriggerConfig, biasedHedge);
+    if (
+      explicitIvWindows.length > 0 &&
+      entryIvWindow != null &&
+      !explicitIvWindows.some((rule) => remainingWindowsOverlap(rule, entryIvWindow))
+    ) {
+      pushNodeError(
+        issues,
+        node,
+        'biased_hedge_iv_time_rules_no_entry_overlap',
+        'action.place_order biased_hedge_v1 priceToBeatIvTimeRules must overlap the early primary entry window.'
+      );
     }
     const reentryMaxAttempts = toFiniteNumber(config.reentryMaxAttempts);
     const reentryCooldownSec = toFiniteNumber(config.reentryCooldownSec);

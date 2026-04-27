@@ -230,6 +230,42 @@ test('validateActionPlaceOrderConfig accepts biased_hedge_v1 smoke config', () =
   assert.equal(issues.length, 0);
 });
 
+test('validateActionPlaceOrderConfig accepts biased_hedge_v1 explicit early IV time rule', () => {
+  const graph = buildBiasedHedgeGraph({
+    priceToBeatIvTimeRules: [
+      {
+        startRemainingSec: 270,
+        endRemainingSec: 120,
+        maxPriceCent: 75,
+        minEdge: 0.08,
+        minGapStrength: 0,
+      },
+    ],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_biased');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig rejects biased_hedge_v1 IV time rules outside entry window', () => {
+  const graph = buildBiasedHedgeGraph({
+    priceToBeatIvTimeRules: [
+      {
+        startRemainingSec: 90,
+        endRemainingSec: 30,
+        maxPriceCent: 75,
+        minEdge: 0.08,
+        minGapStrength: 0,
+      },
+    ],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_biased');
+  assert.ok(
+    issues.some((issue) => issue.code === 'biased_hedge_iv_time_rules_no_entry_overlap')
+  );
+});
+
 test('validateActionPlaceOrderConfig rejects biased_hedge_v1 without stop config', () => {
   const graph = buildBiasedHedgeGraph({ biasedHedgeStop: null });
 

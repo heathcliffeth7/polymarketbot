@@ -7,6 +7,7 @@ const BIASED_HEDGE_DEFAULT_HIGH_PRICE_MIN_FINAL_Q: f64 = 0.82;
 const BIASED_HEDGE_DEFAULT_HIGH_PRICE_MIN_EDGE: f64 = 0.10;
 const BIASED_HEDGE_DEFAULT_MIN_DOMINANT_SHARE: f64 = 0.75;
 const BIASED_HEDGE_DEFAULT_MAX_HEDGE_SPEND_RATIO: f64 = 0.25;
+const BIASED_HEDGE_DEFAULT_ENTRY_START_SEC: i64 = 30;
 const BIASED_HEDGE_DEFAULT_DISABLE_NEW_PRIMARY_AFTER_SEC: i64 = 180;
 const BIASED_HEDGE_DEFAULT_DISABLE_ANY_BUY_AFTER_SEC: i64 = 240;
 const BIASED_HEDGE_MONITOR_INTERVAL_SEC: i64 = 10;
@@ -221,6 +222,60 @@ fn biased_hedge_timing_payload(timing: BiasedHedgeMarketTiming) -> Value {
         "remaining_sec": timing.remaining_sec,
         "cycle_window_active": timing.cycle_window_active,
     })
+}
+
+fn biased_hedge_has_explicit_iv_time_rules(node: &TradeFlowNode) -> bool {
+    node.config
+        .get("priceToBeatIvTimeRules")
+        .and_then(Value::as_array)
+        .is_some_and(|rules| !rules.is_empty())
+}
+
+fn biased_hedge_default_iv_time_rule(
+    node: &TradeFlowNode,
+    config: &ActionPlaceOrderBiasedHedgeConfig,
+    market_slug: &str,
+) -> Option<Value> {
+    let scope = find_updown_scope_by_slug(market_slug)?;
+    let window_seconds = updown_scope_window_seconds(scope).max(1);
+    let entry_start_sec = BIASED_HEDGE_DEFAULT_ENTRY_START_SEC
+        .max(0)
+        .min(window_seconds.saturating_sub(1));
+    let entry_end_sec = config
+        .disable_new_primary_after_sec
+        .max(entry_start_sec + 1)
+        .min(window_seconds);
+    let start_remaining_sec = window_seconds.saturating_sub(entry_start_sec);
+    let end_remaining_sec = window_seconds.saturating_sub(entry_end_sec);
+    (start_remaining_sec > end_remaining_sec).then(|| {
+        let biased = biased_hedge_object(node, "biasedHedge");
+        let max_price_cent = biased_hedge_f64(biased, "maxPriceCent")
+            .or_else(|| node_config_f64(node, "maxPriceCent"))
+            .unwrap_or(75.0);
+        json!({
+            "startRemainingSec": start_remaining_sec,
+            "endRemainingSec": end_remaining_sec,
+            "maxPriceCent": max_price_cent,
+            "minEdge": config.primary_min_edge,
+            "minGapStrength": 0,
+        })
+    })
+}
+
+fn apply_biased_hedge_early_iv_time_rule(
+    node: &mut TradeFlowNode,
+    config: &ActionPlaceOrderBiasedHedgeConfig,
+    market_slug: &str,
+) {
+    if biased_hedge_has_explicit_iv_time_rules(node) {
+        return;
+    }
+    let Some(rule) = biased_hedge_default_iv_time_rule(node, config, market_slug) else {
+        return;
+    };
+    if let Some(map) = node.config.as_object_mut() {
+        map.insert("priceToBeatIvTimeRules".to_string(), json!([rule]));
+    }
 }
 
 fn biased_hedge_iv_payload(candidate: &PairLockEdgeCandidate) -> Option<&Value> {
@@ -865,6 +920,7 @@ async fn execute_action_place_order_pair_lock_biased_hedge_strategy(
     if let Some(map) = eval_node.config.as_object_mut() {
         map.insert("sizeUsdc".to_string(), json!(config.primary_budget_usdc));
     }
+    apply_biased_hedge_early_iv_time_rule(&mut eval_node, &config, &market_slug);
     let ptb_runtime =
         crate::trade_flow::guards::price_to_beat::PriceToBeatGuardRuntimeContext::pair_lock_auto_primary(
             repo,

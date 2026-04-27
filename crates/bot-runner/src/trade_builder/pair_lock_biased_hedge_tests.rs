@@ -79,6 +79,65 @@ mod pair_lock_biased_hedge_tests {
         }
     }
 
+    fn biased_test_node(config: Value) -> TradeFlowNode {
+        TradeFlowNode {
+            key: "biased".to_string(),
+            node_type: "action.place_order".to_string(),
+            config,
+        }
+    }
+
+    #[test]
+    fn biased_hedge_injects_early_iv_time_rule_when_missing() {
+        let config = biased_test_config();
+        let mut node = biased_test_node(json!({
+            "biasedHedge": { "maxPriceCent": 75 },
+        }));
+
+        apply_biased_hedge_early_iv_time_rule(
+            &mut node,
+            &config,
+            "btc-updown-5m-1777315200",
+        );
+
+        let rules = node
+            .config
+            .get("priceToBeatIvTimeRules")
+            .and_then(Value::as_array)
+            .expect("default rule should be injected");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].get("startRemainingSec").and_then(Value::as_i64), Some(270));
+        assert_eq!(rules[0].get("endRemainingSec").and_then(Value::as_i64), Some(120));
+        assert_eq!(rules[0].get("minEdge").and_then(Value::as_f64), Some(0.08));
+        assert_eq!(rules[0].get("minGapStrength").and_then(Value::as_i64), Some(0));
+    }
+
+    #[test]
+    fn biased_hedge_preserves_explicit_iv_time_rules() {
+        let config = biased_test_config();
+        let explicit = json!({
+            "startRemainingSec": 180,
+            "endRemainingSec": 90,
+            "maxPriceCent": 70,
+            "minEdge": 0.09,
+            "minGapStrength": 0.4,
+        });
+        let mut node = biased_test_node(json!({
+            "priceToBeatIvTimeRules": [explicit.clone()],
+        }));
+
+        apply_biased_hedge_early_iv_time_rule(
+            &mut node,
+            &config,
+            "btc-updown-5m-1777315200",
+        );
+
+        assert_eq!(
+            node.config.get("priceToBeatIvTimeRules"),
+            Some(&json!([explicit]))
+        );
+    }
+
     #[test]
     fn biased_hedge_high_price_requires_stronger_conviction() {
         let config = biased_test_config();
