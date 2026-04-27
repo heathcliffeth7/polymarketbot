@@ -6,6 +6,21 @@ import type {
 } from '@/lib/types';
 import type { AutoScopeTradeAnalysisFilters } from './analytics';
 
+const PENDING_ANALYSIS_TTL_MINUTES = 30;
+const PENDING_ANALYSIS_TTL_MS = PENDING_ANALYSIS_TTL_MINUTES * 60 * 1000;
+const PERMANENT_SKIP_REASONS = new Set([
+  'missing_auto_scope_trigger',
+  'not_root_buy_order',
+  'missing_flow_run',
+  'missing_flow_version',
+  'missing_action_node_key',
+  'root_order_not_found',
+]);
+const RETRYABLE_SKIP_REASONS = new Set([
+  'missing_buy_fill_metrics',
+  'zero_buy_fill_qty',
+]);
+
 interface PendingAutoScopeTradeAnalysisRowDb {
   definition_id: number;
   definition_name: string | null;
@@ -23,6 +38,44 @@ interface PendingAutoScopeTradeAnalysisRowDb {
 
 function numberOrNull(value: number | null): number | null {
   return value == null ? null : Number(value);
+}
+
+function normalizedSkipReason(value: string | null | undefined): string | null {
+  const normalized = value?.trim() ?? '';
+  return normalized === '' ? null : normalized;
+}
+
+export function isPermanentAutoScopePendingSkipReason(
+  value: string | null | undefined
+): boolean {
+  const reason = normalizedSkipReason(value);
+  return reason != null && PERMANENT_SKIP_REASONS.has(reason);
+}
+
+export function isRetryableAutoScopePendingSkipReason(
+  value: string | null | undefined
+): boolean {
+  const reason = normalizedSkipReason(value);
+  return reason != null && RETRYABLE_SKIP_REASONS.has(reason);
+}
+
+export function shouldShowPendingAutoScopeAnalysisRow(input: {
+  hasAutoScopeUpstream: boolean;
+  latestSkipReason?: string | null;
+  filledOrUpdatedAt: string;
+  nowIso: string;
+}): boolean {
+  if (isPermanentAutoScopePendingSkipReason(input.latestSkipReason)) return false;
+
+  const nowMs = new Date(input.nowIso).getTime();
+  const rowMs = new Date(input.filledOrUpdatedAt).getTime();
+  if (!Number.isFinite(nowMs) || !Number.isFinite(rowMs)) return false;
+  if (nowMs - rowMs > PENDING_ANALYSIS_TTL_MS) return false;
+
+  return (
+    input.hasAutoScopeUpstream ||
+    isRetryableAutoScopePendingSkipReason(input.latestSkipReason)
+  );
 }
 
 function deriveMarketEndAtFromSlug(marketSlug: string): string | null {
@@ -119,6 +172,29 @@ export async function getPendingAutoScopeAnalysisRows(
        FROM trade_flow_auto_scope_analysis_rows s
        WHERE s.root_builder_order_id = o.id
      )`,
+    `COALESCE(fill_log.last_fill_ts, o.updated_at, o.created_at) >= NOW() - INTERVAL '${PENDING_ANALYSIS_TTL_MINUTES} minutes'`,
+    `COALESCE(latest_refresh.skip_reason, '') NOT IN (
+       'missing_auto_scope_trigger',
+       'not_root_buy_order',
+       'missing_flow_run',
+       'missing_flow_version',
+       'missing_action_node_key',
+       'root_order_not_found'
+     )`,
+    `(
+       latest_refresh.skip_reason IN ('missing_buy_fill_metrics', 'zero_buy_fill_qty')
+       OR EXISTS (
+         SELECT 1
+         FROM jsonb_array_elements(
+           COALESCE(
+             COALESCE(node_snapshot.snapshot_json, entry_log.payload->'node_snapshot')->'upstream_nodes',
+             '[]'::jsonb
+           )
+         ) item
+         WHERE item->'node'->>'type' = 'trigger.market_price'
+           AND item->'node'->'config'->>'marketMode' = 'auto_scope'
+       )
+     )`,
   ];
 
   if (filters.from) {
@@ -160,6 +236,33 @@ export async function getPendingAutoScopeAnalysisRows(
        COALESCE(fill_log.last_fill_ts, o.updated_at, o.created_at)::text AS updated_at
      FROM trade_builder_orders o
      LEFT JOIN fill_log ON fill_log.root_builder_order_id = o.id
+     LEFT JOIN LATERAL (
+       SELECT
+         l.payload->>'skip_reason' AS skip_reason
+       FROM bot_decision_logs l
+       WHERE l.root_order_id = o.id::text
+         AND l.event_type IN (
+           'AUTO_SCOPE_ANALYSIS_REFRESH_SKIPPED',
+           'AUTO_SCOPE_ANALYSIS_REFRESH_UPDATED'
+         )
+       ORDER BY l.event_ts DESC, l.created_at DESC, l.id DESC
+       LIMIT 1
+     ) latest_refresh ON true
+     LEFT JOIN LATERAL (
+       SELECT s.snapshot_json
+       FROM trade_builder_order_node_snapshots s
+       WHERE s.root_order_id = o.id
+       ORDER BY s.updated_at DESC, s.id DESC
+       LIMIT 1
+     ) node_snapshot ON true
+     LEFT JOIN LATERAL (
+       SELECT l.payload
+       FROM bot_decision_logs l
+       WHERE l.root_order_id = o.id::text
+         AND l.event_type = 'ENTRY_EVALUATED'
+       ORDER BY l.event_ts DESC, l.created_at DESC, l.id DESC
+       LIMIT 1
+     ) entry_log ON true
      LEFT JOIN trade_flow_definitions d ON d.id = o.origin_flow_definition_id
      WHERE ${conditions.join('\n       AND ')}
      ORDER BY COALESCE(fill_log.last_fill_ts, o.updated_at, o.created_at) DESC, o.id DESC
@@ -169,3 +272,9 @@ export async function getPendingAutoScopeAnalysisRows(
 
   return rows.rows.map(mapPendingAnalysisRow);
 }
+
+export const __pendingAutoScopeAnalysisTestUtils = {
+  isPermanentAutoScopePendingSkipReason,
+  isRetryableAutoScopePendingSkipReason,
+  shouldShowPendingAutoScopeAnalysisRow,
+};
