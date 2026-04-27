@@ -4,6 +4,8 @@ import type {
   AutoScopeTradeBlockedSignal,
   AutoScopeTradeDiagnostic,
   AutoScopeTradeExecutionTelemetry,
+  AutoScopeTradeForensicEvent,
+  AutoScopeTradeForensicSummary,
   AutoScopeNoOrderTelemetry,
   AutoScopeTradePositionLegSnapshot,
   AutoScopeTradePositionSnapshot,
@@ -22,6 +24,7 @@ interface AutoScopeAnalysisExtra {
   executionTelemetry: AutoScopeTradeExecutionTelemetry | null;
   positionSnapshot: AutoScopeTradePositionSnapshot;
   tpStatus: AutoScopeTradeTpStatus;
+  forensic: AutoScopeTradeForensicSummary;
 }
 
 interface AnalysisExtraRowDb {
@@ -51,6 +54,19 @@ interface ExecutionTelemetryEventDb {
   builder_order_id: number;
   event_type: 'submitted' | 'filled';
   payload_json: JsonObject;
+}
+
+interface DecisionLogEventDb {
+  event_id: string;
+  event_type: string;
+  event_ts: string;
+  created_at: string;
+  decision_id: string | null;
+  sl_event_id: string | null;
+  fill_event_id: string | null;
+  order_id: string | null;
+  root_order_id: string | null;
+  payload: JsonObject;
 }
 
 interface TpOrderDb {
@@ -447,13 +463,67 @@ function buildTpStatus(rootRows: AnalysisExtraRowDb[], tpOrders: TpOrderDb[]): A
   };
 }
 
+function mapDecisionLogEvent(row: DecisionLogEventDb): AutoScopeTradeForensicEvent {
+  return {
+    eventId: row.event_id,
+    eventType: row.event_type,
+    eventTs: row.event_ts,
+    createdAt: row.created_at,
+    decisionId: row.decision_id,
+    slEventId: row.sl_event_id,
+    fillEventId: row.fill_event_id,
+    orderId: row.order_id,
+    payload: row.payload ?? {},
+  };
+}
+
+function latestPayload(
+  events: AutoScopeTradeForensicEvent[],
+  eventTypes: string[]
+): Record<string, unknown> | null {
+  const wanted = new Set(eventTypes);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (wanted.has(event.eventType)) return event.payload;
+  }
+  return null;
+}
+
+function buildForensicSummary(events: AutoScopeTradeForensicEvent[]): AutoScopeTradeForensicSummary {
+  const orderLifecycleTypes = new Set([
+    'ORDER_SUBMITTED',
+    'ORDER_FILLED',
+    'ORDER_PARTIALLY_FILLED',
+    'ORDER_EXPIRED',
+    'ORDER_CANCELED',
+    'ORDER_ERROR',
+    'ORDER_REPLACED',
+    'ORDER_REARMED',
+  ]);
+  const entry = latestPayload(events, ['ENTRY_EVALUATED']);
+  return {
+    entryDecision: entry,
+    entryStopLossPlan: objectValue(entry?.stop_loss_config_at_entry),
+    orderLifecycle: events.filter((event) => orderLifecycleTypes.has(event.eventType)),
+    stopLossTrigger: latestPayload(events, ['PTB_STOP_LOSS_TRIGGERED']),
+    postSlRecovery: latestPayload(events, [
+      'POST_SL_RESOLUTION_FINAL',
+      'POST_SL_MARKET_END',
+      'POST_SL_CHECK',
+    ]),
+    slClassification: latestPayload(events, ['POST_SL_RESOLUTION_FINAL']),
+    rawEvents: events,
+  };
+}
+
 function buildExtra(
   rootOrderId: number,
   rootRows: AnalysisExtraRowDb[],
   runMarketRows: AnalysisExtraRowDb[],
   guardPayload: JsonObject | null,
   tpOrders: TpOrderDb[],
-  executionTelemetry: AutoScopeTradeExecutionTelemetry | null
+  executionTelemetry: AutoScopeTradeExecutionTelemetry | null,
+  forensicEvents: AutoScopeTradeForensicEvent[]
 ): AutoScopeAnalysisExtra {
   const signalQuality = buildAutoScopeSignalQualityFromGuard(guardPayload);
   return {
@@ -463,6 +533,7 @@ function buildExtra(
     executionTelemetry,
     positionSnapshot: buildPositionSnapshot(rootOrderId, rootRows, runMarketRows),
     tpStatus: buildTpStatus(rootRows, tpOrders),
+    forensic: buildForensicSummary(forensicEvents),
   };
 }
 
@@ -494,7 +565,7 @@ export async function getAutoScopeTradeAnalysisExtrasForRoots(
   const ids = Array.from(new Set(rootOrderIds.filter((id) => Number.isFinite(id) && id > 0)));
   if (ids.length === 0) return new Map();
 
-  const [rootRowsRes, runMarketRowsRes, guardEventsRes, telemetryEventsRes, tpOrdersRes] = await Promise.all([
+  const [rootRowsRes, runMarketRowsRes, guardEventsRes, telemetryEventsRes, tpOrdersRes, decisionLogsRes] = await Promise.all([
     pool.query<AnalysisExtraRowDb>(
       `SELECT
          root_builder_order_id,
@@ -587,6 +658,25 @@ export async function getAutoScopeTradeAnalysisExtrasForRoots(
          AND (exit_ladder_kind = 'tp' OR trigger_condition = 'cross_above')`,
       [userId, ids]
     ),
+    pool.query<DecisionLogEventDb>(
+      `SELECT
+         l.event_id::text,
+         l.event_type,
+         l.event_ts::text,
+         l.created_at::text,
+         l.decision_id,
+         l.sl_event_id,
+         l.fill_event_id,
+         l.order_id,
+         l.root_order_id,
+         l.payload
+       FROM bot_decision_logs l
+       JOIN trade_builder_orders o ON o.id::text = l.root_order_id
+       WHERE o.user_id = $1
+         AND l.root_order_id = ANY($2::text[])
+       ORDER BY l.root_order_id ASC, l.event_ts ASC, l.created_at ASC, l.id ASC`,
+      [userId, ids.map(String)]
+    ),
   ]);
 
   const rootRowsById = new Map<number, AnalysisExtraRowDb[]>();
@@ -620,6 +710,16 @@ export async function getAutoScopeTradeAnalysisExtrasForRoots(
     if (event.event_type === 'filled') fillByRootId.set(rootId, event.payload_json);
   }
 
+  const decisionLogsByRootId = new Map<number, AutoScopeTradeForensicEvent[]>();
+  for (const row of decisionLogsRes.rows) {
+    const rootId = Number(row.root_order_id);
+    if (!Number.isFinite(rootId)) continue;
+    decisionLogsByRootId.set(rootId, [
+      ...(decisionLogsByRootId.get(rootId) ?? []),
+      mapDecisionLogEvent(row),
+    ]);
+  }
+
   const extras = new Map<number, AutoScopeAnalysisExtra>();
   for (const rootId of ids) {
     const rootRows = rootRowsById.get(rootId) ?? [];
@@ -637,7 +737,8 @@ export async function getAutoScopeTradeAnalysisExtrasForRoots(
         buildExecutionTelemetry(
           submittedByRootId.get(rootId) ?? null,
           fillByRootId.get(rootId) ?? null
-        )
+        ),
+        decisionLogsByRootId.get(rootId) ?? []
       )
     );
   }

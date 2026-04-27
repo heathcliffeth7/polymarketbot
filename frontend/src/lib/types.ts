@@ -702,6 +702,7 @@ export interface AutoScopeTradeDiagnostic {
   executionTelemetry?: AutoScopeTradeExecutionTelemetry | null;
   positionSnapshot?: AutoScopeTradePositionSnapshot;
   tpStatus?: AutoScopeTradeTpStatus;
+  forensic?: AutoScopeTradeForensicSummary;
   updatedAt: string;
 }
 
@@ -760,6 +761,28 @@ export interface AutoScopeTradeExecutionTelemetry {
   fillSlippageVsVwap: number | null;
   fillSlippageVsBestAsk: number | null;
   fillSource: string | null;
+}
+
+export interface AutoScopeTradeForensicEvent {
+  eventId: string;
+  eventType: string;
+  eventTs: string;
+  createdAt: string;
+  decisionId: string | null;
+  slEventId: string | null;
+  fillEventId: string | null;
+  orderId: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface AutoScopeTradeForensicSummary {
+  entryDecision: Record<string, unknown> | null;
+  entryStopLossPlan: Record<string, unknown> | null;
+  orderLifecycle: AutoScopeTradeForensicEvent[];
+  stopLossTrigger: Record<string, unknown> | null;
+  postSlRecovery: Record<string, unknown> | null;
+  slClassification: Record<string, unknown> | null;
+  rawEvents: AutoScopeTradeForensicEvent[];
 }
 
 export interface AutoScopeTradePositionLegSnapshot {
@@ -896,6 +919,7 @@ export interface AutoScopeTradeAnalysisRow {
   executionTelemetry?: AutoScopeTradeExecutionTelemetry | null;
   positionSnapshot?: AutoScopeTradePositionSnapshot;
   tpStatus?: AutoScopeTradeTpStatus;
+  forensic?: AutoScopeTradeForensicSummary;
 }
 
 export interface AutoScopeTradeAnalysisSummary {

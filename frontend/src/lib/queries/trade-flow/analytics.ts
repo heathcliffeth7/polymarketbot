@@ -742,6 +742,30 @@ function csvPositionSnapshot(snapshot: AutoScopeTradePositionSnapshot | undefine
   return `before:${formatLeg(snapshot.before)} after:${formatLeg(snapshot.after)}`;
 }
 
+function csvJson(value: unknown): string {
+  if (value == null) return '';
+  return JSON.stringify(value);
+}
+
+function forensicPayload(
+  row: AutoScopeTradeAnalysisRow,
+  eventType: string
+): Record<string, unknown> | null {
+  return (
+    row.forensic?.rawEvents.find((event) => event.eventType === eventType)?.payload ??
+    null
+  );
+}
+
+function payloadValue(payload: Record<string, unknown> | null | undefined, path: string[]): unknown {
+  let current: unknown = payload;
+  for (const key of path) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return null;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current ?? null;
+}
+
 export function buildAutoScopeTradeAnalysisCsv(
   rows: AutoScopeTradeAnalysisRow[]
 ): string {
@@ -882,6 +906,133 @@ export function buildAutoScopeTradeAnalysisCsv(
         row.scenarioPnl?.worstUsdc ?? null,
       ]
         .map(csvField)
+        .join(',')
+    );
+  }
+
+  return `${lines.join('\n')}\n`;
+}
+
+export function buildAutoScopeTradeAnalysisForensicCsv(
+  rows: AutoScopeTradeAnalysisRow[]
+): string {
+  const headers = [
+    'workflow',
+    'definition_id',
+    'run_id',
+    'root_order_id',
+    'market_slug',
+    'outcome_label',
+    'decision_id',
+    'sl_event_id',
+    'entry_decision',
+    'entry_reason',
+    'entry_ptb_gap_now',
+    'entry_ptb_gap_slope_5s',
+    'entry_ptb_trend',
+    'entry_ptb_peak_last_30s',
+    'entry_ptb_drawdown_from_peak',
+    'entry_volume_regime',
+    'entry_volume_ratio',
+    'entry_shadow_would_block',
+    'entry_shadow_reason',
+    'entry_risk_tags',
+    'entry_risk_tag_values_json',
+    'entry_guard_breakdown_json',
+    'entry_stop_loss_plan_json',
+    'entry_config_json',
+    'entry_data_freshness_json',
+    'order_submitted_count',
+    'order_filled_count',
+    'order_expired_count',
+    'order_error_count',
+    'last_submit_payload_json',
+    'last_fill_payload_json',
+    'last_expire_payload_json',
+    'last_error_payload_json',
+    'sl_armed_payload_json',
+    'ptb_sl_trigger_payload_json',
+    'post_sl_check_10s_json',
+    'post_sl_check_30s_json',
+    'post_sl_market_end_json',
+    'post_sl_resolution_final_json',
+    'sl_classification',
+    'actual_sl_pnl',
+    'hold_to_resolution_pnl',
+    'entry_payload_json',
+    'sl_payload_json',
+    'raw_events_json',
+    'row_pnl_usdc',
+    'exit_reason',
+  ];
+  const lines = [headers.map(csvField).join(',')];
+
+  for (const row of rows) {
+    const events = row.forensic?.rawEvents ?? [];
+    const entry = forensicPayload(row, 'ENTRY_EVALUATED');
+    const submitted = forensicPayload(row, 'ORDER_SUBMITTED');
+    const filled = forensicPayload(row, 'ORDER_FILLED');
+    const expired = forensicPayload(row, 'ORDER_EXPIRED');
+    const errorPayload = forensicPayload(row, 'ORDER_ERROR');
+    const slArmed = forensicPayload(row, 'STOP_LOSS_ARMED');
+    const ptbSl = forensicPayload(row, 'PTB_STOP_LOSS_TRIGGERED');
+    const postChecks = events.filter((event) => event.eventType === 'POST_SL_CHECK');
+    const post10 = postChecks.find((event) => payloadValue(event.payload, ['check_after_s']) === 10)?.payload ?? null;
+    const post30 = postChecks.find((event) => payloadValue(event.payload, ['check_after_s']) === 30)?.payload ?? null;
+    const postEnd = forensicPayload(row, 'POST_SL_MARKET_END');
+    const postFinal = forensicPayload(row, 'POST_SL_RESOLUTION_FINAL');
+
+    lines.push(
+      [
+        row.definitionName ?? '',
+        row.definitionId,
+        row.runId,
+        row.rootOrderId,
+        row.marketSlug,
+        row.outcomeLabel,
+        row.forensic?.rawEvents[0]?.decisionId ?? null,
+        row.forensic?.rawEvents.find((event) => event.slEventId)?.slEventId ?? null,
+        payloadValue(entry, ['decision']),
+        payloadValue(entry, ['decision_reason']),
+        payloadValue(entry, ['ptb', 'gap_now']),
+        payloadValue(entry, ['ptb', 'slope_5s']),
+        payloadValue(entry, ['ptb', 'trend']),
+        payloadValue(entry, ['ptb', 'peak_last_30s']),
+        payloadValue(entry, ['ptb', 'drawdown_from_peak']),
+        payloadValue(entry, ['volume', 'polymarket', 'regime']),
+        payloadValue(entry, ['volume', 'polymarket', 'ratio']),
+        payloadValue(entry, ['guard_breakdown', 'shadow_volume_guard', 'would_block']),
+        payloadValue(entry, ['guard_breakdown', 'shadow_volume_guard', 'reason']),
+        csvJson(payloadValue(entry, ['risk_tags'])),
+        csvJson(payloadValue(entry, ['risk_tag_values'])),
+        csvJson(payloadValue(entry, ['guard_breakdown'])),
+        csvJson(payloadValue(entry, ['stop_loss_config_at_entry'])),
+        csvJson(payloadValue(entry, ['config'])),
+        csvJson(payloadValue(entry, ['data_freshness'])),
+        events.filter((event) => event.eventType === 'ORDER_SUBMITTED').length,
+        events.filter((event) => event.eventType === 'ORDER_FILLED').length,
+        events.filter((event) => event.eventType === 'ORDER_EXPIRED').length,
+        events.filter((event) => event.eventType === 'ORDER_ERROR').length,
+        csvJson(submitted),
+        csvJson(filled),
+        csvJson(expired),
+        csvJson(errorPayload),
+        csvJson(slArmed),
+        csvJson(ptbSl),
+        csvJson(post10),
+        csvJson(post30),
+        csvJson(postEnd),
+        csvJson(postFinal),
+        payloadValue(postFinal, ['sl_classification']),
+        payloadValue(postFinal, ['pnl_comparison', 'actual_sl_pnl']),
+        payloadValue(postFinal, ['pnl_comparison', 'hold_to_resolution_pnl']),
+        csvJson(entry),
+        csvJson(ptbSl ?? slArmed),
+        csvJson(events),
+        row.rowPnlUsdc,
+        row.exitReason,
+      ]
+        .map((value) => csvField(value == null ? null : String(value)))
         .join(',')
     );
   }

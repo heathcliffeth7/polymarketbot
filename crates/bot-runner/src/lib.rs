@@ -84,6 +84,7 @@ include!("trade_builder/order_expiry.rs");
 include!("trade_builder/trigger_sizes.rs");
 include!("trade_builder/submit_telemetry.rs");
 include!("trade_builder/sell_submit_prefetch.rs");
+include!("trade_builder/decision_logs.rs");
 include!("trade_builder/order_submit.rs");
 include!("trade_builder/cancel_reconcile.rs");
 include!("trade_builder/exit_ladders.rs");

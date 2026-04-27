@@ -103,6 +103,24 @@ async fn maybe_handle_trade_builder_order_eligibility_window(
                 }),
             )
             .await?;
+            trade_builder_spawn_decision_log(
+                repo,
+                order,
+                "ORDER_EXPIRED",
+                json!({
+                    "status_transition_id": format!("{}:outside_cycle_window", order.id),
+                    "side": &order.side,
+                    "kind": &order.kind,
+                    "reason": "outside_cycle_window",
+                    "time_alive_ms": Utc::now().signed_duration_since(order.created_at).num_milliseconds().max(0),
+                    "eligible_after_at": order.eligible_after_at.as_ref().map(|value| value.to_rfc3339()),
+                    "eligible_before_at": order.eligible_before_at.as_ref().map(|value| value.to_rfc3339()),
+                }),
+                TradeBuilderDecisionLogOptions {
+                    idempotency_key: Some(format!("ORDER_EXPIRED:{}:outside_cycle_window", order.id)),
+                    ..TradeBuilderDecisionLogOptions::default()
+                },
+            );
             maybe_send_order_not_filled_notification(
                 repo,
                 order,
@@ -327,6 +345,23 @@ async fn process_trade_builder_order(
                     &json!({ "expires_at": expires_at }),
                 )
                 .await?;
+                trade_builder_spawn_decision_log(
+                    repo,
+                    &order,
+                    "ORDER_EXPIRED",
+                    json!({
+                        "status_transition_id": format!("{}:ttl_expired", order.id),
+                        "side": &order.side,
+                        "kind": &order.kind,
+                        "reason": "ttl_expired",
+                        "expires_at": expires_at.to_rfc3339(),
+                        "time_alive_ms": Utc::now().signed_duration_since(order.created_at).num_milliseconds().max(0),
+                    }),
+                    TradeBuilderDecisionLogOptions {
+                        idempotency_key: Some(format!("ORDER_EXPIRED:{}:ttl_expired", order.id)),
+                        ..TradeBuilderDecisionLogOptions::default()
+                    },
+                );
                 maybe_send_order_not_filled_notification(
                     repo,
                     &order,
@@ -807,6 +842,17 @@ async fn process_trade_builder_order(
         ptb_stop_loss_evaluation.as_ref(),
     )
     .await?;
+    if let Some(evaluation) = ptb_stop_loss_evaluation
+        .as_ref()
+        .filter(|evaluation| evaluation.should_trigger)
+    {
+        trade_builder_spawn_ptb_stop_loss_triggered_log(
+            repo,
+            &order,
+            evaluation,
+            execution_price,
+        );
+    }
     if order.active_exchange_order_id.is_none() {
         let _ = maybe_dispatch_trade_builder_parallel_exit_batch(
             repo,

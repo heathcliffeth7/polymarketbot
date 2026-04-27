@@ -32,12 +32,14 @@ export {
 } from './auto-scope-analysis-extras';
 export {
   buildAutoScopeTradeAnalysisCsv,
+  buildAutoScopeTradeAnalysisForensicCsv,
   getAutoScopeTradeAnalysis,
   getAutoScopeTradeDiagnostic,
   getAutoScopeTradeAnalysisRowsForExport,
   getTradeFlowNodeRuntime,
   getTradeFlowPtbState,
 } from './analytics';
+export { buildDecisionLogsRawCsv } from './decision-logs';
 export {
   FLOW_DEFINITION_BUSY_CODE,
   FLOW_DEFINITION_BUSY_MESSAGE,

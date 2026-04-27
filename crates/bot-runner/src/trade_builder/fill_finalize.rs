@@ -557,14 +557,12 @@ async fn create_trade_builder_price_exit_child_order(
         sync_armed_builder_order_to_cache(child_order).await;
     }
 
-    repo.append_trade_builder_order_event(
-        parent_order.id,
-        if family == TRADE_BUILDER_EXIT_LADDER_KIND_TP {
-            "tp_sell_created"
-        } else {
-            "sl_sell_created"
-        },
-        &json!({
+    let child_event_type = if family == TRADE_BUILDER_EXIT_LADDER_KIND_TP {
+        "tp_sell_created"
+    } else {
+        "sl_sell_created"
+    };
+    let child_event_payload = json!({
             "child_order_id": child_id,
             "initial_status": "armed",
             "family": family,
@@ -581,9 +579,29 @@ async fn create_trade_builder_price_exit_child_order(
             } else {
                 None
             },
-        }),
-    )
-    .await?;
+    });
+    repo.append_trade_builder_order_event(parent_order.id, child_event_type, &child_event_payload)
+        .await?;
+    if family == TRADE_BUILDER_EXIT_LADDER_KIND_SL {
+        let sl_event_id = format!("sl:tb:{}:{child_id}", parent_order.id);
+        trade_builder_spawn_decision_log(
+            repo,
+            parent_order,
+            "STOP_LOSS_ARMED",
+            json!({
+                "sl_event_id": &sl_event_id,
+                "sl_child_order_id": child_id.to_string(),
+                "sl_type": "price",
+                "armed_config": child_event_payload,
+            }),
+            TradeBuilderDecisionLogOptions {
+                idempotency_key: Some(format!("STOP_LOSS_ARMED:{}:{child_id}", parent_order.id)),
+                sl_event_id: Some(sl_event_id),
+                child_order_id: Some(child_id.to_string()),
+                ..TradeBuilderDecisionLogOptions::default()
+            },
+        );
+    }
 
     Ok(Some(child_id))
 }
@@ -690,10 +708,7 @@ async fn create_trade_builder_ptb_stop_loss_child_order(
         sync_armed_builder_order_to_cache(child_order).await;
     }
 
-    repo.append_trade_builder_order_event(
-        parent_order.id,
-        "sl_sell_created",
-        &json!({
+    let child_event_payload = json!({
             "child_order_id": child_id,
             "initial_status": "armed",
             "family": exit_ladder_kind.unwrap_or(TRADE_BUILDER_EXIT_LADDER_KIND_SL),
@@ -706,9 +721,27 @@ async fn create_trade_builder_ptb_stop_loss_child_order(
             "execution_price": execution_price,
             "ptb_stop_loss_gap_usd": ptb_stop_loss_gap_usd,
             "ptb_reference_price": ptb_reference_price,
+    });
+    repo.append_trade_builder_order_event(parent_order.id, "sl_sell_created", &child_event_payload)
+        .await?;
+    let sl_event_id = format!("sl:tb:{}:{child_id}", parent_order.id);
+    trade_builder_spawn_decision_log(
+        repo,
+        parent_order,
+        "STOP_LOSS_ARMED",
+        json!({
+            "sl_event_id": &sl_event_id,
+            "sl_child_order_id": child_id.to_string(),
+            "sl_type": "ptb",
+            "armed_config": child_event_payload,
         }),
-    )
-    .await?;
+        TradeBuilderDecisionLogOptions {
+            idempotency_key: Some(format!("STOP_LOSS_ARMED:{}:{child_id}", parent_order.id)),
+            sl_event_id: Some(sl_event_id),
+            child_order_id: Some(child_id.to_string()),
+            ..TradeBuilderDecisionLogOptions::default()
+        },
+    );
 
     Ok(Some(child_id))
 }
@@ -980,6 +1013,34 @@ async fn finalize_builder_fill(
         .await?;
     repo.append_trade_builder_order_event(order.id, "filled", &filled_payload)
         .await?;
+    let fill_event_id = trade_builder_fill_event_id_for_order(order, exchange_order_id);
+    trade_builder_spawn_decision_log(
+        repo,
+        order,
+        "ORDER_FILLED",
+        json!({
+            "fill_event_id": &fill_event_id,
+            "fill_sequence_no": next_trigger_count,
+            "filled_qty_delta": actual_fill_qty.unwrap_or(canonical_entry_qty),
+            "cumulative_filled_qty": canonical_entry_qty,
+            "avg_fill_price": execution_price,
+            "exchange_order_id": exchange_order_id,
+            "raw_filled_payload": filled_payload,
+        }),
+        TradeBuilderDecisionLogOptions {
+            idempotency_key: Some(format!(
+                "ORDER_FILLED:{}:{}:{}:{}",
+                order.id,
+                exchange_order_id,
+                canonical_entry_qty,
+                next_trigger_count
+            )),
+            exchange_order_id: Some(exchange_order_id.to_string()),
+            fill_event_id: Some(fill_event_id),
+            event_ts: Some(Utc::now()),
+            ..TradeBuilderDecisionLogOptions::default()
+        },
+    );
 
     if let Some((notification_type, message)) = build_trade_builder_fill_notification(
         order,

@@ -11,26 +11,41 @@ async fn append_trade_builder_guard_diagnostics_event(
     effective_decision: &str,
     effective_reason_code: &str,
 ) -> Result<()> {
+    let order_event_payload = json!({
+        "market_slug": &order.market_slug,
+        "token_id": &order.token_id,
+        "outcome_label": &order.outcome_label,
+        "status_before": &order.status,
+        "current_price": current_price,
+        "desired_price": desired_price,
+        "best_ask": best_ask,
+        "trigger_price_guard": trigger_price_guard.clone(),
+        "execution_floor_guard": execution_floor_guard.clone(),
+        "max_price_guard": max_price_guard.clone(),
+        "effective_guard_scope": effective_guard_scope,
+        "effective_decision": effective_decision,
+        "effective_reason_code": effective_reason_code,
+    });
     repo.append_trade_builder_order_event(
         order.id,
         "guard_evaluated",
-        &json!({
-            "market_slug": &order.market_slug,
-            "token_id": &order.token_id,
-            "outcome_label": &order.outcome_label,
-            "status_before": &order.status,
-            "current_price": current_price,
-            "desired_price": desired_price,
-            "best_ask": best_ask,
-            "trigger_price_guard": trigger_price_guard,
-            "execution_floor_guard": execution_floor_guard,
-            "max_price_guard": max_price_guard,
-            "effective_guard_scope": effective_guard_scope,
-            "effective_decision": effective_decision,
-            "effective_reason_code": effective_reason_code,
-        }),
+        &order_event_payload,
     )
-    .await
+    .await?;
+    trade_builder_spawn_entry_evaluated_decision_log(
+        repo,
+        order,
+        current_price,
+        desired_price,
+        best_ask,
+        trigger_price_guard,
+        execution_floor_guard,
+        max_price_guard,
+        effective_guard_scope,
+        effective_decision,
+        effective_reason_code,
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -996,6 +1011,34 @@ async fn submit_trade_builder_trigger_order(
         Ok(ack) => ack,
         Err(err) => {
             let error_text = err.to_string();
+            trade_builder_spawn_decision_log(
+                repo,
+                order,
+                "ORDER_ERROR",
+                json!({
+                    "submit_attempt_no": order.triggers_fired + 1,
+                    "submit_status": "error",
+                    "error": &error_text,
+                    "side": &order.side,
+                    "kind": &order.kind,
+                    "intended_price": desired_price,
+                    "intended_qty": submit_size,
+                    "book_at_submit": {
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "estimated_avg_fill": desired_price
+                    }
+                }),
+                TradeBuilderDecisionLogOptions {
+                    idempotency_key: Some(format!(
+                        "ORDER_ERROR:{}:{}:{}",
+                        order.id,
+                        order.triggers_fired + 1,
+                        error_text.chars().take(48).collect::<String>()
+                    )),
+                    ..TradeBuilderDecisionLogOptions::default()
+                },
+            );
             if trade_builder_error_is_fatal_exchange_rejection(&error_text) {
                 repo.set_trade_builder_order_status(order.id, "error", Some(&error_text))
                     .await?;
@@ -1258,6 +1301,30 @@ async fn submit_trade_builder_trigger_order(
     }
     repo.append_trade_builder_order_event(order.id, "submitted", &raw)
         .await?;
+    trade_builder_spawn_decision_log(
+        repo,
+        order,
+        "ORDER_SUBMITTED",
+        json!({
+            "submit_attempt_no": order.triggers_fired + 1,
+            "submit_status": normalized_status,
+            "exchange_order_id": &exchange_order_id,
+            "client_order_id": &client_order_id,
+            "intended_price": desired_price,
+            "intended_qty": submit_size,
+            "book_at_submit": {
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "estimated_avg_fill": desired_price
+            },
+            "raw_submitted_payload": raw.clone(),
+        }),
+        TradeBuilderDecisionLogOptions {
+            idempotency_key: Some(format!("ORDER_SUBMITTED:{}:{}", order.id, order.triggers_fired + 1)),
+            exchange_order_id: Some(exchange_order_id.clone()),
+            ..TradeBuilderDecisionLogOptions::default()
+        },
+    );
     maybe_send_trade_builder_submitted_notification(
         repo,
         order,

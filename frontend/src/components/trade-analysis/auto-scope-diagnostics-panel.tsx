@@ -62,6 +62,15 @@ function formatPositionLeg(leg: {
   return `U ${formatQty(leg.upQty)} / D ${formatQty(leg.downQty)} / Cost ${formatUsdc(leg.costUsdc)} / Floor ${formatQty(leg.floorQty)} / ${formatPnl(leg.floorPnlUsdc)}`;
 }
 
+function forensicValue(payload: Record<string, unknown> | null | undefined, path: string[]): unknown {
+  let current: unknown = payload;
+  for (const key of path) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return null;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current ?? null;
+}
+
 export function AutoScopeDiagnosticsPanel({
   rootOrderId,
   onClose,
@@ -229,6 +238,129 @@ export function AutoScopeDiagnosticsPanel({
             <DetailMetric label="Worst Hold" value={formatPrice(diagnostic.worstPriceDuringHold)} />
             <DetailMetric label="Exit Score" value={formatScore(diagnostic.exitQualityScore)} />
           </div>
+
+          {diagnostic.forensic?.entryDecision && (
+            <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+              <p className="mb-2 text-xs font-medium text-zinc-200">Entry Decision</p>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <DetailMetric
+                  label="Decision"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, ['decision'])
+                  )}
+                />
+                <DetailMetric
+                  label="PTB Trend"
+                  value={`${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, ['ptb', 'trend'])
+                  )} / slope ${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, ['ptb', 'slope_5s'])
+                  )}`}
+                />
+                <DetailMetric
+                  label="Volume"
+                  value={`${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, [
+                      'volume',
+                      'polymarket',
+                      'regime',
+                    ])
+                  )} ${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, [
+                      'volume',
+                      'polymarket',
+                      'ratio',
+                    ])
+                  )}x`}
+                />
+                <DetailMetric
+                  label="Shadow Guard"
+                  value={`${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, [
+                      'guard_breakdown',
+                      'shadow_volume_guard',
+                      'would_block',
+                    ])
+                  )} / ${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, [
+                      'guard_breakdown',
+                      'shadow_volume_guard',
+                      'reason',
+                    ])
+                  )}`}
+                />
+                <DetailMetric
+                  label="Risk Tags"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, ['risk_tags'])
+                  )}
+                />
+                <DetailMetric
+                  label="Entry SL Plan"
+                  value={compactMetricValue(diagnostic.forensic.entryStopLossPlan)}
+                />
+              </div>
+            </div>
+          )}
+
+          {diagnostic.forensic && diagnostic.forensic.orderLifecycle.length > 0 && (
+            <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+              <p className="mb-2 text-xs font-medium text-zinc-200">Order Lifecycle</p>
+              <div className="space-y-2">
+                {diagnostic.forensic.orderLifecycle.slice(-6).map((event) => (
+                  <div
+                    key={event.eventId}
+                    className="grid gap-2 rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs md:grid-cols-4"
+                  >
+                    <span className="text-zinc-300">{event.eventType}</span>
+                    <span className="font-mono text-zinc-400">{formatDateTime(event.eventTs)}</span>
+                    <span className="font-mono text-zinc-400">order {event.orderId ?? '-'}</span>
+                    <span className="font-mono text-zinc-400">
+                      {compactMetricValue(
+                        forensicValue(event.payload, ['submit_status']) ??
+                          forensicValue(event.payload, ['reason']) ??
+                          forensicValue(event.payload, ['avg_fill_price'])
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(diagnostic.forensic?.stopLossTrigger || diagnostic.forensic?.postSlRecovery) && (
+            <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+              <p className="mb-2 text-xs font-medium text-zinc-200">Stop Loss / Recovery</p>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <DetailMetric
+                  label="SL Gap"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.stopLossTrigger, ['sl', 'ptb_gap_sl'])
+                  )}
+                />
+                <DetailMetric
+                  label="SL Fill"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.stopLossTrigger, ['sl', 'sl_fill_price'])
+                  )}
+                />
+                <DetailMetric
+                  label="Post-SL Check"
+                  value={`${compactMetricValue(
+                    forensicValue(diagnostic.forensic.postSlRecovery, ['check_after_s'])
+                  )}s / catch-up ${compactMetricValue(
+                    forensicValue(diagnostic.forensic.postSlRecovery, ['catch_up'])
+                  )}`}
+                />
+                <DetailMetric
+                  label="Classification"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.slClassification, ['sl_classification'])
+                  )}
+                />
+              </div>
+            </div>
+          )}
 
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
             <DetailMetric label="Open > Trigger" value={formatDuration(diagnostic.openToTriggerMs)} />

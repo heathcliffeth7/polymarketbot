@@ -236,6 +236,22 @@ export function AutoScopeAnalysisTable() {
     document.body.removeChild(a);
   }
 
+  function exportForensicCsv() {
+    const a = document.createElement('a');
+    a.href = `/api/trade-flow/analytics/auto-scope/export/full?${exportQuery}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  function exportDecisionLogsCsv() {
+    const a = document.createElement('a');
+    a.href = `/api/trade-flow/analytics/auto-scope/decision-logs/export?${exportQuery}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
   function exportNoOrderCsv() {
     const a = document.createElement('a');
     a.href = `/api/trade-flow/analytics/auto-scope/no-order/export?${exportQuery}`;
@@ -270,6 +286,27 @@ export function AutoScopeAnalysisTable() {
             >
               <Download className="size-4" />
               CSV
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-zinc-700 text-zinc-200"
+              disabled={total === 0}
+              onClick={exportForensicCsv}
+            >
+              <Download className="size-4" />
+              Full CSV
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-zinc-700 text-zinc-200"
+              onClick={exportDecisionLogsCsv}
+            >
+              <Download className="size-4" />
+              Raw Logs
             </Button>
             <Button
               type="button"

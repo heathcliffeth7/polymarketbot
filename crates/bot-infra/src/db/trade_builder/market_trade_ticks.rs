@@ -62,6 +62,8 @@ impl PostgresRepository {
                 COALESCE(SUM(notional_usdc) FILTER (WHERE event_ts >= $2), 0.0)::DOUBLE PRECISION AS volume_10s, \
                 COALESCE(SUM(notional_usdc) FILTER (WHERE event_ts >= $3), 0.0)::DOUBLE PRECISION AS volume_30s, \
                 COALESCE(SUM(notional_usdc) FILTER (WHERE event_ts >= $4), 0.0)::DOUBLE PRECISION AS volume_60s, \
+                COUNT(*) FILTER (WHERE event_ts >= $2)::BIGINT AS trade_count_10s, \
+                COUNT(*) FILTER (WHERE event_ts >= $3)::BIGINT AS trade_count_30s, \
                 COUNT(*) FILTER (WHERE event_ts >= $4)::BIGINT AS trade_count_60s \
              FROM market_trade_ticks \
              WHERE market_slug = $1 AND event_ts >= $4 AND event_ts <= $5",
@@ -78,6 +80,8 @@ impl PostgresRepository {
             volume_10s: row.get::<f64, _>("volume_10s").max(0.0),
             volume_30s: row.get::<f64, _>("volume_30s").max(0.0),
             volume_60s: row.get::<f64, _>("volume_60s").max(0.0),
+            trade_count_10s: row.get("trade_count_10s"),
+            trade_count_30s: row.get("trade_count_30s"),
             trade_count_60s: row.get("trade_count_60s"),
         })
     }
