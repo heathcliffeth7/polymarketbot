@@ -235,10 +235,12 @@ fn biased_hedge_default_iv_time_rule(
     node: &TradeFlowNode,
     config: &ActionPlaceOrderBiasedHedgeConfig,
     market_slug: &str,
+    entry_start_sec_override: Option<i64>,
 ) -> Option<Value> {
     let scope = find_updown_scope_by_slug(market_slug)?;
     let window_seconds = updown_scope_window_seconds(scope).max(1);
-    let entry_start_sec = BIASED_HEDGE_DEFAULT_ENTRY_START_SEC
+    let entry_start_sec = entry_start_sec_override
+        .unwrap_or(BIASED_HEDGE_DEFAULT_ENTRY_START_SEC)
         .max(0)
         .min(window_seconds.saturating_sub(1));
     let entry_end_sec = config
@@ -262,15 +264,37 @@ fn biased_hedge_default_iv_time_rule(
     })
 }
 
+fn biased_hedge_trigger_cycle_start_sec(
+    graph: Option<&TradeFlowGraphRuntime>,
+    trigger_node_key: Option<&str>,
+) -> Option<i64> {
+    let graph = graph?;
+    let trigger_node_key = trigger_node_key?;
+    graph
+        .nodes
+        .iter()
+        .find(|node| node.key == trigger_node_key && node.node_type == "trigger.market_price")
+        .and_then(|node| node_config_i64(node, "cycleWindowStartSec"))
+        .filter(|value| *value >= 0)
+}
+
 fn apply_biased_hedge_early_iv_time_rule(
     node: &mut TradeFlowNode,
     config: &ActionPlaceOrderBiasedHedgeConfig,
     market_slug: &str,
+    graph: Option<&TradeFlowGraphRuntime>,
+    trigger_node_key: Option<&str>,
 ) {
     if biased_hedge_has_explicit_iv_time_rules(node) {
         return;
     }
-    let Some(rule) = biased_hedge_default_iv_time_rule(node, config, market_slug) else {
+    let entry_start_sec_override = biased_hedge_trigger_cycle_start_sec(graph, trigger_node_key);
+    let Some(rule) = biased_hedge_default_iv_time_rule(
+        node,
+        config,
+        market_slug,
+        entry_start_sec_override,
+    ) else {
         return;
     };
     if let Some(map) = node.config.as_object_mut() {
@@ -920,7 +944,13 @@ async fn execute_action_place_order_pair_lock_biased_hedge_strategy(
     if let Some(map) = eval_node.config.as_object_mut() {
         map.insert("sizeUsdc".to_string(), json!(config.primary_budget_usdc));
     }
-    apply_biased_hedge_early_iv_time_rule(&mut eval_node, &config, &market_slug);
+    apply_biased_hedge_early_iv_time_rule(
+        &mut eval_node,
+        &config,
+        &market_slug,
+        Some(graph),
+        Some(trigger_node_key),
+    );
     let ptb_runtime =
         crate::trade_flow::guards::price_to_beat::PriceToBeatGuardRuntimeContext::pair_lock_auto_primary(
             repo,

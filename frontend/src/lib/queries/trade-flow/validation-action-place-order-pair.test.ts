@@ -230,6 +230,13 @@ test('validateActionPlaceOrderConfig accepts biased_hedge_v1 smoke config', () =
   assert.equal(issues.length, 0);
 });
 
+test('validateActionPlaceOrderConfig accepts biased_hedge_v1 15s early window', () => {
+  const graph = buildBiasedHedgeGraph({}, { cycleWindowStartSec: 15, cycleWindowEndSec: 180 });
+
+  const issues = collectActionIssues(graph, 'pair_buy_biased');
+  assert.equal(issues.length, 0);
+});
+
 test('validateActionPlaceOrderConfig accepts biased_hedge_v1 explicit early IV time rule', () => {
   const graph = buildBiasedHedgeGraph({
     priceToBeatIvTimeRules: [
@@ -242,6 +249,26 @@ test('validateActionPlaceOrderConfig accepts biased_hedge_v1 explicit early IV t
       },
     ],
   });
+
+  const issues = collectActionIssues(graph, 'pair_buy_biased');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig accepts biased_hedge_v1 explicit 15s IV time rule', () => {
+  const graph = buildBiasedHedgeGraph(
+    {
+      priceToBeatIvTimeRules: [
+        {
+          startRemainingSec: 285,
+          endRemainingSec: 120,
+          maxPriceCent: 75,
+          minEdge: 0.08,
+          minGapStrength: 0,
+        },
+      ],
+    },
+    { cycleWindowStartSec: 15, cycleWindowEndSec: 180 }
+  );
 
   const issues = collectActionIssues(graph, 'pair_buy_biased');
   assert.equal(issues.length, 0);

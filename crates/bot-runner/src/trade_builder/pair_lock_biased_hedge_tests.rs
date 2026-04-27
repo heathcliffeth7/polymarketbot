@@ -87,6 +87,21 @@ mod pair_lock_biased_hedge_tests {
         }
     }
 
+    fn biased_test_trigger_graph(cycle_window_start_sec: i64) -> TradeFlowGraphRuntime {
+        TradeFlowGraphRuntime {
+            context: json!({}),
+            nodes: vec![TradeFlowNode {
+                key: "trigger_biased".to_string(),
+                node_type: "trigger.market_price".to_string(),
+                config: json!({
+                    "cycleWindowStartSec": cycle_window_start_sec,
+                    "cycleWindowEndSec": 180,
+                }),
+            }],
+            edges: Vec::new(),
+        }
+    }
+
     #[test]
     fn biased_hedge_injects_early_iv_time_rule_when_missing() {
         let config = biased_test_config();
@@ -98,6 +113,8 @@ mod pair_lock_biased_hedge_tests {
             &mut node,
             &config,
             "btc-updown-5m-1777315200",
+            None,
+            None,
         );
 
         let rules = node
@@ -110,6 +127,33 @@ mod pair_lock_biased_hedge_tests {
         assert_eq!(rules[0].get("endRemainingSec").and_then(Value::as_i64), Some(120));
         assert_eq!(rules[0].get("minEdge").and_then(Value::as_f64), Some(0.08));
         assert_eq!(rules[0].get("minGapStrength").and_then(Value::as_i64), Some(0));
+    }
+
+    #[test]
+    fn biased_hedge_derives_iv_time_rule_from_trigger_cycle_start() {
+        let config = biased_test_config();
+        let graph = biased_test_trigger_graph(15);
+        let mut node = biased_test_node(json!({
+            "biasedHedge": { "maxPriceCent": 75 },
+        }));
+
+        apply_biased_hedge_early_iv_time_rule(
+            &mut node,
+            &config,
+            "btc-updown-5m-1777315200",
+            Some(&graph),
+            Some("trigger_biased"),
+        );
+
+        let rules = node
+            .config
+            .get("priceToBeatIvTimeRules")
+            .and_then(Value::as_array)
+            .expect("default rule should be injected");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].get("startRemainingSec").and_then(Value::as_i64), Some(285));
+        assert_eq!(rules[0].get("endRemainingSec").and_then(Value::as_i64), Some(120));
+        assert_eq!(rules[0].get("minEdge").and_then(Value::as_f64), Some(0.08));
     }
 
     #[test]
@@ -130,6 +174,8 @@ mod pair_lock_biased_hedge_tests {
             &mut node,
             &config,
             "btc-updown-5m-1777315200",
+            None,
+            None,
         );
 
         assert_eq!(
