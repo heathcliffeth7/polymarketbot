@@ -8,7 +8,7 @@ Bu klasör Polymarket botunun trade flow, guard, pair lock, çıkış, analiz ve
 
 1. [node-ozellikleri.md](./node-ozellikleri.md) - kısa node index'i.
 2. [yeni-ozellikler.md](./yeni-ozellikler.md) - son eklenen özelliklerin özet changelog'u.
-3. [teori-ve-zor-problemler.md](./teori-ve-zor-problemler.md) - botun karar zinciri için ispat, karşı örnek ve güçlü teori sonuçları.
+3. [gecmis-islem-kanitlari.md](./gecmis-islem-kanitlari.md) - botun kendi eski işlem kayıtlarından çalışma kanıtları.
 4. [senaryolar/01-market-dongusu-ve-auto-scope.md](./senaryolar/01-market-dongusu-ve-auto-scope.md) - 5 dakikalık market ve auto-scope temeli.
 5. [senaryolar/02-giris-trigger-ve-zamanlama.md](./senaryolar/02-giris-trigger-ve-zamanlama.md) - trigger, entry timing ve fiyat tetikleri.
 6. [senaryolar/03-emir-gonderimi-sizing-ve-fill.md](./senaryolar/03-emir-gonderimi-sizing-ve-fill.md) - order üretimi, sizing, fill lock.
@@ -35,7 +35,7 @@ Bu klasör Polymarket botunun trade flow, guard, pair lock, çıkış, analiz ve
 | PTB iyi mi, pahalı mı, IV edge ne diyor? | [04-ptb-guard-ve-iv-mismatch.md](./senaryolar/04-ptb-guard-ve-iv-mismatch.md) |
 | Çok SL sonrası bot niye daha seçici oldu? | [05-ptb-bump-ve-max-price-relax.md](./senaryolar/05-ptb-bump-ve-max-price-relax.md) |
 | Pair lock neden tek bacak açtı veya hiç açmadı? | [07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) |
-| Botun kararının ispatı veya karşı örneği lazım | [teori-ve-zor-problemler.md](./teori-ve-zor-problemler.md) |
+| Botun eski işlemlerden kanıtı lazım | [gecmis-islem-kanitlari.md](./gecmis-islem-kanitlari.md) |
 | Telegram mesajında hangi alan ne demek? | [09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) |
 | Config örneği lazım | [config-receteleri.md](./ornekler/config-receteleri.md) |
 
@@ -68,7 +68,7 @@ Operatör için amaç teori değil, doğru teşhistir. "Order yok" demeden önce
 ### Strateji Tasarlayan
 
 1. [10-volatility-capture-stratejileri.md](./senaryolar/10-volatility-capture-stratejileri.md) ile stratejinin EV risklerini oku.
-2. [teori-ve-zor-problemler.md](./teori-ve-zor-problemler.md) ile "bu karar ispatlanabilir mi, yoksa karşı örnek mi var?" sorusunu kur.
+2. [gecmis-islem-kanitlari.md](./gecmis-islem-kanitlari.md) ile gerçek işlem kayıtlarının ne söylediğini oku.
 3. Entry kalitesi için [02-giris-trigger-ve-zamanlama.md](./senaryolar/02-giris-trigger-ve-zamanlama.md) ve [04-ptb-guard-ve-iv-mismatch.md](./senaryolar/04-ptb-guard-ve-iv-mismatch.md) dosyalarını birlikte değerlendir.
 4. Exit kalitesi için [06-tp-sl-time-exit-ve-reentry.md](./senaryolar/06-tp-sl-time-exit-ve-reentry.md) dosyasını kullan.
 5. Çift taraflı strateji için [07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) dosyasındaki tek bacak ve lock risklerini kontrol et.

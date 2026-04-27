@@ -15,14 +15,14 @@ Bu dosya `botunözellikleri/` altındaki yeni dokümantasyonun hangi repo içi n
 | [problemler/vol-capture-sorunlar.md](../problemler/vol-capture-sorunlar.md) | Volatility capture stratejisi, tek taraf dolma, likidite, pencere riski |
 | [yapılcak/yapılacak.md](../yapılcak/yapılacak.md) | `iv_mismatch_edge`, pairlock exit ve V1 karar akışı |
 
-## Teori Kaynakları
+## İşlem Verisi Kaynakları
 
 | Kaynak | Bu sette kullanıldığı yer |
 |---|---|
-| [Wolfers/Zitzewitz - Prediction Markets, 2004](https://users.nber.org/~jwolfers/papers/Predictionmarkets.pdf) | Market fiyatını olasılık sinyali gibi okumanın gücü ve sınırları |
-| [Wolfers/Zitzewitz - Interpreting Prediction Market Prices as Probabilities, 2006](https://www.nber.org/papers/w12200.pdf) | Prediction market fiyatlarının ortalama inanca yakınlığı ve sapma koşulları |
-| [Hanson - Logarithmic Market Scoring Rules, 2002](https://hanson.gmu.edu/mktscore.pdf) | Market scoring, consensus estimate ve bilgi toplama mantığı |
-| [Kelly - A New Interpretation of Information Rate, 1956](https://www.princeton.edu/~wbialek/rome/refs/kelly_56.pdf) | Edge, sizing ve log-growth ilişkisi |
+| `trade_flow_auto_scope_trade_diagnostics` | Son 30 gün root trade PnL, diagnosis, entry/exit kalite özeti |
+| `trade_flow_auto_scope_analysis_rows` | TP/SL/open position satırları, row PnL ve exit reason ayrımı |
+| `trade_builder_order_events` | Guard, submit, fill, TP/SL child ve pair lock event kanıtları |
+| `trade_builder_orders` | Order status, side, kind ve lifecycle dağılımı |
 
 ## Kod Referansları
 
