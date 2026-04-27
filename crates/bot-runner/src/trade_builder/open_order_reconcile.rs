@@ -133,6 +133,47 @@ async fn maybe_handle_latched_stop_loss_terminal_status(
     Ok(true)
 }
 
+async fn suppress_trade_builder_buy_ioc_reprice(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    exchange_order_id: &str,
+    normalized: &str,
+    remaining_usdc: Option<f64>,
+    remaining_qty: Option<f64>,
+    desired_price: f64,
+) -> Result<()> {
+    repo.clear_trade_builder_active_exchange_order(order.id, "completed")
+        .await?;
+    repo.append_trade_builder_order_event(
+        order.id,
+        "buy_ioc_reprice_suppressed_pending_resolution",
+        &json!({
+            "exchange_order_id": exchange_order_id,
+            "status_before": normalized,
+            "status_after": "completed",
+            "side": &order.side,
+            "execution_mode": &order.execution_mode,
+            "order_type": clob_order_type_for_execution_mode(
+                normalize_trade_builder_execution_mode(&order.execution_mode)
+            ),
+            "remaining_usdc": remaining_usdc,
+            "remaining_qty": remaining_qty,
+            "desired_price": desired_price,
+            "reason_code": "parent_buy_ioc_no_confirmed_fill_after_cancel",
+            "reason_message": "Parent buy IOC reprice suppressed to avoid duplicate exposure while fill data can lag.",
+        }),
+    )
+    .await?;
+    maybe_send_order_not_filled_notification(
+        repo,
+        order,
+        "parent_buy_ioc_no_confirmed_fill_after_cancel",
+        "Buy IOC emri iptal sonrasi kesin fill gostermedigi icin tekrar alis basilmadi.",
+    )
+    .await;
+    Ok(())
+}
+
 async fn reconcile_trade_builder_open_order(
     repo: &PostgresRepository,
     run_id: i64,
@@ -219,6 +260,44 @@ async fn reconcile_trade_builder_open_order(
         .await?
         {
             return Ok(());
+        }
+        if trade_builder_should_track_buy_inventory_observation(&order) {
+            let (remaining_usdc, _) =
+                estimate_remaining_trade_builder_sizing(&order, &order_info, current_price);
+            let desired_price = order.working_price.unwrap_or(current_price);
+            match reconcile_trade_builder_post_cancel_buy_fill(
+                repo,
+                cfg,
+                client,
+                ws,
+                &mut order,
+                exchange_order_id,
+                &order_info,
+                normalized,
+                current_price,
+                remaining_usdc,
+                desired_price,
+            )
+            .await?
+            {
+                TradeBuilderPostCancelBuyOutcome::Finalized => return Ok(()),
+                TradeBuilderPostCancelBuyOutcome::NoFill
+                    if trade_builder_should_suppress_buy_ioc_reprice(&order) =>
+                {
+                    suppress_trade_builder_buy_ioc_reprice(
+                        repo,
+                        &order,
+                        exchange_order_id,
+                        normalized,
+                        remaining_usdc,
+                        None,
+                        desired_price,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                TradeBuilderPostCancelBuyOutcome::NoFill => {}
+            }
         }
         let next_status =
             if order.kind == "conditional" && order.triggers_fired < order.max_triggers {
@@ -710,7 +789,6 @@ async fn reconcile_trade_builder_open_order(
 
     match client.cancel(exchange_order_id).await {
         Ok(()) => {
-            let mut cancel_recorded = false;
             if trade_builder_should_track_buy_inventory_observation(&order) {
                 match reconcile_trade_builder_post_cancel_buy_fill(
                     repo,
@@ -728,22 +806,10 @@ async fn reconcile_trade_builder_open_order(
                 .await?
                 {
                     TradeBuilderPostCancelBuyOutcome::Finalized => return Ok(()),
-                    TradeBuilderPostCancelBuyOutcome::RepriceRemainder {
-                        remaining_usdc: next_remaining_usdc,
-                        remaining_qty: next_remaining_qty,
-                        size: next_size,
-                    } => {
-                        cancel_recorded = true;
-                        remaining_usdc = next_remaining_usdc;
-                        remaining_qty = next_remaining_qty;
-                        size = next_size;
-                    }
                     TradeBuilderPostCancelBuyOutcome::NoFill => {}
                 }
             }
-            if !cancel_recorded {
-                repo.mark_order_status(exchange_order_id, "canceled").await?;
-            }
+            repo.mark_order_status(exchange_order_id, "canceled").await?;
         }
         Err(err) => {
             let error_text = err.to_string();
@@ -806,6 +872,20 @@ async fn reconcile_trade_builder_open_order(
                 "failed to cancel builder order before reprice: {exchange_order_id}"
             ));
         }
+    }
+
+    if trade_builder_should_suppress_buy_ioc_reprice(&order) {
+        suppress_trade_builder_buy_ioc_reprice(
+            repo,
+            &order,
+            exchange_order_id,
+            normalized,
+            remaining_usdc,
+            remaining_qty,
+            desired_price,
+        )
+        .await?;
+        return Ok(());
     }
 
     let market_spec =

@@ -1,6 +1,25 @@
 use super::super::*;
 
 impl PostgresRepository {
+    pub async fn get_trade_builder_buy_inventory_baseline_qty(
+        &self,
+        parent_builder_order_id: i64,
+    ) -> Result<Option<f64>> {
+        let row = sqlx::query(
+            "SELECT baseline_visible_qty \
+             FROM trade_builder_inventory_observations \
+             WHERE parent_builder_order_id = $1 \
+               AND observation_kind = 'buy_inventory_baseline' \
+             ORDER BY created_at DESC \
+             LIMIT 1",
+        )
+        .bind(parent_builder_order_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        Ok(row.and_then(|row| row.get("baseline_visible_qty")))
+    }
+
     pub async fn insert_trade_builder_inventory_observation_if_absent(
         &self,
         observation: &TradeBuilderInventoryObservationInput,

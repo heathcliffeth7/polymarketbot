@@ -1,3 +1,4 @@
+#[cfg(test)]
 fn trade_builder_detected_cancel_fill_qty(
     api_filled_size: Option<f64>,
     db_fill_qty: f64,
@@ -6,9 +7,60 @@ fn trade_builder_detected_cancel_fill_qty(
         .or_else(|| normalize_trade_builder_terminal_fill_qty_candidate(Some(db_fill_qty)))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TradeBuilderCancelFillDetection {
+    qty: f64,
+    source: &'static str,
+}
+
+fn trade_builder_detected_visible_inventory_fill_qty(
+    baseline_visible_qty: Option<f64>,
+    actual_visible_qty: Option<f64>,
+) -> Option<f64> {
+    let baseline_qty = normalize_trade_builder_visible_inventory_qty(baseline_visible_qty)?;
+    let actual_qty = normalize_trade_builder_visible_inventory_qty(actual_visible_qty)?;
+    let delta = round_trade_builder_share_qty((actual_qty - baseline_qty).max(0.0));
+    (delta > TRADE_BUILDER_EXIT_QTY_TOLERANCE).then_some(delta)
+}
+
+fn trade_builder_detected_cancel_fill(
+    api_filled_size: Option<f64>,
+    db_fill_qty: f64,
+    visible_inventory_fill_qty: Option<f64>,
+) -> Option<TradeBuilderCancelFillDetection> {
+    if let Some(qty) = normalize_trade_builder_terminal_fill_qty_candidate(api_filled_size) {
+        return Some(TradeBuilderCancelFillDetection {
+            qty,
+            source: TradeBuilderTerminalFillQtySource::OrderInfoFilledSize.as_str(),
+        });
+    }
+    if let Some(qty) = normalize_trade_builder_terminal_fill_qty_candidate(Some(db_fill_qty)) {
+        return Some(TradeBuilderCancelFillDetection {
+            qty,
+            source: "db_aggregate",
+        });
+    }
+    visible_inventory_fill_qty.map(|qty| TradeBuilderCancelFillDetection {
+        qty,
+        source: "visible_inventory_delta",
+    })
+}
+
+fn trade_builder_cancel_fill_canonical_entry_qty(
+    order: &TradeBuilderOrder,
+    fill_qty: f64,
+) -> Option<(f64, &'static str)> {
+    if let Some(cumulative_fill_qty) = trade_builder_cumulative_fill_qty(order, Some(fill_qty)) {
+        return Some((cumulative_fill_qty, "cumulative_fill_qty"));
+    }
+
+    normalize_trade_builder_terminal_fill_qty_candidate(Some(fill_qty))
+        .map(|qty| (qty, "actual_fill_qty"))
+}
+
 fn trade_builder_detected_cancel_fill_notional(
     db_fill_notional: f64,
-    detected_fill_qty: Option<f64>,
+    detection: Option<TradeBuilderCancelFillDetection>,
     post_cancel_price: Option<f64>,
     working_price: Option<f64>,
     current_price: f64,
@@ -18,15 +70,7 @@ fn trade_builder_detected_cancel_fill_notional(
     }
 
     let fallback_price = post_cancel_price.or(working_price).unwrap_or(current_price);
-    detected_fill_qty.unwrap_or(0.0) * fallback_price
-}
-
-fn trade_builder_cancel_fill_detection_source(api_filled_size: Option<f64>) -> &'static str {
-    if api_filled_size.is_some() {
-        TradeBuilderTerminalFillQtySource::OrderInfoFilledSize.as_str()
-    } else {
-        "db_aggregate"
-    }
+    detection.map(|fill| fill.qty).unwrap_or(0.0) * fallback_price
 }
 
 fn trade_builder_cancel_fill_is_full(
@@ -53,11 +97,14 @@ fn trade_builder_remaining_usdc_after_partial_fill(
 enum TradeBuilderPostCancelBuyOutcome {
     NoFill,
     Finalized,
-    RepriceRemainder {
-        remaining_usdc: Option<f64>,
-        remaining_qty: Option<f64>,
-        size: f64,
-    },
+}
+
+fn trade_builder_should_suppress_buy_ioc_reprice(order: &TradeBuilderOrder) -> bool {
+    trade_builder_should_track_buy_inventory_observation(order)
+        && clob_order_type_for_execution_mode(normalize_trade_builder_execution_mode(
+            &order.execution_mode,
+        ))
+        .eq_ignore_ascii_case("IOC")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -72,7 +119,7 @@ async fn reconcile_trade_builder_post_cancel_buy_fill(
     normalized: &str,
     current_price: f64,
     remaining_usdc: Option<f64>,
-    desired_price: f64,
+    _desired_price: f64,
 ) -> Result<TradeBuilderPostCancelBuyOutcome> {
     let post_cancel_info = client.status(exchange_order_id).await;
     let api_filled_size = post_cancel_info
@@ -84,19 +131,59 @@ async fn reconcile_trade_builder_post_cancel_buy_fill(
         .aggregate_fill_metrics_by_exchange_order_id(exchange_order_id)
         .await
         .unwrap_or((0.0, 0.0));
-    let detected_fill_qty = trade_builder_detected_cancel_fill_qty(api_filled_size, db_fill_qty);
-    let detection_source = trade_builder_cancel_fill_detection_source(api_filled_size);
+    let visible_inventory_fill_qty = match repo
+        .get_trade_builder_buy_inventory_baseline_qty(order.id)
+        .await
+    {
+        Ok(baseline_visible_qty) => {
+            let actual_visible_qty = match client.available_token_qty(&order.token_id).await {
+                Ok(quantity) => normalize_trade_builder_visible_inventory_read(quantity),
+                Err(err) => {
+                    repo.append_trade_builder_order_event(
+                        order.id,
+                        "post_cancel_visible_inventory_check_failed",
+                        &json!({
+                            "exchange_order_id": exchange_order_id,
+                            "error": err.to_string(),
+                        }),
+                    )
+                    .await?;
+                    None
+                }
+            };
+            trade_builder_detected_visible_inventory_fill_qty(
+                baseline_visible_qty,
+                actual_visible_qty,
+            )
+        }
+        Err(err) => {
+            repo.append_trade_builder_order_event(
+                order.id,
+                "post_cancel_visible_inventory_baseline_failed",
+                &json!({
+                    "exchange_order_id": exchange_order_id,
+                    "error": err.to_string(),
+                }),
+            )
+            .await?;
+            None
+        }
+    };
+    let detected_fill =
+        trade_builder_detected_cancel_fill(api_filled_size, db_fill_qty, visible_inventory_fill_qty);
     let detected_fill_notional = trade_builder_detected_cancel_fill_notional(
         db_fill_notional,
-        detected_fill_qty,
+        detected_fill,
         post_cancel_info.as_ref().ok().and_then(|info| info.price),
         order.working_price,
         current_price,
     );
 
-    let Some(fill_qty) = detected_fill_qty else {
+    let Some(detected_fill) = detected_fill else {
         return Ok(TradeBuilderPostCancelBuyOutcome::NoFill);
     };
+    let fill_qty = detected_fill.qty;
+    let detection_source = detected_fill.source;
 
     let effective_info = post_cancel_info.as_ref().ok().unwrap_or(order_info);
     let effective_status = post_cancel_info
@@ -106,7 +193,7 @@ async fn reconcile_trade_builder_post_cancel_buy_fill(
         .unwrap_or("canceled");
     if trade_builder_cancel_fill_is_full(effective_status, order_info.size, fill_qty) {
         let (canonical_entry_qty, canonical_entry_qty_source) =
-            trade_builder_canonical_entry_qty(order, Some(fill_qty)).ok_or_else(|| {
+            trade_builder_cancel_fill_canonical_entry_qty(order, fill_qty).ok_or_else(|| {
                 anyhow::anyhow!(
                     "builder order canonical fill qty unresolved for exchange_order_id={exchange_order_id}"
                 )
@@ -183,35 +270,25 @@ async fn reconcile_trade_builder_post_cancel_buy_fill(
         }),
     )
     .await?;
-    let size = calc_level_size(new_remaining_usdc, desired_price);
-    if size <= 0.0 {
-        let (canonical_entry_qty, canonical_entry_qty_source) =
-            trade_builder_canonical_entry_qty(order, Some(fill_qty)).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "builder order canonical fill qty unresolved for exchange_order_id={exchange_order_id}"
-                )
-            })?;
-        finalize_builder_fill(
-            repo,
-            cfg,
-            ws,
-            order,
-            exchange_order_id,
-            canonical_entry_qty,
-            canonical_entry_qty_source,
-            Some(fill_qty),
-            execution_price,
-            false,
-            Some(detection_source),
-        )
-        .await?;
-        return Ok(TradeBuilderPostCancelBuyOutcome::Finalized);
-    }
-
-    order.filled_qty = cumulative_filled_qty;
-    Ok(TradeBuilderPostCancelBuyOutcome::RepriceRemainder {
-        remaining_usdc: Some(new_remaining_usdc),
-        remaining_qty: None,
-        size,
-    })
+    let (canonical_entry_qty, canonical_entry_qty_source) =
+        trade_builder_cancel_fill_canonical_entry_qty(order, fill_qty).ok_or_else(|| {
+            anyhow::anyhow!(
+                "builder order canonical fill qty unresolved for exchange_order_id={exchange_order_id}"
+            )
+        })?;
+    finalize_builder_fill(
+        repo,
+        cfg,
+        ws,
+        order,
+        exchange_order_id,
+        canonical_entry_qty,
+        canonical_entry_qty_source,
+        Some(fill_qty),
+        execution_price,
+        false,
+        Some(detection_source),
+    )
+    .await?;
+    Ok(TradeBuilderPostCancelBuyOutcome::Finalized)
 }

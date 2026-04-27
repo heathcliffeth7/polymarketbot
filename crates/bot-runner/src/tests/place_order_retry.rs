@@ -465,19 +465,75 @@ fn post_cancel_fill_qty_falls_back_to_db_aggregate() {
 }
 
 #[test]
-fn post_cancel_fill_notional_prefers_db_then_price_fallback() {
+fn post_cancel_fill_detection_uses_visible_inventory_delta_last() {
     assert_eq!(
-        trade_builder_detected_cancel_fill_notional(4.91, Some(5.81), Some(0.83), Some(0.86), 0.9),
+        trade_builder_detected_visible_inventory_fill_qty(Some(2.0), Some(10.006)),
+        Some(8.01)
+    );
+    assert_eq!(
+        trade_builder_detected_cancel_fill(None, 0.0, Some(8.01)),
+        Some(TradeBuilderCancelFillDetection {
+            qty: 8.01,
+            source: "visible_inventory_delta"
+        })
+    );
+    assert_eq!(
+        trade_builder_detected_cancel_fill(Some(5.811), 0.0, Some(8.01)),
+        Some(TradeBuilderCancelFillDetection {
+            qty: 5.81,
+            source: TradeBuilderTerminalFillQtySource::OrderInfoFilledSize.as_str()
+        })
+    );
+}
+
+#[test]
+fn post_cancel_fill_canonical_qty_prefers_detected_actual_over_submitted_dynamic() {
+    let mut order = test_builder_order("buy", None);
+    order.tp_enabled = true;
+    order.submitted_dynamic_qty = Some(11.11);
+
+    assert_eq!(
+        trade_builder_cancel_fill_canonical_entry_qty(&order, 8.0),
+        Some((8.0, "actual_fill_qty"))
+    );
+}
+
+#[test]
+fn parent_buy_ioc_reprice_is_suppressed_for_exit_tracked_buys() {
+    let mut order = test_builder_order("buy", None);
+    order.kind = "immediate".to_string();
+    order.execution_mode = "market".to_string();
+    order.tp_enabled = true;
+
+    assert!(trade_builder_should_suppress_buy_ioc_reprice(&order));
+
+    order.tp_enabled = false;
+    order.sl_enabled = false;
+    assert!(!trade_builder_should_suppress_buy_ioc_reprice(&order));
+
+    let mut sell_order = test_builder_order("sell", Some(1));
+    sell_order.execution_mode = "market".to_string();
+    assert!(!trade_builder_should_suppress_buy_ioc_reprice(&sell_order));
+}
+
+#[test]
+fn post_cancel_fill_notional_prefers_db_then_price_fallback() {
+    let detection = Some(TradeBuilderCancelFillDetection {
+        qty: 5.81,
+        source: "db_aggregate",
+    });
+    assert_eq!(
+        trade_builder_detected_cancel_fill_notional(4.91, detection, Some(0.83), Some(0.86), 0.9),
         4.91
     );
     assert!(
-        (trade_builder_detected_cancel_fill_notional(0.0, Some(5.81), Some(0.83), Some(0.86), 0.9)
+        (trade_builder_detected_cancel_fill_notional(0.0, detection, Some(0.83), Some(0.86), 0.9)
             - 4.8223)
             .abs()
             < 0.000001
     );
     assert!(
-        (trade_builder_detected_cancel_fill_notional(0.0, Some(5.81), None, Some(0.86), 0.9)
+        (trade_builder_detected_cancel_fill_notional(0.0, detection, None, Some(0.86), 0.9)
             - 4.9966)
             .abs()
             < 0.000001
