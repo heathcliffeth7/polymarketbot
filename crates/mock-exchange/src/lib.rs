@@ -155,14 +155,15 @@ async fn post_order(
             "salt",
             "maker",
             "signer",
+            "taker",
             "tokenId",
             "makerAmount",
             "takerAmount",
             "side",
+            "expiration",
+            "nonce",
+            "feeRateBps",
             "signatureType",
-            "timestamp",
-            "metadata",
-            "builder",
             "signature",
         ];
         let missing_fields = required_fields
@@ -180,7 +181,7 @@ async fn post_order(
             )
                 .into_response();
         }
-        let forbidden_fields = ["nonce", "feeRateBps", "taker"]
+        let forbidden_fields = ["timestamp", "metadata", "builder"]
             .iter()
             .copied()
             .filter(|field| order.get(field).is_some())
@@ -189,14 +190,14 @@ async fn post_order(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "error": "legacy CLOB fields are not accepted in V2 orders",
+                    "error": "unsupported CLOB order fields",
                     "fields": forbidden_fields
                 })),
             )
                 .into_response();
         }
 
-        // V2 EIP-712 format: { "order": { "tokenId", "side", "makerAmount", "takerAmount", ... }, "owner", "orderType" }
+        // EIP-712 format: { "order": { "tokenId", "side", "makerAmount", "takerAmount", ... }, "owner", "orderType" }
         let token_id = order
             .get("tokenId")
             .and_then(|v| v.as_str())

@@ -18,7 +18,6 @@ pub struct ClobHttpClient {
     api_key: String,
     gnosis_safe: Option<Address>,
     builder_code_hex: String,
-    builder_code: [u8; 32],
     market_info_by_condition: Arc<Mutex<HashMap<String, ClobMarketInfo>>>,
     market_condition_by_token: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -42,9 +41,9 @@ impl ClobHttpClient {
         let domain_separator = domain_separator_for_exchange(chain_id, exchange_address);
         let neg_risk_domain_separator = neg_risk_exchange_address
             .map(|address| domain_separator_for_exchange(chain_id, address));
-        let builder_code =
-            parse_bytes32_hex(builder_code.as_deref().unwrap_or_default()).unwrap_or([0u8; 32]);
-        let builder_code_hex = bytes32_to_hex(builder_code);
+        let builder_code_hex = bytes32_to_hex(
+            parse_bytes32_hex(builder_code.as_deref().unwrap_or_default()).unwrap_or([0u8; 32]),
+        );
         Self {
             base_url,
             positions_base_url,
@@ -62,7 +61,6 @@ impl ClobHttpClient {
             api_key,
             gnosis_safe,
             builder_code_hex,
-            builder_code,
             market_info_by_condition: Arc::new(Mutex::new(HashMap::new())),
             market_condition_by_token: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -216,9 +214,6 @@ pub(super) fn build_place_order_body(
     taker_amount: U256,
     side_str: &str,
     sig_type: u64,
-    order_timestamp: U256,
-    metadata: [u8; 32],
-    builder_code_hex: &str,
     signature: &str,
     owner: &str,
     normalized_order_type: &str,
@@ -229,20 +224,20 @@ pub(super) fn build_place_order_body(
             "salt": salt_u64,
             "maker": maker_str,
             "signer": signer_str,
+            "taker": "0x0000000000000000000000000000000000000000",
             "tokenId": token_id.to_string(),
             "makerAmount": maker_amount.to_string(),
             "takerAmount": taker_amount.to_string(),
             "side": side_str,
             "expiration": "0",
+            "nonce": "0",
+            "feeRateBps": fee_rate_bps.to_string(),
             "signatureType": sig_type as i64,
-            "timestamp": order_timestamp.to_string(),
-            "metadata": bytes32_to_hex(metadata),
-            "builder": builder_code_hex,
             "signature": signature,
         },
         "owner": owner,
         "orderType": normalized_order_type,
-        "feeRateBps": fee_rate_bps.to_string(),
+        "deferExec": false,
     })
 }
 
@@ -651,8 +646,6 @@ impl ClobRestClient for ClobHttpClient {
         };
 
         let effective_exchange_address = self.effective_exchange_address(req.neg_risk);
-        let order_timestamp = U256::from(unix_now_millis()? as u64);
-        let metadata = [0u8; 32];
         let sign_started = std::time::Instant::now();
         let signature = match sign_order_eip712_with_domain_separator(
             &self.wallet,
@@ -664,10 +657,8 @@ impl ClobRestClient for ClobHttpClient {
             maker_amount,
             taker_amount,
             side_u8,
+            req.fee_rate_bps,
             sig_type,
-            order_timestamp,
-            metadata,
-            self.builder_code,
         ) {
             Ok(signature) => signature,
             Err(err) => {
@@ -705,9 +696,6 @@ impl ClobRestClient for ClobHttpClient {
             taker_amount,
             side_str,
             sig_type,
-            order_timestamp,
-            metadata,
-            &self.builder_code_hex,
             &signature,
             &self.api_key,
             normalized_order_type,
@@ -721,10 +709,10 @@ impl ClobRestClient for ClobHttpClient {
             maker_amount = %maker_amount,
             taker_amount = %taker_amount,
             salt = %salt,
-            timestamp = %order_timestamp,
             maker = %maker_str,
             signer = %signer_str,
             sig_type,
+            fee_rate_bps = req.fee_rate_bps,
             builder = %self.builder_code_hex,
             exchange = %effective_exchange_address,
             chain_id = self.chain_id,

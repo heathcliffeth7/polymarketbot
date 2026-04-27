@@ -363,7 +363,7 @@ fn fee_rate_parser_preserves_existing_fee_rate_fields() {
 }
 
 #[test]
-fn place_order_body_includes_top_level_fee_rate_bps() {
+fn place_order_body_includes_signed_order_fee_rate_bps() {
     let body = build_place_order_body(
         1,
         "0x0000000000000000000000000000000000000000",
@@ -373,16 +373,23 @@ fn place_order_body_includes_top_level_fee_rate_bps() {
         U256::from(789_u64),
         "BUY",
         0,
-        U256::from(1_000_u64),
-        [0u8; 32],
-        "0x0000000000000000000000000000000000000000",
         "0xsignature",
         "api-key",
         "IOC",
         1_000,
     );
 
-    assert_eq!(body.get("feeRateBps").and_then(Value::as_str), Some("1000"));
+    let order = body.get("order").expect("order");
+    assert_eq!(
+        order.get("feeRateBps").and_then(Value::as_str),
+        Some("1000")
+    );
+    assert_eq!(order.get("nonce").and_then(Value::as_str), Some("0"));
+    assert_eq!(
+        order.get("taker").and_then(Value::as_str),
+        Some("0x0000000000000000000000000000000000000000")
+    );
+    assert!(body.get("feeRateBps").is_none());
     assert_eq!(body.get("owner").and_then(Value::as_str), Some("api-key"));
     assert_eq!(body.get("orderType").and_then(Value::as_str), Some("IOC"));
 }

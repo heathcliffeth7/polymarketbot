@@ -1,6 +1,6 @@
 use crate::signer::{
-    domain_separator_for_exchange, sign_order_eip712_with_domain_separator, unix_now_millis,
-    unix_now_secs, ApiCredentials, ClobHeaderSigner, HeaderSigner,
+    domain_separator_for_exchange, sign_order_eip712_with_domain_separator, unix_now_secs,
+    ApiCredentials, ClobHeaderSigner, HeaderSigner,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;

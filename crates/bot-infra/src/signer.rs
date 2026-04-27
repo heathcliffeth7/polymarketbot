@@ -163,9 +163,10 @@ pub fn unix_now_millis() -> Result<i64> {
     Ok(now.as_millis() as i64)
 }
 
-const ORDER_TYPE_STR: &str = "Order(uint256 salt,address maker,address signer,\
+const ORDER_TYPE_STR: &str = "Order(uint256 salt,address maker,address signer,address taker,\
      uint256 tokenId,uint256 makerAmount,uint256 takerAmount,\
-     uint8 side,uint8 signatureType,uint256 timestamp,bytes32 metadata,bytes32 builder)";
+     uint256 expiration,uint256 nonce,uint256 feeRateBps,\
+     uint8 side,uint8 signatureType)";
 
 const DOMAIN_TYPE_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
@@ -174,7 +175,7 @@ static ORDER_TYPE_HASH: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256(ORDER_TY
 static DOMAIN_TYPE_HASH: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256(DOMAIN_TYPE_STR));
 static DOMAIN_NAME_HASH: LazyLock<[u8; 32]> =
     LazyLock::new(|| keccak256("Polymarket CTF Exchange"));
-static DOMAIN_VERSION_HASH: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("2"));
+static DOMAIN_VERSION_HASH: LazyLock<[u8; 32]> = LazyLock::new(|| keccak256("1"));
 
 pub fn domain_separator_for_exchange(chain_id: u64, exchange_address: Address) -> [u8; 32] {
     keccak256(encode(&[
@@ -196,24 +197,24 @@ pub fn sign_order_eip712_with_domain_separator(
     maker_amount: U256,
     taker_amount: U256,
     side: u8,
+    fee_rate_bps: u64,
     sig_type: u64,
-    timestamp: U256,
-    metadata: [u8; 32],
-    builder: [u8; 32],
 ) -> Result<String> {
+    let zero_addr = Address::zero();
     let struct_hash: [u8; 32] = keccak256(encode(&[
         Token::FixedBytes(ORDER_TYPE_HASH.to_vec()),
         Token::Uint(salt),
         Token::Address(maker),
         Token::Address(signer),
+        Token::Address(zero_addr),
         Token::Uint(token_id),
         Token::Uint(maker_amount),
         Token::Uint(taker_amount),
+        Token::Uint(U256::zero()),
+        Token::Uint(U256::zero()),
+        Token::Uint(U256::from(fee_rate_bps)),
         Token::Uint(U256::from(side as u64)),
         Token::Uint(U256::from(sig_type)),
-        Token::Uint(timestamp),
-        Token::FixedBytes(metadata.to_vec()),
-        Token::FixedBytes(builder.to_vec()),
     ]));
 
     let mut digest_input = [0u8; 66];
@@ -253,10 +254,8 @@ pub fn sign_order_eip712(
     maker_amount: U256,
     taker_amount: U256,
     side: u8,
+    fee_rate_bps: u64,
     sig_type: u64,
-    timestamp: U256,
-    metadata: [u8; 32],
-    builder: [u8; 32],
 ) -> Result<String> {
     sign_order_eip712_with_domain_separator(
         wallet,
@@ -268,10 +267,8 @@ pub fn sign_order_eip712(
         maker_amount,
         taker_amount,
         side,
+        fee_rate_bps,
         sig_type,
-        timestamp,
-        metadata,
-        builder,
     )
 }
 
@@ -364,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_domain_separator_signing_matches_v2_signing() {
+    fn cached_domain_separator_signing_matches_direct_signing() {
         let wallet = "0000000000000000000000000000000000000000000000000000000000000001"
             .parse::<LocalWallet>()
             .unwrap();
@@ -375,9 +372,7 @@ mod tests {
         let token_id = U256::from(4u64);
         let maker_amount = U256::from(5u64);
         let taker_amount = U256::from(6u64);
-        let timestamp = U256::from(1_713_398_400_000u64);
-        let metadata = [0u8; 32];
-        let builder = [0u8; 32];
+        let fee_rate_bps = 1000;
 
         let direct = sign_order_eip712(
             &wallet,
@@ -390,10 +385,8 @@ mod tests {
             maker_amount,
             taker_amount,
             0,
+            fee_rate_bps,
             2,
-            timestamp,
-            metadata,
-            builder,
         )
         .unwrap();
         let cached = sign_order_eip712_with_domain_separator(
@@ -406,10 +399,8 @@ mod tests {
             maker_amount,
             taker_amount,
             0,
+            fee_rate_bps,
             2,
-            timestamp,
-            metadata,
-            builder,
         )
         .unwrap();
 
