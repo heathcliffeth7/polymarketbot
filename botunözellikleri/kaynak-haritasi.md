@@ -1,6 +1,6 @@
 # Kaynak Haritası
 
-Güncelleme tarihi: 2026-04-26
+Güncelleme tarihi: 2026-04-27
 
 Bu dosya `botunözellikleri/` altındaki yeni dokümantasyonun hangi repo içi notlardan ve kod alanlarından derlendiğini gösterir.
 
@@ -15,6 +15,15 @@ Bu dosya `botunözellikleri/` altındaki yeni dokümantasyonun hangi repo içi n
 | [problemler/vol-capture-sorunlar.md](../problemler/vol-capture-sorunlar.md) | Volatility capture stratejisi, tek taraf dolma, likidite, pencere riski |
 | [yapılcak/yapılacak.md](../yapılcak/yapılacak.md) | `iv_mismatch_edge`, pairlock exit ve V1 karar akışı |
 
+## Teori Kaynakları
+
+| Kaynak | Bu sette kullanıldığı yer |
+|---|---|
+| [Wolfers/Zitzewitz - Prediction Markets, 2004](https://users.nber.org/~jwolfers/papers/Predictionmarkets.pdf) | Market fiyatını olasılık sinyali gibi okumanın gücü ve sınırları |
+| [Wolfers/Zitzewitz - Interpreting Prediction Market Prices as Probabilities, 2006](https://www.nber.org/papers/w12200.pdf) | Prediction market fiyatlarının ortalama inanca yakınlığı ve sapma koşulları |
+| [Hanson - Logarithmic Market Scoring Rules, 2002](https://hanson.gmu.edu/mktscore.pdf) | Market scoring, consensus estimate ve bilgi toplama mantığı |
+| [Kelly - A New Interpretation of Information Rate, 1956](https://www.princeton.edu/~wbialek/rome/refs/kelly_56.pdf) | Edge, sizing ve log-growth ilişkisi |
+
 ## Kod Referansları
 
 | Alan | Kod bölgesi |
@@ -23,9 +32,11 @@ Bu dosya `botunözellikleri/` altındaki yeni dokümantasyonun hangi repo içi n
 | Entry timing | `crates/bot-runner/src/trade_flow/triggers/market_price_entry_timing.rs` |
 | PTB guard | `crates/bot-runner/src/trade_flow/guards/price_to_beat.rs` |
 | `iv_mismatch_edge` runtime config | `crates/bot-runner/src/trade_flow/guards/price_to_beat/iv_mismatch_runtime_config.rs` |
+| `iv_mismatch_edge` edge/cost/threshold kararı | `crates/bot-runner/src/trade_flow/guards/price_to_beat/iv_mismatch_edge.rs` |
 | Max price relax | `crates/bot-runner/src/trade_flow/guards/price_to_beat/max_price_relax/` |
 | PTB stop-loss bump | `crates/bot-runner/src/trade_builder/ptb_stop_loss_bump.rs` |
 | PTB stop-loss | `crates/bot-runner/src/trade_builder/ptb_stop_loss.rs` |
+| `edge_pairlock_v1` karar sırası | `crates/bot-runner/src/trade_builder/pair_lock_edge_strategy.rs` |
 | Pair lock validation | `frontend/src/lib/queries/trade-flow/validation-action-place-order-pair.ts` |
 | PTB bump/relax validation | `frontend/src/lib/queries/trade-flow/validation-action-place-order-ptb-bump.ts` |
 | PTB V2 validation | `frontend/src/lib/queries/trade-flow/validation-action-place-order-ptb-v2.ts` |
