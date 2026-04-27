@@ -14,6 +14,8 @@ Bu dosya `botunözellikleri/` altındaki yeni dokümantasyonun hangi repo içi n
 | [problemler/sl-ve-giris-kalite-analizi.md](../problemler/sl-ve-giris-kalite-analizi.md) | TP/SL sonucu, re-entry riski, giriş kalitesi, fee/buffer etkisi |
 | [problemler/vol-capture-sorunlar.md](../problemler/vol-capture-sorunlar.md) | Volatility capture stratejisi, tek taraf dolma, likidite, pencere riski |
 | [yapılcak/yapılacak.md](../yapılcak/yapılacak.md) | `iv_mismatch_edge`, pairlock exit ve V1 karar akışı |
+| [olympusx_analysis/generated/reverse_v2/jetfadil_taktik_tek_dosya.md](../../olympusx_analysis/generated/reverse_v2/jetfadil_taktik_tek_dosya.md) | OlympusX/JetFadil pattern, ROI ve başarısızlık dersleri |
+| [olympusx_analysis/generated/reverse_v2/detailed_tactic_report.md](../../olympusx_analysis/generated/reverse_v2/detailed_tactic_report.md) | Dominant share, late spend, high price chase ve subpattern ayrımı |
 
 ## İşlem Verisi Kaynakları
 

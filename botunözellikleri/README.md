@@ -9,16 +9,17 @@ Bu klasör Polymarket botunun trade flow, guard, pair lock, çıkış, analiz ve
 1. [node-ozellikleri.md](./node-ozellikleri.md) - kısa node index'i.
 2. [yeni-ozellikler.md](./yeni-ozellikler.md) - son eklenen özelliklerin özet changelog'u.
 3. [gecmis-islem-kanitlari.md](./gecmis-islem-kanitlari.md) - botun kendi eski işlem kayıtlarından çalışma kanıtları.
-4. [senaryolar/01-market-dongusu-ve-auto-scope.md](./senaryolar/01-market-dongusu-ve-auto-scope.md) - 5 dakikalık market ve auto-scope temeli.
-5. [senaryolar/02-giris-trigger-ve-zamanlama.md](./senaryolar/02-giris-trigger-ve-zamanlama.md) - trigger, entry timing ve fiyat tetikleri.
-6. [senaryolar/03-emir-gonderimi-sizing-ve-fill.md](./senaryolar/03-emir-gonderimi-sizing-ve-fill.md) - order üretimi, sizing, fill lock.
-7. [senaryolar/04-ptb-guard-ve-iv-mismatch.md](./senaryolar/04-ptb-guard-ve-iv-mismatch.md) - PTB guard ve `iv_mismatch_edge`.
-8. [senaryolar/05-ptb-bump-ve-max-price-relax.md](./senaryolar/05-ptb-bump-ve-max-price-relax.md) - stop-loss sonrası bump ve relax.
-9. [senaryolar/06-tp-sl-time-exit-ve-reentry.md](./senaryolar/06-tp-sl-time-exit-ve-reentry.md) - TP, SL, time exit, re-entry.
-10. [senaryolar/07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) - pair lock ve `edge_pairlock_v1`.
-11. [senaryolar/08-risk-guardlari-ve-hata-durumlari.md](./senaryolar/08-risk-guardlari-ve-hata-durumlari.md) - risk, retry ve block akışları.
-12. [senaryolar/09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) - bildirim, event ve analiz ekranları.
-13. [senaryolar/10-volatility-capture-stratejileri.md](./senaryolar/10-volatility-capture-stratejileri.md) - strateji riskleri ve EV senaryoları.
+4. [olympusx-dersleri-bot-neden-basarisiz.md](./olympusx-dersleri-bot-neden-basarisiz.md) - OlympusX/JetFadil analizinden botun başarısızlık nedenleri.
+5. [senaryolar/01-market-dongusu-ve-auto-scope.md](./senaryolar/01-market-dongusu-ve-auto-scope.md) - 5 dakikalık market ve auto-scope temeli.
+6. [senaryolar/02-giris-trigger-ve-zamanlama.md](./senaryolar/02-giris-trigger-ve-zamanlama.md) - trigger, entry timing ve fiyat tetikleri.
+7. [senaryolar/03-emir-gonderimi-sizing-ve-fill.md](./senaryolar/03-emir-gonderimi-sizing-ve-fill.md) - order üretimi, sizing, fill lock.
+8. [senaryolar/04-ptb-guard-ve-iv-mismatch.md](./senaryolar/04-ptb-guard-ve-iv-mismatch.md) - PTB guard ve `iv_mismatch_edge`.
+9. [senaryolar/05-ptb-bump-ve-max-price-relax.md](./senaryolar/05-ptb-bump-ve-max-price-relax.md) - stop-loss sonrası bump ve relax.
+10. [senaryolar/06-tp-sl-time-exit-ve-reentry.md](./senaryolar/06-tp-sl-time-exit-ve-reentry.md) - TP, SL, time exit, re-entry.
+11. [senaryolar/07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) - pair lock ve `edge_pairlock_v1`.
+12. [senaryolar/08-risk-guardlari-ve-hata-durumlari.md](./senaryolar/08-risk-guardlari-ve-hata-durumlari.md) - risk, retry ve block akışları.
+13. [senaryolar/09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) - bildirim, event ve analiz ekranları.
+14. [senaryolar/10-volatility-capture-stratejileri.md](./senaryolar/10-volatility-capture-stratejileri.md) - strateji riskleri ve EV senaryoları.
 
 ## Klasörler
 
@@ -36,6 +37,7 @@ Bu klasör Polymarket botunun trade flow, guard, pair lock, çıkış, analiz ve
 | Çok SL sonrası bot niye daha seçici oldu? | [05-ptb-bump-ve-max-price-relax.md](./senaryolar/05-ptb-bump-ve-max-price-relax.md) |
 | Pair lock neden tek bacak açtı veya hiç açmadı? | [07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) |
 | Botun eski işlemlerden kanıtı lazım | [gecmis-islem-kanitlari.md](./gecmis-islem-kanitlari.md) |
+| Bot neden başarısız oluyor? | [olympusx-dersleri-bot-neden-basarisiz.md](./olympusx-dersleri-bot-neden-basarisiz.md) |
 | Telegram mesajında hangi alan ne demek? | [09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) |
 | Config örneği lazım | [config-receteleri.md](./ornekler/config-receteleri.md) |
 
@@ -69,9 +71,10 @@ Operatör için amaç teori değil, doğru teşhistir. "Order yok" demeden önce
 
 1. [10-volatility-capture-stratejileri.md](./senaryolar/10-volatility-capture-stratejileri.md) ile stratejinin EV risklerini oku.
 2. [gecmis-islem-kanitlari.md](./gecmis-islem-kanitlari.md) ile gerçek işlem kayıtlarının ne söylediğini oku.
-3. Entry kalitesi için [02-giris-trigger-ve-zamanlama.md](./senaryolar/02-giris-trigger-ve-zamanlama.md) ve [04-ptb-guard-ve-iv-mismatch.md](./senaryolar/04-ptb-guard-ve-iv-mismatch.md) dosyalarını birlikte değerlendir.
-4. Exit kalitesi için [06-tp-sl-time-exit-ve-reentry.md](./senaryolar/06-tp-sl-time-exit-ve-reentry.md) dosyasını kullan.
-5. Çift taraflı strateji için [07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) dosyasındaki tek bacak ve lock risklerini kontrol et.
+3. [olympusx-dersleri-bot-neden-basarisiz.md](./olympusx-dersleri-bot-neden-basarisiz.md) ile OlympusX derslerini botun kayıp nedenleriyle karşılaştır.
+4. Entry kalitesi için [02-giris-trigger-ve-zamanlama.md](./senaryolar/02-giris-trigger-ve-zamanlama.md) ve [04-ptb-guard-ve-iv-mismatch.md](./senaryolar/04-ptb-guard-ve-iv-mismatch.md) dosyalarını birlikte değerlendir.
+5. Exit kalitesi için [06-tp-sl-time-exit-ve-reentry.md](./senaryolar/06-tp-sl-time-exit-ve-reentry.md) dosyasını kullan.
+6. Çift taraflı strateji için [07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) dosyasındaki tek bacak ve lock risklerini kontrol et.
 
 Strateji tasarımında en sık hata tek bir guard'ı "kâr makinesi" gibi görmektir. Guard'lar sadece kötü girişleri azaltır; fill kalitesi, fee, depth ve exit davranışı hâlâ sonucu belirler.
 
