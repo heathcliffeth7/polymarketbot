@@ -75,11 +75,13 @@ pub(super) async fn maybe_record_trade_flow_auto_tune_market(
             repo,
             client,
             &run_spec.context,
+            &node_spec.node_key,
             market_slug,
             &node_spec.token_id,
             &node_spec.outcome_label,
             window_end_at,
             &summary,
+            &events,
             &action_steps,
         )
         .await;

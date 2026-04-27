@@ -16,6 +16,7 @@ include!("lib_parts/part_011.rs");
 include!("trade_flow/repeat_step_input.rs");
 include!("lib_parts/part_012.rs");
 include!("trade_flow/cycle_window_timers.rs");
+include!("trade_flow/missed_market_timeline.rs");
 include!("trade_flow/missed_market_no_order_diagnosis.rs");
 include!("trade_flow/missed_market_notifications.rs");
 mod auto_tune {

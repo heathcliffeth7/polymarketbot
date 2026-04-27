@@ -694,6 +694,131 @@ fn trade_flow_missed_market_summary_uses_ptb_gate_event() {
 }
 
 #[test]
+fn missed_market_timeline_reports_rotation_trigger_action_and_ptb_source() {
+    let market_start = DateTime::parse_from_rfc3339("2026-04-27T23:15:00Z")
+        .expect("timestamp")
+        .with_timezone(&Utc);
+    let market_slug = "btc-updown-5m-1777331700";
+    let token_id = "token-up";
+    let output = json!({
+        "reason": "pair_lock_primary_guard_waiting",
+        "blocked": true,
+        "market_slug": market_slug,
+        "yes_candidate_guard": {
+            "passed": false,
+            "decision": "waiting",
+            "reason_code": "price_to_beat_gap_below_threshold",
+            "token_id": token_id,
+            "outcome_label": "Up",
+            "price_to_beat_guard": {
+                "passed": false,
+                "decision": "waiting",
+                "reason_code": "price_to_beat_gap_below_threshold",
+                "price_to_beat": 77034.80604610911,
+                "price_to_beat_status": "rtds_live",
+                "price_to_beat_source": "chainlink_rtds_start_tick",
+                "price_to_beat_source_latency_ms": 1000,
+                "current_price": 77034.226,
+                "directional_gap": -0.5800461091130273,
+                "threshold_usd": 5.0
+            }
+        }
+    });
+    let events = vec![
+        TradeFlowEventRecord {
+            run_id: 7,
+            event_type: "trigger_auto_scope_market_rotated".to_string(),
+            payload_json: json!({
+                "node_key": "trigger_market",
+                "new_market_slug": market_slug,
+                "expected_market_start": market_start.to_rfc3339(),
+                "rotation_detected_at": (market_start + ChronoDuration::milliseconds(920)).to_rfc3339(),
+                "rotation_lag_ms": 920,
+                "selection_reason": "in_window"
+            }),
+            created_at: market_start + ChronoDuration::milliseconds(920),
+        },
+        TradeFlowEventRecord {
+            run_id: 7,
+            event_type: "trigger_ws_price_enqueued".to_string(),
+            payload_json: json!({
+                "node_key": "trigger_market",
+                "market_slug": market_slug,
+                "token_id": token_id,
+                "queued_at": (market_start + ChronoDuration::milliseconds(1_800)).to_rfc3339()
+            }),
+            created_at: market_start + ChronoDuration::milliseconds(1_800),
+        },
+    ];
+    let steps = vec![TradeFlowRunStep {
+        id: 1,
+        run_id: 7,
+        node_key: "action_1".to_string(),
+        node_type: "action.place_order".to_string(),
+        status: "completed".to_string(),
+        attempt: 1,
+        input_json: None,
+        output_json: Some(output.clone()),
+        error_text: None,
+        started_at: Some(market_start + ChronoDuration::milliseconds(2_000)),
+        ended_at: Some(market_start + ChronoDuration::milliseconds(2_050)),
+        available_at: market_start + ChronoDuration::milliseconds(1_950),
+        parent_step_id: None,
+        idempotency_key: None,
+        created_at: market_start + ChronoDuration::milliseconds(1_950),
+    }];
+    let summary =
+        no_fill_summary_from_action_place_order_output(&output, token_id, "Up").expect("summary");
+    let timeline = build_no_order_market_timeline_payload(NoOrderMarketTimelineContext {
+        node_key: "trigger_market",
+        market_slug,
+        token_id,
+        outcome_label: "Up",
+        window_end_at: market_start + ChronoDuration::minutes(5),
+        summary: &summary,
+        events: &events,
+        action_steps: &steps,
+    });
+
+    assert_eq!(
+        timeline.get("rotation_lag_ms").and_then(Value::as_i64),
+        Some(920)
+    );
+    assert_eq!(
+        timeline.get("first_trigger_lag_ms").and_then(Value::as_i64),
+        Some(1_800)
+    );
+    assert_eq!(
+        timeline.get("first_action_lag_ms").and_then(Value::as_i64),
+        Some(2_000)
+    );
+    assert_eq!(
+        timeline
+            .get("first_ptb_guard_source")
+            .and_then(Value::as_str),
+        Some("chainlink_rtds_start_tick")
+    );
+    assert_eq!(
+        timeline
+            .get("first_ptb_guard_status")
+            .and_then(Value::as_str),
+        Some("rtds_live")
+    );
+    assert_eq!(
+        timeline
+            .get("first_action_blocker_code")
+            .and_then(Value::as_str),
+        Some("price_to_beat_gap_below_threshold")
+    );
+    assert_eq!(
+        timeline
+            .get("no_order_primary_reason")
+            .and_then(Value::as_str),
+        Some("ptb_gap_below_threshold")
+    );
+}
+
+#[test]
 fn action_place_order_output_summary_uses_target_pair_lock_candidate() {
     let output = json!({
         "reason": "pair_lock_primary_guard_waiting",

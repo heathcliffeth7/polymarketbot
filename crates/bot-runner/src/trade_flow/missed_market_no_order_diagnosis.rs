@@ -795,11 +795,13 @@ async fn build_missed_market_no_order_diagnosis_payload(
     repo: &PostgresRepository,
     client: Option<&dyn OrderExecutor>,
     run_context: &Value,
+    node_key: &str,
     market_slug: &str,
     token_id: &str,
     outcome_label: &str,
     window_end_at: DateTime<Utc>,
     summary: &TradeBuilderNoFillReasonSummary,
+    events: &[TradeFlowEventRecord],
     action_steps: &[TradeFlowRunStep],
 ) -> Value {
     let snapshots = match repo
@@ -820,7 +822,7 @@ async fn build_missed_market_no_order_diagnosis_payload(
     let final_quote_payload =
         build_no_order_final_quote_payload(client, run_context, token_id, outcome_label).await;
     let liquidity_payload = build_no_order_liquidity_payload(repo, market_slug, window_end_at).await;
-    build_no_order_base_diagnosis_payload(
+    let mut payload = build_no_order_base_diagnosis_payload(
         market_slug,
         token_id,
         outcome_label,
@@ -830,7 +832,25 @@ async fn build_missed_market_no_order_diagnosis_payload(
         snapshot,
         final_quote_payload.as_ref(),
         Some(liquidity_payload),
-    )
+    );
+    let timeline = build_no_order_market_timeline_payload(NoOrderMarketTimelineContext {
+        node_key,
+        market_slug,
+        token_id,
+        outcome_label,
+        window_end_at,
+        summary,
+        events,
+        action_steps,
+    });
+    if let Some(payload_obj) = payload.as_object_mut() {
+        if let Some(timeline_obj) = timeline.as_object() {
+            for (key, value) in timeline_obj {
+                payload_obj.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    payload
 }
 
 fn no_order_diag_f64(payload: &Value, key: &str) -> Option<f64> {
@@ -886,8 +906,9 @@ fn build_missed_market_no_order_diagnosis_message_block(diagnosis: &Value) -> St
         );
     } else {
         lines.push(format!(
-            "Ana sebep: {} beklenirken market/window kapandi.",
-            no_order_diag_str(diagnosis, "last_guard_name").unwrap_or("Guard")
+            "Ana sebep: {}",
+            no_order_diag_str(diagnosis, "why_no_order_summary")
+                .unwrap_or("Guard condition market/window sonuna kadar gecmedi.")
         ));
     }
     lines.push(String::new());
@@ -928,6 +949,7 @@ fn build_missed_market_no_order_diagnosis_message_block(diagnosis: &Value) -> St
                 .unwrap_or("N/A")
         ));
     }
+    append_no_order_market_timeline_lines(&mut lines, diagnosis);
     lines.push(String::new());
     lines.push("Piyasa Durumu".to_string());
     lines.push(format!(
