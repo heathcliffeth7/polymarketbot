@@ -2,6 +2,7 @@ mod analysis;
 mod decision_logs;
 mod inventory;
 mod market_trade_ticks;
+mod node_snapshots;
 mod orders;
 mod pair_sessions;
 mod participation;

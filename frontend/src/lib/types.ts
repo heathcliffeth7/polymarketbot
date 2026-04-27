@@ -778,6 +778,10 @@ export interface AutoScopeTradeForensicEvent {
 export interface AutoScopeTradeForensicSummary {
   entryDecision: Record<string, unknown> | null;
   entryStopLossPlan: Record<string, unknown> | null;
+  nodeSnapshot: Record<string, unknown> | null;
+  entryNodeKey: string | null;
+  entryNodeType: string | null;
+  entryNodeConfigHash: string | null;
   orderLifecycle: AutoScopeTradeForensicEvent[];
   stopLossTrigger: Record<string, unknown> | null;
   postSlRecovery: Record<string, unknown> | null;

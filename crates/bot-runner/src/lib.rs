@@ -39,6 +39,7 @@ include!("trade_builder/place_order_exit_config.rs");
 include!("trade_builder/action_place_order_stale_market.rs");
 include!("trade_builder/buy_fill_lock.rs");
 include!("trade_builder/action_place_order_sizing.rs");
+include!("trade_builder/node_snapshot.rs");
 include!("lib_parts/part_018.rs");
 include!("lib_parts/part_019.rs");
 include!("lib_parts/part_020.rs");

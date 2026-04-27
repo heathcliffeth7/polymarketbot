@@ -638,6 +638,13 @@ fn trade_builder_spawn_entry_evaluated_decision_log(
         let market = build_trade_builder_market_timing_payload(&order, event_ts);
         let ptb = build_trade_builder_ptb_payload(&repo, &order, event_ts).await;
         let volume = build_trade_builder_volume_payload(&repo, &order, event_ts).await;
+        let node_snapshot = repo
+            .get_trade_builder_order_node_snapshot(order.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|record| record.snapshot_json)
+            .unwrap_or(Value::Null);
         let shadow = build_shadow_volume_guard_payload(&ptb, &volume);
         let risk_tags = risk_tags_from_entry_payload(desired_price, &ptb, &volume, &market, &shadow);
         let payload = json!({
@@ -672,6 +679,7 @@ fn trade_builder_spawn_entry_evaluated_decision_log(
             "risk_tags": risk_tags,
             "risk_tag_values": risk_tag_values_from_entry_payload(desired_price, &ptb, &market),
             "risk_tag_thresholds": risk_tag_thresholds_payload(),
+            "node_snapshot": node_snapshot,
             "config": {
                 "strategy_config_version": "runtime",
                 "workflow_config_hash": order.origin_flow_definition_id.map(|id| format!("flow_definition:{id}")),

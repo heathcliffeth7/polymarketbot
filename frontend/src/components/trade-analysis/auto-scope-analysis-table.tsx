@@ -161,6 +161,28 @@ function diagnosisBadgeClassName(row: AutoScopeTradeAnalysisRow): string {
   return 'border-amber-900 bg-amber-950/40 text-amber-300';
 }
 
+function entryPayloadValue(row: AutoScopeTradeAnalysisRow, path: string[]): unknown {
+  let current: unknown = row.forensic?.entryDecision ?? null;
+  for (const key of path) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return null;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current ?? null;
+}
+
+function compactForensicValue(value: unknown): string {
+  if (value == null) return '-';
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(3);
+  if (typeof value === 'boolean') return value ? 'YES' : 'NO';
+  if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : 'none';
+  return String(value);
+}
+
+function shortConfigHash(value: string | null | undefined): string {
+  if (!value) return '-';
+  return value.startsWith('sha256:') ? value.slice(7, 19) : value.slice(0, 12);
+}
+
 function filterSelectClassName(): string {
   return 'h-8 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200';
 }
@@ -427,10 +449,16 @@ export function AutoScopeAnalysisTable() {
         />
 
         <div className="overflow-x-auto">
-          <Table className="min-w-[1320px] text-xs text-zinc-200">
+          <Table className="min-w-[1840px] text-xs text-zinc-200">
             <TableHeader>
               <TableRow className="border-zinc-800 hover:bg-transparent">
                 <TableHead className="text-zinc-400">Workflow</TableHead>
+                <TableHead className="text-zinc-400">Node</TableHead>
+                <TableHead className="text-zinc-400">Config Hash</TableHead>
+                <TableHead className="text-zinc-400">PTB Trend</TableHead>
+                <TableHead className="text-zinc-400">Volume</TableHead>
+                <TableHead className="text-zinc-400">ShadowGuard</TableHead>
+                <TableHead className="text-zinc-400">Risk Tags</TableHead>
                 <TableHead className="text-zinc-400">Market</TableHead>
                 <TableHead className="text-zinc-400">Exit</TableHead>
                 <TableHead className="text-zinc-400">Teshis</TableHead>
@@ -449,13 +477,13 @@ export function AutoScopeAnalysisTable() {
             <TableBody>
               {isLoading && rows.length === 0 ? (
                 <TableRow className="border-zinc-800">
-                  <TableCell colSpan={14} className="py-10 text-center text-zinc-500">
+                  <TableCell colSpan={20} className="py-10 text-center text-zinc-500">
                     Analiz verisi yukleniyor...
                   </TableCell>
                 </TableRow>
               ) : rows.length === 0 ? (
                 <TableRow className="border-zinc-800">
-                  <TableCell colSpan={14} className="py-10 text-center text-zinc-500">
+                  <TableCell colSpan={20} className="py-10 text-center text-zinc-500">
                     Gosterilecek auto-scope trade analizi bulunamadi.
                   </TableCell>
                 </TableRow>
@@ -477,6 +505,81 @@ export function AutoScopeAnalysisTable() {
                           Run #{row.runId} / Root #{row.rootOrderId}
                         </p>
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="max-w-[150px] space-y-1">
+                        <p className="truncate font-mono text-zinc-100">
+                          {row.forensic?.entryNodeKey ?? '-'}
+                        </p>
+                        <p className="truncate text-[11px] text-zinc-500">
+                          {row.forensic?.entryNodeType ?? '-'}
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell className="font-mono text-[11px] text-zinc-400">
+                      {shortConfigHash(row.forensic?.entryNodeConfigHash)}
+                    </TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        <p className="text-zinc-100">
+                          {compactForensicValue(entryPayloadValue(row, ['ptb', 'trend']))}
+                        </p>
+                        <p className="font-mono text-[11px] text-zinc-500">
+                          slope {compactForensicValue(entryPayloadValue(row, ['ptb', 'slope_5s']))}
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        <p className="text-zinc-100">
+                          {compactForensicValue(
+                            entryPayloadValue(row, ['volume', 'polymarket', 'regime'])
+                          )}
+                        </p>
+                        <p className="font-mono text-[11px] text-zinc-500">
+                          {compactForensicValue(
+                            entryPayloadValue(row, ['volume', 'polymarket', 'ratio'])
+                          )}
+                          x
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        <p
+                          className={
+                            entryPayloadValue(row, [
+                              'guard_breakdown',
+                              'shadow_volume_guard',
+                              'would_block',
+                            ]) === true
+                              ? 'text-red-300'
+                              : 'text-emerald-300'
+                          }
+                        >
+                          {compactForensicValue(
+                            entryPayloadValue(row, [
+                              'guard_breakdown',
+                              'shadow_volume_guard',
+                              'would_block',
+                            ])
+                          )}
+                        </p>
+                        <p className="max-w-[140px] truncate text-[11px] text-zinc-500">
+                          {compactForensicValue(
+                            entryPayloadValue(row, [
+                              'guard_breakdown',
+                              'shadow_volume_guard',
+                              'reason',
+                            ])
+                          )}
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <p className="max-w-[180px] truncate text-[11px] text-zinc-400">
+                        {compactForensicValue(entryPayloadValue(row, ['risk_tags']))}
+                      </p>
                     </TableCell>
                     <TableCell>
                       <div className="space-y-1">

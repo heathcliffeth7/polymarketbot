@@ -723,7 +723,7 @@ export async function getAutoScopeTradeDiagnostic(params: {
   };
 }
 
-function csvField(value: string | number | null): string {
+function csvField(value: unknown): string {
   if (value == null) return '';
   const text = String(value);
   if (!/[",\r\n]/.test(text)) return text;
@@ -766,6 +766,19 @@ function payloadValue(payload: Record<string, unknown> | null | undefined, path:
   return current ?? null;
 }
 
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function nodeSnapshotPayload(
+  row: AutoScopeTradeAnalysisRow,
+  entry: Record<string, unknown> | null
+): Record<string, unknown> | null {
+  return recordValue(payloadValue(entry, ['node_snapshot'])) ?? row.forensic?.nodeSnapshot ?? null;
+}
+
 export function buildAutoScopeTradeAnalysisCsv(
   rows: AutoScopeTradeAnalysisRow[]
 ): string {
@@ -782,6 +795,11 @@ export function buildAutoScopeTradeAnalysisCsv(
     'token_id',
     'outcome_label',
     'exit_reason',
+    'entry_node_key',
+    'entry_node_config_hash',
+    'entry_ptb_trend',
+    'entry_volume_regime',
+    'entry_shadow_guard_would_block',
     'market_open_at',
     'market_end_at',
     'triggered_at',
@@ -838,6 +856,7 @@ export function buildAutoScopeTradeAnalysisCsv(
   const lines = [headers.map(csvField).join(',')];
 
   for (const row of rows) {
+    const entry = forensicPayload(row, 'ENTRY_EVALUATED');
     lines.push(
       [
         row.definitionName ?? '',
@@ -852,6 +871,11 @@ export function buildAutoScopeTradeAnalysisCsv(
         row.tokenId,
         row.outcomeLabel,
         row.exitReason,
+        row.forensic?.entryNodeKey ?? null,
+        row.forensic?.entryNodeConfigHash ?? null,
+        payloadValue(entry, ['ptb', 'trend']),
+        payloadValue(entry, ['volume', 'polymarket', 'regime']),
+        payloadValue(entry, ['guard_breakdown', 'shadow_volume_guard', 'would_block']),
         row.marketOpenAt,
         row.marketEndAt,
         row.triggeredAt,
@@ -925,6 +949,13 @@ export function buildAutoScopeTradeAnalysisForensicCsv(
     'outcome_label',
     'decision_id',
     'sl_event_id',
+    'entry_node_key',
+    'entry_node_type',
+    'entry_node_config_hash',
+    'entry_action_node_json',
+    'entry_upstream_nodes_json',
+    'entry_resolved_order_input_json',
+    'entry_node_snapshot_json',
     'entry_decision',
     'entry_reason',
     'entry_ptb_gap_now',
@@ -981,6 +1012,7 @@ export function buildAutoScopeTradeAnalysisForensicCsv(
     const post30 = postChecks.find((event) => payloadValue(event.payload, ['check_after_s']) === 30)?.payload ?? null;
     const postEnd = forensicPayload(row, 'POST_SL_MARKET_END');
     const postFinal = forensicPayload(row, 'POST_SL_RESOLUTION_FINAL');
+    const nodeSnapshot = nodeSnapshotPayload(row, entry);
 
     lines.push(
       [
@@ -992,6 +1024,13 @@ export function buildAutoScopeTradeAnalysisForensicCsv(
         row.outcomeLabel,
         row.forensic?.rawEvents[0]?.decisionId ?? null,
         row.forensic?.rawEvents.find((event) => event.slEventId)?.slEventId ?? null,
+        payloadValue(nodeSnapshot, ['node_key']) ?? payloadValue(nodeSnapshot, ['action_node', 'key']),
+        payloadValue(nodeSnapshot, ['node_type']) ?? payloadValue(nodeSnapshot, ['action_node', 'type']),
+        payloadValue(nodeSnapshot, ['node_config_hash']),
+        csvJson(payloadValue(nodeSnapshot, ['action_node'])),
+        csvJson(payloadValue(nodeSnapshot, ['upstream_nodes'])),
+        csvJson(payloadValue(nodeSnapshot, ['resolved_order_input'])),
+        csvJson(nodeSnapshot),
         payloadValue(entry, ['decision']),
         payloadValue(entry, ['decision_reason']),
         payloadValue(entry, ['ptb', 'gap_now']),

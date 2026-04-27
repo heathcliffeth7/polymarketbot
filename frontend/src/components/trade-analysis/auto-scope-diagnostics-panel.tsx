@@ -71,6 +71,11 @@ function forensicValue(payload: Record<string, unknown> | null | undefined, path
   return current ?? null;
 }
 
+function jsonPreview(value: unknown): string {
+  if (value == null) return '-';
+  return JSON.stringify(value, null, 2);
+}
+
 export function AutoScopeDiagnosticsPanel({
   rootOrderId,
   onClose,
@@ -299,6 +304,78 @@ export function AutoScopeDiagnosticsPanel({
                   label="Entry SL Plan"
                   value={compactMetricValue(diagnostic.forensic.entryStopLossPlan)}
                 />
+              </div>
+            </div>
+          )}
+
+          {diagnostic.forensic?.nodeSnapshot && (
+            <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+              <p className="mb-2 text-xs font-medium text-zinc-200">Node Snapshot</p>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <DetailMetric
+                  label="Action Node"
+                  value={`${compactMetricValue(diagnostic.forensic.entryNodeKey)} / ${compactMetricValue(
+                    diagnostic.forensic.entryNodeType
+                  )}`}
+                />
+                <DetailMetric
+                  label="Config Hash"
+                  value={compactMetricValue(diagnostic.forensic.entryNodeConfigHash)}
+                />
+                <DetailMetric
+                  label="Upstream Count"
+                  value={compactMetricValue(
+                    Array.isArray(
+                      forensicValue(diagnostic.forensic.nodeSnapshot, ['upstream_nodes'])
+                    )
+                      ? (
+                          forensicValue(diagnostic.forensic.nodeSnapshot, [
+                            'upstream_nodes',
+                          ]) as unknown[]
+                        ).length
+                      : null
+                  )}
+                />
+                <DetailMetric
+                  label="Capture Source"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.nodeSnapshot, ['capture_source'])
+                  )}
+                />
+              </div>
+              <div className="mt-3 grid gap-3 xl:grid-cols-3">
+                <div>
+                  <p className="mb-1 text-[11px] uppercase tracking-normal text-zinc-500">
+                    Action Node JSON
+                  </p>
+                  <pre className="max-h-72 overflow-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 text-[11px] text-zinc-300">
+                    {jsonPreview(
+                      forensicValue(diagnostic.forensic.nodeSnapshot, ['action_node'])
+                    )}
+                  </pre>
+                </div>
+                <div>
+                  <p className="mb-1 text-[11px] uppercase tracking-normal text-zinc-500">
+                    Upstream Nodes JSON
+                  </p>
+                  <pre className="max-h-72 overflow-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 text-[11px] text-zinc-300">
+                    {jsonPreview(
+                      forensicValue(diagnostic.forensic.nodeSnapshot, ['upstream_nodes'])
+                    )}
+                  </pre>
+                </div>
+                <div>
+                  <p className="mb-1 text-[11px] uppercase tracking-normal text-zinc-500">
+                    Resolved Order Input
+                  </p>
+                  <pre className="max-h-72 overflow-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 text-[11px] text-zinc-300">
+                    {jsonPreview(
+                      forensicValue(diagnostic.forensic.nodeSnapshot, [
+                        'resolved_order_input',
+                      ])
+                    )}
+                  </pre>
+                </div>
               </div>
             </div>
           )}

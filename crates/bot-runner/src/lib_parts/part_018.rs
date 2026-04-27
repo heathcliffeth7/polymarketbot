@@ -991,6 +991,18 @@ async fn execute_action_place_order(
             runtime_snapshot.as_ref(),
             fresh_submit_lease_until,
         );
+        attach_action_place_order_node_snapshot(
+            repo,
+            existing_order.id,
+            existing_order.parent_order_id.unwrap_or(existing_order.id),
+            run,
+            node,
+            graph,
+            flow_rearmed_payload
+                .as_object_mut()
+                .expect("flow_rearmed payload"),
+        )
+        .await?;
         repo.append_trade_builder_order_event(
             existing_order.id,
             "flow_rearmed",
@@ -1302,6 +1314,16 @@ async fn execute_action_place_order(
         runtime_snapshot.as_ref(),
         fresh_submit_lease_until,
     );
+    attach_action_place_order_node_snapshot(
+        repo,
+        builder_order_id,
+        parent_builder_order_id.unwrap_or(builder_order_id),
+        run,
+        node,
+        graph,
+        &mut flow_created_payload,
+    )
+    .await?;
     repo.append_trade_builder_order_event(
         builder_order_id,
         "flow_created",

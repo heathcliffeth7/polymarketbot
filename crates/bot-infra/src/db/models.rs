@@ -181,6 +181,33 @@ pub struct BotDecisionLogRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct TradeBuilderOrderNodeSnapshotInput {
+    pub order_id: i64,
+    pub root_order_id: i64,
+    pub flow_run_id: Option<i64>,
+    pub flow_definition_id: Option<i64>,
+    pub flow_version_id: Option<i64>,
+    pub node_key: String,
+    pub node_type: String,
+    pub node_config_hash: String,
+    pub snapshot_json: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderOrderNodeSnapshotRecord {
+    pub order_id: i64,
+    pub root_order_id: i64,
+    pub flow_run_id: Option<i64>,
+    pub flow_definition_id: Option<i64>,
+    pub flow_version_id: Option<i64>,
+    pub node_key: String,
+    pub node_type: String,
+    pub node_config_hash: String,
+    pub snapshot_json: Value,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
 pub struct TradeBuilderOrder {
     pub id: i64,
     pub trade_id: i64,

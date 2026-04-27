@@ -69,6 +69,15 @@ interface DecisionLogEventDb {
   payload: JsonObject;
 }
 
+interface NodeSnapshotDb {
+  root_order_id: number;
+  order_id: number;
+  node_key: string;
+  node_type: string;
+  node_config_hash: string;
+  snapshot_json: JsonObject;
+}
+
 interface TpOrderDb {
   parent_order_id: number;
   status: string;
@@ -489,7 +498,10 @@ function latestPayload(
   return null;
 }
 
-function buildForensicSummary(events: AutoScopeTradeForensicEvent[]): AutoScopeTradeForensicSummary {
+function buildForensicSummary(
+  events: AutoScopeTradeForensicEvent[],
+  fallbackNodeSnapshot: JsonObject | null
+): AutoScopeTradeForensicSummary {
   const orderLifecycleTypes = new Set([
     'ORDER_SUBMITTED',
     'ORDER_FILLED',
@@ -501,9 +513,16 @@ function buildForensicSummary(events: AutoScopeTradeForensicEvent[]): AutoScopeT
     'ORDER_REARMED',
   ]);
   const entry = latestPayload(events, ['ENTRY_EVALUATED']);
+  const nodeSnapshot = objectValue(entry?.node_snapshot) ?? fallbackNodeSnapshot;
   return {
     entryDecision: entry,
     entryStopLossPlan: objectValue(entry?.stop_loss_config_at_entry),
+    nodeSnapshot,
+    entryNodeKey:
+      firstText(nodeSnapshot, [['node_key'], ['action_node', 'key']]) ??
+      firstText(entry, [['workflow']]),
+    entryNodeType: firstText(nodeSnapshot, [['node_type'], ['action_node', 'type']]),
+    entryNodeConfigHash: firstText(nodeSnapshot, [['node_config_hash']]),
     orderLifecycle: events.filter((event) => orderLifecycleTypes.has(event.eventType)),
     stopLossTrigger: latestPayload(events, ['PTB_STOP_LOSS_TRIGGERED']),
     postSlRecovery: latestPayload(events, [
@@ -523,7 +542,8 @@ function buildExtra(
   guardPayload: JsonObject | null,
   tpOrders: TpOrderDb[],
   executionTelemetry: AutoScopeTradeExecutionTelemetry | null,
-  forensicEvents: AutoScopeTradeForensicEvent[]
+  forensicEvents: AutoScopeTradeForensicEvent[],
+  nodeSnapshot: JsonObject | null
 ): AutoScopeAnalysisExtra {
   const signalQuality = buildAutoScopeSignalQualityFromGuard(guardPayload);
   return {
@@ -533,7 +553,7 @@ function buildExtra(
     executionTelemetry,
     positionSnapshot: buildPositionSnapshot(rootOrderId, rootRows, runMarketRows),
     tpStatus: buildTpStatus(rootRows, tpOrders),
-    forensic: buildForensicSummary(forensicEvents),
+    forensic: buildForensicSummary(forensicEvents, nodeSnapshot),
   };
 }
 
@@ -565,7 +585,15 @@ export async function getAutoScopeTradeAnalysisExtrasForRoots(
   const ids = Array.from(new Set(rootOrderIds.filter((id) => Number.isFinite(id) && id > 0)));
   if (ids.length === 0) return new Map();
 
-  const [rootRowsRes, runMarketRowsRes, guardEventsRes, telemetryEventsRes, tpOrdersRes, decisionLogsRes] = await Promise.all([
+  const [
+    rootRowsRes,
+    runMarketRowsRes,
+    guardEventsRes,
+    telemetryEventsRes,
+    tpOrdersRes,
+    decisionLogsRes,
+    nodeSnapshotsRes,
+  ] = await Promise.all([
     pool.query<AnalysisExtraRowDb>(
       `SELECT
          root_builder_order_id,
@@ -677,6 +705,21 @@ export async function getAutoScopeTradeAnalysisExtrasForRoots(
        ORDER BY l.root_order_id ASC, l.event_ts ASC, l.created_at ASC, l.id ASC`,
       [userId, ids.map(String)]
     ),
+    pool.query<NodeSnapshotDb>(
+      `SELECT DISTINCT ON (s.root_order_id)
+         s.root_order_id,
+         s.order_id,
+         s.node_key,
+         s.node_type,
+         s.node_config_hash,
+         s.snapshot_json
+       FROM trade_builder_order_node_snapshots s
+       JOIN trade_builder_orders o ON o.id = s.root_order_id
+       WHERE o.user_id = $1
+         AND s.root_order_id = ANY($2::bigint[])
+       ORDER BY s.root_order_id, s.updated_at DESC, s.id DESC`,
+      [userId, ids]
+    ),
   ]);
 
   const rootRowsById = new Map<number, AnalysisExtraRowDb[]>();
@@ -720,6 +763,11 @@ export async function getAutoScopeTradeAnalysisExtrasForRoots(
     ]);
   }
 
+  const nodeSnapshotByRootId = new Map<number, JsonObject>();
+  for (const row of nodeSnapshotsRes.rows) {
+    nodeSnapshotByRootId.set(Number(row.root_order_id), row.snapshot_json);
+  }
+
   const extras = new Map<number, AutoScopeAnalysisExtra>();
   for (const rootId of ids) {
     const rootRows = rootRowsById.get(rootId) ?? [];
@@ -738,7 +786,8 @@ export async function getAutoScopeTradeAnalysisExtrasForRoots(
           submittedByRootId.get(rootId) ?? null,
           fillByRootId.get(rootId) ?? null
         ),
-        decisionLogsByRootId.get(rootId) ?? []
+        decisionLogsByRootId.get(rootId) ?? [],
+        nodeSnapshotByRootId.get(rootId) ?? null
       )
     );
   }
