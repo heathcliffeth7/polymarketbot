@@ -136,6 +136,10 @@ export const NUMERIC_KEYS = new Set([
   'counterLegPriceToBeatMaxDiff',
   'counterLegExecutionFloorPriceCent',
   'counterLegSizeUsdc',
+  'autoTuneSampleMarkets',
+  'autoTuneMinEligibleMarkets',
+  'autoTuneCooldownMarketsAfterAdvice',
+  'autoTuneDedupeSameAdviceForMarkets',
 ]);
 
 export const BOOLEAN_KEYS = new Set([
@@ -192,6 +196,7 @@ export const BOOLEAN_KEYS = new Set([
   'pairIgnoreStopLossAfterLocked',
   'notifyOnPairLocked',
   'notifyOnPairUnwind',
+  'autoTuneEnabled',
 ]);
 
 export const CONTEXT_BASE_KEYS = new Set([

@@ -9,6 +9,7 @@ import { applyPtbStopLossBumpFormDefaults, normalizePrimaryPriceToBeatGuardBuild
 import { normalizePtbIvTimeRuleBuildConfig, parsePtbIvTimeRuleRows } from './ptb-iv-time-rules';
 import { applyPtbStopLossFormDefaults, buildPtbStopLossRules, normalizePtbStopLossGapUnit, parsePtbStopLossRuleRows, shouldEnablePtbStopLossFromConfig } from './ptb-stop-loss';
 import { normalizeTriggerMarketPriceCycleWindowConfig, readTriggerMarketPriceCycleWindowFields } from './cycle-window';
+import { applyAutoTuneFormDefaults, normalizeAutoTuneBuildConfig } from './auto-tune';
 import { TRIGGER_MARKET_ONCE_SCOPE_VERSION } from './constants';
 import { normalizePtbMode } from './ptb-modes';
 import type { DrawdownRuleRow, EntryTimingProfileRow, ExitLadderRuleRow, NodeConfigFormState, OutcomeConditionRow, PtbIvTimeRuleRow, PtbStopLossBumpLossRuleRow, PtbStopLossRuleRow, TimeExitRuleRow } from './types';
@@ -132,6 +133,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
       fields.sizePct = toStringValue(cfg.sizePercent);
     }
     applyPairLockFormDefaults(fields, cfg);
+    applyAutoTuneFormDefaults(fields, cfg);
     applyPtbStopLossFormDefaults(fields, cfg);
     ptbIvTimeRuleRows.push(...parsePtbIvTimeRuleRows(cfg));
     ptbStopLossBumpLossRuleRows.push(...parsePtbStopLossBumpLossRuleRows(cfg));
@@ -576,6 +578,7 @@ export function buildNodeConfigFromForm(
         config.executionMode = 'market';
       }
     }
+    normalizeAutoTuneBuildConfig(config, form);
 
     const sideRaw = toStringValue(config.side).trim().toLowerCase();
     const isBuySide = sideRaw === 'buy';

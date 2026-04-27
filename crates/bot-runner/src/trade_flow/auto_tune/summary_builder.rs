@@ -12,15 +12,22 @@ pub(super) async fn maybe_record_trade_flow_auto_tune_market(
         return Ok(());
     };
     let graph = parse_trade_flow_graph(&version)?;
-    let cfg = AutoTuneConfig::from_graph_and_run_context(Some(&graph.context), &run_spec.context);
-    if !cfg.advice_enabled() {
-        return Ok(());
-    }
     let Some(market_slug) = node_spec.market_slug.as_deref() else {
         return Ok(());
     };
     let action_nodes = auto_tune_downstream_action_place_order_nodes(&graph, &node_spec.node_key);
-    if action_nodes.is_empty() {
+    let enabled_action_nodes = action_nodes
+        .into_iter()
+        .filter_map(|action_node| {
+            let cfg = AutoTuneConfig::from_action_graph_and_run_context(
+                Some(&action_node.config),
+                Some(&graph.context),
+                &run_spec.context,
+            );
+            cfg.advice_enabled().then_some((action_node, cfg))
+        })
+        .collect::<Vec<_>>();
+    if enabled_action_nodes.is_empty() {
         return Ok(());
     }
     let events = repo
@@ -30,7 +37,7 @@ pub(super) async fn maybe_record_trade_flow_auto_tune_market(
         )
         .await?;
 
-    for action_node in action_nodes {
+    for (action_node, cfg) in enabled_action_nodes {
         let action_node_keys = vec![action_node.key.clone()];
         let action_steps = repo
             .list_completed_place_order_blocked_steps_for_nodes_market_token(

@@ -18,6 +18,7 @@ import {
   toTrimmedString,
 } from './shared';
 import { validateActionPlaceOrderExecutionFloorConfig } from './validation-action-place-order-execution-floor';
+import { validateActionPlaceOrderAutoTuneConfig } from './validation-action-place-order-auto-tune';
 import { validateActionPlaceOrderBuyFillLockConfig } from './validation-action-place-order-buy-fill-lock';
 import { validateActionPlaceOrderPairLockConfig } from './validation-action-place-order-pair';
 import { validateActionPlaceOrderPtbStopLossBumpConfig } from './validation-action-place-order-ptb-bump';
@@ -926,6 +927,7 @@ export function validateActionPlaceOrderConfig(
   }
 
   validateActionPlaceOrderBuyFillLockConfig(issues, node, config, side);
+  validateActionPlaceOrderAutoTuneConfig(issues, node, config);
 
   validateActionPlaceOrderExecutionFloorConfig(issues, node, graph, side, config);
 

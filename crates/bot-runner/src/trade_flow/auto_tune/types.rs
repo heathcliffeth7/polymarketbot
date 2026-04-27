@@ -58,28 +58,40 @@ struct AutoTuneConfig {
 }
 
 impl AutoTuneConfig {
+    fn from_action_graph_and_run_context(
+        action_config: Option<&Value>,
+        graph_context: Option<&Value>,
+        run_context: &Value,
+    ) -> Self {
+        if let Some(action_config) = action_config {
+            if let Some(settings) = auto_tune_settings(action_config) {
+                return Self::from_settings_and_legacy(Some(settings), &[action_config]);
+            }
+            if auto_tune_has_legacy_values(action_config) {
+                return Self::from_settings_and_legacy(None, &[action_config]);
+            }
+        }
+        Self::from_graph_and_run_context(graph_context, run_context)
+    }
+
     fn from_graph_and_run_context(graph_context: Option<&Value>, run_context: &Value) -> Self {
         let settings = graph_context
             .and_then(auto_tune_settings)
             .or_else(|| auto_tune_settings(run_context));
+        let mut legacy_sources = Vec::new();
+        if let Some(context) = graph_context {
+            legacy_sources.push(context);
+        }
+        legacy_sources.push(run_context);
+        Self::from_settings_and_legacy(settings, &legacy_sources)
+    }
+
+    fn from_settings_and_legacy(settings: Option<&Value>, legacy_sources: &[&Value]) -> Self {
         let enabled = value_bool(settings, "enabled")
-            .or_else(|| {
-                graph_context.and_then(|context| {
-                    auto_tune_legacy_value(context, "autoTuneEnabled").and_then(Value::as_bool)
-                })
-            })
-            .or_else(|| {
-                auto_tune_legacy_value(run_context, "autoTuneEnabled").and_then(Value::as_bool)
-            })
+            .or_else(|| auto_tune_legacy_bool(legacy_sources, "autoTuneEnabled"))
             .unwrap_or(false);
         let mode = value_string(settings, "mode")
-            .or_else(|| {
-                graph_context
-                    .and_then(|context| auto_tune_legacy_value(context, "autoTuneMode"))
-                    .or_else(|| auto_tune_legacy_value(run_context, "autoTuneMode"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
+            .or_else(|| auto_tune_legacy_string(legacy_sources, "autoTuneMode"))
             .map(|value| match value.trim().to_ascii_lowercase().as_str() {
                 "advice" | "advice_only" => AutoTuneMode::Advice,
                 _ => AutoTuneMode::Off,
@@ -90,16 +102,20 @@ impl AutoTuneConfig {
                 AutoTuneMode::Off
             });
         let sample_markets = value_usize(settings, "sampleMarkets")
+            .or_else(|| auto_tune_legacy_usize(legacy_sources, "autoTuneSampleMarkets"))
             .unwrap_or(DEFAULT_SAMPLE_MARKETS)
             .max(1);
         let min_eligible_markets = value_usize(settings, "minEligibleMarkets")
+            .or_else(|| auto_tune_legacy_usize(legacy_sources, "autoTuneMinEligibleMarkets"))
             .unwrap_or(DEFAULT_MIN_ELIGIBLE_MARKETS)
             .min(sample_markets)
             .max(1);
         let cooldown_markets_after_advice = value_usize(settings, "cooldownMarketsAfterAdvice")
             .or_else(|| value_usize(settings, "cooldownMarketsAfterChange"))
+            .or_else(|| auto_tune_legacy_usize(legacy_sources, "autoTuneCooldownMarketsAfterAdvice"))
             .unwrap_or(DEFAULT_COOLDOWN_MARKETS_AFTER_ADVICE);
         let dedupe_same_advice_for_markets = value_usize(settings, "dedupeSameAdviceForMarkets")
+            .or_else(|| auto_tune_legacy_usize(legacy_sources, "autoTuneDedupeSameAdviceForMarkets"))
             .unwrap_or(DEFAULT_DEDUPE_SAME_ADVICE_FOR_MARKETS);
         let caps = AutoTuneCaps::from_settings(settings);
         Self {
@@ -138,6 +154,39 @@ fn auto_tune_legacy_value<'a>(context: &'a Value, key: &str) -> Option<&'a Value
     context
         .get(key)
         .or_else(|| context.get("flowContext").and_then(|flow_context| flow_context.get(key)))
+}
+
+fn auto_tune_has_legacy_values(context: &Value) -> bool {
+    [
+        "autoTuneEnabled",
+        "autoTuneMode",
+        "autoTuneSampleMarkets",
+        "autoTuneMinEligibleMarkets",
+        "autoTuneCooldownMarketsAfterAdvice",
+        "autoTuneDedupeSameAdviceForMarkets",
+    ]
+    .iter()
+    .any(|key| auto_tune_legacy_value(context, key).is_some())
+}
+
+fn auto_tune_legacy_bool(contexts: &[&Value], key: &str) -> Option<bool> {
+    contexts
+        .iter()
+        .find_map(|context| auto_tune_legacy_value(context, key).and_then(Value::as_bool))
+}
+
+fn auto_tune_legacy_string(contexts: &[&Value], key: &str) -> Option<String> {
+    contexts.iter().find_map(|context| {
+        auto_tune_legacy_value(context, key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+}
+
+fn auto_tune_legacy_usize(contexts: &[&Value], key: &str) -> Option<usize> {
+    contexts
+        .iter()
+        .find_map(|context| auto_tune_legacy_value(context, key).and_then(value_as_usize))
 }
 
 impl AutoTuneCaps {
@@ -211,7 +260,10 @@ fn value_string(settings: Option<&Value>, key: &str) -> Option<String> {
 }
 
 fn value_usize(settings: Option<&Value>, key: &str) -> Option<usize> {
-    let value = settings?.get(key)?;
+    value_as_usize(settings?.get(key)?)
+}
+
+fn value_as_usize(value: &Value) -> Option<usize> {
     value
         .as_u64()
         .and_then(|value| usize::try_from(value).ok())
@@ -229,4 +281,82 @@ fn value_i64(settings: Option<&Value>, key: &str) -> Option<i64> {
 
 fn value_f64(settings: Option<&Value>, key: &str) -> Option<f64> {
     settings?.get(key).and_then(value_as_f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_auto_tune_config_overrides_graph_context() {
+        let action_config = serde_json::json!({
+            "autoTune": {
+                "enabled": false,
+                "mode": "advice"
+            }
+        });
+        let graph_context = serde_json::json!({
+            "autoTune": {
+                "enabled": true,
+                "mode": "advice"
+            }
+        });
+        let run_context = serde_json::json!({});
+
+        let cfg = AutoTuneConfig::from_action_graph_and_run_context(
+            Some(&action_config),
+            Some(&graph_context),
+            &run_context,
+        );
+
+        assert!(!cfg.advice_enabled());
+    }
+
+    #[test]
+    fn action_nested_auto_tune_config_sets_advice_window() {
+        let action_config = serde_json::json!({
+            "autoTune": {
+                "enabled": true,
+                "mode": "advice",
+                "sampleMarkets": 6,
+                "minEligibleMarkets": 4,
+                "cooldownMarketsAfterAdvice": 2,
+                "dedupeSameAdviceForMarkets": 4
+            }
+        });
+        let run_context = serde_json::json!({});
+
+        let cfg = AutoTuneConfig::from_action_graph_and_run_context(
+            Some(&action_config),
+            None,
+            &run_context,
+        );
+
+        assert!(cfg.advice_enabled());
+        assert_eq!(cfg.sample_markets, 6);
+        assert_eq!(cfg.min_eligible_markets, 4);
+        assert_eq!(cfg.cooldown_markets_after_advice, 2);
+        assert_eq!(cfg.dedupe_same_advice_for_markets, 4);
+    }
+
+    #[test]
+    fn action_legacy_flat_auto_tune_config_is_supported() {
+        let action_config = serde_json::json!({
+            "autoTuneEnabled": true,
+            "autoTuneMode": "advice",
+            "autoTuneSampleMarkets": 3,
+            "autoTuneMinEligibleMarkets": 2
+        });
+        let run_context = serde_json::json!({});
+
+        let cfg = AutoTuneConfig::from_action_graph_and_run_context(
+            Some(&action_config),
+            None,
+            &run_context,
+        );
+
+        assert!(cfg.advice_enabled());
+        assert_eq!(cfg.sample_markets, 3);
+        assert_eq!(cfg.min_eligible_markets, 2);
+    }
 }
