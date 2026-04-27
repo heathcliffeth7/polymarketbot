@@ -80,11 +80,16 @@ fn resolve_action_place_order_pair_lock_config(
         return Ok(None);
     }
 
-    let pair_max_total_cent = node_config_f64(node, "pairMaxTotalCent")
-        .or_else(|| node_config_f64(node, "pairTargetTotalCent"))
-        .ok_or_else(|| anyhow::anyhow!("action.place_order pair_lock requires pairMaxTotalCent"))?;
     let strategy = resolve_action_place_order_pair_lock_strategy(node)?;
     let uses_edge_strategy = strategy == PAIR_LOCK_STRATEGY_EDGE_PAIRLOCK_V1;
+    let uses_biased_hedge_strategy = strategy == PAIR_LOCK_STRATEGY_BIASED_HEDGE_V1;
+    let pair_max_total_cent = node_config_f64(node, "pairMaxTotalCent")
+        .or_else(|| node_config_f64(node, "pairTargetTotalCent"))
+        .unwrap_or(if uses_biased_hedge_strategy { 99.0 } else { f64::NAN });
+    anyhow::ensure!(
+        pair_max_total_cent.is_finite(),
+        "action.place_order pair_lock requires pairMaxTotalCent"
+    );
     anyhow::ensure!(
         pair_max_total_cent > 0.0 && pair_max_total_cent < 100.0,
         "action.place_order pairMaxTotalCent must be in (0, 100)"
@@ -99,7 +104,7 @@ fn resolve_action_place_order_pair_lock_config(
     let (total_budget_usdc, counter_leg_size_usdc) = match sizing_mode {
         ActionPlaceOrderPairLockSizingMode::Manual => {
             let counter_leg_size_usdc = node_config_f64(node, "counterLegSizeUsdc");
-            if !uses_edge_strategy {
+            if !uses_edge_strategy && !uses_biased_hedge_strategy {
                 let counter_leg_size_usdc = counter_leg_size_usdc
                     .ok_or_else(|| anyhow::anyhow!("action.place_order pair_lock requires counterLegSizeUsdc > 0"))?;
                 anyhow::ensure!(
@@ -107,6 +112,10 @@ fn resolve_action_place_order_pair_lock_config(
                     "action.place_order counterLegSizeUsdc must be > 0"
                 );
                 (None, Some(counter_leg_size_usdc))
+            } else if uses_biased_hedge_strategy {
+                let hedge_budget = resolve_action_place_order_biased_hedge_config(node)?
+                    .map(|config| config.hedge_budget_usdc);
+                (None, hedge_budget)
             } else {
                 (None, counter_leg_size_usdc.filter(|value| *value > 0.0))
             }
@@ -251,172 +260,6 @@ fn resolve_pair_lock_direct_trigger_node_key(
     Ok(trigger_key)
 }
 
-fn extract_builder_order_id(execution: &TradeFlowNodeExecution) -> Result<i64> {
-    execution
-        .output
-        .get("builder_order_id")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow::anyhow!("pair_lock child order creation did not return builder_order_id"))
-}
-
-fn extract_source_trade_id(execution: &TradeFlowNodeExecution) -> Option<i64> {
-    execution
-        .output
-        .get("source_trade_id")
-        .and_then(Value::as_i64)
-}
-
-fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Value>) {
-    for key in [
-        "mode", "pairMaxTotalCent", "pairTargetTotalCent", "pairSizingMode", "pairTotalBudgetUsdc",
-        "pairOrphanGraceMs", "pairProtectiveUnwindEnabled", "pairIgnoreStopLossAfterLocked", "notifyOnPairLocked", "notifyOnPairUnwind", "counterLegEnabled",
-        "counterLegOutcomeLabel", "counterLegTriggerCondition", "counterLegTriggerPriceCent",
-        "counterLegMaxPriceCent", "counterLegPriceToBeatGuardEnabled", "counterLegPriceToBeatMode",
-        "counterLegPriceToBeatMaxDiff", "counterLegPriceToBeatMaxDiffUnit",
-        "counterLegExecutionFloorGuardEnabled", "counterLegExecutionFloorPriceCent",
-        "counterLegRetryOnPriceToBeatGuardBlock", "counterLegRetryOnExecutionFloorGuardBlock",
-        "counterLegRetryOnMaxPriceBlock", "counterLegSizeUsdc", "counterLegTpEnabled",
-        "counterLegTpPriceCent", "counterLegTpRules", "counterLegNotifyOnTpHit",
-        "counterLegSlEnabled",
-        "counterLegSlPriceCent", "counterLegSlTriggerPriceMode", "counterLegPtbStopLossEnabled",
-        "counterLegPtbStopLossGapUsd", "counterLegPtbStopLossGapUnit",
-        "counterLegPtbStopLossTimeDecayMode",
-        "counterLegNotifyOnSlHit", "tpEnabled", "tpPrice", "tpPriceCent", "tpRules",
-        "notifyOnTpHit", "slPrice", "slRules", "ptbStopLossRules", "timeExitRules",
-        "reentryTriggerNodeKey",
-        "reentryMinPriceCent", "reentryMaxPriceCent", "reentryPriceToBeatMaxDiff",
-        "reentryPriceToBeatMaxDiffUnit", "reentrySkipCurrentWindow", "reentryThresholdDecay",
-        "reentryMaxPriceTightenBps", "stagedSlReentryOnlyAfterAllStages",
-    ] {
-        config.remove(key);
-    }
-}
-
-fn build_pair_lock_single_leg_node(
-    node: &TradeFlowNode,
-    market_slug: &str,
-    token_id: &str,
-    outcome_label: &str,
-    trigger_node_key: &str,
-) -> TradeFlowNode {
-    let mut config = node
-        .config
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    strip_action_place_order_pair_fields(&mut config);
-    config.insert("mode".to_string(), json!(ACTION_PLACE_ORDER_MODE_SINGLE));
-    config.remove("sourceTradeId");
-    config.insert("marketSlug".to_string(), json!(market_slug));
-    config.insert("tokenId".to_string(), json!(token_id));
-    config.insert("outcomeLabel".to_string(), json!(outcome_label));
-    config.insert("reentryTriggerNodeKey".to_string(), json!(trigger_node_key));
-    copy_pair_lock_primary_take_profit_fields(node, &mut config);
-    if let Some(value) = node.config.get("slRules") {
-        config.insert("slRules".to_string(), value.clone());
-    }
-    if let Some(value) = node.config.get("ptbStopLossRules") {
-        config.insert("ptbStopLossRules".to_string(), value.clone());
-    }
-
-    TradeFlowNode {
-        key: node.key.clone(),
-        node_type: node.node_type.clone(),
-        config: Value::Object(config),
-    }
-}
-
-fn build_pair_lock_counter_leg_node(
-    node: &TradeFlowNode,
-    market_slug: &str,
-    counter: &ActionPlaceOrderPairResolvedCounterLeg,
-    pair_lock: &ActionPlaceOrderPairLockConfig,
-    trigger_node_key: &str,
-) -> TradeFlowNode {
-    let mut config = node
-        .config
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    strip_action_place_order_pair_fields(&mut config);
-    config.insert("mode".to_string(), json!(ACTION_PLACE_ORDER_MODE_SINGLE));
-    config.insert(
-        "refKey".to_string(),
-        json!(format!("{}__counter", action_place_order_pair_lock_ref_key(node))),
-    );
-    config.remove("sourceTradeId");
-    config.insert("marketSlug".to_string(), json!(market_slug));
-    config.insert("tokenId".to_string(), json!(&counter.token_id));
-    config.insert("outcomeLabel".to_string(), json!(&counter.outcome_label));
-    config.insert("reentryTriggerNodeKey".to_string(), json!(trigger_node_key));
-    copy_pair_lock_counter_take_profit_fields(node, &mut config);
-
-    if let Some(counter_size) = pair_lock.counter_leg_size_usdc {
-        if counter_size > 0.0 {
-            config.insert("sizeUsdc".to_string(), json!(counter_size));
-            config.insert("sizeMode".to_string(), json!("usdc"));
-            config.remove("sizePct");
-            config.remove("sizePercent");
-        }
-    }
-
-    for (source_key, target_key) in [
-        ("counterLegTriggerCondition", "triggerCondition"),
-        ("counterLegTriggerPriceCent", "triggerPriceCent"),
-        ("counterLegMaxPriceCent", "maxPriceCent"),
-        ("counterLegPriceToBeatGuardEnabled", "priceToBeatGuardEnabled"),
-        ("counterLegPriceToBeatMode", "priceToBeatMode"),
-        ("counterLegPriceToBeatMaxDiff", "priceToBeatMaxDiff"),
-        ("counterLegPriceToBeatMaxDiffUnit", "priceToBeatMaxDiffUnit"),
-        ("counterLegExecutionFloorGuardEnabled", "executionFloorGuardEnabled"),
-        ("counterLegExecutionFloorPriceCent", "executionFloorPriceCent"),
-        ("counterLegRetryOnPriceToBeatGuardBlock", "retryOnPriceToBeatGuardBlock"),
-        ("counterLegRetryOnExecutionFloorGuardBlock", "retryOnExecutionFloorGuardBlock"),
-        ("counterLegRetryOnMaxPriceBlock", "retryOnMaxPriceBlock"),
-        ("counterLegTpEnabled", "tpEnabled"),
-        ("counterLegTpPriceCent", "tpPriceCent"),
-        ("counterLegNotifyOnTpHit", "notifyOnTpHit"),
-        ("counterLegSlEnabled", "slEnabled"),
-        ("counterLegSlPriceCent", "slPriceCent"),
-        ("counterLegSlTriggerPriceMode", "slTriggerPriceMode"),
-        ("counterLegPtbStopLossEnabled", "ptbStopLossEnabled"),
-        ("counterLegPtbStopLossGapUsd", "ptbStopLossGapUsd"),
-        ("counterLegPtbStopLossGapUnit", "ptbStopLossGapUnit"),
-        ("counterLegPtbStopLossTimeDecayMode", "ptbStopLossTimeDecayMode"),
-        ("counterLegNotifyOnSlHit", "notifyOnSlHit"),
-    ] {
-        if let Some(value) = node.config.get(source_key) {
-            config.insert(target_key.to_string(), value.clone());
-        } else {
-            config.remove(target_key);
-        }
-    }
-    if !pair_lock.protective_unwind_enabled {
-        config.insert("retryOnPriceToBeatGuardBlock".to_string(), json!(true));
-        config.insert("retryOnExecutionFloorGuardBlock".to_string(), json!(true));
-        config.insert("retryOnMaxPriceBlock".to_string(), json!(true));
-    }
-
-    TradeFlowNode {
-        key: format!("{}__counter", node.key),
-        node_type: node.node_type.clone(),
-        config: Value::Object(config),
-    }
-}
-
-async fn cancel_pair_lock_order_if_created(
-    repo: &PostgresRepository,
-    builder_order_id: Option<i64>,
-    reason: &str,
-) {
-    let Some(builder_order_id) = builder_order_id else {
-        return;
-    };
-    let _ = repo
-        .set_trade_builder_order_status(builder_order_id, "canceled", Some(reason))
-        .await;
-}
-
 async fn execute_action_place_order_pair_lock(
     repo: &PostgresRepository,
     run_id: i64,
@@ -437,6 +280,13 @@ async fn execute_action_place_order_pair_lock(
     let trigger_node_key = resolve_pair_lock_direct_trigger_node_key(&node.key, graph)?;
     if action_place_order_uses_edge_pairlock_strategy(node) {
         return execute_action_place_order_pair_lock_edge_strategy(
+            repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
+            &pair_lock, &trigger_node_key,
+        )
+        .await;
+    }
+    if action_place_order_uses_biased_hedge_strategy(node) {
+        return execute_action_place_order_pair_lock_biased_hedge_strategy(
             repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
             &pair_lock, &trigger_node_key,
         )
@@ -936,6 +786,17 @@ async fn maybe_apply_trade_builder_pair_lock_runtime(
         }
         return Ok(false);
     }
+    if let Some(node) = resolve_trade_builder_pair_lock_node(repo, &session).await? {
+        if action_place_order_uses_biased_hedge_strategy(&node) {
+            if let Some(config) = resolve_action_place_order_biased_hedge_config(&node)? {
+                if maybe_prepare_biased_hedge_counter_runtime(repo, order, &session, &config, now)
+                    .await?
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
     if maybe_prepare_trade_builder_pair_lock_auto_counter(repo, order, &session, &pair_lock)
         .await?
     {
@@ -1289,6 +1150,9 @@ async fn maybe_handle_trade_builder_pair_lock_buy_fill(
     let Some(session) = repo.get_trade_builder_pair_session(pair_session_id).await? else {
         return Ok(());
     };
+    if maybe_handle_biased_hedge_pair_fill(repo, &session, order).await? {
+        return Ok(());
+    }
     if session.status != TRADE_BUILDER_PAIR_STATUS_WORKING {
         return Ok(());
     }

@@ -11,6 +11,7 @@ export function isPairLockField(key: string): boolean {
     key === 'pairLockDecisionQty' ||
     key === 'pairLockSingleEdgeThreshold' ||
     key === 'pairLockCostBuffer' ||
+    key.startsWith('biasedHedge') ||
     key === 'pairSizingMode' ||
     key === 'pairTotalBudgetUsdc' ||
     key === 'pairOrphanGraceMs' ||
@@ -231,6 +232,7 @@ export function resolvePairLockSizingFieldVisibility(
     key !== 'pairLockDecisionQty' &&
     key !== 'pairLockSingleEdgeThreshold' &&
     key !== 'pairLockCostBuffer' &&
+    !key.startsWith('biasedHedge') &&
     key !== 'pairSizingMode' &&
     key !== 'pairTotalBudgetUsdc' &&
     key !== 'counterLegSizeUsdc'
@@ -248,7 +250,10 @@ export function resolvePairLockSizingFieldVisibility(
   ) {
     return pairLockEnabled && strategy === 'edge_pairlock_v1';
   }
-  if (strategy === 'edge_pairlock_v1') {
+  if (key.startsWith('biasedHedge')) {
+    return pairLockEnabled && strategy === 'biased_hedge_v1';
+  }
+  if (strategy === 'edge_pairlock_v1' || strategy === 'biased_hedge_v1') {
     return false;
   }
   if (key === 'pairSizingMode') {

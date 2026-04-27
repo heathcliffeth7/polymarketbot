@@ -49,7 +49,12 @@ include!("trade_builder/pair_lock_auto_primary.rs");
 include!("trade_builder/pair_lock_step_quote.rs");
 include!("trade_builder/pair_lock_take_profit.rs");
 include!("trade_builder/pair_lock.rs");
+include!("trade_builder/pair_lock_child_nodes.rs");
 include!("trade_builder/pair_lock_edge_strategy.rs");
+include!("trade_builder/pair_lock_biased_hedge.rs");
+include!("trade_builder/pair_lock_biased_hedge_lifecycle.rs");
+#[cfg(test)]
+include!("trade_builder/pair_lock_biased_hedge_tests.rs");
 include!("trade_builder/pair_lock_protective_unwind.rs");
 include!("trade_builder/pair_lock_stop_loss.rs");
 include!("lib_parts/part_021.rs");

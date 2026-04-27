@@ -139,6 +139,43 @@ export function updateNodeFieldState(
           (nextFields.pairLockSingleEdgeThreshold ?? '').trim() || '0.10';
         nextFields.pairLockCostBuffer = (nextFields.pairLockCostBuffer ?? '').trim() || '0.005';
         nextFields.pairMaxTotalCent = (nextFields.pairMaxTotalCent ?? '').trim() || '95';
+      } else if (pairLockStrategy === 'biased_hedge_v1') {
+        nextFields.priceToBeatGuardEnabled = 'true';
+        nextFields.priceToBeatMode = 'iv_mismatch_edge';
+        nextFields.pairSizingMode = 'manual';
+        nextFields.counterLegEnabled = 'true';
+        nextFields.tpEnabled = 'false';
+        nextFields.sizeMode = 'usdc';
+        nextFields.sizeUsdc = (nextFields.sizeUsdc ?? '').trim() || '2';
+        nextFields.maxPriceCent = (nextFields.maxPriceCent ?? '').trim() || '75';
+        nextFields.pairProtectiveUnwindEnabled = 'true';
+        nextFields.pairOrphanGraceMs = (nextFields.pairOrphanGraceMs ?? '').trim() || '1500';
+        nextFields.reentryMaxAttempts = '0';
+        nextFields.biasedHedgePrimaryBudgetUsdc = (nextFields.biasedHedgePrimaryBudgetUsdc ?? '').trim() || '2';
+        nextFields.biasedHedgeHedgeBudgetUsdc = (nextFields.biasedHedgeHedgeBudgetUsdc ?? '').trim() || '0.5';
+        nextFields.biasedHedgeMinDominantShare = (nextFields.biasedHedgeMinDominantShare ?? '').trim() || '0.75';
+        nextFields.biasedHedgeMaxHedgeSpendRatio = (nextFields.biasedHedgeMaxHedgeSpendRatio ?? '').trim() || '0.25';
+        nextFields.biasedHedgePrimaryMinEdge = (nextFields.biasedHedgePrimaryMinEdge ?? '').trim() || '0.08';
+        nextFields.biasedHedgePrimaryMinFinalQ = (nextFields.biasedHedgePrimaryMinFinalQ ?? '').trim() || '0.72';
+        nextFields.biasedHedgeMaxPriceCent = (nextFields.biasedHedgeMaxPriceCent ?? '').trim() || '75';
+        nextFields.biasedHedgeHighPriceCent = (nextFields.biasedHedgeHighPriceCent ?? '').trim() || '70';
+        nextFields.biasedHedgeHighPriceMinFinalQ = (nextFields.biasedHedgeHighPriceMinFinalQ ?? '').trim() || '0.82';
+        nextFields.biasedHedgeHighPriceMinEdge = (nextFields.biasedHedgeHighPriceMinEdge ?? '').trim() || '0.10';
+        nextFields.biasedHedgeHedgeOnlyIfPrimaryFilled = 'true';
+        nextFields.biasedHedgeHedgeMinPriceCent = (nextFields.biasedHedgeHedgeMinPriceCent ?? '').trim() || '3';
+        nextFields.biasedHedgeHedgeMaxPriceCent = (nextFields.biasedHedgeHedgeMaxPriceCent ?? '').trim() || '25';
+        nextFields.biasedHedgeDisableNewPrimaryAfterSec = (nextFields.biasedHedgeDisableNewPrimaryAfterSec ?? '').trim() || '180';
+        nextFields.biasedHedgeDisableAnyBuyAfterSec = (nextFields.biasedHedgeDisableAnyBuyAfterSec ?? '').trim() || '240';
+        nextFields.biasedHedgeMaxSideSwitchCount = (nextFields.biasedHedgeMaxSideSwitchCount ?? '').trim() || '0';
+        nextFields.biasedHedgeMaxPairedEffectiveCostCent = (nextFields.biasedHedgeMaxPairedEffectiveCostCent ?? '').trim() || '95';
+        nextFields.biasedHedgeStopBiasInvalidationEnabled = 'true';
+        nextFields.biasedHedgeStopMinQFinalToHold = (nextFields.biasedHedgeStopMinQFinalToHold ?? '').trim() || '0.55';
+        nextFields.biasedHedgeStopMinEdgeToHold = (nextFields.biasedHedgeStopMinEdgeToHold ?? '').trim() || '0';
+        nextFields.biasedHedgeStopExitPctOnInvalidation = (nextFields.biasedHedgeStopExitPctOnInvalidation ?? '').trim() || '100';
+        nextFields.biasedHedgeStopPtbStopLossEnabled = 'true';
+        nextFields.biasedHedgeStopPtbStopLossGapUsd = (nextFields.biasedHedgeStopPtbStopLossGapUsd ?? '').trim() || '-3';
+        nextFields.biasedHedgeStopPtbStopLossTimeDecayMode = (nextFields.biasedHedgeStopPtbStopLossTimeDecayMode ?? '').trim() || 'tighten';
+        nextFields.biasedHedgeStopTimeExitRulesJson = (nextFields.biasedHedgeStopTimeExitRulesJson ?? '').trim() || '[{"elapsedSec":90,"remainingPct":60},{"elapsedSec":150,"remainingPct":0}]';
       }
       return {
         ...next,

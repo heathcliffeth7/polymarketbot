@@ -166,6 +166,10 @@ export function validateActionPlaceOrderConfig(
   graph: TradeFlowGraph
 ) {
   const config = isRecord(node.config) ? node.config : {};
+  const mode = toTrimmedString(config.mode).toLowerCase();
+  const pairLockStrategy = toTrimmedString(config.pairLockStrategy).toLowerCase();
+  const allowsZeroReentryMaxAttempts =
+    mode === 'pair_lock' && pairLockStrategy === 'biased_hedge_v1';
   const graphSourceTradeId = toFiniteNumber(graph.context.sourceTradeId);
   const graphMarketSlug = String(graph.context.marketSlug ?? '').trim();
   const graphTokenId = String(graph.context.tokenId ?? '').trim();
@@ -663,6 +667,10 @@ export function validateActionPlaceOrderConfig(
   const reentryMaxAttempts = toFiniteNumber(config.reentryMaxAttempts);
   if (
     config.reentryMaxAttempts != null &&
+    !(
+      allowsZeroReentryMaxAttempts &&
+      reentryMaxAttempts === 0
+    ) &&
     (reentryMaxAttempts == null || reentryMaxAttempts < 1 || reentryMaxAttempts > 10 || !Number.isInteger(reentryMaxAttempts))
   ) {
     pushNodeError(

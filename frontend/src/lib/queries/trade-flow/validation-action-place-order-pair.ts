@@ -90,6 +90,41 @@ function isSupportedStopLossTriggerPriceMode(value: string): boolean {
   ].includes(value);
 }
 
+function nestedConfig(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function parseBiasedTimeExitRules(raw: unknown): Array<{ elapsedSec: number; remainingPct: number }> | null {
+  const value = typeof raw === 'string' && raw.trim() ? safeParseJson(raw) : raw;
+  if (!Array.isArray(value)) return null;
+  const parsed: Array<{ elapsedSec: number; remainingPct: number }> = [];
+  for (const item of value) {
+    if (!isRecord(item)) return null;
+    const elapsedSec = toFiniteNumber(item.elapsedSec);
+    const remainingPct = toFiniteNumber(item.remainingPct);
+    if (
+      elapsedSec == null ||
+      elapsedSec <= 0 ||
+      !Number.isInteger(elapsedSec) ||
+      remainingPct == null ||
+      remainingPct < 0 ||
+      remainingPct > 100
+    ) {
+      return null;
+    }
+    parsed.push({ elapsedSec, remainingPct });
+  }
+  return parsed;
+}
+
+function safeParseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 export function validateActionPlaceOrderPairLockConfig(
   issues: TradeFlowValidationIssue[],
   node: TradeFlowNode,
@@ -118,6 +153,9 @@ export function validateActionPlaceOrderPairLockConfig(
     .filter((edge) => edge.target === node.key)
     .map((edge) => nodeMap.get(edge.source))
     .filter((candidate): candidate is TradeFlowNode => !!candidate);
+  const directTriggerConfig = directIncomingNodes.length === 1 && directIncomingNodes[0].type === 'trigger.market_price'
+    ? nestedConfig(directIncomingNodes[0].config)
+    : {};
   if (directIncomingNodes.length !== 1) {
     pushNodeError(
       issues,
@@ -173,15 +211,20 @@ export function validateActionPlaceOrderPairLockConfig(
     );
   }
   const pairLockStrategy = toTrimmedString(config.pairLockStrategy).toLowerCase() || 'legacy';
-  if (pairLockStrategy !== 'legacy' && pairLockStrategy !== 'edge_pairlock_v1') {
+  if (
+    pairLockStrategy !== 'legacy' &&
+    pairLockStrategy !== 'edge_pairlock_v1' &&
+    pairLockStrategy !== 'biased_hedge_v1'
+  ) {
     pushNodeError(
       issues,
       node,
       'invalid_pair_lock_strategy',
-      'action.place_order pairLockStrategy must be legacy or edge_pairlock_v1.'
+      'action.place_order pairLockStrategy must be legacy, edge_pairlock_v1, or biased_hedge_v1.'
     );
   }
   const usesEdgePairLock = pairLockStrategy === 'edge_pairlock_v1';
+  const usesBiasedHedge = pairLockStrategy === 'biased_hedge_v1';
   if (usesEdgePairLock) {
     if (toBooleanish(config.priceToBeatGuardEnabled) !== true) {
       pushNodeError(
@@ -230,6 +273,105 @@ export function validateActionPlaceOrderPairLockConfig(
       );
     }
   }
+  if (usesBiasedHedge) {
+    if (toBooleanish(config.priceToBeatGuardEnabled) !== true) {
+      pushNodeError(
+        issues,
+        node,
+        'biased_hedge_requires_ptb_guard',
+        'action.place_order biased_hedge_v1 requires priceToBeatGuardEnabled=true.'
+      );
+    }
+    if (toTrimmedString(config.priceToBeatMode).toLowerCase() !== 'iv_mismatch_edge') {
+      pushNodeError(
+        issues,
+        node,
+        'biased_hedge_requires_iv_mismatch_edge',
+        'action.place_order biased_hedge_v1 requires priceToBeatMode=iv_mismatch_edge.'
+      );
+    }
+    if (toBooleanish(config.pairProtectiveUnwindEnabled) !== true) {
+      pushNodeError(
+        issues,
+        node,
+        'biased_hedge_requires_protective_unwind',
+        'action.place_order biased_hedge_v1 smoke requires pairProtectiveUnwindEnabled=true.'
+      );
+    }
+    const cycleWindowEndSec = toFiniteNumber(directTriggerConfig.cycleWindowEndSec);
+    if (cycleWindowEndSec != null && cycleWindowEndSec > 240) {
+      pushNodeError(
+        issues,
+        node,
+        'biased_hedge_cycle_window_end_too_late',
+        'action.place_order biased_hedge_v1 requires trigger cycleWindowEndSec <= 240.'
+      );
+    }
+    const biasedHedge = nestedConfig(config.biasedHedge);
+    const biasedHedgeStop = nestedConfig(config.biasedHedgeStop);
+    const primaryBudgetUsdc = toFiniteNumber(biasedHedge.primaryBudgetUsdc);
+    const hedgeBudgetUsdc = toFiniteNumber(biasedHedge.hedgeBudgetUsdc);
+    const minDominantShare = toFiniteNumber(biasedHedge.minDominantShare);
+    const maxHedgeSpendRatio = toFiniteNumber(biasedHedge.maxHedgeSpendRatio);
+    const highPriceCent = toFiniteNumber(biasedHedge.highPriceCent);
+    const maxPriceCent = toFiniteNumber(config.maxPriceCent);
+    const highPriceMinFinalQ = toFiniteNumber(biasedHedge.highPriceMinFinalQ);
+    const hedgeMaxPriceCent = toFiniteNumber(biasedHedge.hedgeMaxPriceCent);
+    const maxSideSwitchCount = toFiniteNumber(biasedHedge.maxSideSwitchCount);
+    if (primaryBudgetUsdc == null || primaryBudgetUsdc <= 0) {
+      pushNodeError(issues, node, 'biased_hedge_invalid_primary_budget', 'biasedHedge.primaryBudgetUsdc must be > 0.');
+    }
+    if (hedgeBudgetUsdc == null || hedgeBudgetUsdc <= 0) {
+      pushNodeError(issues, node, 'biased_hedge_invalid_hedge_budget', 'biasedHedge.hedgeBudgetUsdc must be > 0.');
+    }
+    if (primaryBudgetUsdc != null && hedgeBudgetUsdc != null && hedgeBudgetUsdc >= primaryBudgetUsdc) {
+      pushNodeError(issues, node, 'biased_hedge_hedge_budget_must_be_smaller', 'biasedHedge.hedgeBudgetUsdc must be less than primaryBudgetUsdc.');
+    }
+    if (minDominantShare == null || minDominantShare < 0.70 || minDominantShare >= 1) {
+      pushNodeError(issues, node, 'biased_hedge_invalid_min_dominant_share', 'biasedHedge.minDominantShare must be in [0.70, 1).');
+    }
+    if (maxHedgeSpendRatio == null || maxHedgeSpendRatio <= 0 || maxHedgeSpendRatio > 0.35) {
+      pushNodeError(issues, node, 'biased_hedge_invalid_max_hedge_spend_ratio', 'biasedHedge.maxHedgeSpendRatio must be in (0, 0.35].');
+    }
+    if (
+      maxHedgeSpendRatio != null &&
+      minDominantShare != null &&
+      maxHedgeSpendRatio > (1 - minDominantShare) / minDominantShare
+    ) {
+      pushNodeError(issues, node, 'biased_hedge_ratio_breaks_dominance', 'biasedHedge.maxHedgeSpendRatio cannot break minDominantShare.');
+    }
+    if (toBooleanish(biasedHedge.hedgeOnlyIfPrimaryFilled) !== true) {
+      pushNodeError(issues, node, 'biased_hedge_requires_primary_fill_before_hedge', 'biasedHedge.hedgeOnlyIfPrimaryFilled must be true.');
+    }
+    if (highPriceMinFinalQ == null || highPriceMinFinalQ < 0.78) {
+      pushNodeError(issues, node, 'biased_hedge_high_price_min_q_too_low', 'biasedHedge.highPriceMinFinalQ must be >= 0.78.');
+    }
+    if (highPriceCent != null && maxPriceCent != null && highPriceCent > maxPriceCent) {
+      pushNodeError(issues, node, 'biased_hedge_high_price_above_max_price', 'biasedHedge.highPriceCent cannot be greater than maxPriceCent.');
+    }
+    if (hedgeMaxPriceCent != null && highPriceCent != null && hedgeMaxPriceCent >= highPriceCent) {
+      pushNodeError(issues, node, 'biased_hedge_hedge_max_above_high_price', 'biasedHedge.hedgeMaxPriceCent must be below highPriceCent.');
+    }
+    if (maxSideSwitchCount != null && maxSideSwitchCount > 1) {
+      pushNodeError(issues, node, 'biased_hedge_side_switch_limit_too_high', 'biasedHedge.maxSideSwitchCount must be <= 1.');
+    }
+    if (toBooleanish(biasedHedgeStop.biasInvalidationEnabled) !== true) {
+      pushNodeError(issues, node, 'biased_hedge_stop_required', 'biasedHedgeStop.biasInvalidationEnabled must be true.');
+    }
+    const exitPctOnInvalidation = toFiniteNumber(biasedHedgeStop.exitPctOnInvalidation);
+    if (exitPctOnInvalidation == null || exitPctOnInvalidation <= 0) {
+      pushNodeError(issues, node, 'biased_hedge_invalid_exit_pct', 'biasedHedgeStop.exitPctOnInvalidation must be > 0.');
+    }
+    const timeExitRules = parseBiasedTimeExitRules(biasedHedgeStop.timeExitRules);
+    if (!timeExitRules || timeExitRules.length === 0) {
+      pushNodeError(issues, node, 'biased_hedge_time_exit_required', 'biasedHedgeStop.timeExitRules cannot be empty.');
+    }
+    const reentryMaxAttempts = toFiniteNumber(config.reentryMaxAttempts);
+    const reentryCooldownSec = toFiniteNumber(config.reentryCooldownSec);
+    if (reentryMaxAttempts != null && reentryMaxAttempts > 0 && reentryCooldownSec === 0) {
+      pushNodeError(issues, node, 'biased_hedge_reentry_requires_cooldown', 'reentryCooldownSec cannot be 0 when reentryMaxAttempts > 0.');
+    }
+  }
   const sizeMode = toTrimmedString(config.sizeMode).toLowerCase();
   if (sizeMode !== 'usdc' || config.sizePct != null || config.sizePercent != null) {
     pushNodeError(
@@ -268,7 +410,7 @@ export function validateActionPlaceOrderPairLockConfig(
   }
 
   const pairMaxTotalCent = toFiniteNumber(config.pairMaxTotalCent ?? config.pairTargetTotalCent);
-  if (pairMaxTotalCent == null || pairMaxTotalCent <= 0 || pairMaxTotalCent >= 100) {
+  if (!usesBiasedHedge && (pairMaxTotalCent == null || pairMaxTotalCent <= 0 || pairMaxTotalCent >= 100)) {
     pushNodeError(
       issues,
       node,
@@ -517,7 +659,7 @@ export function validateActionPlaceOrderPairLockConfig(
         'action.place_order pairTotalBudgetUsdc must be greater than the primary sizeUsdc.'
       );
     }
-  } else if (!usesEdgePairLock) {
+  } else if (!usesEdgePairLock && !usesBiasedHedge) {
     const counterLegSizeUsdc = toFiniteNumber(config.counterLegSizeUsdc);
     if (counterLegSizeUsdc == null || counterLegSizeUsdc <= 0) {
       pushNodeError(

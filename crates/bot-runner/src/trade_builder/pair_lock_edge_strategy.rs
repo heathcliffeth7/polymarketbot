@@ -1,5 +1,6 @@
 const PAIR_LOCK_STRATEGY_LEGACY: &str = "legacy";
 const PAIR_LOCK_STRATEGY_EDGE_PAIRLOCK_V1: &str = "edge_pairlock_v1";
+const PAIR_LOCK_STRATEGY_BIASED_HEDGE_V1: &str = "biased_hedge_v1";
 const DEFAULT_PAIR_LOCK_DECISION_QTY: f64 = 5.0;
 const DEFAULT_PAIR_LOCK_SINGLE_EDGE_THRESHOLD: f64 = 0.10;
 const DEFAULT_PAIR_LOCK_COST_BUFFER: f64 = 0.005;
@@ -54,7 +55,8 @@ fn resolve_action_place_order_pair_lock_strategy(node: &TradeFlowNode) -> Result
     {
         "" | PAIR_LOCK_STRATEGY_LEGACY => Ok(PAIR_LOCK_STRATEGY_LEGACY),
         PAIR_LOCK_STRATEGY_EDGE_PAIRLOCK_V1 => Ok(PAIR_LOCK_STRATEGY_EDGE_PAIRLOCK_V1),
-        _ => anyhow::bail!("action.place_order pairLockStrategy must be legacy or edge_pairlock_v1"),
+        PAIR_LOCK_STRATEGY_BIASED_HEDGE_V1 => Ok(PAIR_LOCK_STRATEGY_BIASED_HEDGE_V1),
+        _ => anyhow::bail!("action.place_order pairLockStrategy must be legacy, edge_pairlock_v1, or biased_hedge_v1"),
     }
 }
 
@@ -62,6 +64,13 @@ fn action_place_order_uses_edge_pairlock_strategy(node: &TradeFlowNode) -> bool 
     matches!(
         resolve_action_place_order_pair_lock_strategy(node),
         Ok(PAIR_LOCK_STRATEGY_EDGE_PAIRLOCK_V1)
+    )
+}
+
+fn action_place_order_uses_biased_hedge_strategy(node: &TradeFlowNode) -> bool {
+    matches!(
+        resolve_action_place_order_pair_lock_strategy(node),
+        Ok(PAIR_LOCK_STRATEGY_BIASED_HEDGE_V1)
     )
 }
 

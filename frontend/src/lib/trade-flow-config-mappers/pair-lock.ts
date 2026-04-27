@@ -7,6 +7,33 @@ export const PAIR_LOCK_CONFIG_KEYS = [
   'pairLockDecisionQty',
   'pairLockSingleEdgeThreshold',
   'pairLockCostBuffer',
+  'biasedHedge',
+  'biasedHedgeStop',
+  'biasedHedgePrimaryBudgetUsdc',
+  'biasedHedgeHedgeBudgetUsdc',
+  'biasedHedgeMinDominantShare',
+  'biasedHedgeMaxHedgeSpendRatio',
+  'biasedHedgePrimaryMinEdge',
+  'biasedHedgePrimaryMinFinalQ',
+  'biasedHedgeMaxPriceCent',
+  'biasedHedgeHighPriceCent',
+  'biasedHedgeHighPriceMinFinalQ',
+  'biasedHedgeHighPriceMinEdge',
+  'biasedHedgeHedgeOnlyIfPrimaryFilled',
+  'biasedHedgeHedgeMaxPriceCent',
+  'biasedHedgeHedgeMinPriceCent',
+  'biasedHedgeDisableNewPrimaryAfterSec',
+  'biasedHedgeDisableAnyBuyAfterSec',
+  'biasedHedgeMaxSideSwitchCount',
+  'biasedHedgeMaxPairedEffectiveCostCent',
+  'biasedHedgeStopBiasInvalidationEnabled',
+  'biasedHedgeStopMinQFinalToHold',
+  'biasedHedgeStopMinEdgeToHold',
+  'biasedHedgeStopExitPctOnInvalidation',
+  'biasedHedgeStopPtbStopLossEnabled',
+  'biasedHedgeStopPtbStopLossGapUsd',
+  'biasedHedgeStopPtbStopLossTimeDecayMode',
+  'biasedHedgeStopTimeExitRulesJson',
   'pairMaxTotalCent',
   'pairTargetTotalCent',
   'pairSizingMode',
@@ -114,10 +141,96 @@ export function normalizePairLockSizingMode(value: string): 'manual' | 'auto_rem
     : 'manual';
 }
 
-export function normalizePairLockStrategy(value: string): 'legacy' | 'edge_pairlock_v1' {
-  return value.trim().toLowerCase() === 'edge_pairlock_v1'
-    ? 'edge_pairlock_v1'
-    : 'legacy';
+export type PairLockStrategy = 'legacy' | 'edge_pairlock_v1' | 'biased_hedge_v1';
+
+export function normalizePairLockStrategy(value: string): PairLockStrategy {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'edge_pairlock_v1') return 'edge_pairlock_v1';
+  if (normalized === 'biased_hedge_v1') return 'biased_hedge_v1';
+  return 'legacy';
+}
+
+function nestedRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value != null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function setDefault(fields: Record<string, string>, key: string, value: string): void {
+  if (!(fields[key] ?? '').trim()) fields[key] = value;
+}
+
+function readNestedField(
+  fields: Record<string, string>,
+  source: Record<string, unknown>,
+  sourceKey: string,
+  fieldKey: string,
+  fallback?: string
+): void {
+  const value = toStringValue(source[sourceKey]).trim();
+  if (value) fields[fieldKey] = value;
+  else if (fallback != null) setDefault(fields, fieldKey, fallback);
+}
+
+function parseBiasedHedgeTimeExitRulesJson(value: unknown): Array<{ elapsedSec: number; remainingPct: number }> {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => nestedRecord(item))
+      .map((item) => ({
+        elapsedSec: Number(toStringValue(item.elapsedSec).trim()),
+        remainingPct: Number(toStringValue(item.remainingPct).trim()),
+      }))
+      .filter((item) => Number.isFinite(item.elapsedSec) && item.elapsedSec > 0 && Number.isFinite(item.remainingPct) && item.remainingPct >= 0 && item.remainingPct <= 100);
+  }
+  if (typeof value !== 'string' || !value.trim()) return [];
+  try {
+    return parseBiasedHedgeTimeExitRulesJson(JSON.parse(value));
+  } catch {
+    return [];
+  }
+}
+
+function applyBiasedHedgeFormDefaults(fields: Record<string, string>, cfg: Record<string, unknown>): void {
+  const biased = nestedRecord(cfg.biasedHedge);
+  const stop = nestedRecord(cfg.biasedHedgeStop);
+  fields.priceToBeatGuardEnabled = 'true';
+  fields.priceToBeatMode = 'iv_mismatch_edge';
+  fields.pairSizingMode = 'manual';
+  fields.counterLegEnabled = 'true';
+  fields.tpEnabled = 'false';
+  fields.pairProtectiveUnwindEnabled = 'true';
+  fields.pairOrphanGraceMs = (fields.pairOrphanGraceMs ?? '').trim() || '1500';
+  fields.reentryMaxAttempts = (fields.reentryMaxAttempts ?? '').trim() || '0';
+  readNestedField(fields, biased, 'primaryBudgetUsdc', 'biasedHedgePrimaryBudgetUsdc', toStringValue(cfg.sizeUsdc).trim() || '2');
+  readNestedField(fields, biased, 'hedgeBudgetUsdc', 'biasedHedgeHedgeBudgetUsdc', '0.5');
+  readNestedField(fields, biased, 'minDominantShare', 'biasedHedgeMinDominantShare', '0.75');
+  readNestedField(fields, biased, 'maxHedgeSpendRatio', 'biasedHedgeMaxHedgeSpendRatio', '0.25');
+  readNestedField(fields, biased, 'primaryMinEdge', 'biasedHedgePrimaryMinEdge', '0.08');
+  readNestedField(fields, biased, 'primaryMinFinalQ', 'biasedHedgePrimaryMinFinalQ', '0.72');
+  readNestedField(fields, biased, 'maxPriceCent', 'biasedHedgeMaxPriceCent', toStringValue(cfg.maxPriceCent).trim() || '75');
+  readNestedField(fields, biased, 'highPriceCent', 'biasedHedgeHighPriceCent', '70');
+  readNestedField(fields, biased, 'highPriceMinFinalQ', 'biasedHedgeHighPriceMinFinalQ', '0.82');
+  readNestedField(fields, biased, 'highPriceMinEdge', 'biasedHedgeHighPriceMinEdge', '0.10');
+  fields.biasedHedgeHedgeOnlyIfPrimaryFilled = toStringValue(biased.hedgeOnlyIfPrimaryFilled ?? 'true');
+  readNestedField(fields, biased, 'hedgeMinPriceCent', 'biasedHedgeHedgeMinPriceCent', '3');
+  readNestedField(fields, biased, 'hedgeMaxPriceCent', 'biasedHedgeHedgeMaxPriceCent', '25');
+  readNestedField(fields, biased, 'disableNewPrimaryAfterSec', 'biasedHedgeDisableNewPrimaryAfterSec', '180');
+  readNestedField(fields, biased, 'disableAnyBuyAfterSec', 'biasedHedgeDisableAnyBuyAfterSec', '240');
+  readNestedField(fields, biased, 'maxSideSwitchCount', 'biasedHedgeMaxSideSwitchCount', '0');
+  readNestedField(fields, cfg, 'biasedHedgeMaxPairedEffectiveCostCent', 'biasedHedgeMaxPairedEffectiveCostCent', '95');
+  fields.biasedHedgeStopBiasInvalidationEnabled = toStringValue(stop.biasInvalidationEnabled ?? 'true');
+  readNestedField(fields, stop, 'minQFinalToHold', 'biasedHedgeStopMinQFinalToHold', '0.55');
+  readNestedField(fields, stop, 'minEdgeToHold', 'biasedHedgeStopMinEdgeToHold', '0');
+  readNestedField(fields, stop, 'exitPctOnInvalidation', 'biasedHedgeStopExitPctOnInvalidation', '100');
+  fields.biasedHedgeStopPtbStopLossEnabled = toStringValue(stop.ptbStopLossEnabled ?? 'true');
+  readNestedField(fields, stop, 'ptbStopLossGapUsd', 'biasedHedgeStopPtbStopLossGapUsd', '-3');
+  fields.biasedHedgeStopPtbStopLossTimeDecayMode = toStringValue(stop.ptbStopLossTimeDecayMode ?? 'tighten');
+  const timeExitRules = parseBiasedHedgeTimeExitRulesJson(stop.timeExitRules);
+  fields.biasedHedgeStopTimeExitRulesJson = JSON.stringify(
+    timeExitRules.length > 0
+      ? timeExitRules
+      : [{ elapsedSec: 90, remainingPct: 60 }, { elapsedSec: 150, remainingPct: 0 }]
+  );
 }
 
 export function applyPairLockFormDefaults(
@@ -138,6 +251,8 @@ export function applyPairLockFormDefaults(
     if (!(fields.pairLockSingleEdgeThreshold ?? '').trim()) fields.pairLockSingleEdgeThreshold = '0.10';
     if (!(fields.pairLockCostBuffer ?? '').trim()) fields.pairLockCostBuffer = '0.005';
     if (!(fields.pairMaxTotalCent ?? '').trim()) fields.pairMaxTotalCent = '95';
+  } else if (fields.pairLockStrategy === 'biased_hedge_v1') {
+    applyBiasedHedgeFormDefaults(fields, cfg);
   }
   if (!(fields.pairMaxTotalCent ?? '').trim()) {
     fields.pairMaxTotalCent = toStringValue(cfg.pairMaxTotalCent ?? cfg.pairTargetTotalCent).trim();
@@ -179,6 +294,90 @@ function normalizeNonNegativeNumberField(
   config[key] = Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
+function positiveNumber(config: Record<string, unknown>, key: string, fallback: number): number {
+  const value = Number(toStringValue(config[key]).trim());
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function nonNegativeNumber(config: Record<string, unknown>, key: string, fallback: number): number {
+  const value = Number(toStringValue(config[key]).trim());
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function booleanValue(config: Record<string, unknown>, key: string, fallback: boolean): boolean {
+  const value = toStringValue(config[key]).trim().toLowerCase();
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  if (typeof config[key] === 'boolean') return config[key] as boolean;
+  return fallback;
+}
+
+function finiteNumber(config: Record<string, unknown>, key: string, fallback: number): number {
+  const value = Number(toStringValue(config[key]).trim());
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeBiasedHedgeBuildConfig(config: Record<string, unknown>): void {
+  config.pairLockStrategy = 'biased_hedge_v1';
+  config.priceToBeatGuardEnabled = true;
+  config.priceToBeatMode = 'iv_mismatch_edge';
+  config.pairSizingMode = 'manual';
+  config.counterLegEnabled = true;
+  config.tpEnabled = false;
+  config.pairProtectiveUnwindEnabled = true;
+  const primaryBudgetUsdc = positiveNumber(config, 'biasedHedgePrimaryBudgetUsdc', positiveNumber(config, 'sizeUsdc', 2));
+  const hedgeBudgetUsdc = positiveNumber(config, 'biasedHedgeHedgeBudgetUsdc', 0.5);
+  config.biasedHedge = {
+    primaryBudgetUsdc,
+    hedgeBudgetUsdc,
+    minDominantShare: positiveNumber(config, 'biasedHedgeMinDominantShare', 0.75),
+    maxHedgeSpendRatio: positiveNumber(config, 'biasedHedgeMaxHedgeSpendRatio', 0.25),
+    primaryMinEdge: nonNegativeNumber(config, 'biasedHedgePrimaryMinEdge', 0.08),
+    primaryMinFinalQ: positiveNumber(config, 'biasedHedgePrimaryMinFinalQ', 0.72),
+    maxPriceCent: positiveNumber(config, 'biasedHedgeMaxPriceCent', positiveNumber(config, 'maxPriceCent', 75)),
+    highPriceCent: positiveNumber(config, 'biasedHedgeHighPriceCent', 70),
+    highPriceMinFinalQ: positiveNumber(config, 'biasedHedgeHighPriceMinFinalQ', 0.82),
+    highPriceMinEdge: nonNegativeNumber(config, 'biasedHedgeHighPriceMinEdge', 0.10),
+    hedgeOnlyIfPrimaryFilled: booleanValue(config, 'biasedHedgeHedgeOnlyIfPrimaryFilled', true),
+    hedgeMinPriceCent: positiveNumber(config, 'biasedHedgeHedgeMinPriceCent', 3),
+    hedgeMaxPriceCent: positiveNumber(config, 'biasedHedgeHedgeMaxPriceCent', 25),
+    disableNewPrimaryAfterSec: Math.floor(positiveNumber(config, 'biasedHedgeDisableNewPrimaryAfterSec', 180)),
+    disableAnyBuyAfterSec: Math.floor(positiveNumber(config, 'biasedHedgeDisableAnyBuyAfterSec', 240)),
+    maxSideSwitchCount: Math.floor(nonNegativeNumber(config, 'biasedHedgeMaxSideSwitchCount', 0)),
+  };
+  config.biasedHedgeMaxPairedEffectiveCostCent = positiveNumber(config, 'biasedHedgeMaxPairedEffectiveCostCent', 95);
+  const timeExitRules = parseBiasedHedgeTimeExitRulesJson(config.biasedHedgeStopTimeExitRulesJson);
+  config.biasedHedgeStop = {
+    biasInvalidationEnabled: booleanValue(config, 'biasedHedgeStopBiasInvalidationEnabled', true),
+    minQFinalToHold: positiveNumber(config, 'biasedHedgeStopMinQFinalToHold', 0.55),
+    minEdgeToHold: nonNegativeNumber(config, 'biasedHedgeStopMinEdgeToHold', 0),
+    exitPctOnInvalidation: positiveNumber(config, 'biasedHedgeStopExitPctOnInvalidation', 100),
+    ptbStopLossEnabled: booleanValue(config, 'biasedHedgeStopPtbStopLossEnabled', true),
+    ptbStopLossGapUsd: finiteNumber(config, 'biasedHedgeStopPtbStopLossGapUsd', -3),
+    ptbStopLossTimeDecayMode: ['none', 'relax'].includes(toStringValue(config.biasedHedgeStopPtbStopLossTimeDecayMode).trim().toLowerCase())
+      ? toStringValue(config.biasedHedgeStopPtbStopLossTimeDecayMode).trim().toLowerCase()
+      : 'tighten',
+    timeExitRules: timeExitRules.length > 0
+      ? timeExitRules
+      : [{ elapsedSec: 90, remainingPct: 60 }, { elapsedSec: 150, remainingPct: 0 }],
+  };
+  for (const key of PAIR_LOCK_CONFIG_KEYS) {
+    if (
+      key.startsWith('biasedHedge') &&
+      key !== 'biasedHedge' &&
+      key !== 'biasedHedgeStop' &&
+      key !== 'biasedHedgeMaxPairedEffectiveCostCent'
+    ) {
+      delete config[key];
+    }
+  }
+  delete config.pairLockDecisionQty;
+  delete config.pairLockSingleEdgeThreshold;
+  delete config.pairLockCostBuffer;
+  delete config.pairTotalBudgetUsdc;
+  delete config.counterLegSizeUsdc;
+}
+
 export function normalizePairLockBuildConfig(config: Record<string, unknown>): void {
   const pairLockMode = toStringValue(config.mode).trim().toLowerCase() === 'pair_lock';
   if (!pairLockMode) {
@@ -197,11 +396,16 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     normalizePositiveNumberField(config, 'pairLockDecisionQty', 5);
     normalizeNonNegativeNumberField(config, 'pairLockSingleEdgeThreshold', 0.10);
     normalizeNonNegativeNumberField(config, 'pairLockCostBuffer', 0.005);
+  } else if (pairLockStrategy === 'biased_hedge_v1') {
+    normalizeBiasedHedgeBuildConfig(config);
   } else {
     delete config.pairLockStrategy;
     delete config.pairLockDecisionQty;
     delete config.pairLockSingleEdgeThreshold;
     delete config.pairLockCostBuffer;
+    delete config.biasedHedge;
+    delete config.biasedHedgeStop;
+    delete config.biasedHedgeMaxPairedEffectiveCostCent;
   }
 
   const pairMaxTotalCent = Number(toStringValue(config.pairMaxTotalCent ?? config.pairTargetTotalCent).trim());
@@ -227,7 +431,7 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
   }
 
   config.pairSizingMode = normalizePairLockSizingMode(toStringValue(config.pairSizingMode));
-  if (pairLockStrategy === 'edge_pairlock_v1') {
+  if (pairLockStrategy === 'edge_pairlock_v1' || pairLockStrategy === 'biased_hedge_v1') {
     config.pairSizingMode = 'manual';
     delete config.pairTotalBudgetUsdc;
     delete config.counterLegSizeUsdc;
@@ -381,6 +585,7 @@ export function normalizePairLockStopLossBuildConfig(
 export function normalizePairLockTakeProfitBuildConfig(
   config: Record<string, unknown>
 ): void {
+  const pairLockStrategy = normalizePairLockStrategy(toStringValue(config.pairLockStrategy));
   const primaryTpEnabled =
     config.tpEnabled === true ||
     (Array.isArray(config.tpRules) && config.tpRules.length > 0);
@@ -390,7 +595,11 @@ export function normalizePairLockTakeProfitBuildConfig(
       (Array.isArray(config.counterLegTpRules) && config.counterLegTpRules.length > 0));
 
   if (!primaryTpEnabled) {
-    delete config.tpEnabled;
+    if (pairLockStrategy === 'biased_hedge_v1') {
+      config.tpEnabled = false;
+    } else {
+      delete config.tpEnabled;
+    }
     delete config.tpPriceCent;
     delete config.tpPrice;
     delete config.tpRules;

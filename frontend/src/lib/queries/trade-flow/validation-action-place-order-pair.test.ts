@@ -18,6 +18,7 @@ function buildAutoScopeTrigger(key: string): TradeFlowNode {
       bindingMode: 'pair_lock_only',
       priceMode: 'composite',
       repeatMode: 'once',
+      cycleWindowMode: 'custom_range',
       outcomeConditions: [
         {
           outcomeLabel: 'Up',
@@ -27,6 +28,111 @@ function buildAutoScopeTrigger(key: string): TradeFlowNode {
       ],
     },
   };
+}
+
+function buildAutoScopeTriggerWithConfig(
+  key: string,
+  config: Record<string, unknown>
+): TradeFlowNode {
+  const trigger = buildAutoScopeTrigger(key);
+  trigger.config = { ...trigger.config, ...config };
+  return trigger;
+}
+
+function buildBiasedHedgeConfig(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  const biasedOverrides =
+    overrides.biasedHedge && typeof overrides.biasedHedge === 'object'
+      ? (overrides.biasedHedge as Record<string, unknown>)
+      : {};
+  const stopOverrides =
+    overrides.biasedHedgeStop && typeof overrides.biasedHedgeStop === 'object'
+      ? (overrides.biasedHedgeStop as Record<string, unknown>)
+      : {};
+  const base = {
+    mode: 'pair_lock',
+    pairLockStrategy: 'biased_hedge_v1',
+    side: 'buy',
+    executionMode: 'market',
+    sizeMode: 'usdc',
+    sizeUsdc: 2,
+    maxPriceCent: 75,
+    priceToBeatGuardEnabled: true,
+    priceToBeatMode: 'iv_mismatch_edge',
+    counterLegEnabled: true,
+    counterLegOutcomeLabel: 'opposite',
+    pairProtectiveUnwindEnabled: true,
+    pairOrphanGraceMs: 1500,
+    tpEnabled: false,
+    reentryMaxAttempts: 0,
+    biasedHedgeMaxPairedEffectiveCostCent: 95,
+    biasedHedge: {
+      primaryBudgetUsdc: 2,
+      hedgeBudgetUsdc: 0.5,
+      minDominantShare: 0.75,
+      maxHedgeSpendRatio: 0.25,
+      primaryMinEdge: 0.08,
+      primaryMinFinalQ: 0.72,
+      maxPriceCent: 75,
+      highPriceCent: 70,
+      highPriceMinFinalQ: 0.82,
+      highPriceMinEdge: 0.10,
+      hedgeOnlyIfPrimaryFilled: true,
+      hedgeMinPriceCent: 3,
+      hedgeMaxPriceCent: 25,
+      disableNewPrimaryAfterSec: 180,
+      disableAnyBuyAfterSec: 240,
+      maxSideSwitchCount: 0,
+      ...biasedOverrides,
+    },
+    biasedHedgeStop: {
+      biasInvalidationEnabled: true,
+      minQFinalToHold: 0.55,
+      minEdgeToHold: 0,
+      exitPctOnInvalidation: 100,
+      ptbStopLossEnabled: true,
+      ptbStopLossGapUsd: -3,
+      ptbStopLossTimeDecayMode: 'tighten',
+      timeExitRules: [
+        { elapsedSec: 90, remainingPct: 60 },
+        { elapsedSec: 150, remainingPct: 0 },
+      ],
+      ...stopOverrides,
+    },
+  };
+  const result: Record<string, unknown> = { ...base, ...overrides, biasedHedge: base.biasedHedge, biasedHedgeStop: base.biasedHedgeStop };
+  if ('biasedHedge' in overrides && overrides.biasedHedge == null) {
+    result.biasedHedge = overrides.biasedHedge;
+  }
+  if ('biasedHedgeStop' in overrides && overrides.biasedHedgeStop == null) {
+    result.biasedHedgeStop = overrides.biasedHedgeStop;
+  }
+  return result;
+}
+
+function buildBiasedHedgeGraph(
+  actionOverrides: Record<string, unknown> = {},
+  triggerOverrides: Record<string, unknown> = {}
+): TradeFlowGraph {
+  return normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTriggerWithConfig('trigger_biased', {
+        cycleWindowStartSec: 30,
+        cycleWindowEndSec: 180,
+        ...triggerOverrides,
+      }),
+      {
+        key: 'pair_buy_biased',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: buildBiasedHedgeConfig(actionOverrides),
+      },
+    ],
+    edges: [{ key: 'edge_biased', source: 'trigger_biased', target: 'pair_buy_biased', type: 'default', condition: null }],
+  });
 }
 
 function collectActionIssues(graph: TradeFlowGraph, nodeKey: string): TradeFlowValidationIssue[] {
@@ -115,6 +221,55 @@ test('validateActionPlaceOrderConfig accepts edge_pairlock_v1 share qty config',
 
   const issues = collectActionIssues(graph, 'pair_buy_edge');
   assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig accepts biased_hedge_v1 smoke config', () => {
+  const graph = buildBiasedHedgeGraph();
+
+  const issues = collectActionIssues(graph, 'pair_buy_biased');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig rejects biased_hedge_v1 without stop config', () => {
+  const graph = buildBiasedHedgeGraph({ biasedHedgeStop: null });
+
+  const issues = collectActionIssues(graph, 'pair_buy_biased');
+  assert.ok(issues.some((issue) => issue.code === 'biased_hedge_stop_required'));
+  assert.ok(issues.some((issue) => issue.code === 'biased_hedge_time_exit_required'));
+});
+
+test('validateActionPlaceOrderConfig rejects biased_hedge_v1 hedge before primary fill', () => {
+  const graph = buildBiasedHedgeGraph({
+    biasedHedge: { hedgeOnlyIfPrimaryFilled: false },
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_biased');
+  assert.ok(issues.some((issue) => issue.code === 'biased_hedge_requires_primary_fill_before_hedge'));
+});
+
+test('validateActionPlaceOrderConfig rejects biased_hedge_v1 weak high-price guard', () => {
+  const graph = buildBiasedHedgeGraph({
+    biasedHedge: { highPriceMinFinalQ: 0.77 },
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_biased');
+  assert.ok(issues.some((issue) => issue.code === 'biased_hedge_high_price_min_q_too_low'));
+});
+
+test('validateActionPlaceOrderConfig rejects biased_hedge_v1 dominance-breaking hedge ratio', () => {
+  const graph = buildBiasedHedgeGraph({
+    biasedHedge: { minDominantShare: 0.80, maxHedgeSpendRatio: 0.30 },
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_biased');
+  assert.ok(issues.some((issue) => issue.code === 'biased_hedge_ratio_breaks_dominance'));
+});
+
+test('validateActionPlaceOrderConfig rejects biased_hedge_v1 late cycle window', () => {
+  const graph = buildBiasedHedgeGraph({}, { cycleWindowEndSec: 260 });
+
+  const issues = collectActionIssues(graph, 'pair_buy_biased');
+  assert.ok(issues.some((issue) => issue.code === 'biased_hedge_cycle_window_end_too_late'));
 });
 
 test('validateActionPlaceOrderConfig accepts pair_lock primary PTB bump loss table config', () => {
