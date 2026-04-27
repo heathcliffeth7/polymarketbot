@@ -206,6 +206,46 @@ fn bytes32_to_hex(bytes: [u8; 32]) -> String {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_place_order_body(
+    salt_u64: u64,
+    maker_str: &str,
+    signer_str: &str,
+    token_id: U256,
+    maker_amount: U256,
+    taker_amount: U256,
+    side_str: &str,
+    sig_type: u64,
+    order_timestamp: U256,
+    metadata: [u8; 32],
+    builder_code_hex: &str,
+    signature: &str,
+    owner: &str,
+    normalized_order_type: &str,
+    fee_rate_bps: u64,
+) -> serde_json::Value {
+    json!({
+        "order": {
+            "salt": salt_u64,
+            "maker": maker_str,
+            "signer": signer_str,
+            "tokenId": token_id.to_string(),
+            "makerAmount": maker_amount.to_string(),
+            "takerAmount": taker_amount.to_string(),
+            "side": side_str,
+            "expiration": "0",
+            "signatureType": sig_type as i64,
+            "timestamp": order_timestamp.to_string(),
+            "metadata": bytes32_to_hex(metadata),
+            "builder": builder_code_hex,
+            "signature": signature,
+        },
+        "owner": owner,
+        "orderType": normalized_order_type,
+        "feeRateBps": fee_rate_bps.to_string(),
+    })
+}
+
 fn parse_price_history_point(raw: &Value) -> Option<PriceHistoryPoint> {
     let ts = raw
         .get("t")
@@ -656,25 +696,23 @@ impl ClobRestClient for ClobHttpClient {
         let signer_str = ethers::utils::to_checksum(&signer_addr, None);
         let side_str = if is_buy { "BUY" } else { "SELL" };
         let salt_u64 = salt.low_u64();
-        let body = json!({
-            "order": {
-                "salt": salt_u64,
-                "maker": maker_str,
-                "signer": signer_str,
-                "tokenId": token_id.to_string(),
-                "makerAmount": maker_amount.to_string(),
-                "takerAmount": taker_amount.to_string(),
-                "side": side_str,
-                "expiration": "0",
-                "signatureType": sig_type as i64,
-                "timestamp": order_timestamp.to_string(),
-                "metadata": bytes32_to_hex(metadata),
-                "builder": self.builder_code_hex.clone(),
-                "signature": signature,
-            },
-            "owner": self.api_key,
-            "orderType": normalized_order_type,
-        });
+        let body = build_place_order_body(
+            salt_u64,
+            &maker_str,
+            &signer_str,
+            token_id,
+            maker_amount,
+            taker_amount,
+            side_str,
+            sig_type,
+            order_timestamp,
+            metadata,
+            &self.builder_code_hex,
+            &signature,
+            &self.api_key,
+            normalized_order_type,
+            req.fee_rate_bps,
+        );
 
         tracing::warn!(
             side = side_u8,

@@ -1,14 +1,17 @@
 use super::clob::{
-    extract_best_bid_ask_from_book, extract_order_book_from_book, parse_clob_market_info_response,
-    parse_fee_rate_bps_response,
+    build_place_order_body, extract_best_bid_ask_from_book, extract_order_book_from_book,
+    parse_clob_market_info_response, parse_fee_rate_bps_response,
 };
 use super::parse::{parse_gamma_market, parse_gamma_market_any, parse_yes_no_token_ids};
 use super::{ClobHttpClient, ClobRestClient, OrderBookLevel, PlaceOrderRequest};
 use crate::signer::ApiCredentials;
 use anyhow::Result;
-use ethers::{signers::LocalWallet, types::Address};
+use ethers::{
+    signers::LocalWallet,
+    types::{Address, U256},
+};
 use mock_exchange::spawn_mock_exchange;
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -357,4 +360,29 @@ fn fee_rate_parser_preserves_existing_fee_rate_fields() {
 
     assert_eq!(parse_fee_rate_bps_response(&snake), Some(12));
     assert_eq!(parse_fee_rate_bps_response(&camel), Some(34));
+}
+
+#[test]
+fn place_order_body_includes_top_level_fee_rate_bps() {
+    let body = build_place_order_body(
+        1,
+        "0x0000000000000000000000000000000000000000",
+        "0x0000000000000000000000000000000000000000",
+        U256::from(123_u64),
+        U256::from(456_u64),
+        U256::from(789_u64),
+        "BUY",
+        0,
+        U256::from(1_000_u64),
+        [0u8; 32],
+        "0x0000000000000000000000000000000000000000",
+        "0xsignature",
+        "api-key",
+        "IOC",
+        1_000,
+    );
+
+    assert_eq!(body.get("feeRateBps").and_then(Value::as_str), Some("1000"));
+    assert_eq!(body.get("owner").and_then(Value::as_str), Some("api-key"));
+    assert_eq!(body.get("orderType").and_then(Value::as_str), Some("IOC"));
 }
