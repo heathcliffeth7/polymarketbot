@@ -386,6 +386,7 @@ fn trade_builder_analysis_build_trade_diagnostic(
     events_by_order_id: &HashMap<i64, Vec<TradeBuilderOrderEventRecord>>,
     second_snapshots: &[TradeBuilderMarketSecondSnapshot],
     buy_metrics: &AutoScopeAnalysisOrderMetrics,
+    sell_allocation_summary: &AutoScopeAnalysisSellAllocationSummary,
     open_to_trigger_ms: Option<i64>,
     trigger_to_buy_fill_ms: Option<i64>,
 ) -> TradeFlowAutoScopeTradeDiagnosticInput {
@@ -538,6 +539,9 @@ fn trade_builder_analysis_build_trade_diagnostic(
     if is_open_position {
         trade_builder_analysis_data_flag(&mut data_quality_flags, "open_position_mark");
     }
+    if sell_allocation_summary.ignored_sell_qty > 0.0 {
+        trade_builder_analysis_data_flag(&mut data_quality_flags, "oversold_exit_qty");
+    }
     if submitted_event.is_none() || flow_created_event.is_none() {
         trade_builder_analysis_data_flag(&mut data_quality_flags, "old_trade_best_effort");
     }
@@ -586,6 +590,7 @@ fn trade_builder_analysis_build_trade_diagnostic(
         diagnosis_detail,
         data_quality_flags,
         compact_metrics_json: json!({
+            "pnl_model_version": AUTO_SCOPE_ANALYSIS_PNL_MODEL_VERSION,
             "buy_qty": round_trade_builder_share_qty(buy_metrics.qty),
             "buy_notional_usdc": round_trade_builder_signed_qty(buy_metrics.notional_usdc),
             "buy_fee_usdc": round_trade_builder_signed_qty(buy_metrics.fee_usdc),
@@ -594,6 +599,15 @@ fn trade_builder_analysis_build_trade_diagnostic(
                     .filter(|row| row.row_type == "sell_exit")
                     .map(|row| row.row_qty)
                     .sum()
+            ),
+            "allocated_sold_qty": round_trade_builder_share_qty(
+                sell_allocation_summary.allocated_sold_qty
+            ),
+            "observed_sell_qty": round_trade_builder_share_qty(
+                sell_allocation_summary.observed_sell_qty
+            ),
+            "ignored_sell_qty": round_trade_builder_share_qty(
+                sell_allocation_summary.ignored_sell_qty
             ),
             "remaining_qty": round_trade_builder_share_qty(
                 rows.iter()

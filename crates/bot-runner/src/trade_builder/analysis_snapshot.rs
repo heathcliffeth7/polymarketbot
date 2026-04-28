@@ -1,4 +1,5 @@
 const AUTO_SCOPE_ANALYSIS_BACKFILL_LIMIT: i64 = 25;
+const AUTO_SCOPE_ANALYSIS_PNL_MODEL_VERSION: i64 = 2;
 const AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_DELAYS_SECS: [u64; 4] = [1, 3, 8, 20];
 
 static AUTO_SCOPE_ANALYSIS_BACKFILL_CHECKED_ROOTS: LazyLock<parking_lot::Mutex<HashSet<i64>>> =
@@ -24,6 +25,21 @@ struct AutoScopeAnalysisPnlBreakdown {
     net_value_usdc: f64,
     row_pnl_usdc: f64,
     pnl_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AutoScopeAnalysisSellAllocationSummary {
+    observed_sell_qty: f64,
+    allocated_sold_qty: f64,
+    ignored_sell_qty: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AutoScopeAnalysisSellFillAllocation {
+    allocated_qty: f64,
+    ignored_qty: f64,
+    allocation_ratio: f64,
+    remaining_qty_after_exit: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +214,32 @@ fn trade_builder_analysis_pnl_breakdown(
         net_value_usdc: round_trade_builder_signed_qty(net_value_usdc),
         row_pnl_usdc: round_trade_builder_signed_qty(row_pnl_usdc),
         pnl_pct,
+    }
+}
+
+fn trade_builder_analysis_allocate_sell_fill(
+    buy_qty: f64,
+    allocated_sold_qty: f64,
+    raw_sell_qty: f64,
+) -> AutoScopeAnalysisSellFillAllocation {
+    let sell_qty = round_trade_builder_share_qty(raw_sell_qty.max(0.0));
+    let remaining_qty_before_exit =
+        round_trade_builder_share_qty((buy_qty - allocated_sold_qty).max(0.0));
+    let allocated_qty = round_trade_builder_share_qty(sell_qty.min(remaining_qty_before_exit));
+    let ignored_qty = round_trade_builder_share_qty((sell_qty - allocated_qty).max(0.0));
+    let allocation_ratio = if sell_qty > 0.0 {
+        allocated_qty / sell_qty
+    } else {
+        0.0
+    };
+    let remaining_qty_after_exit =
+        round_trade_builder_share_qty((remaining_qty_before_exit - allocated_qty).max(0.0));
+
+    AutoScopeAnalysisSellFillAllocation {
+        allocated_qty,
+        ignored_qty,
+        allocation_ratio,
+        remaining_qty_after_exit,
     }
 }
 
@@ -717,7 +759,7 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
 
     let buy_notional_per_share = buy_metrics.notional_usdc / buy_metrics.qty.max(0.0000001);
     let buy_fee_per_share = buy_metrics.fee_usdc / buy_metrics.qty.max(0.0000001);
-    let mut cumulative_sold_qty = 0.0;
+    let mut sell_allocation_summary = AutoScopeAnalysisSellAllocationSummary::default();
     let mut rows = Vec::new();
 
     let mut child_sell_entries = child_orders
@@ -747,16 +789,31 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
 
     for (child_order, metrics) in child_sell_entries {
         let sell_qty = round_trade_builder_share_qty(metrics.qty);
-        cumulative_sold_qty = round_trade_builder_share_qty(cumulative_sold_qty + sell_qty);
-        let remaining_qty_after_exit =
-            round_trade_builder_share_qty((buy_metrics.qty - cumulative_sold_qty).max(0.0));
-        let sell_notional_usdc = round_trade_builder_signed_qty(metrics.notional_usdc);
-        let sell_fee_usdc = round_trade_builder_signed_qty(metrics.fee_usdc);
-        let breakdown = trade_builder_analysis_pnl_breakdown(
+        let allocation = trade_builder_analysis_allocate_sell_fill(
+            buy_metrics.qty,
+            sell_allocation_summary.allocated_sold_qty,
             sell_qty,
+        );
+        sell_allocation_summary.observed_sell_qty =
+            round_trade_builder_share_qty(sell_allocation_summary.observed_sell_qty + sell_qty);
+        sell_allocation_summary.ignored_sell_qty = round_trade_builder_share_qty(
+            sell_allocation_summary.ignored_sell_qty + allocation.ignored_qty,
+        );
+        if allocation.allocated_qty <= 0.0 {
+            continue;
+        }
+        sell_allocation_summary.allocated_sold_qty = round_trade_builder_share_qty(
+            sell_allocation_summary.allocated_sold_qty + allocation.allocated_qty,
+        );
+        let allocated_sell_notional_usdc = metrics.notional_usdc * allocation.allocation_ratio;
+        let allocated_sell_fee_usdc = metrics.fee_usdc * allocation.allocation_ratio;
+        let sell_notional_usdc = round_trade_builder_signed_qty(allocated_sell_notional_usdc);
+        let sell_fee_usdc = round_trade_builder_signed_qty(allocated_sell_fee_usdc);
+        let breakdown = trade_builder_analysis_pnl_breakdown(
+            allocation.allocated_qty,
             buy_notional_per_share,
             buy_fee_per_share,
-            metrics.notional_usdc - metrics.fee_usdc,
+            allocated_sell_notional_usdc - allocated_sell_fee_usdc,
         );
         let order_events = events_by_order_id
             .get(&child_order.id)
@@ -784,8 +841,8 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
             buy_avg_price: Some(buy_avg_price),
             mark_or_sell_price: metrics.avg_price,
             mark_price_captured_at: metrics.last_filled_at,
-            row_qty: sell_qty,
-            remaining_qty_after_exit,
+            row_qty: allocation.allocated_qty,
+            remaining_qty_after_exit: allocation.remaining_qty_after_exit,
             row_pnl_usdc: breakdown.row_pnl_usdc,
             buy_notional_usdc: Some(breakdown.buy_notional_usdc),
             buy_fee_usdc: Some(breakdown.buy_fee_usdc),
@@ -800,7 +857,7 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
     }
 
     let remaining_qty =
-        round_trade_builder_share_qty((buy_metrics.qty - cumulative_sold_qty).max(0.0));
+        round_trade_builder_share_qty((buy_metrics.qty - sell_allocation_summary.allocated_sold_qty).max(0.0));
     if remaining_qty > 0.0 {
         let (mark_price, mark_price_captured_at) = trade_builder_analysis_mark_price(
             &root_order,
@@ -859,6 +916,7 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
         &events_by_order_id,
         &second_snapshots,
         &buy_metrics,
+        &sell_allocation_summary,
         open_to_trigger_ms,
         trigger_to_buy_fill_ms,
     );
@@ -1126,6 +1184,55 @@ mod auto_scope_analysis_tests {
         assert_eq!(breakdown.net_value_usdc, 1.5);
         assert_eq!(breakdown.row_pnl_usdc, 0.5);
         assert_eq!(breakdown.pnl_pct, Some(50.0));
+    }
+
+    #[test]
+    fn sell_allocation_keeps_normal_exit_full_size() {
+        let allocation = trade_builder_analysis_allocate_sell_fill(10.0, 0.0, 5.0);
+
+        assert_eq!(allocation.allocated_qty, 5.0);
+        assert_eq!(allocation.ignored_qty, 0.0);
+        assert_eq!(allocation.allocation_ratio, 1.0);
+        assert_eq!(allocation.remaining_qty_after_exit, 5.0);
+    }
+
+    #[test]
+    fn sell_allocation_caps_overlapping_exit_to_remaining_buy_qty() {
+        let allocation = trade_builder_analysis_allocate_sell_fill(10.0, 7.0, 7.0);
+
+        assert_eq!(allocation.allocated_qty, 3.0);
+        assert_eq!(allocation.ignored_qty, 4.0);
+        assert!((allocation.allocation_ratio - (3.0 / 7.0)).abs() < 0.000001);
+        assert_eq!(allocation.remaining_qty_after_exit, 0.0);
+    }
+
+    #[test]
+    fn sell_allocation_ignores_duplicate_exit_after_position_closed() {
+        let allocation = trade_builder_analysis_allocate_sell_fill(10.0, 10.0, 2.0);
+
+        assert_eq!(allocation.allocated_qty, 0.0);
+        assert_eq!(allocation.ignored_qty, 2.0);
+        assert_eq!(allocation.allocation_ratio, 0.0);
+        assert_eq!(allocation.remaining_qty_after_exit, 0.0);
+    }
+
+    #[test]
+    fn partial_sell_allocation_prorates_sell_notional_and_fee() {
+        let allocation = trade_builder_analysis_allocate_sell_fill(10.0, 7.0, 7.0);
+        let sell_notional_usdc = 7.0 * allocation.allocation_ratio;
+        let sell_fee_usdc = 0.7 * allocation.allocation_ratio;
+        let breakdown = trade_builder_analysis_pnl_breakdown(
+            allocation.allocated_qty,
+            0.40,
+            0.01,
+            sell_notional_usdc - sell_fee_usdc,
+        );
+
+        assert_eq!(round_trade_builder_signed_qty(sell_notional_usdc), 3.0);
+        assert_eq!(round_trade_builder_signed_qty(sell_fee_usdc), 0.3);
+        assert_eq!(breakdown.cost_basis_usdc, 1.23);
+        assert_eq!(breakdown.net_value_usdc, 2.7);
+        assert_eq!(breakdown.row_pnl_usdc, 1.47);
     }
 
     #[test]

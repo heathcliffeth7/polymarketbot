@@ -38,6 +38,12 @@ impl PostgresRepository {
                    WHERE s.root_builder_order_id = o.id
                      AND s.valuation_kind IS NULL
                  )
+                 OR EXISTS (
+                   SELECT 1
+                   FROM trade_flow_auto_scope_trade_diagnostics d
+                   WHERE d.root_builder_order_id = o.id
+                     AND COALESCE((d.compact_metrics_json->>'pnl_model_version')::int, 0) < 2
+                 )
                )
              ORDER BY o.created_at ASC, o.id ASC
              LIMIT $1",
