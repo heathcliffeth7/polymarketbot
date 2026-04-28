@@ -7,8 +7,15 @@ export const AUTO_SCOPE_CASH_PNL_CSV_HEADERS = [
   'local_fallback_cash_fill_pnl_usdc',
 ];
 
+const OFFICIAL_MARKET_ACTIVITY_FLAG_SQL = `(dg.data_quality_flags @> ARRAY['official_activity_ambiguous']::text[]
+                  OR dg.data_quality_flags @> ARRAY['official_market_scope_required']::text[])`;
+const OFFICIAL_MARKET_ACTIVITY_EVIDENCE_SQL = `(COALESCE((dg.compact_metrics_json->>'official_market_buy_usdc')::double precision, 0)
+                  + COALESCE((dg.compact_metrics_json->>'official_market_sell_usdc')::double precision, 0)
+                  + COALESCE((dg.compact_metrics_json->>'official_market_redeem_usdc')::double precision, 0)) > 0`;
+
 export const AUTO_SCOPE_EFFECTIVE_CASH_PNL_SQL_EXPR = `CASE
-              WHEN dg.data_quality_flags @> ARRAY['official_activity_ambiguous']::text[]
+              WHEN ${OFFICIAL_MARKET_ACTIVITY_FLAG_SQL}
+                AND ${OFFICIAL_MARKET_ACTIVITY_EVIDENCE_SQL}
                 AND (dg.compact_metrics_json->>'official_market_pnl_usdc') IS NOT NULL
               THEN (dg.compact_metrics_json->>'official_market_pnl_usdc')::double precision
               ELSE COALESCE((dg.compact_metrics_json->>'cash_fill_pnl_usdc')::double precision, s.row_pnl_usdc)
@@ -92,13 +99,30 @@ function hasDataQualityFlag(
   return Array.isArray(flags) && flags.includes(flag);
 }
 
+function hasOfficialMarketScopeFlag(flags: readonly string[] | null | undefined): boolean {
+  return (
+    hasDataQualityFlag(flags, 'official_activity_ambiguous') ||
+    hasDataQualityFlag(flags, 'official_market_scope_required')
+  );
+}
+
+function hasOfficialMarketActivityEvidence(compact: Record<string, unknown> | null): boolean {
+  return (
+    (compactNumber(compact, 'official_market_buy_usdc') ?? 0) +
+      (compactNumber(compact, 'official_market_sell_usdc') ?? 0) +
+      (compactNumber(compact, 'official_market_redeem_usdc') ?? 0) >
+    0
+  );
+}
+
 export function mapAutoScopeCashMetrics(
   compact: Record<string, unknown> | null,
   dataQualityFlags: readonly string[] | null = []
 ): AutoScopeCashMetrics {
   const officialMarketPnlUsdc = compactNumber(compact, 'official_market_pnl_usdc');
   const cashFillPnlUsdc =
-    hasDataQualityFlag(dataQualityFlags, 'official_activity_ambiguous') &&
+    hasOfficialMarketScopeFlag(dataQualityFlags) &&
+    hasOfficialMarketActivityEvidence(compact) &&
     officialMarketPnlUsdc != null
       ? officialMarketPnlUsdc
       : compactNumber(compact, 'cash_fill_pnl_usdc');
@@ -144,7 +168,8 @@ function buildAutoScopeCashMetricsSummarySql(whereClause: string): string {
          COALESCE((dg.compact_metrics_json->>'cash_fill_pnl_usdc')::double precision, 0) AS cash_fill_pnl_usdc,
          (dg.compact_metrics_json->>'official_market_pnl_usdc')::double precision AS official_market_pnl_usdc,
          CASE
-           WHEN dg.data_quality_flags @> ARRAY['official_activity_ambiguous']::text[]
+           WHEN ${OFFICIAL_MARKET_ACTIVITY_FLAG_SQL}
+            AND ${OFFICIAL_MARKET_ACTIVITY_EVIDENCE_SQL}
             AND (dg.compact_metrics_json->>'official_market_pnl_usdc') IS NOT NULL
            THEN true
            ELSE false

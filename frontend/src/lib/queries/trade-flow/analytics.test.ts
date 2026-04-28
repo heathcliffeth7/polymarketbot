@@ -271,11 +271,49 @@ test('mapAutoScopeCashMetrics uses official market pnl for ambiguous activity ro
   assert.equal(metrics.officialMarketBuyUsdc, 13.4182);
 });
 
+test('mapAutoScopeCashMetrics uses official market pnl for market-scope rows', () => {
+  const metrics = mapAutoScopeCashMetrics(
+    {
+      cash_fill_pnl_usdc: -1,
+      cash_pnl_source: 'data_api_activity',
+      local_fallback_cash_fill_pnl_usdc: -1.81,
+      official_market_pnl_usdc: -3.24722,
+      official_market_buy_usdc: 9.8982,
+      official_market_sell_usdc: 5.6286,
+      official_market_redeem_usdc: 1.02238,
+    },
+    ['official_market_scope_required']
+  );
+
+  assert.equal(metrics.cashFillPnlUsdc, -3.24722);
+  assert.equal(metrics.localFallbackCashFillPnlUsdc, -1.81);
+});
+
+test('mapAutoScopeCashMetrics keeps fallback when official market activity has no evidence', () => {
+  const metrics = mapAutoScopeCashMetrics(
+    {
+      cash_fill_pnl_usdc: -6,
+      cash_pnl_source: 'local_fallback',
+      local_fallback_cash_fill_pnl_usdc: -6,
+      official_market_pnl_usdc: 0,
+      official_market_buy_usdc: 0,
+      official_market_sell_usdc: 0,
+      official_market_redeem_usdc: 0,
+    },
+    ['official_market_scope_required']
+  );
+
+  assert.equal(metrics.cashFillPnlUsdc, -6);
+  assert.equal(metrics.officialMarketPnlUsdc, 0);
+});
+
 test('cash metrics summary SQL counts ambiguous market pnl once per market', () => {
   const sql = __autoScopeCashMetricsTestUtils.buildAutoScopeCashMetricsSummarySql('s.user_id = $1');
   assert.match(sql, /market_effective AS/);
   assert.match(sql, /GROUP BY market_slug/);
   assert.match(sql, /BOOL_OR\(use_market_pnl\)/);
+  assert.match(sql, /official_market_scope_required/);
+  assert.match(sql, /official_market_buy_usdc/);
   assert.match(sql, /THEN official_market_pnl_usdc/);
   assert.doesNotMatch(sql, /SUM\(COALESCE\(\(dg\.compact_metrics_json->>'cash_fill_pnl_usdc'\)/);
 });
