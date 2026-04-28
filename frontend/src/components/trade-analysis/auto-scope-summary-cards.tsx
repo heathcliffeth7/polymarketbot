@@ -23,6 +23,14 @@ function MetricTile({
   );
 }
 
+function formatOptionalPnl(value: number | null | undefined): string {
+  return value == null ? '-' : formatPnl(value);
+}
+
+function optionalPnlClassName(value: number | null | undefined): string {
+  return value == null ? 'text-zinc-300' : pnlClassName(value);
+}
+
 export function AutoScopeSummaryCards({
   summary,
   pagePnl,
@@ -32,23 +40,32 @@ export function AutoScopeSummaryCards({
     summary.officialSellUsdc == null && summary.officialRedeemUsdc == null
       ? null
       : (summary.officialSellUsdc ?? 0) + (summary.officialRedeemUsdc ?? 0);
+  const pendingInventoryRedeem =
+    summary.pendingInventoryValueUsdc == null && summary.pendingRedeemableValueUsdc == null
+      ? null
+      : (summary.pendingInventoryValueUsdc ?? 0) + (summary.pendingRedeemableValueUsdc ?? 0);
   return (
     <div className="space-y-3">
       <div className="grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 lg:grid-cols-5">
         <MetricTile
-          label={isOfficial ? 'Official PnL' : 'Toplam PnL'}
+          label="Official Wallet Cash PnL"
           value={formatPnl(summary.totalPnlUsdc)}
           className={pnlClassName(summary.totalPnlUsdc)}
         />
         <MetricTile
-          label={isOfficial ? 'Official Realized' : 'Realized'}
-          value={formatPnl(summary.realizedPnlUsdc)}
-          className={pnlClassName(summary.realizedPnlUsdc)}
+          label="Local Fill Cash PnL"
+          value={formatOptionalPnl(summary.localCashFillPnlUsdc)}
+          className={optionalPnlClassName(summary.localCashFillPnlUsdc)}
         />
         <MetricTile
-          label="Acik/Mark"
-          value={formatPnl(summary.openPnlUsdc)}
-          className={pnlClassName(summary.openPnlUsdc)}
+          label="Diagnostic PnL"
+          value={formatOptionalPnl(summary.diagnosticPnlUsdc ?? summary.rootRowsPnlUsdc)}
+          className={optionalPnlClassName(summary.diagnosticPnlUsdc ?? summary.rootRowsPnlUsdc)}
+        />
+        <MetricTile
+          label="Pending Inventory / Redeem"
+          value={formatOptionalPnl(pendingInventoryRedeem)}
+          className={optionalPnlClassName(pendingInventoryRedeem)}
         />
         <MetricTile label="Profit Factor" value={summary.profitFactor == null ? '-' : summary.profitFactor.toFixed(2)} />
         <MetricTile label="Win Rate" value={formatPercent(summary.winRatePct)} />
@@ -63,7 +80,7 @@ export function AutoScopeSummaryCards({
               : formatUsdc(summary.feeDragUsdc)
           }
         />
-        <MetricTile label="Gorunen Satirlar" value={formatPnl(pagePnl)} className={pnlClassName(pagePnl)} />
+        <MetricTile label="Gorunen Satirlar Diagnostic" value={formatPnl(pagePnl)} className={pnlClassName(pagePnl)} />
       </div>
 
       <div className="rounded-md border border-zinc-800 bg-zinc-950 p-3">

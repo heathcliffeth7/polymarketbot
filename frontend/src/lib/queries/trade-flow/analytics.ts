@@ -30,6 +30,10 @@ import {
   applyOfficialMarketPnlSummary,
   getOfficialMarketPnlSummaryForFilters,
 } from './official-market-pnl';
+import {
+  getAutoScopeCashMetricsSummaryForWhere,
+  mapAutoScopeCashMetrics,
+} from './auto-scope-analysis-cash-metrics';
 
 export interface AutoScopeTradeAnalysisFilters {
   userId: number;
@@ -82,6 +86,7 @@ interface AutoScopeTradeAnalysisRowDb {
   diagnosis_label: string | null;
   entry_quality_score: number | null;
   exit_quality_score: number | null;
+  compact_metrics_json: Record<string, unknown> | null;
   updated_at: string;
 }
 
@@ -289,6 +294,7 @@ function derivePositionState(
 function mapAnalysisRow(row: AutoScopeTradeAnalysisRowDb): AutoScopeTradeAnalysisRow {
   const marketEndAt = row.market_end_at ?? deriveMarketEndAtFromSlug(row.market_slug);
   const nowIso = new Date().toISOString();
+  const cashMetrics = mapAutoScopeCashMetrics(row.compact_metrics_json);
   return {
     rowId: row.row_key,
     rowType: row.row_type,
@@ -327,6 +333,7 @@ function mapAnalysisRow(row: AutoScopeTradeAnalysisRowDb): AutoScopeTradeAnalysi
     markValueUsdc: numberOrNull(row.mark_value_usdc),
     netValueUsdc: numberOrNull(row.net_value_usdc),
     pnlPct: numberOrNull(row.pnl_pct),
+    ...cashMetrics,
     valuationKind: row.valuation_kind,
     primaryDiagnosisCode: row.primary_diagnosis_code,
     diagnosisLabel: row.diagnosis_label,
@@ -382,6 +389,7 @@ function mapAnalysisSummary(
 }
 
 function mapDiagnostic(row: AutoScopeTradeDiagnosticDb): AutoScopeTradeDiagnostic {
+  const cashMetrics = mapAutoScopeCashMetrics(row.compact_metrics_json);
   return {
     rootOrderId: Number(row.root_builder_order_id),
     userId: Number(row.user_id),
@@ -397,6 +405,7 @@ function mapDiagnostic(row: AutoScopeTradeDiagnosticDb): AutoScopeTradeDiagnosti
     feeDragUsdc: Number(row.fee_drag_usdc || 0),
     costBasisUsdc: Number(row.cost_basis_usdc || 0),
     netValueUsdc: Number(row.net_value_usdc || 0),
+    ...cashMetrics,
     entryTriggerPrice: numberOrNull(row.entry_trigger_price),
     entrySubmitPrice: numberOrNull(row.entry_submit_price),
     entryFillPrice: numberOrNull(row.entry_fill_price),
@@ -498,6 +507,7 @@ const ANALYSIS_ROW_SELECT = `SELECT
          dg.diagnosis_label,
          dg.entry_quality_score,
          dg.exit_quality_score,
+         dg.compact_metrics_json,
          s.updated_at::text
        FROM trade_flow_auto_scope_analysis_rows s
        LEFT JOIN trade_flow_definitions d ON d.id = s.definition_id
@@ -524,7 +534,8 @@ export async function getAutoScopeTradeAnalysis(
   const limitParam = where.params.length + 1;
   const offsetParam = where.params.length + 2;
 
-  const [countRes, refreshedAtRes, summaryRes, diagnosisRes, dataRes] = await Promise.all([
+  const [countRes, refreshedAtRes, summaryRes, diagnosisRes, cashSummary, dataRes] =
+    await Promise.all([
     pool.query<{ total: number }>(
       `SELECT COUNT(*)::int AS total
        FROM trade_flow_auto_scope_analysis_rows s
@@ -576,6 +587,10 @@ export async function getAutoScopeTradeAnalysis(
        ORDER BY pnl_usdc ASC, trade_count DESC, dg.primary_diagnosis_code ASC`,
       where.params
     ),
+    getAutoScopeCashMetricsSummaryForWhere({
+      whereClause: where.whereClause,
+      params: where.params,
+    }),
     pool.query<AutoScopeTradeAnalysisRowDb>(
       `${ANALYSIS_ROW_SELECT}
        WHERE ${where.whereClause}
@@ -596,10 +611,10 @@ export async function getAutoScopeTradeAnalysis(
     filters.userId,
     visibleRows.map((row) => row.rootOrderId)
   );
-  const rowSummary = mapAnalysisSummary(
-    summaryRes.rows[0],
-    mapDiagnosisBreakdown(diagnosisRes.rows)
-  );
+  const rowSummary = {
+    ...mapAnalysisSummary(summaryRes.rows[0], mapDiagnosisBreakdown(diagnosisRes.rows)),
+    ...cashSummary,
+  };
   let summary = rowSummary;
   let refreshedAt = refreshedAtRes.rows[0]?.refreshed_at ?? new Date().toISOString();
 
@@ -862,6 +877,16 @@ export function buildAutoScopeTradeAnalysisCsv(
     'mark_value_usdc',
     'net_value_usdc',
     'row_pnl_usdc',
+    'diagnostic_pnl_usdc',
+    'cash_fill_pnl_usdc',
+    'cash_buy_usdc',
+    'cash_sell_usdc',
+    'cash_redeem_usdc',
+    'economic_pnl_usdc',
+    'pending_inventory_qty',
+    'pending_inventory_value_usdc',
+    'pending_redeemable_value_usdc',
+    'cash_status',
     'pnl_pct',
     'required_q',
     'q_margin',
@@ -938,6 +963,16 @@ export function buildAutoScopeTradeAnalysisCsv(
         row.markValueUsdc,
         row.netValueUsdc,
         row.rowPnlUsdc,
+        row.diagnosticPnlUsdc,
+        row.cashFillPnlUsdc,
+        row.cashBuyUsdc,
+        row.cashSellUsdc,
+        row.cashRedeemUsdc,
+        row.economicPnlUsdc,
+        row.pendingInventoryQty,
+        row.pendingInventoryValueUsdc,
+        row.pendingRedeemableValueUsdc,
+        row.cashStatus,
         row.pnlPct,
         row.signalQuality?.requiredQ ?? null,
         row.signalQuality?.qMargin ?? null,
@@ -1032,6 +1067,16 @@ export function buildAutoScopeTradeAnalysisForensicCsv(
     'sl_payload_json',
     'raw_events_json',
     'row_pnl_usdc',
+    'diagnostic_pnl_usdc',
+    'cash_fill_pnl_usdc',
+    'cash_buy_usdc',
+    'cash_sell_usdc',
+    'cash_redeem_usdc',
+    'economic_pnl_usdc',
+    'pending_inventory_qty',
+    'pending_inventory_value_usdc',
+    'pending_redeemable_value_usdc',
+    'cash_status',
     'exit_reason',
   ];
   const lines = [headers.map(csvField).join(',')];
@@ -1107,6 +1152,16 @@ export function buildAutoScopeTradeAnalysisForensicCsv(
         csvJson(ptbSl ?? slArmed),
         csvJson(events),
         row.rowPnlUsdc,
+        row.diagnosticPnlUsdc,
+        row.cashFillPnlUsdc,
+        row.cashBuyUsdc,
+        row.cashSellUsdc,
+        row.cashRedeemUsdc,
+        row.economicPnlUsdc,
+        row.pendingInventoryQty,
+        row.pendingInventoryValueUsdc,
+        row.pendingRedeemableValueUsdc,
+        row.cashStatus,
         row.exitReason,
       ]
         .map((value) => csvField(value == null ? null : String(value)))

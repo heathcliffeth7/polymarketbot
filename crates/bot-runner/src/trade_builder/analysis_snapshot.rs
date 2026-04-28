@@ -1,5 +1,5 @@
 const AUTO_SCOPE_ANALYSIS_BACKFILL_LIMIT: i64 = 25;
-const AUTO_SCOPE_ANALYSIS_PNL_MODEL_VERSION: i64 = 4;
+const AUTO_SCOPE_ANALYSIS_PNL_MODEL_VERSION: i64 = 5;
 const AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_DELAYS_SECS: [u64; 4] = [1, 3, 8, 20];
 
 static AUTO_SCOPE_ANALYSIS_BACKFILL_CHECKED_ROOTS: LazyLock<parking_lot::Mutex<HashSet<i64>>> =
@@ -763,6 +763,7 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
     let buy_notional_per_share = buy_metrics.notional_usdc / buy_metrics.qty.max(0.0000001);
     let buy_fee_per_share = buy_metrics.fee_usdc / buy_metrics.qty.max(0.0000001);
     let mut sell_allocation_summary = AutoScopeAnalysisSellAllocationSummary::default();
+    let mut cash_sell_notional_usdc = 0.0;
     let mut rows = Vec::new();
 
     let mut child_sell_entries = child_orders
@@ -792,6 +793,7 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
 
     for (child_order, metrics) in child_sell_entries {
         let sell_qty = round_trade_builder_share_qty(metrics.qty);
+        cash_sell_notional_usdc += metrics.notional_usdc.max(0.0);
         let allocation = trade_builder_analysis_allocate_sell_fill(
             buy_metrics.qty,
             sell_allocation_summary.allocated_sold_qty,
@@ -940,6 +942,7 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
         &events_by_order_id,
         &second_snapshots,
         &buy_metrics,
+        cash_sell_notional_usdc,
         &sell_allocation_summary,
         &pnl_reconciliation,
         open_to_trigger_ms,

@@ -673,6 +673,16 @@ export interface AutoScopeTradeDiagnostic {
   feeDragUsdc: number;
   costBasisUsdc: number;
   netValueUsdc: number;
+  cashFillPnlUsdc?: number | null;
+  diagnosticPnlUsdc?: number | null;
+  economicPnlUsdc?: number | null;
+  cashBuyUsdc?: number | null;
+  cashSellUsdc?: number | null;
+  cashRedeemUsdc?: number | null;
+  pendingInventoryQty?: number | null;
+  pendingInventoryValueUsdc?: number | null;
+  pendingRedeemableValueUsdc?: number | null;
+  cashStatus?: string | null;
   entryTriggerPrice: number | null;
   entrySubmitPrice: number | null;
   entryFillPrice: number | null;
@@ -918,6 +928,16 @@ export interface AutoScopeTradeAnalysisRow {
   markValueUsdc: number | null;
   netValueUsdc: number | null;
   pnlPct: number | null;
+  cashFillPnlUsdc: number | null;
+  diagnosticPnlUsdc: number | null;
+  economicPnlUsdc: number | null;
+  cashBuyUsdc: number | null;
+  cashSellUsdc: number | null;
+  cashRedeemUsdc: number | null;
+  pendingInventoryQty: number | null;
+  pendingInventoryValueUsdc: number | null;
+  pendingRedeemableValueUsdc: number | null;
+  cashStatus: string | null;
   valuationKind: AutoScopeTradeAnalysisValuationKind | null;
   primaryDiagnosisCode: AutoScopeTradeDiagnosisCode | null;
   diagnosisLabel: string | null;
@@ -960,6 +980,11 @@ export interface AutoScopeTradeAnalysisSummary {
   officialRedeemUsdc?: number;
   rootRowsPnlUsdc?: number;
   officialDeltaUsdc?: number;
+  localCashFillPnlUsdc?: number;
+  diagnosticPnlUsdc?: number;
+  economicPnlUsdc?: number;
+  pendingInventoryValueUsdc?: number;
+  pendingRedeemableValueUsdc?: number;
 }
 
 export interface AutoScopeTradeAnalysisResponse

@@ -102,10 +102,41 @@ function formatPnl(value: number): string {
   return `${sign}${value.toFixed(2)} USDC`;
 }
 
+function formatNullablePnl(value: number | null): string {
+  return value == null ? '-' : formatPnl(value);
+}
+
+function nullablePnlClassName(value: number | null): string {
+  return value == null ? 'text-zinc-300' : pnlClassName(value);
+}
+
 function formatPercent(value: number | null): string {
   if (value == null) return '-';
   const sign = value > 0 ? '+' : '';
   return `${sign}${value.toFixed(2)}%`;
+}
+
+function formatNullableQty(value: number | null): string {
+  return value == null ? '-' : formatQty(value);
+}
+
+function cashStatusLabel(value: string | null): string {
+  switch (value) {
+    case 'closed_cash_observed':
+      return 'Cash closed';
+    case 'pending_inventory_or_redeem':
+      return 'Pending inventory/redeem';
+    case 'buy_without_sell_or_redeem':
+      return 'Buy only';
+    case 'redeem_ambiguous':
+      return 'Redeem ambiguous';
+    case 'no_fill_cash':
+      return 'No fill cash';
+    case 'pending_analysis':
+      return 'Pending analysis';
+    default:
+      return '-';
+  }
 }
 
 function formatScore(value: number | null): string {
@@ -461,7 +492,7 @@ export function AutoScopeAnalysisTable() {
         />
 
         <div className="overflow-x-auto">
-          <Table className="min-w-[1840px] text-xs text-zinc-200">
+          <Table className="min-w-[2320px] text-xs text-zinc-200">
             <TableHeader>
               <TableRow className="border-zinc-800 hover:bg-transparent">
                 <TableHead className="text-zinc-400">Workflow</TableHead>
@@ -482,20 +513,26 @@ export function AutoScopeAnalysisTable() {
                 <TableHead className="text-right text-zinc-400">Maliyet</TableHead>
                 <TableHead className="text-right text-zinc-400">Fee</TableHead>
                 <TableHead className="text-right text-zinc-400">Net</TableHead>
-                <TableHead className="text-right text-zinc-400">PnL</TableHead>
+                <TableHead className="text-right text-zinc-400">Cash PnL</TableHead>
+                <TableHead className="text-right text-zinc-400">Buy Cash</TableHead>
+                <TableHead className="text-right text-zinc-400">Sell Cash</TableHead>
+                <TableHead className="text-right text-zinc-400">Redeem</TableHead>
+                <TableHead className="text-right text-zinc-400">Remaining Qty</TableHead>
+                <TableHead className="text-zinc-400">Cash Status</TableHead>
+                <TableHead className="text-right text-zinc-400">Diagnostic PnL</TableHead>
                 <TableHead className="text-right text-zinc-400">PnL %</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {isLoading && rows.length === 0 ? (
                 <TableRow className="border-zinc-800">
-                  <TableCell colSpan={20} className="py-10 text-center text-zinc-500">
+                  <TableCell colSpan={26} className="py-10 text-center text-zinc-500">
                     Analiz verisi yukleniyor...
                   </TableCell>
                 </TableRow>
               ) : rows.length === 0 ? (
                 <TableRow className="border-zinc-800">
-                  <TableCell colSpan={20} className="py-10 text-center text-zinc-500">
+                  <TableCell colSpan={26} className="py-10 text-center text-zinc-500">
                     Gosterilecek auto-scope trade analizi bulunamadi.
                   </TableCell>
                 </TableRow>
@@ -652,9 +689,7 @@ export function AutoScopeAnalysisTable() {
                     <TableCell className="text-right font-mono">
                       <div className="space-y-1">
                         <p>{formatQty(row.rowQty)}</p>
-                        <p className="text-[11px] text-zinc-500">
-                          Kalan {formatQty(row.remainingQtyAfterExit)}
-                        </p>
+                        <p className="text-[11px] text-zinc-500">{row.rowType}</p>
                       </div>
                     </TableCell>
                     <TableCell className="text-right font-mono">
@@ -670,6 +705,31 @@ export function AutoScopeAnalysisTable() {
                     </TableCell>
                     <TableCell className="text-right font-mono">
                       {formatUsdc(row.netValueUsdc)}
+                    </TableCell>
+                    <TableCell className={`text-right font-mono ${nullablePnlClassName(row.cashFillPnlUsdc)}`}>
+                      {formatNullablePnl(row.cashFillPnlUsdc)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      {formatUsdc(row.cashBuyUsdc)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      {formatUsdc(row.cashSellUsdc)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      {formatUsdc(row.cashRedeemUsdc)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono">
+                      <div className="space-y-1">
+                        <p>{formatNullableQty(row.pendingInventoryQty)}</p>
+                        <p className="text-[11px] text-zinc-500">
+                          row {formatQty(row.remainingQtyAfterExit)}
+                        </p>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <span className="inline-flex max-w-[170px] rounded-full border border-zinc-700 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-300">
+                        <span className="truncate">{cashStatusLabel(row.cashStatus)}</span>
+                      </span>
                     </TableCell>
                     <TableCell className={`text-right font-mono ${pnlClassName(row.rowPnlUsdc)}`}>
                       {formatPnl(row.rowPnlUsdc)}

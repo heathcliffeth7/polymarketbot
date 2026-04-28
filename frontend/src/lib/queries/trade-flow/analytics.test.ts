@@ -9,6 +9,7 @@ import {
   __autoScopeAnalysisExtrasTestUtils,
   buildAutoScopeNoOrderSignalsCsv,
 } from '@/lib/queries/trade-flow/auto-scope-analysis-extras';
+import { mapAutoScopeCashMetrics } from '@/lib/queries/trade-flow/auto-scope-analysis-cash-metrics';
 import type { AutoScopeTradeAnalysisRow, AutoScopeTradeBlockedSignal } from '@/lib/types';
 
 test('deriveMarketEndAtFromSlug resolves 5m market end', () => {
@@ -113,6 +114,16 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
       markValueUsdc: null,
       netValueUsdc: 3.5,
       pnlPct: -14.63,
+      cashFillPnlUsdc: -0.4,
+      diagnosticPnlUsdc: -0.6,
+      economicPnlUsdc: -0.4,
+      cashBuyUsdc: 4,
+      cashSellUsdc: 3.6,
+      cashRedeemUsdc: 0,
+      pendingInventoryQty: 0,
+      pendingInventoryValueUsdc: 0,
+      pendingRedeemableValueUsdc: null,
+      cashStatus: 'closed_cash_observed',
       valuationKind: 'realized',
       primaryDiagnosisCode: 'bad_entry_price',
       diagnosisLabel: 'Kotu giris fiyati',
@@ -143,6 +154,9 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
   assert.match(csv, /^workflow,definition_id,/);
   assert.match(csv, /"Flow, A"/);
   assert.match(csv, /buy_fee_usdc/);
+  assert.match(csv, /cash_fill_pnl_usdc/);
+  assert.match(csv, /diagnostic_pnl_usdc/);
+  assert.match(csv, /closed_cash_observed/);
   assert.match(csv, /diagnosis_code/);
   assert.match(csv, /required_q/);
   assert.match(csv, /submitted_estimated_avg_fill/);
@@ -150,6 +164,26 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
   assert.match(csv, /fills_aggregate/);
   assert.match(csv, /bad_entry_price/);
   assert.match(csv, /-14.63/);
+});
+
+test('mapAutoScopeCashMetrics separates cash diagnostic and pending values', () => {
+  const metrics = mapAutoScopeCashMetrics({
+    cash_fill_pnl_usdc: -24.59,
+    diagnostic_pnl_usdc: 27.51,
+    economic_pnl_usdc: -4.59,
+    cash_buy_notional_usdc: 169.98,
+    cash_sell_notional_usdc: 145.39,
+    cash_redeem_usdc: 0,
+    pending_inventory_qty: 35,
+    pending_inventory_value_usdc: 20,
+    pending_redeemable_value_usdc: null,
+    cash_status: 'pending_inventory_or_redeem',
+  });
+
+  assert.equal(metrics.cashFillPnlUsdc, -24.59);
+  assert.equal(metrics.diagnosticPnlUsdc, 27.51);
+  assert.equal(metrics.cashBuyUsdc, 169.98);
+  assert.equal(metrics.cashStatus, 'pending_inventory_or_redeem');
 });
 
 test('buildAutoScopeNoOrderSignalsCsv includes quote status telemetry', () => {

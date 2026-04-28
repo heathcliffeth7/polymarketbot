@@ -166,6 +166,66 @@ fn trade_builder_analysis_data_flag(flags: &mut Vec<String>, flag: &str) {
     }
 }
 
+fn trade_builder_analysis_cash_fill_pnl_usdc(
+    buy_usdc: f64,
+    sell_usdc: f64,
+    redeem_usdc: Option<f64>,
+) -> f64 {
+    round_trade_builder_signed_qty(sell_usdc + redeem_usdc.unwrap_or(0.0) - buy_usdc)
+}
+
+fn trade_builder_analysis_cash_redeem_usdc(
+    reconciliation: &AutoScopeAnalysisPnlReconciliation,
+) -> Option<f64> {
+    if reconciliation.official_pnl_source != "data_api_activity" {
+        return Some(0.0);
+    }
+
+    let root_redeem_is_ambiguous = reconciliation.data_quality_flags.iter().any(|flag| {
+        matches!(
+            flag.as_str(),
+            "official_activity_ambiguous"
+                | "official_market_scope_required"
+                | "official_redeem_unmatched"
+        )
+    });
+    if root_redeem_is_ambiguous {
+        return None;
+    }
+
+    Some(reconciliation.official_redeem_usdc.unwrap_or(0.0))
+}
+
+fn trade_builder_analysis_cash_status(
+    buy_usdc: f64,
+    sell_usdc: f64,
+    redeem_usdc: Option<f64>,
+    pending_qty: f64,
+) -> &'static str {
+    if redeem_usdc.is_none() {
+        return "redeem_ambiguous";
+    }
+    if buy_usdc <= 0.0 {
+        return "no_fill_cash";
+    }
+    if pending_qty > 0.0 {
+        return "pending_inventory_or_redeem";
+    }
+    if sell_usdc <= 0.0 && redeem_usdc.unwrap_or(0.0) <= 0.0 {
+        return "buy_without_sell_or_redeem";
+    }
+    "closed_cash_observed"
+}
+
+fn trade_builder_analysis_cash_diagnostic_diverged(
+    cash_fill_pnl_usdc: f64,
+    diagnostic_pnl_usdc: f64,
+    buy_usdc: f64,
+) -> bool {
+    let tolerance = 0.25_f64.max(buy_usdc.abs() * 0.02);
+    (cash_fill_pnl_usdc - diagnostic_pnl_usdc).abs() > tolerance
+}
+
 fn trade_builder_analysis_thin_liquidity_signal(
     root_events: &[TradeBuilderOrderEventRecord],
     submitted_event: Option<&TradeBuilderOrderEventRecord>,
@@ -386,6 +446,7 @@ fn trade_builder_analysis_build_trade_diagnostic(
     events_by_order_id: &HashMap<i64, Vec<TradeBuilderOrderEventRecord>>,
     second_snapshots: &[TradeBuilderMarketSecondSnapshot],
     buy_metrics: &AutoScopeAnalysisOrderMetrics,
+    cash_sell_notional_usdc: f64,
     sell_allocation_summary: &AutoScopeAnalysisSellAllocationSummary,
     pnl_reconciliation: &AutoScopeAnalysisPnlReconciliation,
     open_to_trigger_ms: Option<i64>,
@@ -444,6 +505,50 @@ fn trade_builder_analysis_build_trade_diagnostic(
     );
     let net_value_usdc = round_trade_builder_signed_qty(
         rows.iter().map(|row| row.net_value_usdc.unwrap_or(0.0)).sum(),
+    );
+    let pending_inventory_qty = round_trade_builder_share_qty(
+        rows.iter()
+            .filter(|row| row.row_type == "open_position")
+            .map(|row| row.row_qty)
+            .sum(),
+    );
+    let pending_inventory_value_usdc = round_trade_builder_signed_qty(
+        rows.iter()
+            .filter(|row| row.row_type == "open_position")
+            .map(|row| row.mark_value_usdc.unwrap_or(0.0))
+            .sum(),
+    );
+    let cash_buy_notional_usdc = round_trade_builder_signed_qty(buy_metrics.notional_usdc);
+    let cash_sell_notional_usdc = round_trade_builder_signed_qty(cash_sell_notional_usdc);
+    let cash_redeem_usdc = trade_builder_analysis_cash_redeem_usdc(pnl_reconciliation)
+        .map(round_trade_builder_signed_qty);
+    let pending_redeemable_value_usdc = if cash_redeem_usdc.is_none() {
+        let value = round_trade_builder_signed_qty(
+            rows.iter()
+                .filter(|row| row.row_type == "settled_payout")
+                .map(|row| row.mark_value_usdc.unwrap_or(0.0))
+                .sum(),
+        );
+        (value > 0.0).then_some(value)
+    } else {
+        None
+    };
+    let cash_fill_pnl_usdc = trade_builder_analysis_cash_fill_pnl_usdc(
+        cash_buy_notional_usdc,
+        cash_sell_notional_usdc,
+        cash_redeem_usdc,
+    );
+    let diagnostic_pnl_usdc = total_pnl_usdc;
+    let economic_pnl_usdc = round_trade_builder_signed_qty(
+        cash_fill_pnl_usdc
+            + pending_inventory_value_usdc
+            + pending_redeemable_value_usdc.unwrap_or(0.0),
+    );
+    let cash_status = trade_builder_analysis_cash_status(
+        cash_buy_notional_usdc,
+        cash_sell_notional_usdc,
+        cash_redeem_usdc,
+        pending_inventory_qty,
     );
     let pnl_pct = (cost_basis_usdc > 0.0)
         .then_some(round_trade_builder_signed_qty((total_pnl_usdc / cost_basis_usdc) * 100.0));
@@ -543,6 +648,19 @@ fn trade_builder_analysis_build_trade_diagnostic(
     if sell_allocation_summary.ignored_sell_qty > 0.0 {
         trade_builder_analysis_data_flag(&mut data_quality_flags, "oversold_exit_qty");
     }
+    if cash_buy_notional_usdc > 0.0
+        && cash_sell_notional_usdc <= 0.0
+        && cash_redeem_usdc.unwrap_or(0.0) <= 0.0
+    {
+        trade_builder_analysis_data_flag(&mut data_quality_flags, "buy_without_sell_or_redeem");
+    }
+    if trade_builder_analysis_cash_diagnostic_diverged(
+        cash_fill_pnl_usdc,
+        diagnostic_pnl_usdc,
+        cash_buy_notional_usdc,
+    ) {
+        trade_builder_analysis_data_flag(&mut data_quality_flags, "cash_diagnostic_divergence");
+    }
     for flag in &pnl_reconciliation.data_quality_flags {
         trade_builder_analysis_data_flag(&mut data_quality_flags, flag);
     }
@@ -598,6 +716,16 @@ fn trade_builder_analysis_build_trade_diagnostic(
             "buy_qty": round_trade_builder_share_qty(buy_metrics.qty),
             "buy_notional_usdc": round_trade_builder_signed_qty(buy_metrics.notional_usdc),
             "buy_fee_usdc": round_trade_builder_signed_qty(buy_metrics.fee_usdc),
+            "cash_buy_notional_usdc": cash_buy_notional_usdc,
+            "cash_sell_notional_usdc": cash_sell_notional_usdc,
+            "cash_redeem_usdc": cash_redeem_usdc,
+            "cash_fill_pnl_usdc": cash_fill_pnl_usdc,
+            "diagnostic_pnl_usdc": diagnostic_pnl_usdc,
+            "economic_pnl_usdc": economic_pnl_usdc,
+            "pending_inventory_qty": pending_inventory_qty,
+            "pending_inventory_value_usdc": pending_inventory_value_usdc,
+            "pending_redeemable_value_usdc": pending_redeemable_value_usdc,
+            "cash_status": cash_status,
             "sold_qty": round_trade_builder_share_qty(
                 rows.iter()
                     .filter(|row| row.row_type == "sell_exit")
@@ -629,12 +757,7 @@ fn trade_builder_analysis_build_trade_diagnostic(
             "official_delta_usdc": pnl_reconciliation.official_delta_usdc,
             "official_vs_root_delta_usdc": pnl_reconciliation.official_market_pnl_usdc
                 .map(|value| round_trade_builder_signed_qty(value - total_pnl_usdc)),
-            "remaining_qty": round_trade_builder_share_qty(
-                rows.iter()
-                    .filter(|row| row.row_type == "open_position")
-                    .map(|row| row.row_qty)
-                    .sum()
-            ),
+            "remaining_qty": pending_inventory_qty,
             "path_sample_count": path.sample_count,
             "thin_liquidity_signal": thin_liquidity_signal,
             "submitted_at": submitted_at.map(|value| value.to_rfc3339()),
@@ -642,5 +765,36 @@ fn trade_builder_analysis_build_trade_diagnostic(
             "buy_last_filled_at": buy_metrics.last_filled_at.map(|value| value.to_rfc3339()),
             "hold_end_at": hold_end.map(|value| value.to_rfc3339()),
         }),
+    }
+}
+
+#[cfg(test)]
+mod auto_scope_cash_diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn cash_fill_pnl_uses_observed_buy_sell_and_redeem_cash() {
+        let pnl = trade_builder_analysis_cash_fill_pnl_usdc(169.98, 145.39, Some(0.0));
+
+        assert_eq!(pnl, -24.59);
+    }
+
+    #[test]
+    fn buy_only_cash_status_marks_pending_inventory() {
+        let pnl = trade_builder_analysis_cash_fill_pnl_usdc(5.0, 0.0, Some(0.0));
+        let status = trade_builder_analysis_cash_status(5.0, 0.0, Some(0.0), 10.0);
+
+        assert_eq!(pnl, -5.0);
+        assert_eq!(status, "pending_inventory_or_redeem");
+    }
+
+    #[test]
+    fn cash_diagnostic_divergence_uses_notional_scaled_tolerance() {
+        assert!(!trade_builder_analysis_cash_diagnostic_diverged(
+            4.95, 5.0, 10.0
+        ));
+        assert!(trade_builder_analysis_cash_diagnostic_diverged(
+            -5.0, 4.64, 5.0
+        ));
     }
 }
