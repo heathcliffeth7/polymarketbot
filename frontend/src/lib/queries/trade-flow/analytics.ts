@@ -17,13 +17,10 @@ import {
   getAutoScopeTradeAnalysisExtrasForRoots,
 } from './auto-scope-analysis-extras';
 import { getPendingAutoScopeAnalysisRows } from './auto-scope-analysis-pending';
-import {
-  applyPolymarketWalletPnlSummary,
-  enrichRowsWithPolymarketPositionPnl,
-  getPolymarketWalletPnlSummaryForFilters,
-} from './polymarket-wallet-pnl';
+import { applyPolymarketWalletPnlSummary, enrichRowsWithPolymarketPositionPnl, getPolymarketWalletPnlSummaryForFilters } from './polymarket-wallet-pnl';
 import {
   AUTO_SCOPE_CASH_PNL_CSV_HEADERS,
+  AUTO_SCOPE_EFFECTIVE_CASH_PNL_SQL_EXPR,
   autoScopeCashPnlCsvValues,
   getAutoScopeCashMetricsSummaryForWhere,
   mapAutoScopeCashMetrics,
@@ -85,6 +82,7 @@ interface AutoScopeTradeAnalysisRowDb {
   diagnosis_label: string | null;
   entry_quality_score: number | null;
   exit_quality_score: number | null;
+  data_quality_flags: string[] | null;
   compact_metrics_json: Record<string, unknown> | null;
   updated_at: string;
 }
@@ -293,7 +291,7 @@ function derivePositionState(
 function mapAnalysisRow(row: AutoScopeTradeAnalysisRowDb): AutoScopeTradeAnalysisRow {
   const marketEndAt = row.market_end_at ?? deriveMarketEndAtFromSlug(row.market_slug);
   const nowIso = new Date().toISOString();
-  const cashMetrics = mapAutoScopeCashMetrics(row.compact_metrics_json);
+  const cashMetrics = mapAutoScopeCashMetrics(row.compact_metrics_json, row.data_quality_flags ?? []);
   return {
     rowId: row.row_key,
     rowType: row.row_type,
@@ -388,7 +386,7 @@ function mapAnalysisSummary(
 }
 
 function mapDiagnostic(row: AutoScopeTradeDiagnosticDb): AutoScopeTradeDiagnostic {
-  const cashMetrics = mapAutoScopeCashMetrics(row.compact_metrics_json);
+  const cashMetrics = mapAutoScopeCashMetrics(row.compact_metrics_json, row.data_quality_flags ?? []);
   return {
     rootOrderId: Number(row.root_builder_order_id),
     userId: Number(row.user_id),
@@ -455,14 +453,14 @@ function buildOrderByClause(
 ): string {
   if (sortBy === 'pnl') {
     const pnlDirection = sortDirection === 'asc' ? 'ASC' : 'DESC';
-    return `s.row_pnl_usdc ${pnlDirection},
-            s.triggered_at DESC NULLS LAST,
+    return `${AUTO_SCOPE_EFFECTIVE_CASH_PNL_SQL_EXPR} ${pnlDirection} NULLS LAST,
+            ${ANALYSIS_FILTER_TIME_EXPR} DESC NULLS LAST,
             s.sell_filled_at DESC NULLS LAST,
             s.root_builder_order_id DESC,
             s.row_key ASC`;
   }
 
-  return `s.triggered_at DESC NULLS LAST,
+  return `${ANALYSIS_FILTER_TIME_EXPR} DESC NULLS LAST,
           s.sell_filled_at DESC NULLS LAST,
           s.root_builder_order_id DESC,
           s.row_key ASC`;
@@ -506,6 +504,7 @@ const ANALYSIS_ROW_SELECT = `SELECT
          dg.diagnosis_label,
          dg.entry_quality_score,
          dg.exit_quality_score,
+         dg.data_quality_flags,
          dg.compact_metrics_json,
          s.updated_at::text
        FROM trade_flow_auto_scope_analysis_rows s
@@ -1393,6 +1392,7 @@ export async function getTradeFlowNodeRuntime(params: {
 
 export const __analyticsTestUtils = {
   analysisFilterTimeExpr: ANALYSIS_FILTER_TIME_EXPR,
+  effectiveCashPnlExpr: AUTO_SCOPE_EFFECTIVE_CASH_PNL_SQL_EXPR,
   deriveMarketEndAtFromSlug,
   derivePositionState,
   buildOrderByClause,

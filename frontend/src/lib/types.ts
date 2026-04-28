@@ -689,6 +689,11 @@ export interface AutoScopeTradeDiagnostic {
   officialSellUsdc?: number | null;
   officialRedeemUsdc?: number | null;
   officialDeltaUsdc?: number | null;
+  officialMarketPnlUsdc?: number | null;
+  officialMarketBuyUsdc?: number | null;
+  officialMarketSellUsdc?: number | null;
+  officialMarketRedeemUsdc?: number | null;
+  officialVsRootDeltaUsdc?: number | null;
   polymarketPositionPnlUsdc?: number | null;
   polymarketPositionSource?: string | null;
   polymarketTotalBetUsdc?: number | null;
@@ -958,6 +963,11 @@ export interface AutoScopeTradeAnalysisRow {
   officialSellUsdc: number | null;
   officialRedeemUsdc: number | null;
   officialDeltaUsdc: number | null;
+  officialMarketPnlUsdc: number | null;
+  officialMarketBuyUsdc: number | null;
+  officialMarketSellUsdc: number | null;
+  officialMarketRedeemUsdc: number | null;
+  officialVsRootDeltaUsdc: number | null;
   polymarketPositionPnlUsdc?: number | null;
   polymarketPositionSource?: string | null;
   polymarketTotalBetUsdc?: number | null;

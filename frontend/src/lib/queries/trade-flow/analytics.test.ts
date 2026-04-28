@@ -9,7 +9,10 @@ import {
   __autoScopeAnalysisExtrasTestUtils,
   buildAutoScopeNoOrderSignalsCsv,
 } from '@/lib/queries/trade-flow/auto-scope-analysis-extras';
-import { mapAutoScopeCashMetrics } from '@/lib/queries/trade-flow/auto-scope-analysis-cash-metrics';
+import {
+  __autoScopeCashMetricsTestUtils,
+  mapAutoScopeCashMetrics,
+} from '@/lib/queries/trade-flow/auto-scope-analysis-cash-metrics';
 import type { AutoScopeTradeAnalysisRow, AutoScopeTradeBlockedSignal } from '@/lib/types';
 
 test('deriveMarketEndAtFromSlug resolves 5m market end', () => {
@@ -64,13 +67,27 @@ test('derivePositionState marks settled payout rows as closed_exit', () => {
 
 test('buildOrderByClause returns pnl ascending order when requested', () => {
   const clause = __analyticsTestUtils.buildOrderByClause('pnl', 'asc');
-  assert.match(clause, /row_pnl_usdc ASC/);
+  const analysisTimeExpr = __analyticsTestUtils.analysisFilterTimeExpr;
+  const effectiveCashPnlExpr = __analyticsTestUtils.effectiveCashPnlExpr;
+  assert.ok(clause.includes(`${effectiveCashPnlExpr} ASC NULLS LAST`));
+  assert.ok(
+    clause.indexOf(`${effectiveCashPnlExpr} ASC NULLS LAST`) <
+      clause.indexOf(`${analysisTimeExpr} DESC NULLS LAST`)
+  );
 });
 
-test('buildOrderByClause keeps default ordering when sortBy=default', () => {
+test('buildOrderByClause keeps default ordering by analysis time fallback', () => {
   const clause = __analyticsTestUtils.buildOrderByClause('default', 'desc');
-  assert.match(clause, /triggered_at DESC/);
+  const analysisTimeExpr = __analyticsTestUtils.analysisFilterTimeExpr;
+  assert.ok(clause.startsWith(`${analysisTimeExpr} DESC NULLS LAST`));
+  assert.match(clause, /s\.buy_filled_at/);
   assert.doesNotMatch(clause, /row_pnl_usdc ASC/);
+});
+
+test('buildOrderByClause lets null-trigger rows sort by buy fill time', () => {
+  const clause = __analyticsTestUtils.buildOrderByClause('default', 'desc');
+  assert.match(clause, /COALESCE\(s\.triggered_at, s\.buy_filled_at,/);
+  assert.doesNotMatch(clause, /^s\.triggered_at DESC NULLS LAST/);
 });
 
 test('analysis relative filters do not use updated_at fallback', () => {
@@ -128,6 +145,11 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
       officialSellUsdc: 2.739,
       officialRedeemUsdc: 1.02238,
       officialDeltaUsdc: -1.72268,
+      officialMarketPnlUsdc: 0.877,
+      officialMarketBuyUsdc: 13.4182,
+      officialMarketSellUsdc: 14.2952,
+      officialMarketRedeemUsdc: 0,
+      officialVsRootDeltaUsdc: 9.357,
       polymarketPositionPnlUsdc: -0.5974,
       polymarketPositionSource: 'closed_positions',
       polymarketTotalBetUsdc: 4.8974,
@@ -170,10 +192,12 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
   assert.match(csv, /buy_fee_usdc/);
   assert.match(csv, /cash_fill_pnl_usdc/);
   assert.match(csv, /official_root_pnl_usdc/);
+  assert.match(csv, /official_market_pnl_usdc/);
   assert.match(csv, /polymarket_position_pnl_usdc/);
   assert.match(csv, /closed_positions/);
   assert.match(csv, /data_api_activity/);
   assert.match(csv, /-1.13602/);
+  assert.match(csv, /0.877/);
   assert.match(csv, /diagnostic_pnl_usdc/);
   assert.match(csv, /lost_unclaimed_or_unredeemed/);
   assert.match(csv, /diagnosis_code/);
@@ -203,6 +227,11 @@ test('mapAutoScopeCashMetrics separates cash diagnostic and pending values', () 
     official_sell_notional_usdc: 2.739,
     official_redeem_usdc: 1.02238,
     official_delta_usdc: -1.72268,
+    official_market_pnl_usdc: 0.877,
+    official_market_buy_usdc: 13.4182,
+    official_market_sell_usdc: 14.2952,
+    official_market_redeem_usdc: 0,
+    official_vs_root_delta_usdc: 9.357,
     pending_inventory_qty: 35,
     pending_inventory_value_usdc: 20,
     pending_redeemable_value_usdc: null,
@@ -217,7 +246,38 @@ test('mapAutoScopeCashMetrics separates cash diagnostic and pending values', () 
   assert.equal(metrics.officialRootPnlUsdc, -1.13602);
   assert.equal(metrics.officialPnlSource, 'data_api_activity');
   assert.equal(metrics.officialRedeemUsdc, 1.02238);
+  assert.equal(metrics.officialMarketPnlUsdc, 0.877);
+  assert.equal(metrics.officialMarketSellUsdc, 14.2952);
   assert.equal(metrics.cashStatus, 'pending_inventory_or_redeem');
+});
+
+test('mapAutoScopeCashMetrics uses official market pnl for ambiguous activity rows', () => {
+  const metrics = mapAutoScopeCashMetrics(
+    {
+      cash_fill_pnl_usdc: -3.83,
+      cash_pnl_source: 'local_fallback',
+      local_fallback_cash_fill_pnl_usdc: -3.83,
+      official_market_pnl_usdc: 0.877,
+      official_market_buy_usdc: 13.4182,
+      official_market_sell_usdc: 14.2952,
+      official_market_redeem_usdc: 0,
+      official_vs_root_delta_usdc: 4.707,
+    },
+    ['official_activity_ambiguous']
+  );
+
+  assert.equal(metrics.cashFillPnlUsdc, 0.877);
+  assert.equal(metrics.localFallbackCashFillPnlUsdc, -3.83);
+  assert.equal(metrics.officialMarketBuyUsdc, 13.4182);
+});
+
+test('cash metrics summary SQL counts ambiguous market pnl once per market', () => {
+  const sql = __autoScopeCashMetricsTestUtils.buildAutoScopeCashMetricsSummarySql('s.user_id = $1');
+  assert.match(sql, /market_effective AS/);
+  assert.match(sql, /GROUP BY market_slug/);
+  assert.match(sql, /BOOL_OR\(use_market_pnl\)/);
+  assert.match(sql, /THEN official_market_pnl_usdc/);
+  assert.doesNotMatch(sql, /SUM\(COALESCE\(\(dg\.compact_metrics_json->>'cash_fill_pnl_usdc'\)/);
 });
 
 test('buildAutoScopeNoOrderSignalsCsv includes quote status telemetry', () => {

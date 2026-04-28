@@ -476,7 +476,7 @@ export function AutoScopeAnalysisTable() {
               }}
               className={filterSelectClassName()}
             >
-              <option value="default">Tetik zamani</option>
+              <option value="default">Islem zamani</option>
               <option value="pnl_asc">PnL artan</option>
               <option value="pnl_desc">PnL azalan</option>
             </select>
