@@ -207,6 +207,29 @@ export async function readPositionWalletAddress(
   return readExchangeApiAddressForServer(context);
 }
 
+export interface DataApiActivityConfigForServer {
+  baseUrl: string;
+  pageSize: number;
+  maxPages: number;
+  walletAddress: string;
+}
+
+export async function readDataApiActivityConfigForServer(
+  context: UserConfigContext
+): Promise<DataApiActivityConfigForServer> {
+  const claim = normalizeClaimShape(await readMergedConfigForServer('claim', context));
+  const pageSize = Math.min(Math.max(Number(claim.positions_page_size ?? 500), 500), 500);
+  const maxPages = Math.min(Math.max(Number(claim.positions_max_pages ?? 20), 20), 20);
+  const baseUrl =
+    String(claim.data_api_base_url ?? '').trim() || 'https://data-api.polymarket.com';
+  return {
+    baseUrl,
+    pageSize,
+    maxPages,
+    walletAddress: await readPositionWalletAddress(context),
+  };
+}
+
 export async function readClaimRelayerConfigForServer(
   context: UserConfigContext
 ): Promise<ClaimRelayerConfigForServer> {

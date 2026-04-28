@@ -72,6 +72,11 @@ test('buildOrderByClause keeps default ordering when sortBy=default', () => {
   assert.doesNotMatch(clause, /row_pnl_usdc ASC/);
 });
 
+test('analysis relative filters do not use updated_at fallback', () => {
+  assert.doesNotMatch(__analyticsTestUtils.analysisFilterTimeExpr, /updated_at/);
+  assert.match(__analyticsTestUtils.analysisFilterTimeExpr, /mark_price_captured_at/);
+});
+
 test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown', () => {
   const rows: AutoScopeTradeAnalysisRow[] = [
     {

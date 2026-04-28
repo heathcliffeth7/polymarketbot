@@ -10,6 +10,10 @@ struct AutoScopeAnalysisPnlReconciliation {
     official_sell_notional_usdc: Option<f64>,
     official_redeem_usdc: Option<f64>,
     official_pnl_usdc: Option<f64>,
+    official_market_buy_usdc: Option<f64>,
+    official_market_sell_usdc: Option<f64>,
+    official_market_redeem_usdc: Option<f64>,
+    official_market_pnl_usdc: Option<f64>,
     internal_fallback_pnl_usdc: f64,
     official_delta_usdc: Option<f64>,
 }
@@ -34,6 +38,14 @@ struct AutoScopeOfficialLedger {
     sell_price: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct AutoScopeOfficialMarketLedger {
+    buy_usdc: f64,
+    sell_usdc: f64,
+    redeem_usdc: f64,
+    pnl_usdc: f64,
+}
+
 impl AutoScopeAnalysisPnlReconciliation {
     fn local(internal_fallback_pnl_usdc: f64) -> Self {
         Self {
@@ -45,6 +57,22 @@ impl AutoScopeAnalysisPnlReconciliation {
 
     fn with_flag(mut self, flag: &str) -> Self {
         trade_builder_analysis_data_flag(&mut self.data_quality_flags, flag);
+        self
+    }
+
+    fn with_market_ledger(
+        mut self,
+        ledger: AutoScopeOfficialMarketLedger,
+        root_rows_pnl_usdc: f64,
+    ) -> Self {
+        self.official_market_buy_usdc = Some(round_trade_builder_official_cash_value(ledger.buy_usdc));
+        self.official_market_sell_usdc = Some(round_trade_builder_official_cash_value(ledger.sell_usdc));
+        self.official_market_redeem_usdc =
+            Some(round_trade_builder_official_cash_value(ledger.redeem_usdc));
+        self.official_market_pnl_usdc = Some(round_trade_builder_official_cash_value(ledger.pnl_usdc));
+        self.official_delta_usdc = Some(round_trade_builder_official_cash_value(
+            ledger.pnl_usdc - root_rows_pnl_usdc,
+        ));
         self
     }
 }
@@ -84,11 +112,28 @@ async fn trade_builder_analysis_try_build_official_pnl_rows(
             return fallback;
         }
     };
-    if root_count > 1 {
+
+    let market_root_count = match repo
+        .count_trade_builder_filled_roots_for_market(root_order.user_id, &root_order.market_slug)
+        .await
+    {
+        Ok(count) => count,
+        Err(err) => {
+            warn!(
+                root_builder_order_id = root_order.id,
+                error = %err,
+                "AUTO_SCOPE_OFFICIAL_PNL_MARKET_ROOT_COUNT_FAILED"
+            );
+            fallback.reconciliation = fallback
+                .reconciliation
+                .with_flag("official_activity_lookup_failed");
+            return fallback;
+        }
+    };
+    if market_root_count > 1 {
         fallback.reconciliation = fallback
             .reconciliation
-            .with_flag("official_activity_ambiguous");
-        return fallback;
+            .with_flag("official_market_scope_required");
     }
 
     let cfg = match load_user_app_config_fresh(repo, run.user_id).await {
@@ -145,6 +190,18 @@ async fn trade_builder_analysis_try_build_official_pnl_rows(
         }
     };
 
+    let market_ledger = trade_builder_analysis_official_market_ledger(&activity);
+    fallback.reconciliation = fallback
+        .reconciliation
+        .clone()
+        .with_market_ledger(market_ledger, internal_fallback_pnl_usdc);
+    if root_count > 1 {
+        fallback.reconciliation = fallback
+            .reconciliation
+            .with_flag("official_activity_ambiguous");
+        return fallback;
+    }
+
     let ledger = trade_builder_analysis_official_ledger(&activity, &root_order.token_id);
     if ledger.buy_qty <= 0.0 || ledger.buy_usdc <= 0.0 {
         fallback.reconciliation = fallback
@@ -162,7 +219,18 @@ async fn trade_builder_analysis_try_build_official_pnl_rows(
         internal_fallback_pnl_usdc,
     );
     match build {
-        Some(rows) => rows,
+        Some(mut rows) => {
+            rows.reconciliation = rows
+                .reconciliation
+                .clone()
+                .with_market_ledger(market_ledger, internal_fallback_pnl_usdc);
+            if market_root_count > 1 {
+                rows.reconciliation = rows
+                    .reconciliation
+                    .with_flag("official_market_scope_required");
+            }
+            rows
+        }
         None => {
             fallback.reconciliation = fallback
                 .reconciliation
@@ -290,6 +358,10 @@ fn trade_builder_analysis_build_official_rows_from_ledger(
         official_sell_notional_usdc: Some(round_trade_builder_official_cash_value(ledger.sell_usdc)),
         official_redeem_usdc: Some(round_trade_builder_official_cash_value(ledger.redeem_usdc)),
         official_pnl_usdc: Some(round_trade_builder_official_cash_value(official_pnl_usdc)),
+        official_market_buy_usdc: None,
+        official_market_sell_usdc: None,
+        official_market_redeem_usdc: None,
+        official_market_pnl_usdc: None,
         internal_fallback_pnl_usdc,
         official_delta_usdc: Some(round_trade_builder_official_cash_value(
             total_pnl - internal_fallback_pnl_usdc,
@@ -444,6 +516,33 @@ fn trade_builder_analysis_official_ledger(
     ledger
 }
 
+fn trade_builder_analysis_official_market_ledger(
+    activity: &[DataApiActivity],
+) -> AutoScopeOfficialMarketLedger {
+    let mut ledger = AutoScopeOfficialMarketLedger::default();
+    for row in activity {
+        if row.activity_type == "REDEEM" {
+            ledger.redeem_usdc += row.usdc_size.max(row.size).max(0.0);
+            continue;
+        }
+        if row.activity_type != "TRADE" {
+            continue;
+        }
+        match row.side.as_deref() {
+            Some("BUY") => ledger.buy_usdc += row.usdc_size.max(0.0),
+            Some("SELL") => ledger.sell_usdc += row.usdc_size.max(0.0),
+            _ => {}
+        }
+    }
+    ledger.buy_usdc = round_trade_builder_official_cash_value(ledger.buy_usdc);
+    ledger.sell_usdc = round_trade_builder_official_cash_value(ledger.sell_usdc);
+    ledger.redeem_usdc = round_trade_builder_official_cash_value(ledger.redeem_usdc);
+    ledger.pnl_usdc = round_trade_builder_official_cash_value(
+        ledger.sell_usdc + ledger.redeem_usdc - ledger.buy_usdc,
+    );
+    ledger
+}
+
 fn trade_builder_analysis_sell_summary_from_rows(
     rows: &[TradeFlowAutoScopeAnalysisRowInput],
 ) -> AutoScopeAnalysisSellAllocationSummary {
@@ -559,6 +658,7 @@ mod official_pnl_tests {
         ];
 
         let ledger = trade_builder_analysis_official_ledger(&rows, "token-up");
+        let market_ledger = trade_builder_analysis_official_market_ledger(&rows);
         let pnl = round_trade_builder_official_cash_value(
             -ledger.buy_usdc + ledger.sell_usdc + ledger.redeem_usdc,
         );
@@ -567,5 +667,51 @@ mod official_pnl_tests {
         assert_eq!(ledger.sell_qty, 9.0);
         assert_eq!(ledger.redeem_usdc, 1.02238);
         assert_eq!(pnl, -1.13602);
+        assert_eq!(market_ledger.pnl_usdc, -1.13602);
+    }
+
+    #[test]
+    fn official_market_ledger_includes_counter_buy_cash() {
+        let rows = vec![
+            DataApiActivity {
+                activity_type: "TRADE".to_string(),
+                side: Some("BUY".to_string()),
+                slug: "btc-updown-5m-1777336200".to_string(),
+                asset: Some("down-token".to_string()),
+                outcome: Some("Down".to_string()),
+                size: 9.09,
+                usdc_size: 9.9258,
+                price: Some(0.55),
+                timestamp: Some(1),
+            },
+            DataApiActivity {
+                activity_type: "TRADE".to_string(),
+                side: Some("BUY".to_string()),
+                slug: "btc-updown-5m-1777336200".to_string(),
+                asset: Some("up-token".to_string()),
+                outcome: Some("Up".to_string()),
+                size: 8.84,
+                usdc_size: 3.2708,
+                price: Some(0.37),
+                timestamp: Some(2),
+            },
+            DataApiActivity {
+                activity_type: "TRADE".to_string(),
+                side: Some("SELL".to_string()),
+                slug: "btc-updown-5m-1777336200".to_string(),
+                asset: Some("down-token".to_string()),
+                outcome: Some("Down".to_string()),
+                size: 9.09,
+                usdc_size: 12.066308,
+                price: Some(0.91),
+                timestamp: Some(3),
+            },
+        ];
+
+        let ledger = trade_builder_analysis_official_market_ledger(&rows);
+
+        assert_eq!(ledger.buy_usdc, 13.1966);
+        assert_eq!(ledger.sell_usdc, 12.06631);
+        assert_eq!(ledger.pnl_usdc, -1.13029);
     }
 }

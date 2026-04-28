@@ -618,10 +618,17 @@ fn trade_builder_analysis_build_trade_diagnostic(
             "official_sell_notional_usdc": pnl_reconciliation.official_sell_notional_usdc,
             "official_redeem_usdc": pnl_reconciliation.official_redeem_usdc,
             "official_pnl_usdc": pnl_reconciliation.official_pnl_usdc,
+            "official_market_buy_usdc": pnl_reconciliation.official_market_buy_usdc,
+            "official_market_sell_usdc": pnl_reconciliation.official_market_sell_usdc,
+            "official_market_redeem_usdc": pnl_reconciliation.official_market_redeem_usdc,
+            "official_market_pnl_usdc": pnl_reconciliation.official_market_pnl_usdc,
             "internal_fallback_pnl_usdc": round_trade_builder_signed_qty(
                 pnl_reconciliation.internal_fallback_pnl_usdc
             ),
+            "root_rows_pnl_usdc": total_pnl_usdc,
             "official_delta_usdc": pnl_reconciliation.official_delta_usdc,
+            "official_vs_root_delta_usdc": pnl_reconciliation.official_market_pnl_usdc
+                .map(|value| round_trade_builder_signed_qty(value - total_pnl_usdc)),
             "remaining_qty": round_trade_builder_share_qty(
                 rows.iter()
                     .filter(|row| row.row_type == "open_position")

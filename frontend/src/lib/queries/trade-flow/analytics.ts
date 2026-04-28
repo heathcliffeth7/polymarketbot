@@ -26,9 +26,14 @@ import {
   getAutoScopeTradeAnalysisExtrasForRoots,
 } from './auto-scope-analysis-extras';
 import { getPendingAutoScopeAnalysisRows } from './auto-scope-analysis-pending';
+import {
+  applyOfficialMarketPnlSummary,
+  getOfficialMarketPnlSummaryForFilters,
+} from './official-market-pnl';
 
 export interface AutoScopeTradeAnalysisFilters {
   userId: number;
+  username?: string;
   page?: number;
   limit?: number;
   sortBy?: AutoScopeTradeAnalysisSortBy;
@@ -189,7 +194,7 @@ interface TradeFlowNodeRuntimeRowDb {
 }
 
 const ANALYSIS_FILTER_TIME_EXPR =
-  'COALESCE(s.triggered_at, s.buy_filled_at, s.sell_filled_at, s.updated_at)';
+  'COALESCE(s.triggered_at, s.buy_filled_at, s.sell_filled_at, s.mark_price_captured_at, s.market_open_at)';
 
 function parseDate(value: string | null): Date | null {
   if (!value) return null;
@@ -352,6 +357,7 @@ function mapAnalysisSummary(
   const lossUsdc = Number(row?.loss_usdc || 0);
   return {
     rowCount,
+    pnlSource: 'analysis_rows',
     marketCount: Number(row?.market_count || 0),
     lossCount,
     profitCount,
@@ -590,6 +596,30 @@ export async function getAutoScopeTradeAnalysis(
     filters.userId,
     visibleRows.map((row) => row.rootOrderId)
   );
+  const rowSummary = mapAnalysisSummary(
+    summaryRes.rows[0],
+    mapDiagnosisBreakdown(diagnosisRes.rows)
+  );
+  let summary = rowSummary;
+  let refreshedAt = refreshedAtRes.rows[0]?.refreshed_at ?? new Date().toISOString();
+
+  try {
+    const officialSummary = await getOfficialMarketPnlSummaryForFilters({
+      userId: filters.userId,
+      username: filters.username ?? '',
+      from: filters.from,
+      to: filters.to,
+      pnlFilter,
+      positionFilter,
+      rootRowsPnlUsdc: rowSummary.totalPnlUsdc,
+    });
+    if (officialSummary) {
+      summary = applyOfficialMarketPnlSummary(rowSummary, officialSummary);
+      refreshedAt = officialSummary.refreshedAt;
+    }
+  } catch (err) {
+    console.error('Official market PnL activity summary failed:', err);
+  }
 
   return {
     data: attachExtrasToRows(visibleRows, extras),
@@ -603,12 +633,8 @@ export async function getAutoScopeTradeAnalysis(
     positionFilter,
     from: filters.from ?? null,
     to: filters.to ?? null,
-    summary: mapAnalysisSummary(
-      summaryRes.rows[0],
-      mapDiagnosisBreakdown(diagnosisRes.rows)
-    ),
-    refreshedAt:
-      refreshedAtRes.rows[0]?.refreshed_at ?? new Date().toISOString(),
+    summary,
+    refreshedAt,
   };
 }
 
@@ -1297,6 +1323,7 @@ export async function getTradeFlowNodeRuntime(params: {
 }
 
 export const __analyticsTestUtils = {
+  analysisFilterTimeExpr: ANALYSIS_FILTER_TIME_EXPR,
   deriveMarketEndAtFromSlug,
   derivePositionState,
   buildOrderByClause,

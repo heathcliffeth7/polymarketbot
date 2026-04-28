@@ -954,6 +954,12 @@ export interface AutoScopeTradeAnalysisSummary {
   largestLossUsdc: number | null;
   feeDragUsdc: number;
   diagnosisBreakdown: AutoScopeTradeAnalysisDiagnosisBreakdown[];
+  pnlSource?: 'analysis_rows' | 'official_market_activity';
+  officialBuyUsdc?: number;
+  officialSellUsdc?: number;
+  officialRedeemUsdc?: number;
+  rootRowsPnlUsdc?: number;
+  officialDeltaUsdc?: number;
 }
 
 export interface AutoScopeTradeAnalysisResponse

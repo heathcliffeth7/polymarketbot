@@ -42,7 +42,7 @@ impl PostgresRepository {
                    SELECT 1
                    FROM trade_flow_auto_scope_trade_diagnostics d
                    WHERE d.root_builder_order_id = o.id
-                     AND COALESCE((d.compact_metrics_json->>'pnl_model_version')::int, 0) < 3
+                     AND COALESCE((d.compact_metrics_json->>'pnl_model_version')::int, 0) < 4
                  )
                )
              ORDER BY o.created_at DESC, o.id DESC
@@ -83,6 +83,37 @@ impl PostgresRepository {
         .bind(user_id)
         .bind(market_slug)
         .bind(token_id)
+        .fetch_one(self.pool())
+        .await?;
+
+        Ok(count)
+    }
+
+    pub async fn count_trade_builder_filled_roots_for_market(
+        &self,
+        user_id: i64,
+        market_slug: &str,
+    ) -> Result<i64> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM trade_builder_orders o
+             WHERE o.user_id = $1
+               AND o.side = 'buy'
+               AND o.parent_order_id IS NULL
+               AND o.origin_flow_run_id IS NOT NULL
+               AND LOWER(o.market_slug) = LOWER($2)
+               AND (
+                 COALESCE(o.filled_qty, 0) > 0
+                 OR EXISTS (
+                   SELECT 1
+                   FROM trade_builder_order_events e
+                   WHERE e.builder_order_id = o.id
+                     AND e.event_type = 'filled'
+                 )
+               )",
+        )
+        .bind(user_id)
+        .bind(market_slug)
         .fetch_one(self.pool())
         .await?;
 

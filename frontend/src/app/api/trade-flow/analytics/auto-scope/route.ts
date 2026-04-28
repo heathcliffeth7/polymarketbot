@@ -49,6 +49,7 @@ export async function GET(req: NextRequest) {
 
     const result = await getAutoScopeTradeAnalysis({
       userId: user.userId,
+      username: user.username,
       page: Math.floor(page),
       limit: Math.floor(limit),
       sortBy,

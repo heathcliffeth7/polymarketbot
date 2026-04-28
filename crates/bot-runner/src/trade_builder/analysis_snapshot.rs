@@ -1,5 +1,5 @@
 const AUTO_SCOPE_ANALYSIS_BACKFILL_LIMIT: i64 = 25;
-const AUTO_SCOPE_ANALYSIS_PNL_MODEL_VERSION: i64 = 3;
+const AUTO_SCOPE_ANALYSIS_PNL_MODEL_VERSION: i64 = 4;
 const AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_DELAYS_SECS: [u64; 4] = [1, 3, 8, 20];
 
 static AUTO_SCOPE_ANALYSIS_BACKFILL_CHECKED_ROOTS: LazyLock<parking_lot::Mutex<HashSet<i64>>> =
@@ -293,6 +293,9 @@ fn trade_builder_analysis_has_upstream_auto_scope_trigger(
     }
 
     let mut queue = VecDeque::from([action_node_key.to_string()]);
+    if let Some(base_node_key) = action_node_key.strip_suffix("__counter") {
+        queue.push_back(base_node_key.to_string());
+    }
     let mut visited = HashSet::new();
     while let Some(current) = queue.pop_front() {
         if !visited.insert(current.clone()) {
@@ -1183,6 +1186,36 @@ mod auto_scope_analysis_tests {
         assert!(trade_builder_analysis_has_upstream_auto_scope_trigger(
             &graph,
             "action_buy"
+        ));
+    }
+
+    #[test]
+    fn upstream_auto_scope_trigger_accepts_pair_lock_counter_node_key() {
+        let graph = TradeFlowGraphRuntime {
+            context: json!({}),
+            nodes: vec![
+                TradeFlowNode {
+                    key: "trigger_auto".to_string(),
+                    node_type: "trigger.market_price".to_string(),
+                    config: json!({ "marketMode": "auto_scope" }),
+                },
+                TradeFlowNode {
+                    key: "action_buy".to_string(),
+                    node_type: "action.place_order".to_string(),
+                    config: json!({}),
+                },
+            ],
+            edges: vec![TradeFlowEdge {
+                source: "trigger_auto".to_string(),
+                target: "action_buy".to_string(),
+                edge_type: "default".to_string(),
+                condition: None,
+            }],
+        };
+
+        assert!(trade_builder_analysis_has_upstream_auto_scope_trigger(
+            &graph,
+            "action_buy__counter"
         ));
     }
 

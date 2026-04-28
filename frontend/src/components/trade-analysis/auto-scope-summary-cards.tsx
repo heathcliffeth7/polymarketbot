@@ -27,16 +27,21 @@ export function AutoScopeSummaryCards({
   summary,
   pagePnl,
 }: AutoScopeSummaryCardsProps) {
+  const isOfficial = summary.pnlSource === 'official_market_activity';
+  const officialCashIn =
+    summary.officialSellUsdc == null && summary.officialRedeemUsdc == null
+      ? null
+      : (summary.officialSellUsdc ?? 0) + (summary.officialRedeemUsdc ?? 0);
   return (
     <div className="space-y-3">
       <div className="grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 lg:grid-cols-5">
         <MetricTile
-          label="Toplam PnL"
+          label={isOfficial ? 'Official PnL' : 'Toplam PnL'}
           value={formatPnl(summary.totalPnlUsdc)}
           className={pnlClassName(summary.totalPnlUsdc)}
         />
         <MetricTile
-          label="Realized"
+          label={isOfficial ? 'Official Realized' : 'Realized'}
           value={formatPnl(summary.realizedPnlUsdc)}
           className={pnlClassName(summary.realizedPnlUsdc)}
         />
@@ -50,8 +55,15 @@ export function AutoScopeSummaryCards({
         <MetricTile label="Avg Win" value={formatUsdc(summary.avgWinUsdc)} className="text-emerald-300" />
         <MetricTile label="Avg Loss" value={formatUsdc(summary.avgLossUsdc)} className="text-red-300" />
         <MetricTile label="Largest Loss" value={formatUsdc(summary.largestLossUsdc)} className="text-red-300" />
-        <MetricTile label="Fee Drag" value={formatUsdc(summary.feeDragUsdc)} />
-        <MetricTile label="Sayfa PnL" value={formatPnl(pagePnl)} className={pnlClassName(pagePnl)} />
+        <MetricTile
+          label={isOfficial ? 'Official In/Out' : 'Fee Drag'}
+          value={
+            isOfficial
+              ? `${formatUsdc(officialCashIn)} / ${formatUsdc(summary.officialBuyUsdc ?? null)}`
+              : formatUsdc(summary.feeDragUsdc)
+          }
+        />
+        <MetricTile label="Gorunen Satirlar" value={formatPnl(pagePnl)} className={pnlClassName(pagePnl)} />
       </div>
 
       <div className="rounded-md border border-zinc-800 bg-zinc-950 p-3">
