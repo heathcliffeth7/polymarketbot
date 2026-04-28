@@ -298,7 +298,7 @@ function normalizeOpenPosition(
     productOrNull(parseNumber(row.size), parseNumber(row.avgPrice));
   const pnl =
     source === 'positions_redeemable_lost'
-      ? parseNumber(row.realizedPnl) ?? parseNumber(row.cashPnl) ?? (totalBet == null ? null : -totalBet)
+      ? parseNumber(row.cashPnl) ?? parseNumber(row.realizedPnl) ?? (totalBet == null ? null : -totalBet)
       : openPositionPnl(row);
   if (pnl == null) return null;
   return {

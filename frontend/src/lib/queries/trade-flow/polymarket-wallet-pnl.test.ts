@@ -70,6 +70,66 @@ test('redeemable lost open position is treated as synthetic closed loss', () => 
   assert.equal(stats.marketPnlIndex.get('btc-updown-5m-1777336800'), -5);
 });
 
+test('redeemable lost position uses cash pnl before zero realized pnl', () => {
+  const stats = __polymarketWalletPnlTestUtils.buildPolymarketPositionStats({
+    closedRows: [],
+    openRows: [
+      {
+        slug: 'btc-updown-5m-1777335600',
+        asset: 'token-up',
+        outcome: 'Up',
+        redeemable: true,
+        currentValue: 0,
+        curPrice: 0,
+        initialValue: 3.3832,
+        cashPnl: -3.3832,
+        realizedPnl: 0,
+      },
+    ],
+  });
+  const row = stats.index.get('btc-updown-5m-1777335600|asset:token-up');
+
+  assert.equal(row?.pnlUsdc, -3.3832);
+  assert.equal(row?.source, 'positions_redeemable_lost');
+  assert.equal(stats.marketPnlIndex.get('btc-updown-5m-1777335600'), -3.3832);
+});
+
+test('sold down and lost up market keeps activity pnl separate from position audit', () => {
+  const stats = __polymarketWalletPnlTestUtils.buildPolymarketPositionStats({
+    closedRows: [
+      {
+        slug: 'btc-updown-5m-1777335600',
+        asset: 'token-down',
+        outcome: 'Down',
+        realizedPnl: 4.003,
+        totalBought: 9.09,
+        avgPrice: 0.55,
+      },
+    ],
+    openRows: [
+      {
+        slug: 'btc-updown-5m-1777335600',
+        asset: 'token-up',
+        outcome: 'Up',
+        redeemable: true,
+        currentValue: 0,
+        curPrice: 0,
+        initialValue: 3.3832,
+        cashPnl: -3.3832,
+        realizedPnl: 0,
+      },
+    ],
+  });
+  const status = __polymarketWalletPnlTestUtils.resolvePnlSourceStatus({
+    baseStatus: 'activity_market',
+    activityMarketPnlUsdc: 0.127,
+    positionMarketPnlUsdc: stats.marketPnlIndex.get('btc-updown-5m-1777335600') ?? null,
+  });
+
+  assert.equal(stats.marketPnlIndex.get('btc-updown-5m-1777335600'), 0.6198);
+  assert.equal(status, 'pnl_source_mismatch');
+});
+
 test('position stats aggregate positions and closed positions by market slug', () => {
   const stats = __polymarketWalletPnlTestUtils.buildPolymarketPositionStats({
     closedRows: [

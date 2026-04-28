@@ -201,6 +201,8 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
   assert.match(csv, /activity_market_pnl_usdc/);
   assert.match(csv, /position_market_pnl_usdc/);
   assert.match(csv, /local_market_pnl_usdc/);
+  assert.doesNotMatch(csv, /polymarket_ui_market_pnl_usdc/);
+  assert.doesNotMatch(csv, /display_pnl_usdc/);
   assert.match(csv, /pnl_source_status/);
   assert.match(csv, /pnl_source_mismatch/);
   assert.match(csv, /polymarket_position_pnl_usdc/);
