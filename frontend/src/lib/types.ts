@@ -619,6 +619,11 @@ export type AutoScopeTradeAnalysisRowType =
   | 'settled_payout'
   | 'open_position'
   | 'pending_analysis';
+export type AutoScopeTradeAnalysisPnlSourceStatus =
+  | 'activity_market'
+  | 'local_fallback'
+  | 'local_fallback_no_activity_evidence'
+  | 'pnl_source_mismatch';
 export type AutoScopeTradeAnalysisPositionState =
   | 'open'
   | 'pending_analysis'
@@ -694,6 +699,10 @@ export interface AutoScopeTradeDiagnostic {
   officialMarketSellUsdc?: number | null;
   officialMarketRedeemUsdc?: number | null;
   officialVsRootDeltaUsdc?: number | null;
+  activityMarketPnlUsdc?: number | null;
+  positionMarketPnlUsdc?: number | null;
+  localMarketPnlUsdc?: number | null;
+  pnlSourceStatus?: AutoScopeTradeAnalysisPnlSourceStatus | null;
   polymarketPositionPnlUsdc?: number | null;
   polymarketPositionSource?: string | null;
   polymarketTotalBetUsdc?: number | null;
@@ -968,6 +977,10 @@ export interface AutoScopeTradeAnalysisRow {
   officialMarketSellUsdc: number | null;
   officialMarketRedeemUsdc: number | null;
   officialVsRootDeltaUsdc: number | null;
+  activityMarketPnlUsdc: number | null;
+  positionMarketPnlUsdc: number | null;
+  localMarketPnlUsdc: number | null;
+  pnlSourceStatus: AutoScopeTradeAnalysisPnlSourceStatus | null;
   polymarketPositionPnlUsdc?: number | null;
   polymarketPositionSource?: string | null;
   polymarketTotalBetUsdc?: number | null;

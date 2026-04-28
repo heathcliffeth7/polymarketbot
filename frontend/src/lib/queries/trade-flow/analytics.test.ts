@@ -13,6 +13,7 @@ import {
   __autoScopeCashMetricsTestUtils,
   mapAutoScopeCashMetrics,
 } from '@/lib/queries/trade-flow/auto-scope-analysis-cash-metrics';
+import { __autoScopeMarketPnlAuditTestUtils } from '@/lib/queries/trade-flow/auto-scope-market-pnl-audit';
 import type { AutoScopeTradeAnalysisRow, AutoScopeTradeBlockedSignal } from '@/lib/types';
 
 test('deriveMarketEndAtFromSlug resolves 5m market end', () => {
@@ -150,6 +151,10 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
       officialMarketSellUsdc: 14.2952,
       officialMarketRedeemUsdc: 0,
       officialVsRootDeltaUsdc: 9.357,
+      activityMarketPnlUsdc: 0.877,
+      positionMarketPnlUsdc: -0.5974,
+      localMarketPnlUsdc: -3.83,
+      pnlSourceStatus: 'pnl_source_mismatch',
       polymarketPositionPnlUsdc: -0.5974,
       polymarketPositionSource: 'closed_positions',
       polymarketTotalBetUsdc: 4.8974,
@@ -193,6 +198,11 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
   assert.match(csv, /cash_fill_pnl_usdc/);
   assert.match(csv, /official_root_pnl_usdc/);
   assert.match(csv, /official_market_pnl_usdc/);
+  assert.match(csv, /activity_market_pnl_usdc/);
+  assert.match(csv, /position_market_pnl_usdc/);
+  assert.match(csv, /local_market_pnl_usdc/);
+  assert.match(csv, /pnl_source_status/);
+  assert.match(csv, /pnl_source_mismatch/);
   assert.match(csv, /polymarket_position_pnl_usdc/);
   assert.match(csv, /closed_positions/);
   assert.match(csv, /data_api_activity/);
@@ -248,6 +258,10 @@ test('mapAutoScopeCashMetrics separates cash diagnostic and pending values', () 
   assert.equal(metrics.officialRedeemUsdc, 1.02238);
   assert.equal(metrics.officialMarketPnlUsdc, 0.877);
   assert.equal(metrics.officialMarketSellUsdc, 14.2952);
+  assert.equal(metrics.activityMarketPnlUsdc, 0.877);
+  assert.equal(metrics.positionMarketPnlUsdc, null);
+  assert.equal(metrics.localMarketPnlUsdc, null);
+  assert.equal(metrics.pnlSourceStatus, 'local_fallback');
   assert.equal(metrics.cashStatus, 'pending_inventory_or_redeem');
 });
 
@@ -269,6 +283,8 @@ test('mapAutoScopeCashMetrics uses official market pnl for ambiguous activity ro
   assert.equal(metrics.cashFillPnlUsdc, 0.877);
   assert.equal(metrics.localFallbackCashFillPnlUsdc, -3.83);
   assert.equal(metrics.officialMarketBuyUsdc, 13.4182);
+  assert.equal(metrics.activityMarketPnlUsdc, 0.877);
+  assert.equal(metrics.pnlSourceStatus, 'activity_market');
 });
 
 test('mapAutoScopeCashMetrics uses official market pnl for market-scope rows', () => {
@@ -287,6 +303,8 @@ test('mapAutoScopeCashMetrics uses official market pnl for market-scope rows', (
 
   assert.equal(metrics.cashFillPnlUsdc, -3.24722);
   assert.equal(metrics.localFallbackCashFillPnlUsdc, -1.81);
+  assert.equal(metrics.activityMarketPnlUsdc, -3.24722);
+  assert.equal(metrics.pnlSourceStatus, 'activity_market');
 });
 
 test('mapAutoScopeCashMetrics keeps fallback when official market activity has no evidence', () => {
@@ -305,6 +323,17 @@ test('mapAutoScopeCashMetrics keeps fallback when official market activity has n
 
   assert.equal(metrics.cashFillPnlUsdc, -6);
   assert.equal(metrics.officialMarketPnlUsdc, 0);
+  assert.equal(metrics.activityMarketPnlUsdc, null);
+  assert.equal(metrics.pnlSourceStatus, 'local_fallback_no_activity_evidence');
+});
+
+test('local market pnl audit SQL sums distinct root diagnostic fallback by market', () => {
+  const sql = __autoScopeMarketPnlAuditTestUtils.localMarketPnlSql;
+  assert.match(sql, /DISTINCT ON \(lower\(btrim\(dg\.market_slug\)\), dg\.root_builder_order_id\)/);
+  assert.match(sql, /local_fallback_cash_fill_pnl_usdc/);
+  assert.match(sql, /cash_fill_pnl_usdc/);
+  assert.match(sql, /dg\.total_pnl_usdc/);
+  assert.match(sql, /GROUP BY market_slug/);
 });
 
 test('cash metrics summary SQL counts ambiguous market pnl once per market', () => {

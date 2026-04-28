@@ -141,6 +141,32 @@ function cashStatusLabel(value: string | null): string {
   }
 }
 
+function pnlSourceStatusLabel(
+  value: AutoScopeTradeAnalysisRow['pnlSourceStatus']
+): string | null {
+  switch (value) {
+    case 'activity_market':
+      return 'Activity market';
+    case 'local_fallback':
+      return 'Local fallback';
+    case 'local_fallback_no_activity_evidence':
+      return 'No activity evidence';
+    case 'pnl_source_mismatch':
+      return 'PnL source mismatch';
+    default:
+      return null;
+  }
+}
+
+function pnlSourceStatusClassName(
+  value: AutoScopeTradeAnalysisRow['pnlSourceStatus']
+): string {
+  if (value === 'pnl_source_mismatch') return 'text-red-300';
+  if (value === 'local_fallback_no_activity_evidence') return 'text-amber-300';
+  if (value === 'activity_market') return 'text-emerald-300';
+  return 'text-zinc-500';
+}
+
 function formatScore(value: number | null): string {
   return value == null ? '-' : `${value.toFixed(0)}/100`;
 }
@@ -712,7 +738,14 @@ export function AutoScopeAnalysisTable() {
                       {formatUsdc(row.netValueUsdc)}
                     </TableCell>
                     <TableCell className={`text-right font-mono ${nullablePnlClassName(row.cashFillPnlUsdc)}`}>
-                      {formatNullablePnl(row.cashFillPnlUsdc)}
+                      <div className="space-y-1">
+                        <p>{formatNullablePnl(row.cashFillPnlUsdc)}</p>
+                        {pnlSourceStatusLabel(row.pnlSourceStatus) ? (
+                          <p className={`text-[11px] ${pnlSourceStatusClassName(row.pnlSourceStatus)}`}>
+                            {pnlSourceStatusLabel(row.pnlSourceStatus)}
+                          </p>
+                        ) : null}
+                      </div>
                     </TableCell>
                     <TableCell className={`text-right font-mono ${nullablePnlClassName(row.polymarketPositionPnlUsdc ?? null)}`}>
                       {formatNullablePnl(row.polymarketPositionPnlUsdc ?? null)}

@@ -45,6 +45,7 @@ test('closed position realized pnl becomes Polymarket position pnl', () => {
   assert.equal(row?.pnlUsdc, -0.5974);
   assert.equal(row?.source, 'closed_positions');
   assert.equal(row?.totalBetUsdc, 4.8974);
+  assert.equal(stats.marketPnlIndex.get('btc-updown-5m-1777336800'), -0.5974);
 });
 
 test('redeemable lost open position is treated as synthetic closed loss', () => {
@@ -66,4 +67,50 @@ test('redeemable lost open position is treated as synthetic closed loss', () => 
   assert.equal(row?.pnlUsdc, -5);
   assert.equal(row?.source, 'positions_redeemable_lost');
   assert.equal(row?.amountReturnedUsdc, 0);
+  assert.equal(stats.marketPnlIndex.get('btc-updown-5m-1777336800'), -5);
+});
+
+test('position stats aggregate positions and closed positions by market slug', () => {
+  const stats = __polymarketWalletPnlTestUtils.buildPolymarketPositionStats({
+    closedRows: [
+      {
+        slug: 'btc-updown-5m-1777336200',
+        asset: 'token-down',
+        outcome: 'Down',
+        realizedPnl: 1.2,
+        totalBet: 3,
+      },
+    ],
+    openRows: [
+      {
+        slug: 'btc-updown-5m-1777336200',
+        asset: 'token-up',
+        outcome: 'Up',
+        cashPnl: -3.1939,
+        realizedPnl: -0.7297,
+      },
+    ],
+  });
+
+  assert.equal(stats.marketPnlIndex.get('btc-updown-5m-1777336200'), -2.7236);
+});
+
+test('activity versus position market pnl mismatch updates source status', () => {
+  const status = __polymarketWalletPnlTestUtils.resolvePnlSourceStatus({
+    baseStatus: 'activity_market',
+    activityMarketPnlUsdc: -0.9717,
+    positionMarketPnlUsdc: -3.9236,
+  });
+
+  assert.equal(status, 'pnl_source_mismatch');
+});
+
+test('small activity versus position pnl drift keeps source status', () => {
+  const status = __polymarketWalletPnlTestUtils.resolvePnlSourceStatus({
+    baseStatus: 'activity_market',
+    activityMarketPnlUsdc: 0.877,
+    positionMarketPnlUsdc: 0.865,
+  });
+
+  assert.equal(status, 'activity_market');
 });

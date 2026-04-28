@@ -1,5 +1,6 @@
 import { readDataApiActivityConfigForServer } from '@/lib/config';
 import type {
+  AutoScopeTradeAnalysisPnlSourceStatus,
   AutoScopeTradeAnalysisRow,
   AutoScopeTradeAnalysisSummary,
   AutoScopeTradeAnalysisTimeRange,
@@ -10,6 +11,7 @@ const WALLET_PNL_CACHE_TTL_MS = 180_000;
 const WALLET_PNL_REQUEST_TIMEOUT_MS = 12_000;
 const CLOSED_POSITION_PAGE_SIZE = 50;
 const CLOSED_POSITION_MAX_PAGES = 100;
+const PNL_SOURCE_MISMATCH_TOLERANCE_USDC = 0.02;
 const USER_PNL_API_BASE =
   process.env.POLYMARKET_USER_PNL_API_BASE || 'https://user-pnl-api.polymarket.com';
 
@@ -53,6 +55,7 @@ interface NormalizedPosition {
 
 interface PositionStats {
   index: Map<string, NormalizedPosition>;
+  marketPnlIndex: Map<string, number>;
   marketCount: number;
   profitCount: number;
   lossCount: number;
@@ -230,6 +233,10 @@ function positionKey(marketSlug: string, tokenId: string | null, outcomeLabel: s
   return `${slug}|outcome:${(outcomeLabel ?? '').trim().toLowerCase()}`;
 }
 
+function marketKey(marketSlug: string): string {
+  return marketSlug.trim().toLowerCase();
+}
+
 function productOrNull(left: number | null, right: number | null): number | null {
   return left == null || right == null ? null : roundCash(left * right);
 }
@@ -343,6 +350,11 @@ export function buildPolymarketPositionStats({
 
   const profitUsdc = roundCash(positions.reduce((sum, row) => sum + Math.max(row.pnlUsdc, 0), 0));
   const lossUsdc = roundCash(Math.abs(positions.reduce((sum, row) => sum + Math.min(row.pnlUsdc, 0), 0)));
+  const marketPnlIndex = positions.reduce<Map<string, number>>((index, position) => {
+    const key = marketKey(position.marketSlug);
+    index.set(key, roundCash((index.get(key) ?? 0) + position.pnlUsdc));
+    return index;
+  }, new Map());
   const largestLoss = positions
     .filter((row) => row.pnlUsdc < 0)
     .map((row) => Math.abs(row.pnlUsdc))
@@ -350,6 +362,7 @@ export function buildPolymarketPositionStats({
 
   return {
     index,
+    marketPnlIndex,
     marketCount: positions.length,
     profitCount: positions.filter((row) => row.pnlUsdc > 0).length,
     lossCount: positions.filter((row) => row.pnlUsdc < 0).length,
@@ -452,14 +465,42 @@ async function fetchPolymarketPositionStats({
   return buildPolymarketPositionStats({ closedRows, openRows });
 }
 
+function resolvePnlSourceStatus({
+  baseStatus,
+  activityMarketPnlUsdc,
+  positionMarketPnlUsdc,
+}: {
+  baseStatus: AutoScopeTradeAnalysisPnlSourceStatus | null;
+  activityMarketPnlUsdc: number | null;
+  positionMarketPnlUsdc: number | null;
+}): AutoScopeTradeAnalysisPnlSourceStatus | null {
+  if (
+    activityMarketPnlUsdc != null &&
+    positionMarketPnlUsdc != null &&
+    Math.abs(activityMarketPnlUsdc - positionMarketPnlUsdc) >
+      PNL_SOURCE_MISMATCH_TOLERANCE_USDC
+  ) {
+    return 'pnl_source_mismatch';
+  }
+  return baseStatus;
+}
+
 function applyPositionToRow(
   row: AutoScopeTradeAnalysisRow,
-  index: Map<string, NormalizedPosition>
+  stats: Pick<PositionStats, 'index' | 'marketPnlIndex'>
 ): AutoScopeTradeAnalysisRow {
-  const position = index.get(positionKey(row.marketSlug, row.tokenId, row.outcomeLabel));
+  const position = stats.index.get(positionKey(row.marketSlug, row.tokenId, row.outcomeLabel));
+  const positionMarketPnlUsdc = stats.marketPnlIndex.get(marketKey(row.marketSlug)) ?? null;
+  const pnlSourceStatus = resolvePnlSourceStatus({
+    baseStatus: row.pnlSourceStatus,
+    activityMarketPnlUsdc: row.activityMarketPnlUsdc,
+    positionMarketPnlUsdc,
+  });
   if (!position) {
     return {
       ...row,
+      positionMarketPnlUsdc,
+      pnlSourceStatus,
       polymarketPositionPnlUsdc: null,
       polymarketPositionSource: null,
       polymarketTotalBetUsdc: null,
@@ -470,6 +511,8 @@ function applyPositionToRow(
   }
   return {
     ...row,
+    positionMarketPnlUsdc,
+    pnlSourceStatus,
     polymarketPositionPnlUsdc: position.pnlUsdc,
     polymarketPositionSource: position.source,
     polymarketTotalBetUsdc: position.totalBetUsdc,
@@ -491,17 +534,19 @@ export async function enrichRowsWithPolymarketPositionPnl({
   if (rows.length === 0) return rows;
   try {
     const config = await readDataApiActivityConfigForServer({ userId, username });
-    if (!config.walletAddress) return rows.map((row) => applyPositionToRow(row, new Map()));
+    const emptyStats = { index: new Map<string, NormalizedPosition>(), marketPnlIndex: new Map<string, number>() };
+    if (!config.walletAddress) return rows.map((row) => applyPositionToRow(row, emptyStats));
     const stats = await fetchPolymarketPositionStats({
       baseUrl: config.baseUrl,
       walletAddress: config.walletAddress,
       positionsPageSize: config.pageSize,
       positionsMaxPages: config.maxPages,
     });
-    return rows.map((row) => applyPositionToRow(row, stats.index));
+    return rows.map((row) => applyPositionToRow(row, stats));
   } catch (err) {
     console.error('Polymarket position PnL enrichment failed:', err);
-    return rows.map((row) => applyPositionToRow(row, new Map()));
+    const emptyStats = { index: new Map<string, NormalizedPosition>(), marketPnlIndex: new Map<string, number>() };
+    return rows.map((row) => applyPositionToRow(row, emptyStats));
   }
 }
 
@@ -612,4 +657,5 @@ export const __polymarketWalletPnlTestUtils = {
   extractLeaderboardPnl,
   mapTimeRangeToUserPnlRequest,
   buildPolymarketPositionStats,
+  resolvePnlSourceStatus,
 };

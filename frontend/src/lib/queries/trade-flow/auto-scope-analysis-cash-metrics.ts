@@ -1,5 +1,9 @@
 import { pool } from '@/lib/db';
-import type { AutoScopeTradeAnalysisRow, AutoScopeTradeAnalysisSummary } from '@/lib/types';
+import type {
+  AutoScopeTradeAnalysisPnlSourceStatus,
+  AutoScopeTradeAnalysisRow,
+  AutoScopeTradeAnalysisSummary,
+} from '@/lib/types';
 
 export const AUTO_SCOPE_CASH_PNL_CSV_HEADERS = [
   'cash_fill_pnl_usdc',
@@ -51,6 +55,10 @@ export interface AutoScopeCashMetrics {
   officialMarketSellUsdc: number | null;
   officialMarketRedeemUsdc: number | null;
   officialVsRootDeltaUsdc: number | null;
+  activityMarketPnlUsdc: number | null;
+  positionMarketPnlUsdc: number | null;
+  localMarketPnlUsdc: number | null;
+  pnlSourceStatus: AutoScopeTradeAnalysisPnlSourceStatus | null;
   pendingInventoryQty: number | null;
   pendingInventoryValueUsdc: number | null;
   pendingRedeemableValueUsdc: number | null;
@@ -120,10 +128,18 @@ export function mapAutoScopeCashMetrics(
   dataQualityFlags: readonly string[] | null = []
 ): AutoScopeCashMetrics {
   const officialMarketPnlUsdc = compactNumber(compact, 'official_market_pnl_usdc');
+  const hasMarketScopeFlag = hasOfficialMarketScopeFlag(dataQualityFlags);
+  const hasMarketActivityEvidence = hasOfficialMarketActivityEvidence(compact);
+  const useOfficialMarketPnl =
+    hasMarketScopeFlag && hasMarketActivityEvidence && officialMarketPnlUsdc != null;
+  const pnlSourceStatus: AutoScopeTradeAnalysisPnlSourceStatus =
+    useOfficialMarketPnl
+      ? 'activity_market'
+      : officialMarketPnlUsdc != null && !hasMarketActivityEvidence
+        ? 'local_fallback_no_activity_evidence'
+        : 'local_fallback';
   const cashFillPnlUsdc =
-    hasOfficialMarketScopeFlag(dataQualityFlags) &&
-    hasOfficialMarketActivityEvidence(compact) &&
-    officialMarketPnlUsdc != null
+    useOfficialMarketPnl
       ? officialMarketPnlUsdc
       : compactNumber(compact, 'cash_fill_pnl_usdc');
   return {
@@ -146,6 +162,11 @@ export function mapAutoScopeCashMetrics(
     officialMarketSellUsdc: compactNumber(compact, 'official_market_sell_usdc'),
     officialMarketRedeemUsdc: compactNumber(compact, 'official_market_redeem_usdc'),
     officialVsRootDeltaUsdc: compactNumber(compact, 'official_vs_root_delta_usdc'),
+    activityMarketPnlUsdc:
+      hasMarketActivityEvidence && officialMarketPnlUsdc != null ? officialMarketPnlUsdc : null,
+    positionMarketPnlUsdc: null,
+    localMarketPnlUsdc: null,
+    pnlSourceStatus,
     pendingInventoryQty: compactNumber(compact, 'pending_inventory_qty'),
     pendingInventoryValueUsdc: compactNumber(compact, 'pending_inventory_value_usdc'),
     pendingRedeemableValueUsdc: compactNumber(compact, 'pending_redeemable_value_usdc'),
