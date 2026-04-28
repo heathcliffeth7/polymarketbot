@@ -634,6 +634,8 @@ export type AutoScopeTradeAnalysisTimeRange =
   | '6h'
   | '12h'
   | '24h'
+  | '1w'
+  | '1m'
   | 'custom';
 export type AutoScopeTradeAnalysisValuationKind = 'realized' | 'settled' | 'mark_to_market';
 export type AutoScopeTradeDiagnosisCode =
@@ -685,6 +687,12 @@ export interface AutoScopeTradeDiagnostic {
   officialSellUsdc?: number | null;
   officialRedeemUsdc?: number | null;
   officialDeltaUsdc?: number | null;
+  polymarketPositionPnlUsdc?: number | null;
+  polymarketPositionSource?: string | null;
+  polymarketTotalBetUsdc?: number | null;
+  polymarketAmountReturnedUsdc?: number | null;
+  polymarketRealizedPnlUsdc?: number | null;
+  polymarketCashPnlUsdc?: number | null;
   pendingInventoryQty?: number | null;
   pendingInventoryValueUsdc?: number | null;
   pendingRedeemableValueUsdc?: number | null;
@@ -946,6 +954,12 @@ export interface AutoScopeTradeAnalysisRow {
   officialSellUsdc: number | null;
   officialRedeemUsdc: number | null;
   officialDeltaUsdc: number | null;
+  polymarketPositionPnlUsdc?: number | null;
+  polymarketPositionSource?: string | null;
+  polymarketTotalBetUsdc?: number | null;
+  polymarketAmountReturnedUsdc?: number | null;
+  polymarketRealizedPnlUsdc?: number | null;
+  polymarketCashPnlUsdc?: number | null;
   pendingInventoryQty: number | null;
   pendingInventoryValueUsdc: number | null;
   pendingRedeemableValueUsdc: number | null;
@@ -986,7 +1000,12 @@ export interface AutoScopeTradeAnalysisSummary {
   largestLossUsdc: number | null;
   feeDragUsdc: number;
   diagnosisBreakdown: AutoScopeTradeAnalysisDiagnosisBreakdown[];
-  pnlSource?: 'analysis_rows' | 'official_market_activity';
+  pnlSource?:
+    | 'analysis_rows'
+    | 'official_market_activity'
+    | 'polymarket_leaderboard'
+    | 'polymarket_user_pnl_history'
+    | 'official_activity_window';
   officialBuyUsdc?: number;
   officialSellUsdc?: number;
   officialRedeemUsdc?: number;

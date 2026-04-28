@@ -35,7 +35,7 @@ export function AutoScopeSummaryCards({
   summary,
   pagePnl,
 }: AutoScopeSummaryCardsProps) {
-  const isOfficial = summary.pnlSource === 'official_market_activity';
+  const isActivityWindow = summary.pnlSource === 'official_activity_window';
   const officialCashIn =
     summary.officialSellUsdc == null && summary.officialRedeemUsdc == null
       ? null
@@ -48,7 +48,7 @@ export function AutoScopeSummaryCards({
     <div className="space-y-3">
       <div className="grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 lg:grid-cols-5">
         <MetricTile
-          label="Official Wallet Cash PnL"
+          label="Polymarket Wallet PnL"
           value={formatPnl(summary.totalPnlUsdc)}
           className={pnlClassName(summary.totalPnlUsdc)}
         />
@@ -73,9 +73,9 @@ export function AutoScopeSummaryCards({
         <MetricTile label="Avg Loss" value={formatUsdc(summary.avgLossUsdc)} className="text-red-300" />
         <MetricTile label="Largest Loss" value={formatUsdc(summary.largestLossUsdc)} className="text-red-300" />
         <MetricTile
-          label={isOfficial ? 'Official In/Out' : 'Fee Drag'}
+          label={isActivityWindow ? 'Activity In/Out' : 'Fee Drag'}
           value={
-            isOfficial
+            isActivityWindow
               ? `${formatUsdc(officialCashIn)} / ${formatUsdc(summary.officialBuyUsdc ?? null)}`
               : formatUsdc(summary.feeDragUsdc)
           }

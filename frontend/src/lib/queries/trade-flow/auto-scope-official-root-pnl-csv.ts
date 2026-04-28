@@ -7,6 +7,12 @@ export const AUTO_SCOPE_OFFICIAL_ROOT_PNL_CSV_HEADERS = [
   'official_sell_usdc',
   'official_redeem_usdc',
   'official_delta_usdc',
+  'polymarket_position_pnl_usdc',
+  'polymarket_position_source',
+  'polymarket_total_bet_usdc',
+  'polymarket_amount_returned_usdc',
+  'polymarket_realized_pnl_usdc',
+  'polymarket_cash_pnl_usdc',
 ];
 
 export function autoScopeOfficialRootPnlCsvValues(
@@ -19,5 +25,11 @@ export function autoScopeOfficialRootPnlCsvValues(
     row.officialSellUsdc,
     row.officialRedeemUsdc,
     row.officialDeltaUsdc,
+    row.polymarketPositionPnlUsdc ?? null,
+    row.polymarketPositionSource ?? null,
+    row.polymarketTotalBetUsdc ?? null,
+    row.polymarketAmountReturnedUsdc ?? null,
+    row.polymarketRealizedPnlUsdc ?? null,
+    row.polymarketCashPnlUsdc ?? null,
   ];
 }

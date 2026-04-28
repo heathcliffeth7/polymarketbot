@@ -110,11 +110,6 @@ function nullablePnlClassName(value: number | null): string {
   return value == null ? 'text-zinc-300' : pnlClassName(value);
 }
 
-function officialRootPnlValue(row: AutoScopeTradeAnalysisRow): number | null {
-  if (row.officialPnlSource !== 'data_api_activity') return null;
-  return row.officialRootPnlUsdc;
-}
-
 function formatPercent(value: number | null): string {
   if (value == null) return '-';
   const sign = value > 0 ? '+' : '';
@@ -410,6 +405,8 @@ export function AutoScopeAnalysisTable() {
               <option value="6h">Son 6 saat</option>
               <option value="12h">Son 12 saat</option>
               <option value="24h">Son 24 saat</option>
+              <option value="1w">Son 1 hafta</option>
+              <option value="1m">Son 1 ay</option>
               <option value="custom">Ozel tarih</option>
             </select>
           </label>
@@ -521,7 +518,7 @@ export function AutoScopeAnalysisTable() {
                 <TableHead className="text-right text-zinc-400">Fee</TableHead>
                 <TableHead className="text-right text-zinc-400">Net</TableHead>
                 <TableHead className="text-right text-zinc-400">Local Cash PnL</TableHead>
-                <TableHead className="text-right text-zinc-400">Official Root PnL</TableHead>
+                <TableHead className="text-right text-zinc-400">Polymarket Position PnL</TableHead>
                 <TableHead className="text-right text-zinc-400">Buy Cash</TableHead>
                 <TableHead className="text-right text-zinc-400">Sell Cash</TableHead>
                 <TableHead className="text-right text-zinc-400">Redeem</TableHead>
@@ -717,14 +714,9 @@ export function AutoScopeAnalysisTable() {
                     <TableCell className={`text-right font-mono ${nullablePnlClassName(row.cashFillPnlUsdc)}`}>
                       {formatNullablePnl(row.cashFillPnlUsdc)}
                     </TableCell>
-                    {(() => {
-                      const officialPnl = officialRootPnlValue(row);
-                      return (
-                        <TableCell className={`text-right font-mono ${nullablePnlClassName(officialPnl)}`}>
-                          {formatNullablePnl(officialPnl)}
-                        </TableCell>
-                      );
-                    })()}
+                    <TableCell className={`text-right font-mono ${nullablePnlClassName(row.polymarketPositionPnlUsdc ?? null)}`}>
+                      {formatNullablePnl(row.polymarketPositionPnlUsdc ?? null)}
+                    </TableCell>
                     <TableCell className="text-right font-mono">
                       {formatUsdc(row.cashBuyUsdc)}
                     </TableCell>

@@ -44,10 +44,12 @@ export async function GET(req: NextRequest) {
 
     const rows = await getAutoScopeTradeAnalysisRowsForExport({
       userId: user.userId,
+      username: user.username,
       sortBy,
       sortDirection,
       pnl,
       position,
+      timeRange: dateFilters.timeRange,
       from: dateFilters.from,
       to: dateFilters.to,
     });

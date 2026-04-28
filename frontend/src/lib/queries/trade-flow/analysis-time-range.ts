@@ -5,6 +5,8 @@ const RELATIVE_TIME_RANGE_HOURS = {
   '6h': 6,
   '12h': 12,
   '24h': 24,
+  '1w': 168,
+  '1m': 720,
 } as const;
 
 export interface AutoScopeTradeAnalysisDateFilters {
@@ -32,7 +34,9 @@ function normalizeTimeRange(
     trimmed === '3h' ||
     trimmed === '6h' ||
     trimmed === '12h' ||
-    trimmed === '24h'
+    trimmed === '24h' ||
+    trimmed === '1w' ||
+    trimmed === '1m'
   ) {
     return trimmed;
   }
@@ -60,7 +64,7 @@ export function resolveAutoScopeTradeAnalysisDateFilters({
       timeRange: 'all',
       from: null,
       to: null,
-      error: 'timeRange must be one of all, custom, 3h, 6h, 12h, 24h',
+      error: 'timeRange must be one of all, custom, 3h, 6h, 12h, 24h, 1w, 1m',
     };
   }
 

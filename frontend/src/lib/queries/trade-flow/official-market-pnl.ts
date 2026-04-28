@@ -6,7 +6,7 @@ import type {
   AutoScopeTradeAnalysisSummary,
 } from '@/lib/types';
 
-const ACTIVITY_CACHE_TTL_MS = 30_000;
+const ACTIVITY_CACHE_TTL_MS = 180_000;
 const ACTIVITY_REQUEST_TIMEOUT_MS = 12_000;
 
 interface RawDataApiActivity {

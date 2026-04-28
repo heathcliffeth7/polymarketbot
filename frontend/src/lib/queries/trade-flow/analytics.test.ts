@@ -126,6 +126,12 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
       officialSellUsdc: 2.739,
       officialRedeemUsdc: 1.02238,
       officialDeltaUsdc: -1.72268,
+      polymarketPositionPnlUsdc: -0.5974,
+      polymarketPositionSource: 'closed_positions',
+      polymarketTotalBetUsdc: 4.8974,
+      polymarketAmountReturnedUsdc: 4.3,
+      polymarketRealizedPnlUsdc: -0.5974,
+      polymarketCashPnlUsdc: null,
       pendingInventoryQty: 0,
       pendingInventoryValueUsdc: 0,
       pendingRedeemableValueUsdc: null,
@@ -162,6 +168,8 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
   assert.match(csv, /buy_fee_usdc/);
   assert.match(csv, /cash_fill_pnl_usdc/);
   assert.match(csv, /official_root_pnl_usdc/);
+  assert.match(csv, /polymarket_position_pnl_usdc/);
+  assert.match(csv, /closed_positions/);
   assert.match(csv, /data_api_activity/);
   assert.match(csv, /-1.13602/);
   assert.match(csv, /diagnostic_pnl_usdc/);

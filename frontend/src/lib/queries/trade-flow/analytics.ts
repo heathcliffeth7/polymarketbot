@@ -1,23 +1,14 @@
 import { pool } from '@/lib/db';
 import type {
-  AutoScopeTradeAnalysisDiagnosisBreakdown,
-  AutoScopeTradeAnalysisPnlFilter,
-  AutoScopeTradeAnalysisPositionState,
-  AutoScopeTradeAnalysisPositionFilter,
-  AutoScopeTradeDiagnostic,
-  AutoScopeTradeDiagnosticResponse,
-  AutoScopeTradeDiagnosisCode,
-  AutoScopeTradeAnalysisResponse,
-  AutoScopeTradeAnalysisRow,
-  AutoScopeTradeAnalysisSortBy,
-  AutoScopeTradeAnalysisSortDirection,
-  AutoScopeTradeAnalysisSummary,
-  AutoScopeTradePositionSnapshot,
-  AutoScopeTradeRiskFlags,
-  TradeFlowNodeRuntimeResponse,
-  TradeFlowNodeRuntimeRow,
-  TradeFlowPtbStateResponse,
-  TradeFlowPtbStateRow,
+  AutoScopeTradeAnalysisDiagnosisBreakdown, AutoScopeTradeAnalysisPnlFilter,
+  AutoScopeTradeAnalysisPositionFilter, AutoScopeTradeAnalysisPositionState,
+  AutoScopeTradeAnalysisResponse, AutoScopeTradeAnalysisRow,
+  AutoScopeTradeAnalysisSortBy, AutoScopeTradeAnalysisSortDirection,
+  AutoScopeTradeAnalysisSummary, AutoScopeTradeAnalysisTimeRange,
+  AutoScopeTradeDiagnostic, AutoScopeTradeDiagnosticResponse,
+  AutoScopeTradeDiagnosisCode, AutoScopeTradePositionSnapshot,
+  AutoScopeTradeRiskFlags, TradeFlowNodeRuntimeResponse,
+  TradeFlowNodeRuntimeRow, TradeFlowPtbStateResponse, TradeFlowPtbStateRow,
 } from '@/lib/types';
 import {
   attachExtraToDiagnostic,
@@ -27,9 +18,10 @@ import {
 } from './auto-scope-analysis-extras';
 import { getPendingAutoScopeAnalysisRows } from './auto-scope-analysis-pending';
 import {
-  applyOfficialMarketPnlSummary,
-  getOfficialMarketPnlSummaryForFilters,
-} from './official-market-pnl';
+  applyPolymarketWalletPnlSummary,
+  enrichRowsWithPolymarketPositionPnl,
+  getPolymarketWalletPnlSummaryForFilters,
+} from './polymarket-wallet-pnl';
 import {
   getAutoScopeCashMetricsSummaryForWhere,
   mapAutoScopeCashMetrics,
@@ -48,6 +40,7 @@ export interface AutoScopeTradeAnalysisFilters {
   sortDirection?: AutoScopeTradeAnalysisSortDirection;
   pnl?: AutoScopeTradeAnalysisPnlFilter;
   position?: AutoScopeTradeAnalysisPositionFilter;
+  timeRange?: AutoScopeTradeAnalysisTimeRange;
   from?: string | null;
   to?: string | null;
 }
@@ -611,10 +604,17 @@ export async function getAutoScopeTradeAnalysis(
   const total = Number(countRes.rows[0]?.total || 0) + pendingRows.length;
   const mappedRows = dataRes.rows.map(mapAnalysisRow);
   const visibleRows = [...pendingRows, ...mappedRows].slice(0, limit);
-  const extras = await getAutoScopeTradeAnalysisExtrasForRoots(
-    filters.userId,
-    visibleRows.map((row) => row.rootOrderId)
-  );
+  const [extras, polymarketRows] = await Promise.all([
+    getAutoScopeTradeAnalysisExtrasForRoots(
+      filters.userId,
+      visibleRows.map((row) => row.rootOrderId)
+    ),
+    enrichRowsWithPolymarketPositionPnl({
+      userId: filters.userId,
+      username: filters.username ?? '',
+      rows: visibleRows,
+    }),
+  ]);
   const rowSummary = {
     ...mapAnalysisSummary(summaryRes.rows[0], mapDiagnosisBreakdown(diagnosisRes.rows)),
     ...cashSummary,
@@ -623,25 +623,24 @@ export async function getAutoScopeTradeAnalysis(
   let refreshedAt = refreshedAtRes.rows[0]?.refreshed_at ?? new Date().toISOString();
 
   try {
-    const officialSummary = await getOfficialMarketPnlSummaryForFilters({
+    const officialSummary = await getPolymarketWalletPnlSummaryForFilters({
       userId: filters.userId,
       username: filters.username ?? '',
+      timeRange: filters.timeRange ?? 'all',
       from: filters.from,
       to: filters.to,
-      pnlFilter,
-      positionFilter,
       rootRowsPnlUsdc: rowSummary.totalPnlUsdc,
     });
     if (officialSummary) {
-      summary = applyOfficialMarketPnlSummary(rowSummary, officialSummary);
+      summary = applyPolymarketWalletPnlSummary(rowSummary, officialSummary);
       refreshedAt = officialSummary.refreshedAt;
     }
   } catch (err) {
-    console.error('Official market PnL activity summary failed:', err);
+    console.error('Polymarket wallet PnL summary failed:', err);
   }
 
   return {
-    data: attachExtrasToRows(visibleRows, extras),
+    data: attachExtrasToRows(polymarketRows, extras),
     total,
     page,
     limit,
@@ -682,7 +681,12 @@ export async function getAutoScopeTradeAnalysisRowsForExport(
     filters.userId,
     mappedRows.map((row) => row.rootOrderId)
   );
-  return attachExtrasToRows(mappedRows, extras);
+  const polymarketRows = await enrichRowsWithPolymarketPositionPnl({
+    userId: filters.userId,
+    username: filters.username ?? '',
+    rows: mappedRows,
+  });
+  return attachExtrasToRows(polymarketRows, extras);
 }
 
 const DIAGNOSTIC_SELECT = `SELECT

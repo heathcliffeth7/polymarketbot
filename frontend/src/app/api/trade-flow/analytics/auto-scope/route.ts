@@ -56,6 +56,7 @@ export async function GET(req: NextRequest) {
       sortDirection,
       pnl,
       position,
+      timeRange: dateFilters.timeRange,
       from: dateFilters.from,
       to: dateFilters.to,
     });
