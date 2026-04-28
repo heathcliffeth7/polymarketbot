@@ -616,6 +616,7 @@ export interface TradeFlowEvent {
 
 export type AutoScopeTradeAnalysisRowType =
   | 'sell_exit'
+  | 'settled_payout'
   | 'open_position'
   | 'pending_analysis';
 export type AutoScopeTradeAnalysisPositionState =
@@ -634,7 +635,7 @@ export type AutoScopeTradeAnalysisTimeRange =
   | '12h'
   | '24h'
   | 'custom';
-export type AutoScopeTradeAnalysisValuationKind = 'realized' | 'mark_to_market';
+export type AutoScopeTradeAnalysisValuationKind = 'realized' | 'settled' | 'mark_to_market';
 export type AutoScopeTradeDiagnosisCode =
   | 'bad_entry_price'
   | 'late_entry'

@@ -52,6 +52,15 @@ test('derivePositionState always marks sell_exit rows as closed_exit', () => {
   assert.equal(state, 'closed_exit');
 });
 
+test('derivePositionState marks settled payout rows as closed_exit', () => {
+  const state = __analyticsTestUtils.derivePositionState(
+    'settled_payout',
+    null,
+    '2026-03-29T16:05:00.000Z'
+  );
+  assert.equal(state, 'closed_exit');
+});
+
 test('buildOrderByClause returns pnl ascending order when requested', () => {
   const clause = __analyticsTestUtils.buildOrderByClause('pnl', 'asc');
   assert.match(clause, /row_pnl_usdc ASC/);
@@ -257,6 +266,23 @@ test('auto-scope scenario pnl separates up down ev and worst cases', () => {
       root_builder_order_id: 1,
       run_id: 10,
       market_slug: 'btc-updown-5m-1772296200',
+      outcome_label: 'Up',
+      row_type: 'settled_payout',
+      exit_reason: 'other',
+      row_qty: 1,
+      row_pnl_usdc: 0.1,
+      cost_basis_usdc: 0.5,
+      valuation_kind: 'settled',
+      triggered_at: null,
+      buy_filled_at: null,
+      sell_filled_at: null,
+      mark_price_captured_at: null,
+      updated_at: '2026-02-28T16:35:00.000Z',
+    },
+    {
+      root_builder_order_id: 1,
+      run_id: 10,
+      market_slug: 'btc-updown-5m-1772296200',
       outcome_label: 'Down',
       row_type: 'open_position',
       exit_reason: 'open_position',
@@ -291,10 +317,10 @@ test('auto-scope scenario pnl separates up down ev and worst cases', () => {
     secondsLeft: 30,
   });
 
-  assert.equal(scenario.realizedPnlUsdc, 0.4);
+  assert.equal(scenario.realizedPnlUsdc, 0.5);
   assert.equal(scenario.markPnlUsdc, -0.2);
-  assert.equal(scenario.ifUpUsdc, -1.1);
-  assert.equal(scenario.ifDownUsdc, 1.9);
-  assert.equal(scenario.worstUsdc, -1.1);
-  assert.equal(scenario.evUsdc, 0.85);
+  assert.equal(scenario.ifUpUsdc, -1.0);
+  assert.equal(scenario.ifDownUsdc, 2.0);
+  assert.equal(scenario.worstUsdc, -1.0);
+  assert.equal(scenario.evUsdc, 0.95);
 });

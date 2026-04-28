@@ -1,5 +1,5 @@
 const AUTO_SCOPE_ANALYSIS_BACKFILL_LIMIT: i64 = 25;
-const AUTO_SCOPE_ANALYSIS_PNL_MODEL_VERSION: i64 = 2;
+const AUTO_SCOPE_ANALYSIS_PNL_MODEL_VERSION: i64 = 3;
 const AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_DELAYS_SECS: [u64; 4] = [1, 3, 8, 20];
 
 static AUTO_SCOPE_ANALYSIS_BACKFILL_CHECKED_ROOTS: LazyLock<parking_lot::Mutex<HashSet<i64>>> =
@@ -907,6 +907,27 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
         });
     }
 
+    let internal_fallback_pnl_usdc =
+        round_trade_builder_signed_qty(rows.iter().map(|row| row.row_pnl_usdc).sum());
+    let official_pnl_rows = trade_builder_analysis_try_build_official_pnl_rows(
+        repo,
+        &root_order,
+        &run,
+        &rows,
+        AutoScopeOfficialPnlTiming {
+            market_open_at,
+            triggered_at,
+            buy_filled_at,
+            open_to_trigger_ms,
+            trigger_to_buy_fill_ms,
+        },
+        internal_fallback_pnl_usdc,
+    )
+    .await;
+    rows = official_pnl_rows.rows;
+    sell_allocation_summary = official_pnl_rows.sell_allocation_summary;
+    let pnl_reconciliation = official_pnl_rows.reconciliation;
+
     let second_snapshots = repo
         .list_trade_builder_market_second_snapshots(&[root_order.market_slug.clone()])
         .await?;
@@ -917,6 +938,7 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
         &second_snapshots,
         &buy_metrics,
         &sell_allocation_summary,
+        &pnl_reconciliation,
         open_to_trigger_ms,
         trigger_to_buy_fill_ms,
     );

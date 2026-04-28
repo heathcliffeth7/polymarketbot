@@ -114,6 +114,7 @@ function formatScore(value: number | null): string {
 
 function exitReasonLabel(row: AutoScopeTradeAnalysisRow): string {
   if (row.positionState === 'pending_analysis') return 'Pending Analysis';
+  if (row.rowType === 'settled_payout') return 'Settlement';
   if (row.positionState === 'closed_market_ended') return 'Kapali (Market End)';
   if (row.positionState === 'open') return 'Acik Pozisyon';
   switch (row.exitReason) {
@@ -133,6 +134,11 @@ function exitMetaLabel(row: AutoScopeTradeAnalysisRow): string {
     return row.buyFilledAt
       ? `Fill geldi: ${formatDateTime(row.buyFilledAt)}`
       : 'Forensic refresh bekleniyor';
+  }
+  if (row.rowType === 'settled_payout') {
+    return row.sellFilledAt
+      ? `Redeem: ${formatDateTime(row.sellFilledAt)}`
+      : 'Polymarket redeem';
   }
   if (row.positionState === 'closed_market_ended') {
     return row.marketEndAt

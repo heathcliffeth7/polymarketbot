@@ -70,6 +70,7 @@ include!("trade_builder/guard_price.rs");
 include!("trade_builder/buy_guard_eval.rs");
 include!("trade_builder/runtime_snapshot.rs");
 include!("trade_builder/min_size_guard.rs");
+include!("trade_builder/analysis_official_pnl.rs");
 include!("trade_builder/analysis_snapshot.rs");
 include!("trade_builder/analysis_diagnostics.rs");
 include!("trade_builder/runtime_price.rs");

@@ -126,6 +126,19 @@ pub struct FillInfo {
     pub ts: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DataApiActivity {
+    pub activity_type: String,
+    pub side: Option<String>,
+    pub slug: String,
+    pub asset: Option<String>,
+    pub outcome: Option<String>,
+    pub size: f64,
+    pub usdc_size: f64,
+    pub price: Option<f64>,
+    pub timestamp: Option<i64>,
+}
+
 #[async_trait]
 pub trait GammaClient: Send + Sync {
     async fn list_active_updown_markets(&self) -> Result<Vec<GammaMarket>>;

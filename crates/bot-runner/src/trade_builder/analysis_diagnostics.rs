@@ -387,6 +387,7 @@ fn trade_builder_analysis_build_trade_diagnostic(
     second_snapshots: &[TradeBuilderMarketSecondSnapshot],
     buy_metrics: &AutoScopeAnalysisOrderMetrics,
     sell_allocation_summary: &AutoScopeAnalysisSellAllocationSummary,
+    pnl_reconciliation: &AutoScopeAnalysisPnlReconciliation,
     open_to_trigger_ms: Option<i64>,
     trigger_to_buy_fill_ms: Option<i64>,
 ) -> TradeFlowAutoScopeTradeDiagnosticInput {
@@ -423,7 +424,7 @@ fn trade_builder_analysis_build_trade_diagnostic(
     let total_pnl_usdc = round_trade_builder_signed_qty(rows.iter().map(|row| row.row_pnl_usdc).sum());
     let realized_pnl_usdc = round_trade_builder_signed_qty(
         rows.iter()
-            .filter(|row| row.row_type == "sell_exit")
+            .filter(|row| row.row_type == "sell_exit" || row.row_type == "settled_payout")
             .map(|row| row.row_pnl_usdc)
             .sum(),
     );
@@ -542,6 +543,9 @@ fn trade_builder_analysis_build_trade_diagnostic(
     if sell_allocation_summary.ignored_sell_qty > 0.0 {
         trade_builder_analysis_data_flag(&mut data_quality_flags, "oversold_exit_qty");
     }
+    for flag in &pnl_reconciliation.data_quality_flags {
+        trade_builder_analysis_data_flag(&mut data_quality_flags, flag);
+    }
     if submitted_event.is_none() || flow_created_event.is_none() {
         trade_builder_analysis_data_flag(&mut data_quality_flags, "old_trade_best_effort");
     }
@@ -609,6 +613,15 @@ fn trade_builder_analysis_build_trade_diagnostic(
             "ignored_sell_qty": round_trade_builder_share_qty(
                 sell_allocation_summary.ignored_sell_qty
             ),
+            "official_pnl_source": pnl_reconciliation.official_pnl_source.as_str(),
+            "official_buy_notional_usdc": pnl_reconciliation.official_buy_notional_usdc,
+            "official_sell_notional_usdc": pnl_reconciliation.official_sell_notional_usdc,
+            "official_redeem_usdc": pnl_reconciliation.official_redeem_usdc,
+            "official_pnl_usdc": pnl_reconciliation.official_pnl_usdc,
+            "internal_fallback_pnl_usdc": round_trade_builder_signed_qty(
+                pnl_reconciliation.internal_fallback_pnl_usdc
+            ),
+            "official_delta_usdc": pnl_reconciliation.official_delta_usdc,
             "remaining_qty": round_trade_builder_share_qty(
                 rows.iter()
                     .filter(|row| row.row_type == "open_position")

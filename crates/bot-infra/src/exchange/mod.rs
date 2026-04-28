@@ -18,6 +18,7 @@ use std::{
 use uuid::Uuid;
 
 mod clob;
+mod data_api;
 mod gamma;
 mod http;
 mod models;
@@ -26,12 +27,13 @@ mod parse;
 mod tests;
 
 pub use clob::ClobHttpClient;
+pub use data_api::PolymarketDataApiClient;
 pub use gamma::GammaHttpClient;
 pub(crate) use http::build_http_client;
 pub use models::{
-    ClobMarketFeeDetails, ClobMarketInfo, ClobMarketToken, ClobRestClient, FillInfo, GammaClient,
-    GammaMarket, OrderAck, OrderBookLevel, OrderBookSnapshot, OrderInfo, PlaceOrderRequest,
-    PriceHistoryPoint, PriceSnapshot,
+    ClobMarketFeeDetails, ClobMarketInfo, ClobMarketToken, ClobRestClient, DataApiActivity,
+    FillInfo, GammaClient, GammaMarket, OrderAck, OrderBookLevel, OrderBookSnapshot, OrderInfo,
+    PlaceOrderRequest, PriceHistoryPoint, PriceSnapshot,
 };
 pub(crate) use parse::{
     data_api_position_matches_token, parse_f64_value, parse_gamma_market, parse_gamma_market_any,

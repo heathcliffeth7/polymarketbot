@@ -22,8 +22,8 @@ use bot_infra::db::{
     TradeFlowRun, TradeFlowRunStep, TradeFlowVersionRuntime,
 };
 use bot_infra::exchange::{
-    ClobHttpClient, ClobRestClient, FillInfo, GammaClient, GammaHttpClient, GammaMarket,
-    OrderBookSnapshot, OrderInfo, PlaceOrderRequest,
+    ClobHttpClient, ClobRestClient, DataApiActivity, FillInfo, GammaClient, GammaHttpClient,
+    GammaMarket, OrderBookSnapshot, OrderInfo, PlaceOrderRequest, PolymarketDataApiClient,
 };
 use bot_infra::market_data::{MarketDataProvider, MockMarketDataProvider};
 use bot_infra::reconcile::reconcile_tick_and_snapshot;

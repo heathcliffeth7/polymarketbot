@@ -32,12 +32,12 @@ interface AnalysisExtraRowDb {
   run_id: number;
   market_slug: string;
   outcome_label: string;
-  row_type: 'sell_exit' | 'open_position';
+  row_type: 'sell_exit' | 'settled_payout' | 'open_position';
   exit_reason: string;
   row_qty: number;
   row_pnl_usdc: number;
   cost_basis_usdc: number | null;
-  valuation_kind: 'realized' | 'mark_to_market' | null;
+  valuation_kind: 'realized' | 'settled' | 'mark_to_market' | null;
   triggered_at: string | null;
   buy_filled_at: string | null;
   sell_filled_at: string | null;
@@ -349,7 +349,7 @@ export function buildAutoScopeScenarioPnl(
 ): AutoScopeTradeScenarioPnl {
   const realizedPnlUsdc = roundMetric(
     rows
-      .filter((row) => row.row_type === 'sell_exit')
+      .filter((row) => row.row_type === 'sell_exit' || row.row_type === 'settled_payout')
       .reduce((sum, row) => sum + Number(row.row_pnl_usdc || 0), 0)
   );
   const markPnlUsdc = roundMetric(

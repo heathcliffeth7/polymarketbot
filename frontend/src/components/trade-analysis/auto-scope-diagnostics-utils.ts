@@ -69,6 +69,7 @@ export function diagnosisBadgeClassName(row: AutoScopeTradeAnalysisRow): string 
 }
 
 export function exitReasonLabel(row: AutoScopeTradeAnalysisRow): string {
+  if (row.rowType === 'settled_payout') return 'Settlement';
   if (row.positionState === 'closed_market_ended') return 'Kapali (Market End)';
   if (row.positionState === 'open') return 'Acik Pozisyon';
   switch (row.exitReason) {
@@ -84,6 +85,11 @@ export function exitReasonLabel(row: AutoScopeTradeAnalysisRow): string {
 }
 
 export function exitMetaLabel(row: AutoScopeTradeAnalysisRow): string {
+  if (row.rowType === 'settled_payout') {
+    return row.sellFilledAt
+      ? `Redeem: ${formatDateTime(row.sellFilledAt)}`
+      : 'Polymarket redeem';
+  }
   if (row.positionState === 'closed_market_ended') {
     return row.marketEndAt
       ? `Market bitti: ${formatDateTime(row.marketEndAt)}`

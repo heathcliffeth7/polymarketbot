@@ -46,7 +46,7 @@ interface AutoScopeTradeAnalysisRowDb {
   run_id: number;
   root_builder_order_id: number;
   exit_builder_order_id: number | null;
-  row_type: 'sell_exit' | 'open_position';
+  row_type: 'sell_exit' | 'settled_payout' | 'open_position';
   market_slug: string;
   token_id: string;
   outcome_label: string;
@@ -72,7 +72,7 @@ interface AutoScopeTradeAnalysisRowDb {
   mark_value_usdc: number | null;
   net_value_usdc: number | null;
   pnl_pct: number | null;
-  valuation_kind: 'realized' | 'mark_to_market' | null;
+  valuation_kind: 'realized' | 'settled' | 'mark_to_market' | null;
   primary_diagnosis_code: AutoScopeTradeDiagnosisCode | null;
   diagnosis_label: string | null;
   entry_quality_score: number | null;
@@ -227,7 +227,7 @@ function buildAnalysisWhereClause(filters: AutoScopeTradeAnalysisFilters): {
   }
 
   if (positionFilter === 'realized') {
-    conditions.push("s.row_type = 'sell_exit'");
+    conditions.push("s.row_type IN ('sell_exit', 'settled_payout')");
   } else if (positionFilter === 'open') {
     conditions.push("s.row_type = 'open_position'");
   }
@@ -272,7 +272,7 @@ function derivePositionState(
   nowIso: string
 ): AutoScopeTradeAnalysisPositionState {
   if (rowType === 'pending_analysis') return 'pending_analysis';
-  if (rowType === 'sell_exit') return 'closed_exit';
+  if (rowType === 'sell_exit' || rowType === 'settled_payout') return 'closed_exit';
   const marketEnd = parseDate(marketEndAt);
   const now = parseDate(nowIso);
   if (marketEnd && now && now >= marketEnd) {
@@ -538,7 +538,7 @@ export async function getAutoScopeTradeAnalysis(
          COUNT(*) FILTER (WHERE s.row_pnl_usdc < 0)::int AS loss_count,
          COUNT(*) FILTER (WHERE s.row_pnl_usdc > 0)::int AS profit_count,
          COALESCE(SUM(s.row_pnl_usdc), 0)::double precision AS total_pnl_usdc,
-         COALESCE(SUM(s.row_pnl_usdc) FILTER (WHERE s.row_type = 'sell_exit'), 0)::double precision AS realized_pnl_usdc,
+         COALESCE(SUM(s.row_pnl_usdc) FILTER (WHERE s.row_type IN ('sell_exit', 'settled_payout')), 0)::double precision AS realized_pnl_usdc,
          COALESCE(SUM(s.row_pnl_usdc) FILTER (WHERE s.row_type = 'open_position'), 0)::double precision AS open_pnl_usdc,
          ABS(COALESCE(SUM(s.row_pnl_usdc) FILTER (WHERE s.row_pnl_usdc < 0), 0))::double precision AS loss_usdc,
          COALESCE(SUM(s.row_pnl_usdc) FILTER (WHERE s.row_pnl_usdc > 0), 0)::double precision AS profit_usdc,
