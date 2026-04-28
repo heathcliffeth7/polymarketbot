@@ -28,6 +28,16 @@ struct AutoScopeDiagnosisCandidate {
     detail: &'static str,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AutoScopeCompactCashMetrics {
+    cash_buy_notional_usdc: f64,
+    cash_sell_notional_usdc: f64,
+    cash_redeem_usdc: Option<f64>,
+    cash_fill_pnl_usdc: f64,
+    local_fallback_cash_fill_pnl_usdc: f64,
+    cash_pnl_source: &'static str,
+}
+
 fn trade_builder_analysis_clamp_score(value: f64) -> f64 {
     round_trade_builder_signed_qty(value.clamp(0.0, 100.0))
 }
@@ -172,6 +182,72 @@ fn trade_builder_analysis_cash_fill_pnl_usdc(
     redeem_usdc: Option<f64>,
 ) -> f64 {
     round_trade_builder_signed_qty(sell_usdc + redeem_usdc.unwrap_or(0.0) - buy_usdc)
+}
+
+fn trade_builder_analysis_official_activity_cash_metrics(
+    reconciliation: &AutoScopeAnalysisPnlReconciliation,
+) -> Option<(f64, f64, Option<f64>, f64)> {
+    if reconciliation.official_pnl_source != "data_api_activity" {
+        return None;
+    }
+    if reconciliation.data_quality_flags.iter().any(|flag| {
+        matches!(
+            flag.as_str(),
+            "official_activity_ambiguous"
+                | "official_activity_lookup_failed"
+                | "official_activity_missing_buy"
+                | "official_redeem_unmatched"
+                | "official_wallet_missing"
+        )
+    }) {
+        return None;
+    }
+
+    let buy = reconciliation.official_buy_notional_usdc?;
+    let sell = reconciliation.official_sell_notional_usdc.unwrap_or(0.0);
+    let redeem = reconciliation.official_redeem_usdc.unwrap_or(0.0);
+    let pnl = reconciliation
+        .official_pnl_usdc
+        .unwrap_or_else(|| sell + redeem - buy);
+
+    Some((
+        round_trade_builder_signed_qty(buy),
+        round_trade_builder_signed_qty(sell),
+        Some(round_trade_builder_signed_qty(redeem)),
+        round_trade_builder_signed_qty(pnl),
+    ))
+}
+
+fn trade_builder_analysis_compact_cash_metrics(
+    local_buy_usdc: f64,
+    local_sell_usdc: f64,
+    local_redeem_usdc: Option<f64>,
+    reconciliation: &AutoScopeAnalysisPnlReconciliation,
+) -> AutoScopeCompactCashMetrics {
+    let local_fallback_cash_fill_pnl_usdc =
+        trade_builder_analysis_cash_fill_pnl_usdc(local_buy_usdc, local_sell_usdc, local_redeem_usdc);
+
+    if let Some((buy, sell, redeem, pnl)) =
+        trade_builder_analysis_official_activity_cash_metrics(reconciliation)
+    {
+        return AutoScopeCompactCashMetrics {
+            cash_buy_notional_usdc: buy,
+            cash_sell_notional_usdc: sell,
+            cash_redeem_usdc: redeem,
+            cash_fill_pnl_usdc: pnl,
+            local_fallback_cash_fill_pnl_usdc,
+            cash_pnl_source: "data_api_activity",
+        };
+    }
+
+    AutoScopeCompactCashMetrics {
+        cash_buy_notional_usdc: local_buy_usdc,
+        cash_sell_notional_usdc: local_sell_usdc,
+        cash_redeem_usdc: local_redeem_usdc,
+        cash_fill_pnl_usdc: local_fallback_cash_fill_pnl_usdc,
+        local_fallback_cash_fill_pnl_usdc,
+        cash_pnl_source: "local_fallback",
+    }
 }
 
 fn trade_builder_analysis_cash_redeem_usdc(
@@ -534,10 +610,19 @@ fn trade_builder_analysis_build_trade_diagnostic(
             .map(|row| row.mark_value_usdc.unwrap_or(0.0))
             .sum(),
     );
-    let cash_buy_notional_usdc = round_trade_builder_signed_qty(buy_metrics.notional_usdc);
-    let cash_sell_notional_usdc = round_trade_builder_signed_qty(cash_sell_notional_usdc);
-    let cash_redeem_usdc = trade_builder_analysis_cash_redeem_usdc(pnl_reconciliation)
+    let local_cash_buy_notional_usdc = round_trade_builder_signed_qty(buy_metrics.notional_usdc);
+    let local_cash_sell_notional_usdc = round_trade_builder_signed_qty(cash_sell_notional_usdc);
+    let local_cash_redeem_usdc = trade_builder_analysis_cash_redeem_usdc(pnl_reconciliation)
         .map(round_trade_builder_signed_qty);
+    let cash_metrics = trade_builder_analysis_compact_cash_metrics(
+        local_cash_buy_notional_usdc,
+        local_cash_sell_notional_usdc,
+        local_cash_redeem_usdc,
+        pnl_reconciliation,
+    );
+    let cash_buy_notional_usdc = cash_metrics.cash_buy_notional_usdc;
+    let cash_sell_notional_usdc = cash_metrics.cash_sell_notional_usdc;
+    let cash_redeem_usdc = cash_metrics.cash_redeem_usdc;
     let pending_redeemable_value_usdc = if cash_redeem_usdc.is_none() {
         let value = round_trade_builder_signed_qty(
             rows.iter()
@@ -549,11 +634,7 @@ fn trade_builder_analysis_build_trade_diagnostic(
     } else {
         None
     };
-    let cash_fill_pnl_usdc = trade_builder_analysis_cash_fill_pnl_usdc(
-        cash_buy_notional_usdc,
-        cash_sell_notional_usdc,
-        cash_redeem_usdc,
-    );
+    let cash_fill_pnl_usdc = cash_metrics.cash_fill_pnl_usdc;
     let diagnostic_pnl_usdc = total_pnl_usdc;
     let economic_pnl_usdc = round_trade_builder_signed_qty(
         cash_fill_pnl_usdc
@@ -742,6 +823,8 @@ fn trade_builder_analysis_build_trade_diagnostic(
             "cash_sell_notional_usdc": cash_sell_notional_usdc,
             "cash_redeem_usdc": cash_redeem_usdc,
             "cash_fill_pnl_usdc": cash_fill_pnl_usdc,
+            "cash_pnl_source": cash_metrics.cash_pnl_source,
+            "local_fallback_cash_fill_pnl_usdc": cash_metrics.local_fallback_cash_fill_pnl_usdc,
             "diagnostic_pnl_usdc": diagnostic_pnl_usdc,
             "economic_pnl_usdc": economic_pnl_usdc,
             "pending_inventory_qty": pending_inventory_qty,
@@ -836,6 +919,57 @@ mod auto_scope_cash_diagnostics_tests {
         let pnl = trade_builder_analysis_cash_fill_pnl_usdc(169.98, 145.39, Some(0.0));
 
         assert_eq!(pnl, -24.59);
+    }
+
+    #[test]
+    fn compact_cash_metrics_prefer_official_activity_cash() {
+        let reconciliation = AutoScopeAnalysisPnlReconciliation {
+            official_pnl_source: "data_api_activity".to_string(),
+            official_buy_notional_usdc: Some(4.998),
+            official_sell_notional_usdc: Some(3.6334),
+            official_redeem_usdc: Some(0.0),
+            official_pnl_usdc: Some(-1.3646),
+            ..AutoScopeAnalysisPnlReconciliation::default()
+        };
+
+        let metrics = trade_builder_analysis_compact_cash_metrics(
+            5.0,
+            3.19,
+            Some(0.0),
+            &reconciliation,
+        );
+
+        assert_eq!(metrics.cash_buy_notional_usdc, 5.0);
+        assert_eq!(metrics.cash_sell_notional_usdc, 3.63);
+        assert_eq!(metrics.cash_redeem_usdc, Some(0.0));
+        assert_eq!(metrics.cash_fill_pnl_usdc, -1.36);
+        assert_eq!(metrics.local_fallback_cash_fill_pnl_usdc, -1.81);
+        assert_eq!(metrics.cash_pnl_source, "data_api_activity");
+    }
+
+    #[test]
+    fn compact_cash_metrics_fall_back_when_official_activity_is_ambiguous() {
+        let reconciliation = AutoScopeAnalysisPnlReconciliation {
+            official_pnl_source: "data_api_activity".to_string(),
+            official_buy_notional_usdc: Some(4.998),
+            official_sell_notional_usdc: Some(3.6334),
+            official_redeem_usdc: Some(0.0),
+            official_pnl_usdc: Some(-1.3646),
+            data_quality_flags: vec!["official_activity_ambiguous".to_string()],
+            ..AutoScopeAnalysisPnlReconciliation::default()
+        };
+
+        let metrics = trade_builder_analysis_compact_cash_metrics(
+            5.0,
+            3.19,
+            Some(0.0),
+            &reconciliation,
+        );
+
+        assert_eq!(metrics.cash_buy_notional_usdc, 5.0);
+        assert_eq!(metrics.cash_sell_notional_usdc, 3.19);
+        assert_eq!(metrics.cash_fill_pnl_usdc, -1.81);
+        assert_eq!(metrics.cash_pnl_source, "local_fallback");
     }
 
     #[test]

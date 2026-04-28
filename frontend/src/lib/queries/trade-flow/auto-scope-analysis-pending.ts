@@ -133,6 +133,8 @@ function mapPendingAnalysisRow(
     netValueUsdc: null,
     pnlPct: null,
     cashFillPnlUsdc: null,
+    cashPnlSource: null,
+    localFallbackCashFillPnlUsdc: null,
     diagnosticPnlUsdc: null,
     economicPnlUsdc: null,
     cashBuyUsdc: null,

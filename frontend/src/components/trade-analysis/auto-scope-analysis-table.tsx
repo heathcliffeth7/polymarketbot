@@ -517,7 +517,7 @@ export function AutoScopeAnalysisTable() {
                 <TableHead className="text-right text-zinc-400">Maliyet</TableHead>
                 <TableHead className="text-right text-zinc-400">Fee</TableHead>
                 <TableHead className="text-right text-zinc-400">Net</TableHead>
-                <TableHead className="text-right text-zinc-400">Local Cash PnL</TableHead>
+                <TableHead className="text-right text-zinc-400">Activity Cash PnL</TableHead>
                 <TableHead className="text-right text-zinc-400">Polymarket Position PnL</TableHead>
                 <TableHead className="text-right text-zinc-400">Buy Cash</TableHead>
                 <TableHead className="text-right text-zinc-400">Sell Cash</TableHead>

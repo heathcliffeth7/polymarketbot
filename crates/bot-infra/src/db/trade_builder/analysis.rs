@@ -42,7 +42,7 @@ impl PostgresRepository {
                    SELECT 1
                    FROM trade_flow_auto_scope_trade_diagnostics d
                    WHERE d.root_builder_order_id = o.id
-                     AND COALESCE((d.compact_metrics_json->>'pnl_model_version')::int, 0) < 6
+                     AND COALESCE((d.compact_metrics_json->>'pnl_model_version')::int, 0) < 7
                  )
                )
              ORDER BY o.created_at DESC, o.id DESC

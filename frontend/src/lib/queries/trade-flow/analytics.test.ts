@@ -115,6 +115,8 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
       netValueUsdc: 3.5,
       pnlPct: -14.63,
       cashFillPnlUsdc: -0.4,
+      cashPnlSource: 'data_api_activity',
+      localFallbackCashFillPnlUsdc: -0.5,
       diagnosticPnlUsdc: -0.6,
       economicPnlUsdc: -0.4,
       cashBuyUsdc: 4,
@@ -178,6 +180,8 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
   assert.match(csv, /required_q/);
   assert.match(csv, /submitted_estimated_avg_fill/);
   assert.match(csv, /fill_slippage_vs_best_ask/);
+  assert.match(csv, /cash_pnl_source/);
+  assert.match(csv, /local_fallback_cash_fill_pnl_usdc/);
   assert.match(csv, /fills_aggregate/);
   assert.match(csv, /bad_entry_price/);
   assert.match(csv, /-14.63/);
@@ -186,6 +190,8 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
 test('mapAutoScopeCashMetrics separates cash diagnostic and pending values', () => {
   const metrics = mapAutoScopeCashMetrics({
     cash_fill_pnl_usdc: -24.59,
+    cash_pnl_source: 'data_api_activity',
+    local_fallback_cash_fill_pnl_usdc: -27.51,
     diagnostic_pnl_usdc: 27.51,
     economic_pnl_usdc: -4.59,
     cash_buy_notional_usdc: 169.98,
@@ -204,6 +210,8 @@ test('mapAutoScopeCashMetrics separates cash diagnostic and pending values', () 
   });
 
   assert.equal(metrics.cashFillPnlUsdc, -24.59);
+  assert.equal(metrics.cashPnlSource, 'data_api_activity');
+  assert.equal(metrics.localFallbackCashFillPnlUsdc, -27.51);
   assert.equal(metrics.diagnosticPnlUsdc, 27.51);
   assert.equal(metrics.cashBuyUsdc, 169.98);
   assert.equal(metrics.officialRootPnlUsdc, -1.13602);

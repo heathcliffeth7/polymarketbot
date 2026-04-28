@@ -53,7 +53,7 @@ export function AutoScopeSummaryCards({
           className={pnlClassName(summary.totalPnlUsdc)}
         />
         <MetricTile
-          label="Local Fill Cash PnL"
+          label="Activity Cash PnL"
           value={formatOptionalPnl(summary.localCashFillPnlUsdc)}
           className={optionalPnlClassName(summary.localCashFillPnlUsdc)}
         />

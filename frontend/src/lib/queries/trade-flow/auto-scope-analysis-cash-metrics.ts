@@ -1,8 +1,26 @@
 import { pool } from '@/lib/db';
-import type { AutoScopeTradeAnalysisSummary } from '@/lib/types';
+import type { AutoScopeTradeAnalysisRow, AutoScopeTradeAnalysisSummary } from '@/lib/types';
+
+export const AUTO_SCOPE_CASH_PNL_CSV_HEADERS = [
+  'cash_fill_pnl_usdc',
+  'cash_pnl_source',
+  'local_fallback_cash_fill_pnl_usdc',
+];
+
+export function autoScopeCashPnlCsvValues(
+  row: AutoScopeTradeAnalysisRow
+): Array<number | string | null> {
+  return [
+    row.cashFillPnlUsdc,
+    row.cashPnlSource,
+    row.localFallbackCashFillPnlUsdc,
+  ];
+}
 
 export interface AutoScopeCashMetrics {
   cashFillPnlUsdc: number | null;
+  cashPnlSource: string | null;
+  localFallbackCashFillPnlUsdc: number | null;
   diagnosticPnlUsdc: number | null;
   economicPnlUsdc: number | null;
   cashBuyUsdc: number | null;
@@ -60,6 +78,8 @@ export function mapAutoScopeCashMetrics(
 ): AutoScopeCashMetrics {
   return {
     cashFillPnlUsdc: compactNumber(compact, 'cash_fill_pnl_usdc'),
+    cashPnlSource: compactString(compact, 'cash_pnl_source'),
+    localFallbackCashFillPnlUsdc: compactNumber(compact, 'local_fallback_cash_fill_pnl_usdc'),
     diagnosticPnlUsdc: compactNumber(compact, 'diagnostic_pnl_usdc'),
     economicPnlUsdc: compactNumber(compact, 'economic_pnl_usdc'),
     cashBuyUsdc: compactNumber(compact, 'cash_buy_notional_usdc'),

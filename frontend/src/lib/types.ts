@@ -676,6 +676,8 @@ export interface AutoScopeTradeDiagnostic {
   costBasisUsdc: number;
   netValueUsdc: number;
   cashFillPnlUsdc?: number | null;
+  cashPnlSource?: string | null;
+  localFallbackCashFillPnlUsdc?: number | null;
   diagnosticPnlUsdc?: number | null;
   economicPnlUsdc?: number | null;
   cashBuyUsdc?: number | null;
@@ -943,6 +945,8 @@ export interface AutoScopeTradeAnalysisRow {
   netValueUsdc: number | null;
   pnlPct: number | null;
   cashFillPnlUsdc: number | null;
+  cashPnlSource: string | null;
+  localFallbackCashFillPnlUsdc: number | null;
   diagnosticPnlUsdc: number | null;
   economicPnlUsdc: number | null;
   cashBuyUsdc: number | null;
