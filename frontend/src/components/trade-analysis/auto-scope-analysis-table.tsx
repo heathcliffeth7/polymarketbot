@@ -132,6 +132,8 @@ function cashStatusLabel(value: string | null): string {
       return 'Redeem ambiguous';
     case 'no_fill_cash':
       return 'No fill cash';
+    case 'lost_unclaimed_or_unredeemed':
+      return 'Lost / no claim';
     case 'pending_analysis':
       return 'Pending analysis';
     default:

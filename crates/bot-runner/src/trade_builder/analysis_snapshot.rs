@@ -1,5 +1,5 @@
 const AUTO_SCOPE_ANALYSIS_BACKFILL_LIMIT: i64 = 25;
-const AUTO_SCOPE_ANALYSIS_PNL_MODEL_VERSION: i64 = 5;
+const AUTO_SCOPE_ANALYSIS_PNL_MODEL_VERSION: i64 = 6;
 const AUTO_SCOPE_ANALYSIS_REFRESH_RETRY_DELAYS_SECS: [u64; 4] = [1, 3, 8, 20];
 
 static AUTO_SCOPE_ANALYSIS_BACKFILL_CHECKED_ROOTS: LazyLock<parking_lot::Mutex<HashSet<i64>>> =
@@ -864,52 +864,70 @@ async fn refresh_trade_builder_auto_scope_analysis_snapshot_for_root_with_contex
     let remaining_qty =
         round_trade_builder_share_qty((buy_metrics.qty - sell_allocation_summary.allocated_sold_qty).max(0.0));
     if remaining_qty > 0.0 {
-        let (mark_price, mark_price_captured_at) = trade_builder_analysis_mark_price(
-            &root_order,
-            mark_price_override,
-            buy_avg_price,
-        );
-        let mark_value_usdc = remaining_qty * mark_price;
-        let breakdown = trade_builder_analysis_pnl_breakdown(
-            remaining_qty,
-            buy_notional_per_share,
-            buy_fee_per_share,
-            mark_value_usdc,
-        );
-        rows.push(TradeFlowAutoScopeAnalysisRowInput {
-            row_key: format!("open:{root_builder_order_id}"),
-            user_id: run.user_id,
-            definition_id: run.definition_id,
-            run_id: run.id,
-            root_builder_order_id,
-            exit_builder_order_id: None,
-            row_type: "open_position".to_string(),
-            market_slug: root_order.market_slug.clone(),
-            token_id: root_order.token_id.clone(),
-            outcome_label: root_order.outcome_label.clone(),
-            exit_reason: "open_position".to_string(),
-            market_open_at,
-            triggered_at,
-            buy_filled_at,
-            sell_filled_at: None,
-            open_to_trigger_ms,
-            trigger_to_buy_fill_ms,
-            buy_avg_price: Some(buy_avg_price),
-            mark_or_sell_price: Some(mark_price),
-            mark_price_captured_at: Some(mark_price_captured_at),
-            row_qty: remaining_qty,
-            remaining_qty_after_exit: remaining_qty,
-            row_pnl_usdc: breakdown.row_pnl_usdc,
-            buy_notional_usdc: Some(breakdown.buy_notional_usdc),
-            buy_fee_usdc: Some(breakdown.buy_fee_usdc),
-            cost_basis_usdc: Some(breakdown.cost_basis_usdc),
-            sell_notional_usdc: None,
-            sell_fee_usdc: None,
-            mark_value_usdc: Some(round_trade_builder_signed_qty(mark_value_usdc)),
-            net_value_usdc: Some(breakdown.net_value_usdc),
-            pnl_pct: breakdown.pnl_pct,
-            valuation_kind: "mark_to_market".to_string(),
-        });
+        if trade_builder_analysis_market_has_ended(&root_order.market_slug) {
+            rows.push(trade_builder_analysis_assumed_lost_settled_row(
+                &root_order,
+                &run,
+                AutoScopeOfficialPnlTiming {
+                    market_open_at,
+                    triggered_at,
+                    buy_filled_at,
+                    open_to_trigger_ms,
+                    trigger_to_buy_fill_ms,
+                },
+                remaining_qty,
+                buy_avg_price,
+                buy_notional_per_share,
+                buy_fee_per_share,
+            ));
+        } else {
+            let (mark_price, mark_price_captured_at) = trade_builder_analysis_mark_price(
+                &root_order,
+                mark_price_override,
+                buy_avg_price,
+            );
+            let mark_value_usdc = remaining_qty * mark_price;
+            let breakdown = trade_builder_analysis_pnl_breakdown(
+                remaining_qty,
+                buy_notional_per_share,
+                buy_fee_per_share,
+                mark_value_usdc,
+            );
+            rows.push(TradeFlowAutoScopeAnalysisRowInput {
+                row_key: format!("open:{root_builder_order_id}"),
+                user_id: run.user_id,
+                definition_id: run.definition_id,
+                run_id: run.id,
+                root_builder_order_id,
+                exit_builder_order_id: None,
+                row_type: "open_position".to_string(),
+                market_slug: root_order.market_slug.clone(),
+                token_id: root_order.token_id.clone(),
+                outcome_label: root_order.outcome_label.clone(),
+                exit_reason: "open_position".to_string(),
+                market_open_at,
+                triggered_at,
+                buy_filled_at,
+                sell_filled_at: None,
+                open_to_trigger_ms,
+                trigger_to_buy_fill_ms,
+                buy_avg_price: Some(buy_avg_price),
+                mark_or_sell_price: Some(mark_price),
+                mark_price_captured_at: Some(mark_price_captured_at),
+                row_qty: remaining_qty,
+                remaining_qty_after_exit: remaining_qty,
+                row_pnl_usdc: breakdown.row_pnl_usdc,
+                buy_notional_usdc: Some(breakdown.buy_notional_usdc),
+                buy_fee_usdc: Some(breakdown.buy_fee_usdc),
+                cost_basis_usdc: Some(breakdown.cost_basis_usdc),
+                sell_notional_usdc: None,
+                sell_fee_usdc: None,
+                mark_value_usdc: Some(round_trade_builder_signed_qty(mark_value_usdc)),
+                net_value_usdc: Some(breakdown.net_value_usdc),
+                pnl_pct: breakdown.pnl_pct,
+                valuation_kind: "mark_to_market".to_string(),
+            });
+        }
     }
 
     let internal_fallback_pnl_usdc =

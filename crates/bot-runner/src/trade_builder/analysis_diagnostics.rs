@@ -201,7 +201,11 @@ fn trade_builder_analysis_cash_status(
     sell_usdc: f64,
     redeem_usdc: Option<f64>,
     pending_qty: f64,
+    assumed_lost_no_claim: bool,
 ) -> &'static str {
+    if assumed_lost_no_claim {
+        return "lost_unclaimed_or_unredeemed";
+    }
     if redeem_usdc.is_none() {
         return "redeem_ambiguous";
     }
@@ -215,6 +219,18 @@ fn trade_builder_analysis_cash_status(
         return "buy_without_sell_or_redeem";
     }
     "closed_cash_observed"
+}
+
+fn trade_builder_analysis_assumed_lost_no_claim(
+    rows: &[TradeFlowAutoScopeAnalysisRowInput],
+) -> bool {
+    rows.iter().any(|row| {
+        row.row_type == "settled_payout"
+            && row.row_qty > 0.0
+            && row.sell_filled_at.is_none()
+            && row.mark_value_usdc.unwrap_or(0.0) <= 0.0
+            && row.net_value_usdc.unwrap_or(0.0) <= 0.0
+    })
 }
 
 fn trade_builder_analysis_cash_diagnostic_diverged(
@@ -544,11 +560,13 @@ fn trade_builder_analysis_build_trade_diagnostic(
             + pending_inventory_value_usdc
             + pending_redeemable_value_usdc.unwrap_or(0.0),
     );
+    let assumed_lost_no_claim = trade_builder_analysis_assumed_lost_no_claim(rows);
     let cash_status = trade_builder_analysis_cash_status(
         cash_buy_notional_usdc,
         cash_sell_notional_usdc,
         cash_redeem_usdc,
         pending_inventory_qty,
+        assumed_lost_no_claim,
     );
     let pnl_pct = (cost_basis_usdc > 0.0)
         .then_some(round_trade_builder_signed_qty((total_pnl_usdc / cost_basis_usdc) * 100.0));
@@ -647,6 +665,10 @@ fn trade_builder_analysis_build_trade_diagnostic(
     }
     if sell_allocation_summary.ignored_sell_qty > 0.0 {
         trade_builder_analysis_data_flag(&mut data_quality_flags, "oversold_exit_qty");
+    }
+    if assumed_lost_no_claim {
+        trade_builder_analysis_data_flag(&mut data_quality_flags, "market_ended_without_redeem");
+        trade_builder_analysis_data_flag(&mut data_quality_flags, "assumed_lost_no_claim");
     }
     if cash_buy_notional_usdc > 0.0
         && cash_sell_notional_usdc <= 0.0
@@ -772,6 +794,43 @@ fn trade_builder_analysis_build_trade_diagnostic(
 mod auto_scope_cash_diagnostics_tests {
     use super::*;
 
+    fn settled_zero_payout_row() -> TradeFlowAutoScopeAnalysisRowInput {
+        TradeFlowAutoScopeAnalysisRowInput {
+            row_key: "settled:1".to_string(),
+            user_id: 1,
+            definition_id: 1,
+            run_id: 1,
+            root_builder_order_id: 1,
+            exit_builder_order_id: None,
+            row_type: "settled_payout".to_string(),
+            market_slug: "btc-updown-5m-1772296200".to_string(),
+            token_id: "token-up".to_string(),
+            outcome_label: "Up".to_string(),
+            exit_reason: "other".to_string(),
+            market_open_at: None,
+            triggered_at: None,
+            buy_filled_at: None,
+            sell_filled_at: None,
+            open_to_trigger_ms: None,
+            trigger_to_buy_fill_ms: None,
+            buy_avg_price: Some(0.5),
+            mark_or_sell_price: None,
+            mark_price_captured_at: None,
+            row_qty: 10.0,
+            remaining_qty_after_exit: 0.0,
+            row_pnl_usdc: -5.0,
+            buy_notional_usdc: Some(5.0),
+            buy_fee_usdc: Some(0.0),
+            cost_basis_usdc: Some(5.0),
+            sell_notional_usdc: None,
+            sell_fee_usdc: None,
+            mark_value_usdc: Some(0.0),
+            net_value_usdc: Some(0.0),
+            pnl_pct: Some(-100.0),
+            valuation_kind: "settled".to_string(),
+        }
+    }
+
     #[test]
     fn cash_fill_pnl_uses_observed_buy_sell_and_redeem_cash() {
         let pnl = trade_builder_analysis_cash_fill_pnl_usdc(169.98, 145.39, Some(0.0));
@@ -782,10 +841,24 @@ mod auto_scope_cash_diagnostics_tests {
     #[test]
     fn buy_only_cash_status_marks_pending_inventory() {
         let pnl = trade_builder_analysis_cash_fill_pnl_usdc(5.0, 0.0, Some(0.0));
-        let status = trade_builder_analysis_cash_status(5.0, 0.0, Some(0.0), 10.0);
+        let status = trade_builder_analysis_cash_status(5.0, 0.0, Some(0.0), 10.0, false);
 
         assert_eq!(pnl, -5.0);
         assert_eq!(status, "pending_inventory_or_redeem");
+    }
+
+    #[test]
+    fn ended_zero_payout_settlement_marks_lost_without_claim() {
+        let status = trade_builder_analysis_cash_status(5.0, 0.0, Some(0.0), 0.0, true);
+
+        assert_eq!(status, "lost_unclaimed_or_unredeemed");
+    }
+
+    #[test]
+    fn zero_payout_settled_row_is_assumed_lost_without_claim() {
+        let rows = vec![settled_zero_payout_row()];
+
+        assert!(trade_builder_analysis_assumed_lost_no_claim(&rows));
     }
 
     #[test]

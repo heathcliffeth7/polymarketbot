@@ -427,6 +427,53 @@ fn trade_builder_analysis_settled_row(
     }
 }
 
+fn trade_builder_analysis_assumed_lost_settled_row(
+    root_order: &TradeBuilderOrder,
+    run: &TradeFlowRun,
+    timing: AutoScopeOfficialPnlTiming,
+    row_qty: f64,
+    buy_avg_price: f64,
+    buy_notional_per_share: f64,
+    buy_fee_per_share: f64,
+) -> TradeFlowAutoScopeAnalysisRowInput {
+    let breakdown =
+        trade_builder_analysis_pnl_breakdown(row_qty, buy_notional_per_share, buy_fee_per_share, 0.0);
+    TradeFlowAutoScopeAnalysisRowInput {
+        row_key: format!("settled:{}", root_order.id),
+        user_id: run.user_id,
+        definition_id: run.definition_id,
+        run_id: run.id,
+        root_builder_order_id: root_order.id,
+        exit_builder_order_id: None,
+        row_type: "settled_payout".to_string(),
+        market_slug: root_order.market_slug.clone(),
+        token_id: root_order.token_id.clone(),
+        outcome_label: root_order.outcome_label.clone(),
+        exit_reason: "other".to_string(),
+        market_open_at: timing.market_open_at,
+        triggered_at: timing.triggered_at,
+        buy_filled_at: timing.buy_filled_at,
+        sell_filled_at: None,
+        open_to_trigger_ms: timing.open_to_trigger_ms,
+        trigger_to_buy_fill_ms: timing.trigger_to_buy_fill_ms,
+        buy_avg_price: Some(buy_avg_price),
+        mark_or_sell_price: None,
+        mark_price_captured_at: trade_builder_analysis_market_end_at_from_slug(&root_order.market_slug),
+        row_qty,
+        remaining_qty_after_exit: 0.0,
+        row_pnl_usdc: breakdown.row_pnl_usdc,
+        buy_notional_usdc: Some(breakdown.buy_notional_usdc),
+        buy_fee_usdc: Some(breakdown.buy_fee_usdc),
+        cost_basis_usdc: Some(breakdown.cost_basis_usdc),
+        sell_notional_usdc: None,
+        sell_fee_usdc: None,
+        mark_value_usdc: Some(0.0),
+        net_value_usdc: Some(0.0),
+        pnl_pct: breakdown.pnl_pct,
+        valuation_kind: "settled".to_string(),
+    }
+}
+
 fn trade_builder_analysis_official_open_row(
     root_order: &TradeBuilderOrder,
     run: &TradeFlowRun,
@@ -604,15 +651,20 @@ fn max_datetime(current: Option<DateTime<Utc>>, ts: Option<i64>) -> Option<DateT
 }
 
 fn trade_builder_analysis_market_has_ended(market_slug: &str) -> bool {
-    let Some(open_at) = trade_builder_analysis_market_open_at_from_slug(market_slug) else {
+    let Some(end_at) = trade_builder_analysis_market_end_at_from_slug(market_slug) else {
         return false;
     };
+    Utc::now() >= end_at
+}
+
+fn trade_builder_analysis_market_end_at_from_slug(market_slug: &str) -> Option<DateTime<Utc>> {
+    let open_at = trade_builder_analysis_market_open_at_from_slug(market_slug)?;
     let duration = if market_slug.to_ascii_lowercase().contains("-15m-") {
         ChronoDuration::minutes(15)
     } else {
         ChronoDuration::minutes(5)
     };
-    Utc::now() >= open_at + duration
+    Some(open_at + duration)
 }
 
 #[cfg(test)]
@@ -713,5 +765,16 @@ mod official_pnl_tests {
         assert_eq!(ledger.buy_usdc, 13.1966);
         assert_eq!(ledger.sell_usdc, 12.06631);
         assert_eq!(ledger.pnl_usdc, -1.13029);
+    }
+
+    #[test]
+    fn market_has_ended_uses_slug_window_duration() {
+        let future_open = Utc::now() + ChronoDuration::hours(1);
+        let future_slug = format!("btc-updown-5m-{}", future_open.timestamp());
+
+        assert!(trade_builder_analysis_market_has_ended(
+            "btc-updown-5m-1772296200"
+        ));
+        assert!(!trade_builder_analysis_market_has_ended(&future_slug));
     }
 }

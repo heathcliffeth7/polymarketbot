@@ -123,7 +123,7 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
       pendingInventoryQty: 0,
       pendingInventoryValueUsdc: 0,
       pendingRedeemableValueUsdc: null,
-      cashStatus: 'closed_cash_observed',
+      cashStatus: 'lost_unclaimed_or_unredeemed',
       valuationKind: 'realized',
       primaryDiagnosisCode: 'bad_entry_price',
       diagnosisLabel: 'Kotu giris fiyati',
@@ -156,7 +156,7 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
   assert.match(csv, /buy_fee_usdc/);
   assert.match(csv, /cash_fill_pnl_usdc/);
   assert.match(csv, /diagnostic_pnl_usdc/);
-  assert.match(csv, /closed_cash_observed/);
+  assert.match(csv, /lost_unclaimed_or_unredeemed/);
   assert.match(csv, /diagnosis_code/);
   assert.match(csv, /required_q/);
   assert.match(csv, /submitted_estimated_avg_fill/);
