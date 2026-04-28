@@ -305,12 +305,10 @@ fn trade_builder_analysis_build_official_rows_from_ledger(
         });
     }
 
-    let redeem_tolerance = AUTO_SCOPE_OFFICIAL_REDEEM_ABS_TOLERANCE
-        .max(ledger.redeem_usdc.abs() * AUTO_SCOPE_OFFICIAL_REDEEM_REL_TOLERANCE);
     let market_ended = trade_builder_analysis_market_has_ended(&root_order.market_slug);
     if residual_qty > 0.0 {
         if ledger.redeem_usdc > 0.0 {
-            if (ledger.redeem_usdc - residual_qty).abs() > redeem_tolerance {
+            if !trade_builder_analysis_redeem_fits_residual(residual_qty, ledger.redeem_usdc) {
                 return None;
             }
             official_pnl_usdc += ledger.redeem_usdc;
@@ -667,6 +665,12 @@ fn trade_builder_analysis_market_end_at_from_slug(market_slug: &str) -> Option<D
     Some(open_at + duration)
 }
 
+fn trade_builder_analysis_redeem_fits_residual(residual_qty: f64, redeem_usdc: f64) -> bool {
+    let redeem_tolerance =
+        AUTO_SCOPE_OFFICIAL_REDEEM_ABS_TOLERANCE.max(redeem_usdc.abs() * AUTO_SCOPE_OFFICIAL_REDEEM_REL_TOLERANCE);
+    redeem_usdc <= residual_qty + redeem_tolerance
+}
+
 #[cfg(test)]
 mod official_pnl_tests {
     use super::*;
@@ -765,6 +769,12 @@ mod official_pnl_tests {
         assert_eq!(ledger.buy_usdc, 13.1966);
         assert_eq!(ledger.sell_usdc, 12.06631);
         assert_eq!(ledger.pnl_usdc, -1.13029);
+    }
+
+    #[test]
+    fn redeem_allocation_accepts_fee_reduced_residual_payout() {
+        assert!(trade_builder_analysis_redeem_fits_residual(1.42, 1.02238));
+        assert!(!trade_builder_analysis_redeem_fits_residual(0.46, 1.02238));
     }
 
     #[test]
