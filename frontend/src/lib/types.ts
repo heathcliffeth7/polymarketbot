@@ -679,6 +679,12 @@ export interface AutoScopeTradeDiagnostic {
   cashBuyUsdc?: number | null;
   cashSellUsdc?: number | null;
   cashRedeemUsdc?: number | null;
+  officialRootPnlUsdc?: number | null;
+  officialPnlSource?: string | null;
+  officialBuyUsdc?: number | null;
+  officialSellUsdc?: number | null;
+  officialRedeemUsdc?: number | null;
+  officialDeltaUsdc?: number | null;
   pendingInventoryQty?: number | null;
   pendingInventoryValueUsdc?: number | null;
   pendingRedeemableValueUsdc?: number | null;
@@ -934,6 +940,12 @@ export interface AutoScopeTradeAnalysisRow {
   cashBuyUsdc: number | null;
   cashSellUsdc: number | null;
   cashRedeemUsdc: number | null;
+  officialRootPnlUsdc: number | null;
+  officialPnlSource: string | null;
+  officialBuyUsdc: number | null;
+  officialSellUsdc: number | null;
+  officialRedeemUsdc: number | null;
+  officialDeltaUsdc: number | null;
   pendingInventoryQty: number | null;
   pendingInventoryValueUsdc: number | null;
   pendingRedeemableValueUsdc: number | null;

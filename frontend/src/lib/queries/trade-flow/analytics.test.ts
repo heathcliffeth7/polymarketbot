@@ -120,6 +120,12 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
       cashBuyUsdc: 4,
       cashSellUsdc: 3.6,
       cashRedeemUsdc: 0,
+      officialRootPnlUsdc: -1.13602,
+      officialPnlSource: 'data_api_activity',
+      officialBuyUsdc: 4.8974,
+      officialSellUsdc: 2.739,
+      officialRedeemUsdc: 1.02238,
+      officialDeltaUsdc: -1.72268,
       pendingInventoryQty: 0,
       pendingInventoryValueUsdc: 0,
       pendingRedeemableValueUsdc: null,
@@ -155,6 +161,9 @@ test('buildAutoScopeTradeAnalysisCsv escapes commas and includes pnl breakdown',
   assert.match(csv, /"Flow, A"/);
   assert.match(csv, /buy_fee_usdc/);
   assert.match(csv, /cash_fill_pnl_usdc/);
+  assert.match(csv, /official_root_pnl_usdc/);
+  assert.match(csv, /data_api_activity/);
+  assert.match(csv, /-1.13602/);
   assert.match(csv, /diagnostic_pnl_usdc/);
   assert.match(csv, /lost_unclaimed_or_unredeemed/);
   assert.match(csv, /diagnosis_code/);
@@ -174,6 +183,12 @@ test('mapAutoScopeCashMetrics separates cash diagnostic and pending values', () 
     cash_buy_notional_usdc: 169.98,
     cash_sell_notional_usdc: 145.39,
     cash_redeem_usdc: 0,
+    official_pnl_usdc: -1.13602,
+    official_pnl_source: 'data_api_activity',
+    official_buy_notional_usdc: 4.8974,
+    official_sell_notional_usdc: 2.739,
+    official_redeem_usdc: 1.02238,
+    official_delta_usdc: -1.72268,
     pending_inventory_qty: 35,
     pending_inventory_value_usdc: 20,
     pending_redeemable_value_usdc: null,
@@ -183,6 +198,9 @@ test('mapAutoScopeCashMetrics separates cash diagnostic and pending values', () 
   assert.equal(metrics.cashFillPnlUsdc, -24.59);
   assert.equal(metrics.diagnosticPnlUsdc, 27.51);
   assert.equal(metrics.cashBuyUsdc, 169.98);
+  assert.equal(metrics.officialRootPnlUsdc, -1.13602);
+  assert.equal(metrics.officialPnlSource, 'data_api_activity');
+  assert.equal(metrics.officialRedeemUsdc, 1.02238);
   assert.equal(metrics.cashStatus, 'pending_inventory_or_redeem');
 });
 

@@ -34,6 +34,10 @@ import {
   getAutoScopeCashMetricsSummaryForWhere,
   mapAutoScopeCashMetrics,
 } from './auto-scope-analysis-cash-metrics';
+import {
+  AUTO_SCOPE_OFFICIAL_ROOT_PNL_CSV_HEADERS,
+  autoScopeOfficialRootPnlCsvValues,
+} from './auto-scope-official-root-pnl-csv';
 
 export interface AutoScopeTradeAnalysisFilters {
   userId: number;
@@ -879,6 +883,7 @@ export function buildAutoScopeTradeAnalysisCsv(
     'row_pnl_usdc',
     'diagnostic_pnl_usdc',
     'cash_fill_pnl_usdc',
+    ...AUTO_SCOPE_OFFICIAL_ROOT_PNL_CSV_HEADERS,
     'cash_buy_usdc',
     'cash_sell_usdc',
     'cash_redeem_usdc',
@@ -965,6 +970,7 @@ export function buildAutoScopeTradeAnalysisCsv(
         row.rowPnlUsdc,
         row.diagnosticPnlUsdc,
         row.cashFillPnlUsdc,
+        ...autoScopeOfficialRootPnlCsvValues(row),
         row.cashBuyUsdc,
         row.cashSellUsdc,
         row.cashRedeemUsdc,
@@ -1069,6 +1075,7 @@ export function buildAutoScopeTradeAnalysisForensicCsv(
     'row_pnl_usdc',
     'diagnostic_pnl_usdc',
     'cash_fill_pnl_usdc',
+    ...AUTO_SCOPE_OFFICIAL_ROOT_PNL_CSV_HEADERS,
     'cash_buy_usdc',
     'cash_sell_usdc',
     'cash_redeem_usdc',
@@ -1154,6 +1161,7 @@ export function buildAutoScopeTradeAnalysisForensicCsv(
         row.rowPnlUsdc,
         row.diagnosticPnlUsdc,
         row.cashFillPnlUsdc,
+        ...autoScopeOfficialRootPnlCsvValues(row),
         row.cashBuyUsdc,
         row.cashSellUsdc,
         row.cashRedeemUsdc,

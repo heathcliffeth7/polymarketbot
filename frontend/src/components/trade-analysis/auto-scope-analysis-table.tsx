@@ -110,6 +110,11 @@ function nullablePnlClassName(value: number | null): string {
   return value == null ? 'text-zinc-300' : pnlClassName(value);
 }
 
+function officialRootPnlValue(row: AutoScopeTradeAnalysisRow): number | null {
+  if (row.officialPnlSource !== 'data_api_activity') return null;
+  return row.officialRootPnlUsdc;
+}
+
 function formatPercent(value: number | null): string {
   if (value == null) return '-';
   const sign = value > 0 ? '+' : '';
@@ -515,7 +520,8 @@ export function AutoScopeAnalysisTable() {
                 <TableHead className="text-right text-zinc-400">Maliyet</TableHead>
                 <TableHead className="text-right text-zinc-400">Fee</TableHead>
                 <TableHead className="text-right text-zinc-400">Net</TableHead>
-                <TableHead className="text-right text-zinc-400">Cash PnL</TableHead>
+                <TableHead className="text-right text-zinc-400">Local Cash PnL</TableHead>
+                <TableHead className="text-right text-zinc-400">Official Root PnL</TableHead>
                 <TableHead className="text-right text-zinc-400">Buy Cash</TableHead>
                 <TableHead className="text-right text-zinc-400">Sell Cash</TableHead>
                 <TableHead className="text-right text-zinc-400">Redeem</TableHead>
@@ -528,13 +534,13 @@ export function AutoScopeAnalysisTable() {
             <TableBody>
               {isLoading && rows.length === 0 ? (
                 <TableRow className="border-zinc-800">
-                  <TableCell colSpan={26} className="py-10 text-center text-zinc-500">
+                  <TableCell colSpan={27} className="py-10 text-center text-zinc-500">
                     Analiz verisi yukleniyor...
                   </TableCell>
                 </TableRow>
               ) : rows.length === 0 ? (
                 <TableRow className="border-zinc-800">
-                  <TableCell colSpan={26} className="py-10 text-center text-zinc-500">
+                  <TableCell colSpan={27} className="py-10 text-center text-zinc-500">
                     Gosterilecek auto-scope trade analizi bulunamadi.
                   </TableCell>
                 </TableRow>
@@ -711,6 +717,14 @@ export function AutoScopeAnalysisTable() {
                     <TableCell className={`text-right font-mono ${nullablePnlClassName(row.cashFillPnlUsdc)}`}>
                       {formatNullablePnl(row.cashFillPnlUsdc)}
                     </TableCell>
+                    {(() => {
+                      const officialPnl = officialRootPnlValue(row);
+                      return (
+                        <TableCell className={`text-right font-mono ${nullablePnlClassName(officialPnl)}`}>
+                          {formatNullablePnl(officialPnl)}
+                        </TableCell>
+                      );
+                    })()}
                     <TableCell className="text-right font-mono">
                       {formatUsdc(row.cashBuyUsdc)}
                     </TableCell>

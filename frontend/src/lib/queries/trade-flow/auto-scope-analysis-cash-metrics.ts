@@ -8,6 +8,12 @@ export interface AutoScopeCashMetrics {
   cashBuyUsdc: number | null;
   cashSellUsdc: number | null;
   cashRedeemUsdc: number | null;
+  officialRootPnlUsdc: number | null;
+  officialPnlSource: string | null;
+  officialBuyUsdc: number | null;
+  officialSellUsdc: number | null;
+  officialRedeemUsdc: number | null;
+  officialDeltaUsdc: number | null;
   pendingInventoryQty: number | null;
   pendingInventoryValueUsdc: number | null;
   pendingRedeemableValueUsdc: number | null;
@@ -59,6 +65,12 @@ export function mapAutoScopeCashMetrics(
     cashBuyUsdc: compactNumber(compact, 'cash_buy_notional_usdc'),
     cashSellUsdc: compactNumber(compact, 'cash_sell_notional_usdc'),
     cashRedeemUsdc: compactNumber(compact, 'cash_redeem_usdc'),
+    officialRootPnlUsdc: compactNumber(compact, 'official_pnl_usdc'),
+    officialPnlSource: compactString(compact, 'official_pnl_source'),
+    officialBuyUsdc: compactNumber(compact, 'official_buy_notional_usdc'),
+    officialSellUsdc: compactNumber(compact, 'official_sell_notional_usdc'),
+    officialRedeemUsdc: compactNumber(compact, 'official_redeem_usdc'),
+    officialDeltaUsdc: compactNumber(compact, 'official_delta_usdc'),
     pendingInventoryQty: compactNumber(compact, 'pending_inventory_qty'),
     pendingInventoryValueUsdc: compactNumber(compact, 'pending_inventory_value_usdc'),
     pendingRedeemableValueUsdc: compactNumber(compact, 'pending_redeemable_value_usdc'),
