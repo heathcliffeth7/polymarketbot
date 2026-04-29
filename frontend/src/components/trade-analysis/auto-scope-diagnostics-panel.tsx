@@ -3,6 +3,7 @@
 import { Download, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useTradeFlowAutoScopeTradeDiagnostic } from '@/hooks/use-trade-flow';
+import { cn } from '@/lib/utils';
 import {
   formatDuration,
   formatDateTime,
@@ -18,6 +19,7 @@ import {
 interface AutoScopeDiagnosticsPanelProps {
   rootOrderId: number | null;
   onClose: () => void;
+  className?: string;
 }
 
 function DetailMetric({
@@ -79,6 +81,7 @@ function jsonPreview(value: unknown): string {
 export function AutoScopeDiagnosticsPanel({
   rootOrderId,
   onClose,
+  className,
 }: AutoScopeDiagnosticsPanelProps) {
   const { data, error, isLoading } = useTradeFlowAutoScopeTradeDiagnostic(rootOrderId);
   if (!rootOrderId) return null;
@@ -95,7 +98,7 @@ export function AutoScopeDiagnosticsPanel({
   }
 
   return (
-    <div className="rounded-md border border-zinc-800 bg-zinc-950 p-4">
+    <div className={cn("rounded-md border border-zinc-800 bg-zinc-950 p-4", className)}>
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
           <p className="text-sm font-medium text-zinc-100">

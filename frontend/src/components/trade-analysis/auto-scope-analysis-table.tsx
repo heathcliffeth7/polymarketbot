@@ -13,6 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   buildTradeFlowAutoScopeAnalysisQuery,
   useTradeFlowAutoScopeAnalysis,
@@ -516,11 +517,6 @@ export function AutoScopeAnalysisTable() {
           </div>
         )}
 
-        <AutoScopeDiagnosticsPanel
-          rootOrderId={selectedRootOrderId}
-          onClose={() => setSelectedRootOrderId(null)}
-        />
-
         <div className="overflow-x-auto">
           <Table className="min-w-[2320px] text-xs text-zinc-200">
             <TableHeader>
@@ -571,10 +567,9 @@ export function AutoScopeAnalysisTable() {
                 rows.map((row) => (
                   <TableRow
                     key={row.rowId}
-                    className={`cursor-pointer border-zinc-800 hover:bg-zinc-950/60 ${
+                    className={`border-zinc-800 hover:bg-zinc-950/60 ${
                       selectedRootOrderId === row.rootOrderId ? 'bg-zinc-950/80' : ''
                     }`}
-                    onClick={() => setSelectedRootOrderId(row.rootOrderId)}
                   >
                     <TableCell>
                       <div className="space-y-1">
@@ -662,12 +657,40 @@ export function AutoScopeAnalysisTable() {
                       </p>
                     </TableCell>
                     <TableCell>
-                      <div className="space-y-1">
-                        <p className="font-medium text-zinc-100">{row.marketSlug}</p>
-                        <p className="text-[11px] text-zinc-500">
-                          {row.outcomeLabel} / {row.tokenId.slice(0, 10)}...
-                        </p>
-                      </div>
+                      <Popover
+                        open={selectedRootOrderId === row.rootOrderId}
+                        onOpenChange={(open) =>
+                          setSelectedRootOrderId(open ? row.rootOrderId : null)
+                        }
+                      >
+                        <PopoverTrigger asChild>
+                          <button
+                            type="button"
+                            className="group -mx-2 block w-[300px] rounded-md px-2 py-1 text-left outline-none transition-colors hover:bg-zinc-900 focus-visible:ring-2 focus-visible:ring-sky-500/60"
+                            aria-label={`Trade detayini ac: ${row.marketSlug}`}
+                          >
+                            <span className="block truncate font-medium text-zinc-100 group-hover:text-white">
+                              {row.marketSlug}
+                            </span>
+                            <span className="block truncate text-[11px] text-zinc-500">
+                              {row.outcomeLabel} / {row.tokenId.slice(0, 10)}...
+                            </span>
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          side="right"
+                          align="start"
+                          sideOffset={10}
+                          collisionPadding={16}
+                          className="max-h-[82vh] w-[min(1100px,calc(100vw-2rem))] overflow-y-auto border-zinc-800 bg-zinc-950 p-0 text-zinc-100 shadow-2xl shadow-black/40"
+                        >
+                          <AutoScopeDiagnosticsPanel
+                            rootOrderId={row.rootOrderId}
+                            onClose={() => setSelectedRootOrderId(null)}
+                            className="border-0 bg-transparent p-4"
+                          />
+                        </PopoverContent>
+                      </Popover>
                     </TableCell>
                     <TableCell>
                       <div className="space-y-1">
