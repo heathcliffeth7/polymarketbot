@@ -554,35 +554,16 @@ export function applyPolymarketWalletPnlSummary(
   rowSummary: AutoScopeTradeAnalysisSummary,
   official: PolymarketWalletPnlSummary
 ): AutoScopeTradeAnalysisSummary {
-  const marketCount = official.marketCount || rowSummary.marketCount;
-  const profitCount = official.marketCount > 0 ? official.profitCount : rowSummary.profitCount;
-  const lossCount = official.marketCount > 0 ? official.lossCount : rowSummary.lossCount;
   return {
     ...rowSummary,
-    pnlSource: official.source,
-    marketCount,
-    profitCount,
-    lossCount,
-    totalPnlUsdc: official.totalPnlUsdc,
-    realizedPnlUsdc: official.realizedPnlUsdc,
-    openPnlUsdc: official.openPnlUsdc,
-    lossUsdc: official.marketCount > 0 ? official.lossUsdc : rowSummary.lossUsdc,
-    profitUsdc: official.marketCount > 0 ? official.profitUsdc : rowSummary.profitUsdc,
-    costBasisUsdc: official.marketCount > 0 ? official.costBasisUsdc : rowSummary.costBasisUsdc,
-    netValueUsdc: official.marketCount > 0 ? official.netValueUsdc : rowSummary.netValueUsdc,
-    profitFactor:
-      official.marketCount > 0 && official.lossUsdc > 0
-        ? official.profitUsdc / official.lossUsdc
-        : rowSummary.profitFactor,
-    winRatePct: marketCount > 0 ? (profitCount / marketCount) * 100 : null,
-    avgWinUsdc: profitCount > 0 ? official.profitUsdc / profitCount : null,
-    avgLossUsdc: lossCount > 0 ? official.lossUsdc / lossCount : null,
-    largestLossUsdc: official.largestLossUsdc,
+    referencePnlUsdc: official.totalPnlUsdc,
+    referencePnlSource: official.source,
+    referenceDeltaUsdc: roundCash(official.totalPnlUsdc - rowSummary.totalPnlUsdc),
     officialBuyUsdc: official.officialBuyUsdc,
     officialSellUsdc: official.officialSellUsdc,
     officialRedeemUsdc: official.officialRedeemUsdc,
     rootRowsPnlUsdc: official.rootRowsPnlUsdc,
-    officialDeltaUsdc: official.officialDeltaUsdc,
+    officialDeltaUsdc: roundCash(official.totalPnlUsdc - rowSummary.totalPnlUsdc),
   };
 }
 

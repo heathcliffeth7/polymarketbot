@@ -345,7 +345,10 @@ test('cash metrics summary SQL counts ambiguous market pnl once per market', () 
   assert.match(sql, /BOOL_OR\(use_market_pnl\)/);
   assert.match(sql, /official_market_scope_required/);
   assert.match(sql, /official_market_buy_usdc/);
-  assert.match(sql, /THEN official_market_pnl_usdc/);
+  assert.match(sql, /effective_pnl_usdc/);
+  assert.match(sql, /profit_count/);
+  assert.match(sql, /loss_count/);
+  assert.match(sql, /largest_loss_usdc/);
   assert.doesNotMatch(sql, /SUM\(COALESCE\(\(dg\.compact_metrics_json->>'cash_fill_pnl_usdc'\)/);
 });
 

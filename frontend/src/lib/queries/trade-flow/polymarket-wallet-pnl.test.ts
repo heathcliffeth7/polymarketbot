@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { __polymarketWalletPnlTestUtils } from './polymarket-wallet-pnl';
+import type { AutoScopeTradeAnalysisSummary } from '@/lib/types';
+import {
+  __polymarketWalletPnlTestUtils,
+  applyPolymarketWalletPnlSummary,
+} from './polymarket-wallet-pnl';
 
 test('leaderboard pnl is extracted as all-time wallet pnl', () => {
   const pnl = __polymarketWalletPnlTestUtils.extractLeaderboardPnl({
@@ -173,4 +177,58 @@ test('small activity versus position pnl drift keeps source status', () => {
   });
 
   assert.equal(status, 'activity_market');
+});
+
+test('wallet summary attaches reference pnl without overriding activity cash summary', () => {
+  const rowSummary: AutoScopeTradeAnalysisSummary = {
+    rowCount: 100,
+    marketCount: 10,
+    lossCount: 4,
+    profitCount: 6,
+    totalPnlUsdc: -748.68829,
+    realizedPnlUsdc: -748.68829,
+    openPnlUsdc: 0,
+    lossUsdc: 30,
+    profitUsdc: 20,
+    buyFeeUsdc: 0,
+    sellFeeUsdc: 0,
+    totalFeeUsdc: 0,
+    costBasisUsdc: 100,
+    netValueUsdc: 20,
+    profitFactor: 0.6666666667,
+    winRatePct: 60,
+    avgWinUsdc: 3.3333333333,
+    avgLossUsdc: 7.5,
+    largestLossUsdc: 12,
+    feeDragUsdc: 0,
+    diagnosisBreakdown: [],
+    pnlSource: 'activity_cash',
+    localCashFillPnlUsdc: -748.68829,
+  };
+
+  const summary = applyPolymarketWalletPnlSummary(rowSummary, {
+    source: 'polymarket_leaderboard',
+    marketCount: 2014,
+    profitCount: 1214,
+    lossCount: 799,
+    totalPnlUsdc: -249.37611,
+    realizedPnlUsdc: 0,
+    openPnlUsdc: 0,
+    lossUsdc: 1795.78796,
+    profitUsdc: 1622.2184,
+    costBasisUsdc: 0,
+    netValueUsdc: 0,
+    largestLossUsdc: 39.77674,
+    rootRowsPnlUsdc: -645.29223,
+    officialDeltaUsdc: 395.91612,
+    refreshedAt: '2026-04-29T00:00:00.000Z',
+  });
+
+  assert.equal(summary.totalPnlUsdc, -748.68829);
+  assert.equal(summary.profitFactor, 0.6666666667);
+  assert.equal(summary.winRatePct, 60);
+  assert.equal(summary.largestLossUsdc, 12);
+  assert.equal(summary.referencePnlUsdc, -249.37611);
+  assert.equal(summary.referencePnlSource, 'polymarket_leaderboard');
+  assert.equal(summary.referenceDeltaUsdc, 499.31218);
 });

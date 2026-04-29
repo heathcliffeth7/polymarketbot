@@ -642,6 +642,10 @@ export type AutoScopeTradeAnalysisTimeRange =
   | '1w'
   | '1m'
   | 'custom';
+export type AutoScopeTradeAnalysisReferencePnlSource =
+  | 'polymarket_leaderboard'
+  | 'polymarket_user_pnl_history'
+  | 'official_activity_window';
 export type AutoScopeTradeAnalysisValuationKind = 'realized' | 'settled' | 'mark_to_market';
 export type AutoScopeTradeDiagnosisCode =
   | 'bad_entry_price'
@@ -1029,6 +1033,7 @@ export interface AutoScopeTradeAnalysisSummary {
   diagnosisBreakdown: AutoScopeTradeAnalysisDiagnosisBreakdown[];
   pnlSource?:
     | 'analysis_rows'
+    | 'activity_cash'
     | 'official_market_activity'
     | 'polymarket_leaderboard'
     | 'polymarket_user_pnl_history'
@@ -1039,6 +1044,9 @@ export interface AutoScopeTradeAnalysisSummary {
   rootRowsPnlUsdc?: number;
   officialDeltaUsdc?: number;
   localCashFillPnlUsdc?: number;
+  referencePnlUsdc?: number | null;
+  referencePnlSource?: AutoScopeTradeAnalysisReferencePnlSource | null;
+  referenceDeltaUsdc?: number | null;
   diagnosticPnlUsdc?: number;
   economicPnlUsdc?: number;
   pendingInventoryValueUsdc?: number;

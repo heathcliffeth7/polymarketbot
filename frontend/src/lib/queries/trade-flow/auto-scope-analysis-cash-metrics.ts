@@ -68,7 +68,13 @@ export interface AutoScopeCashMetrics {
 interface AutoScopeCashSummaryDb {
   root_count: number;
   cash_metric_count: number;
+  market_count: number;
+  profit_count: number;
+  loss_count: number;
   local_cash_fill_pnl_usdc: number | null;
+  profit_usdc: number | null;
+  loss_usdc: number | null;
+  largest_loss_usdc: number | null;
   diagnostic_pnl_usdc: number | null;
   economic_pnl_usdc: number | null;
   pending_inventory_value_usdc: number | null;
@@ -202,27 +208,52 @@ function buildAutoScopeCashMetricsSummarySql(whereClause: string): string {
      market_effective AS (
        SELECT
          market_slug,
-         BOOL_OR(use_market_pnl) AS use_market_pnl,
-         MAX(official_market_pnl_usdc) FILTER (WHERE use_market_pnl) AS official_market_pnl_usdc,
-         SUM(cash_fill_pnl_usdc) AS cash_fill_pnl_usdc
+         CASE
+           WHEN BOOL_OR(use_market_pnl)
+            AND MAX(official_market_pnl_usdc) FILTER (WHERE use_market_pnl) IS NOT NULL
+           THEN MAX(official_market_pnl_usdc) FILTER (WHERE use_market_pnl)
+           ELSE SUM(cash_fill_pnl_usdc)
+         END AS effective_pnl_usdc
        FROM root_metrics
        GROUP BY market_slug
+     ),
+     market_summary AS (
+       SELECT
+         COUNT(*)::int AS market_count,
+         COUNT(*) FILTER (WHERE effective_pnl_usdc > 0)::int AS profit_count,
+         COUNT(*) FILTER (WHERE effective_pnl_usdc < 0)::int AS loss_count,
+         COALESCE(SUM(effective_pnl_usdc), 0)::double precision AS local_cash_fill_pnl_usdc,
+         COALESCE(SUM(GREATEST(effective_pnl_usdc, 0)), 0)::double precision AS profit_usdc,
+         ABS(COALESCE(SUM(LEAST(effective_pnl_usdc, 0)), 0))::double precision AS loss_usdc,
+         ABS(MIN(effective_pnl_usdc) FILTER (WHERE effective_pnl_usdc < 0))::double precision AS largest_loss_usdc
+       FROM market_effective
+     ),
+     root_summary AS (
+       SELECT
+         COUNT(*)::int AS root_count,
+         COUNT(*) FILTER (WHERE compact_metrics_json ? 'cash_fill_pnl_usdc')::int AS cash_metric_count,
+         COALESCE(SUM(COALESCE((compact_metrics_json->>'diagnostic_pnl_usdc')::double precision, 0)), 0)::double precision AS diagnostic_pnl_usdc,
+         COALESCE(SUM(COALESCE((compact_metrics_json->>'economic_pnl_usdc')::double precision, 0)), 0)::double precision AS economic_pnl_usdc,
+         COALESCE(SUM(COALESCE((compact_metrics_json->>'pending_inventory_value_usdc')::double precision, 0)), 0)::double precision AS pending_inventory_value_usdc,
+         COALESCE(SUM(COALESCE((compact_metrics_json->>'pending_redeemable_value_usdc')::double precision, 0)), 0)::double precision AS pending_redeemable_value_usdc
+       FROM root_metrics
      )
      SELECT
-       COUNT(*)::int AS root_count,
-       COUNT(*) FILTER (WHERE compact_metrics_json ? 'cash_fill_pnl_usdc')::int AS cash_metric_count,
-       (SELECT COALESCE(SUM(
-          CASE
-            WHEN use_market_pnl AND official_market_pnl_usdc IS NOT NULL
-            THEN official_market_pnl_usdc
-            ELSE cash_fill_pnl_usdc
-          END
-        ), 0)::double precision FROM market_effective) AS local_cash_fill_pnl_usdc,
-       COALESCE(SUM(COALESCE((compact_metrics_json->>'diagnostic_pnl_usdc')::double precision, 0)), 0)::double precision AS diagnostic_pnl_usdc,
-       COALESCE(SUM(COALESCE((compact_metrics_json->>'economic_pnl_usdc')::double precision, 0)), 0)::double precision AS economic_pnl_usdc,
-       COALESCE(SUM(COALESCE((compact_metrics_json->>'pending_inventory_value_usdc')::double precision, 0)), 0)::double precision AS pending_inventory_value_usdc,
-       COALESCE(SUM(COALESCE((compact_metrics_json->>'pending_redeemable_value_usdc')::double precision, 0)), 0)::double precision AS pending_redeemable_value_usdc
-     FROM root_metrics`;
+       rs.root_count,
+       rs.cash_metric_count,
+       ms.market_count,
+       ms.profit_count,
+       ms.loss_count,
+       ms.local_cash_fill_pnl_usdc,
+       ms.profit_usdc,
+       ms.loss_usdc,
+       ms.largest_loss_usdc,
+       rs.diagnostic_pnl_usdc,
+       rs.economic_pnl_usdc,
+       rs.pending_inventory_value_usdc,
+       rs.pending_redeemable_value_usdc
+     FROM root_summary rs
+     CROSS JOIN market_summary ms`;
 }
 
 export async function getAutoScopeCashMetricsSummaryForWhere({
@@ -241,6 +272,30 @@ export async function getAutoScopeCashMetricsSummaryForWhere({
     return {};
   }
   return {
+    pnlSource: 'activity_cash',
+    marketCount: Number(row.market_count || 0),
+    profitCount: Number(row.profit_count || 0),
+    lossCount: Number(row.loss_count || 0),
+    totalPnlUsdc: numberOrZero(row?.local_cash_fill_pnl_usdc),
+    lossUsdc: numberOrZero(row?.loss_usdc),
+    profitUsdc: numberOrZero(row?.profit_usdc),
+    profitFactor:
+      numberOrZero(row?.loss_usdc) > 0
+        ? numberOrZero(row?.profit_usdc) / numberOrZero(row?.loss_usdc)
+        : null,
+    winRatePct:
+      Number(row.market_count || 0) > 0
+        ? (Number(row.profit_count || 0) / Number(row.market_count || 0)) * 100
+        : null,
+    avgWinUsdc:
+      Number(row.profit_count || 0) > 0
+        ? numberOrZero(row?.profit_usdc) / Number(row.profit_count || 0)
+        : null,
+    avgLossUsdc:
+      Number(row.loss_count || 0) > 0
+        ? numberOrZero(row?.loss_usdc) / Number(row.loss_count || 0)
+        : null,
+    largestLossUsdc: row.largest_loss_usdc == null ? null : Number(row.largest_loss_usdc),
     localCashFillPnlUsdc: numberOrZero(row?.local_cash_fill_pnl_usdc),
     diagnosticPnlUsdc: numberOrZero(row?.diagnostic_pnl_usdc),
     economicPnlUsdc: numberOrZero(row?.economic_pnl_usdc),
