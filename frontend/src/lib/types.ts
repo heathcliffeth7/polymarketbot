@@ -639,6 +639,7 @@ export type AutoScopeTradeAnalysisTimeRange =
   | '6h'
   | '12h'
   | '24h'
+  | '48h'
   | '1w'
   | '1m'
   | 'custom';

@@ -24,13 +24,13 @@ test('buildTradeFlowAutoScopeAnalysisQuery includes filters and skips empty date
 
 test('buildTradeFlowAutoScopeAnalysisQuery includes relative range and skips dates', () => {
   const query = buildTradeFlowAutoScopeAnalysisQuery({
-    timeRange: '6h',
+    timeRange: '48h',
     from: '2026-04-01T00:00:00.000Z',
     to: '2026-04-02T00:00:00.000Z',
   });
   const params = new URLSearchParams(query);
 
-  assert.equal(params.get('timeRange'), '6h');
+  assert.equal(params.get('timeRange'), '48h');
   assert.equal(params.has('from'), false);
   assert.equal(params.has('to'), false);
 });

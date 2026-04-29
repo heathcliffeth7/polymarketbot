@@ -31,6 +31,18 @@ test('resolveAutoScopeTradeAnalysisDateFilters resolves weekly windows', () => {
   assert.equal(filters.to, '2026-04-25T12:00:00.000Z');
 });
 
+test('resolveAutoScopeTradeAnalysisDateFilters resolves 48h windows', () => {
+  const filters = resolveAutoScopeTradeAnalysisDateFilters({
+    timeRangeRaw: '48h',
+    now: NOW,
+  });
+
+  assert.equal(filters.error, null);
+  assert.equal(filters.timeRange, '48h');
+  assert.equal(filters.from, '2026-04-23T12:00:00.000Z');
+  assert.equal(filters.to, '2026-04-25T12:00:00.000Z');
+});
+
 test('resolveAutoScopeTradeAnalysisDateFilters keeps custom dates without a relative range', () => {
   const filters = resolveAutoScopeTradeAnalysisDateFilters({
     fromRaw: '2026-04-01T00:00:00.000Z',

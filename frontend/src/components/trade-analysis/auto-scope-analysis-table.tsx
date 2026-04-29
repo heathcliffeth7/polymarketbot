@@ -451,6 +451,7 @@ export function AutoScopeAnalysisTable() {
               <option value="6h">Son 6 saat</option>
               <option value="12h">Son 12 saat</option>
               <option value="24h">Son 24 saat</option>
+              <option value="48h">Son 48 saat</option>
               <option value="1w">Son 1 hafta</option>
               <option value="1m">Son 1 ay</option>
               <option value="custom">Ozel tarih</option>

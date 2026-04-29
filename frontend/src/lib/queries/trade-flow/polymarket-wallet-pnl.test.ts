@@ -30,6 +30,12 @@ test('3h trade analysis filter maps to supported Polymarket 6h history window', 
   assert.deepEqual(request, { interval: '6h', fidelity: '1h' });
 });
 
+test('48h trade analysis filter maps to supported Polymarket 1w history window', () => {
+  const request = __polymarketWalletPnlTestUtils.mapTimeRangeToUserPnlRequest('48h');
+
+  assert.deepEqual(request, { interval: '1w', fidelity: '3h' });
+});
+
 test('closed position realized pnl becomes Polymarket position pnl', () => {
   const stats = __polymarketWalletPnlTestUtils.buildPolymarketPositionStats({
     closedRows: [

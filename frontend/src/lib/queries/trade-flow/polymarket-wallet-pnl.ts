@@ -200,6 +200,7 @@ export function mapTimeRangeToUserPnlRequest(
       return { interval: '12h', fidelity: '1h' };
     case '24h':
       return { interval: '1d', fidelity: '1h' };
+    case '48h':
     case '1w':
       return { interval: '1w', fidelity: '3h' };
     case '1m':
