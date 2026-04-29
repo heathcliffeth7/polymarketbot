@@ -317,6 +317,21 @@ export function AutoScopeAnalysisTable() {
     setPage(1);
   }
 
+  function isSelectedDiagnostic(row: AutoScopeTradeAnalysisRow): boolean {
+    return (
+      selectedDiagnostic?.rowId === row.rowId &&
+      selectedDiagnostic.rootOrderId === row.rootOrderId
+    );
+  }
+
+  function toggleDiagnostic(row: AutoScopeTradeAnalysisRow) {
+    setSelectedDiagnostic((current) =>
+      current?.rowId === row.rowId && current.rootOrderId === row.rootOrderId
+        ? null
+        : { rowId: row.rowId, rootOrderId: row.rootOrderId }
+    );
+  }
+
   function handleTimeRangeChange(nextTimeRange: AutoScopeTradeAnalysisTimeRange) {
     setTimeRange(nextTimeRange);
     if (nextTimeRange !== 'custom') {
@@ -571,12 +586,10 @@ export function AutoScopeAnalysisTable() {
                 rows.map((row) => (
                   <TableRow
                     key={row.rowId}
-                    className={`border-zinc-800 hover:bg-zinc-950/60 ${
-                      selectedDiagnostic?.rowId === row.rowId &&
-                      selectedDiagnostic.rootOrderId === row.rootOrderId
-                        ? 'bg-zinc-950/80'
-                        : ''
+                    className={`cursor-pointer border-zinc-800 hover:bg-zinc-950/60 ${
+                      isSelectedDiagnostic(row) ? 'bg-zinc-950/80' : ''
                     }`}
+                    onClick={() => toggleDiagnostic(row)}
                   >
                     <TableCell>
                       <div className="space-y-1">
@@ -665,16 +678,9 @@ export function AutoScopeAnalysisTable() {
                     </TableCell>
                     <TableCell>
                       <Popover
-                        open={
-                          selectedDiagnostic?.rowId === row.rowId &&
-                          selectedDiagnostic.rootOrderId === row.rootOrderId
-                        }
+                        open={isSelectedDiagnostic(row)}
                         onOpenChange={(open) => {
-                          if (
-                            !open &&
-                            selectedDiagnostic?.rowId === row.rowId &&
-                            selectedDiagnostic.rootOrderId === row.rootOrderId
-                          ) {
+                          if (!open && isSelectedDiagnostic(row)) {
                             setSelectedDiagnostic(null);
                           }
                         }}
@@ -686,11 +692,7 @@ export function AutoScopeAnalysisTable() {
                             aria-label={`Trade detayini ac: ${row.marketSlug}`}
                             onClick={(event) => {
                               event.stopPropagation();
-                              setSelectedDiagnostic((current) =>
-                                current?.rowId === row.rowId
-                                  ? null
-                                  : { rowId: row.rowId, rootOrderId: row.rootOrderId }
-                              );
+                              toggleDiagnostic(row);
                             }}
                           >
                             <span className="block truncate font-medium text-zinc-100 group-hover:text-white">
