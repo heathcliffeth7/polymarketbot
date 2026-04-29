@@ -1129,6 +1129,22 @@ async fn finalize_builder_fill(
             }
         }
         if order.side == "sell" && order.trigger_condition.as_deref() == Some("cross_below") {
+            if let Err(err) = maybe_notify_pair_lock_adaptive_relax_sl(
+                repo,
+                parent_order,
+                order,
+                execution_price,
+                actual_fill_qty.unwrap_or(canonical_entry_qty),
+            )
+            .await
+            {
+                warn!(
+                    builder_order_id = order.id,
+                    parent_builder_order_id = parent_order.id,
+                    error = %err,
+                    "TRADE_BUILDER_ADAPTIVE_MAX_PRICE_RELAX_SL_NOTIFY_FAILED"
+                );
+            }
             if let Err(err) =
                 maybe_record_action_place_order_ptb_stop_loss_bump(repo, parent_order, order).await
             {

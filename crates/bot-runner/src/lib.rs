@@ -54,6 +54,9 @@ include!("trade_builder/pair_lock.rs");
 include!("trade_builder/pair_lock_child_nodes.rs");
 include!("trade_builder/pair_lock_edge_strategy.rs");
 include!("trade_builder/pair_lock_adaptive_max_price.rs");
+include!("trade_builder/pair_lock_adaptive_max_price_notify.rs");
+#[cfg(test)]
+include!("trade_builder/pair_lock_adaptive_max_price_tests.rs");
 include!("trade_builder/pair_lock_biased_hedge.rs");
 include!("trade_builder/pair_lock_biased_hedge_lifecycle.rs");
 #[cfg(test)]

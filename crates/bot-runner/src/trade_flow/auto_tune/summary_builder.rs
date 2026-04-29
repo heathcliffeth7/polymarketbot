@@ -24,7 +24,9 @@ pub(super) async fn maybe_record_trade_flow_auto_tune_market(
                 Some(&graph.context),
                 &run_spec.context,
             );
-            cfg.advice_enabled().then_some((action_node, cfg))
+            let adaptive_summary_enabled =
+                crate::action_place_order_uses_adaptive_max_price_strategy(&action_node);
+            (cfg.advice_enabled() || adaptive_summary_enabled).then_some((action_node, cfg))
         })
         .collect::<Vec<_>>();
     if enabled_action_nodes.is_empty() {
@@ -99,8 +101,25 @@ pub(super) async fn maybe_record_trade_flow_auto_tune_market(
             order_rollup,
         );
         repo.upsert_trade_flow_auto_tune_market_summary(&input).await?;
-        maybe_emit_trade_flow_auto_tune_advice(repo, run_spec, &action_node, &input.market_scope, &cfg)
+        if crate::action_place_order_uses_adaptive_max_price_strategy(&action_node) {
+            crate::maybe_notify_pair_lock_adaptive_market_summary(
+                repo,
+                run_spec,
+                &action_node,
+                &input,
+            )
             .await?;
+        }
+        if cfg.advice_enabled() {
+            maybe_emit_trade_flow_auto_tune_advice(
+                repo,
+                run_spec,
+                &action_node,
+                &input.market_scope,
+                &cfg,
+            )
+            .await?;
+        }
     }
 
     Ok(())

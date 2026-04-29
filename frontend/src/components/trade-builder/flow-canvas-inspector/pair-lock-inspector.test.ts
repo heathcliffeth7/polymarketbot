@@ -118,11 +118,19 @@ test('resolvePairLockSizingFieldVisibility shows adaptive max price fields only 
     }),
     false
   );
+  assert.equal(
+    resolvePairLockSizingFieldVisibility('notifyOnAdaptiveMaxPriceRelax', true, {
+      pairLockStrategy: 'adaptive_max_price_v1',
+      pairSizingMode: 'manual',
+    }),
+    true
+  );
 });
 
 test('isPairLockField includes locked pair stop-loss ignore toggle', () => {
   assert.equal(isPairLockField('pairIgnoreStopLossAfterLocked'), true);
   assert.equal(isPairLockField('pairLockStrategy'), true);
+  assert.equal(isPairLockField('notifyOnAdaptiveMaxPriceRelax'), true);
 });
 
 test('resolvePairLockStopLossFieldVisibility allows supported lead-leg stop-loss fields', () => {

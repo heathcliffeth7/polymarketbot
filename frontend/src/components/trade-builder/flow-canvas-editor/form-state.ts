@@ -169,6 +169,28 @@ export function updateNodeFieldState(
           (nextFields.adaptiveMaxPriceLateSizeMultiplier ?? '').trim() || '0.35';
         nextFields.adaptiveMaxPriceSlCooldownMarkets =
           (nextFields.adaptiveMaxPriceSlCooldownMarkets ?? '').trim() || '3';
+        nextFields.notifyOnAdaptiveMaxPriceEvaluated =
+          (nextFields.notifyOnAdaptiveMaxPriceEvaluated ?? '').trim() || 'false';
+        nextFields.notifyOnAdaptiveMaxPriceRelax =
+          (nextFields.notifyOnAdaptiveMaxPriceRelax ?? '').trim() || 'true';
+        nextFields.notifyOnAdaptiveMaxPriceRelaxSl =
+          (nextFields.notifyOnAdaptiveMaxPriceRelaxSl ?? '').trim() || 'true';
+        nextFields.notifyOnAdaptiveMaxPriceNoRelaxImportant =
+          (nextFields.notifyOnAdaptiveMaxPriceNoRelaxImportant ?? '').trim() || 'true';
+        nextFields.notifyOnAdaptiveMaxPriceMissResolved =
+          (nextFields.notifyOnAdaptiveMaxPriceMissResolved ?? '').trim() || 'true';
+        nextFields.notifyOnAdaptiveMaxPriceCooldown =
+          (nextFields.notifyOnAdaptiveMaxPriceCooldown ?? '').trim() || 'true';
+        nextFields.notifyOnAdaptiveMaxPriceSummary =
+          (nextFields.notifyOnAdaptiveMaxPriceSummary ?? '').trim() || 'true';
+        nextFields.notifyOnAdaptiveMaxPriceAllNoRelax =
+          (nextFields.notifyOnAdaptiveMaxPriceAllNoRelax ?? '').trim() || 'false';
+        nextFields.adaptiveMaxPriceNotifyMinIntervalSec =
+          (nextFields.adaptiveMaxPriceNotifyMinIntervalSec ?? '').trim() || '30';
+        nextFields.adaptiveMaxPriceNotifyIncludePayload =
+          (nextFields.adaptiveMaxPriceNotifyIncludePayload ?? '').trim() || 'false';
+        nextFields.adaptiveMaxPriceSummaryEveryMarkets =
+          (nextFields.adaptiveMaxPriceSummaryEveryMarkets ?? '').trim() || '5';
       } else if (pairLockStrategy === 'biased_hedge_v1') {
         nextFields.priceToBeatGuardEnabled = 'true';
         nextFields.priceToBeatMode = 'iv_mismatch_edge';

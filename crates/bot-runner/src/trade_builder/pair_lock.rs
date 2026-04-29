@@ -486,6 +486,16 @@ async fn execute_action_place_order_pair_lock(
             &market_slug,
             &primary_outcome_label,
         );
+        maybe_notify_pair_lock_adaptive_relax_allowed(
+            repo,
+            run,
+            node,
+            context,
+            &market_slug,
+            &primary_outcome_label,
+            &override_payload.diagnostics,
+        )
+        .await?;
         repo.append_trade_flow_event(
             Some(run.id),
             run.definition_id,

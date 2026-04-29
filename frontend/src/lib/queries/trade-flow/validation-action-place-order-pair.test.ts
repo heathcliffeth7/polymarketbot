@@ -167,6 +167,17 @@ function buildAdaptiveMaxPriceConfig(
     adaptiveMaxPriceLateExtraBufferCent: 1,
     adaptiveMaxPriceLateSizeMultiplier: 0.35,
     adaptiveMaxPriceSlCooldownMarkets: 3,
+    notifyOnAdaptiveMaxPriceEvaluated: false,
+    notifyOnAdaptiveMaxPriceRelax: true,
+    notifyOnAdaptiveMaxPriceRelaxSl: true,
+    notifyOnAdaptiveMaxPriceNoRelaxImportant: true,
+    notifyOnAdaptiveMaxPriceMissResolved: true,
+    notifyOnAdaptiveMaxPriceCooldown: true,
+    notifyOnAdaptiveMaxPriceSummary: true,
+    notifyOnAdaptiveMaxPriceAllNoRelax: false,
+    adaptiveMaxPriceNotifyMinIntervalSec: 30,
+    adaptiveMaxPriceNotifyIncludePayload: false,
+    adaptiveMaxPriceSummaryEveryMarkets: 5,
     ...overrides,
   };
 }
@@ -318,6 +329,21 @@ test('validateActionPlaceOrderConfig rejects invalid adaptive_max_price_v1 late 
   assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_late_risk_after'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_late_extra_buffer'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_late_size_multiplier'));
+});
+
+test('validateActionPlaceOrderConfig rejects invalid adaptive_max_price_v1 notify fields', () => {
+  const graph = buildAdaptiveMaxPriceGraph({
+    notifyOnAdaptiveMaxPriceRelax: 'maybe',
+    adaptiveMaxPriceNotifyIncludePayload: 'payload',
+    adaptiveMaxPriceNotifyMinIntervalSec: -1,
+    adaptiveMaxPriceSummaryEveryMarkets: 0,
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_adaptive_max_price');
+  assert.ok(issues.some((issue) => issue.code === 'invalid_notify_on_adaptive_max_price_relax'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_notify_include_payload'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_notify_min_interval'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_summary_every_markets'));
 });
 
 test('validateActionPlaceOrderConfig rejects adaptive_max_price_v1 without PTB guard', () => {

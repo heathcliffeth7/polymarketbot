@@ -73,6 +73,17 @@ test('action.place_order adaptive max price strategy round-trips guarded config'
     adaptiveMaxPriceLateExtraBufferCent: 1,
     adaptiveMaxPriceLateSizeMultiplier: 0.35,
     adaptiveMaxPriceSlCooldownMarkets: 3,
+    notifyOnAdaptiveMaxPriceEvaluated: false,
+    notifyOnAdaptiveMaxPriceRelax: true,
+    notifyOnAdaptiveMaxPriceRelaxSl: true,
+    notifyOnAdaptiveMaxPriceNoRelaxImportant: true,
+    notifyOnAdaptiveMaxPriceMissResolved: true,
+    notifyOnAdaptiveMaxPriceCooldown: true,
+    notifyOnAdaptiveMaxPriceSummary: true,
+    notifyOnAdaptiveMaxPriceAllNoRelax: false,
+    adaptiveMaxPriceNotifyMinIntervalSec: 30,
+    adaptiveMaxPriceNotifyIncludePayload: false,
+    adaptiveMaxPriceSummaryEveryMarkets: 5,
     pairLockDecisionQty: 9,
   });
 
@@ -84,6 +95,8 @@ test('action.place_order adaptive max price strategy round-trips guarded config'
   assert.equal(form.fields.adaptiveMaxPriceWindowStartSec, '120');
   assert.equal(form.fields.adaptiveMaxPriceWindowEndSec, '290');
   assert.equal(form.fields.adaptiveMaxPriceLateRiskEnabled, 'true');
+  assert.equal(form.fields.notifyOnAdaptiveMaxPriceRelax, 'true');
+  assert.equal(form.fields.adaptiveMaxPriceNotifyMinIntervalSec, '30');
 
   const rebuilt = buildNodeConfigFromForm('action.place_order', form);
   assert.equal(rebuilt.pairLockStrategy, 'adaptive_max_price_v1');
@@ -104,6 +117,17 @@ test('action.place_order adaptive max price strategy round-trips guarded config'
   assert.equal(rebuilt.adaptiveMaxPriceLateExtraBufferCent, 1);
   assert.equal(rebuilt.adaptiveMaxPriceLateSizeMultiplier, 0.35);
   assert.equal(rebuilt.adaptiveMaxPriceSlCooldownMarkets, 3);
+  assert.equal(rebuilt.notifyOnAdaptiveMaxPriceEvaluated, false);
+  assert.equal(rebuilt.notifyOnAdaptiveMaxPriceRelax, true);
+  assert.equal(rebuilt.notifyOnAdaptiveMaxPriceRelaxSl, true);
+  assert.equal(rebuilt.notifyOnAdaptiveMaxPriceNoRelaxImportant, true);
+  assert.equal(rebuilt.notifyOnAdaptiveMaxPriceMissResolved, true);
+  assert.equal(rebuilt.notifyOnAdaptiveMaxPriceCooldown, true);
+  assert.equal(rebuilt.notifyOnAdaptiveMaxPriceSummary, true);
+  assert.equal(rebuilt.notifyOnAdaptiveMaxPriceAllNoRelax, false);
+  assert.equal(rebuilt.adaptiveMaxPriceNotifyMinIntervalSec, 30);
+  assert.equal(rebuilt.adaptiveMaxPriceNotifyIncludePayload, false);
+  assert.equal(rebuilt.adaptiveMaxPriceSummaryEveryMarkets, 5);
   assert.equal('pairLockDecisionQty' in rebuilt, false);
   assert.equal('adaptiveMaxPriceLateRelaxCutoffS' in rebuilt, false);
 });
@@ -132,4 +156,7 @@ test('action.place_order adaptive max price strategy leaves blank window fields 
   assert.equal('adaptiveMaxPriceWindowEndSec' in rebuilt, false);
   assert.equal(rebuilt.adaptiveMaxPriceLateRiskEnabled, true);
   assert.equal(rebuilt.adaptiveMaxPriceLateRiskAfterSec, 210);
+  assert.equal(rebuilt.notifyOnAdaptiveMaxPriceRelax, true);
+  assert.equal(rebuilt.notifyOnAdaptiveMaxPriceAllNoRelax, false);
+  assert.equal(rebuilt.adaptiveMaxPriceSummaryEveryMarkets, 5);
 });

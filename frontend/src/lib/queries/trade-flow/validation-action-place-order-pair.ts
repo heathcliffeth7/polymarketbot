@@ -373,6 +373,10 @@ export function validateActionPlaceOrderPairLockConfig(
     const lateRiskAfter = lateRiskAfterProvided ? toFiniteNumber(config.adaptiveMaxPriceLateRiskAfterSec) : null;
     const lateExtraBuffer = lateExtraBufferProvided ? toFiniteNumber(config.adaptiveMaxPriceLateExtraBufferCent) : null;
     const lateSizeMultiplier = lateSizeMultiplierProvided ? toFiniteNumber(config.adaptiveMaxPriceLateSizeMultiplier) : null;
+    const notifyMinIntervalProvided = hasProvidedConfigValue(config.adaptiveMaxPriceNotifyMinIntervalSec);
+    const notifyMinInterval = notifyMinIntervalProvided ? toFiniteNumber(config.adaptiveMaxPriceNotifyMinIntervalSec) : null;
+    const summaryEveryProvided = hasProvidedConfigValue(config.adaptiveMaxPriceSummaryEveryMarkets);
+    const summaryEvery = summaryEveryProvided ? toFiniteNumber(config.adaptiveMaxPriceSummaryEveryMarkets) : null;
     if (missCount == null || missCount <= 0 || !Number.isInteger(missCount)) {
       pushNodeError(issues, node, 'invalid_adaptive_max_price_miss_count', 'adaptiveMaxPriceMissCount must be a positive integer.');
     }
@@ -427,6 +431,27 @@ export function validateActionPlaceOrderPairLockConfig(
     }
     if (lateSizeMultiplierProvided && (lateSizeMultiplier == null || lateSizeMultiplier <= 0 || lateSizeMultiplier > 1)) {
       pushNodeError(issues, node, 'invalid_adaptive_max_price_late_size_multiplier', 'adaptiveMaxPriceLateSizeMultiplier must be in (0, 1].');
+    }
+    for (const [key, code] of [
+      ['notifyOnAdaptiveMaxPriceEvaluated', 'invalid_notify_on_adaptive_max_price_evaluated'],
+      ['notifyOnAdaptiveMaxPriceRelax', 'invalid_notify_on_adaptive_max_price_relax'],
+      ['notifyOnAdaptiveMaxPriceRelaxSl', 'invalid_notify_on_adaptive_max_price_relax_sl'],
+      ['notifyOnAdaptiveMaxPriceNoRelaxImportant', 'invalid_notify_on_adaptive_max_price_no_relax_important'],
+      ['notifyOnAdaptiveMaxPriceMissResolved', 'invalid_notify_on_adaptive_max_price_miss_resolved'],
+      ['notifyOnAdaptiveMaxPriceCooldown', 'invalid_notify_on_adaptive_max_price_cooldown'],
+      ['notifyOnAdaptiveMaxPriceSummary', 'invalid_notify_on_adaptive_max_price_summary'],
+      ['notifyOnAdaptiveMaxPriceAllNoRelax', 'invalid_notify_on_adaptive_max_price_all_no_relax'],
+      ['adaptiveMaxPriceNotifyIncludePayload', 'invalid_adaptive_max_price_notify_include_payload'],
+    ] as const) {
+      if (config[key] != null && toBooleanish(config[key]) == null) {
+        pushNodeError(issues, node, code, `action.place_order ${key} must be boolean (true/false).`);
+      }
+    }
+    if (notifyMinIntervalProvided && (notifyMinInterval == null || !Number.isInteger(notifyMinInterval) || notifyMinInterval < 0)) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_notify_min_interval', 'adaptiveMaxPriceNotifyMinIntervalSec must be an integer >= 0.');
+    }
+    if (summaryEveryProvided && (summaryEvery == null || !Number.isInteger(summaryEvery) || summaryEvery <= 0)) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_summary_every_markets', 'adaptiveMaxPriceSummaryEveryMarkets must be a positive integer.');
     }
   }
   if (usesBiasedHedge) {

@@ -2,11 +2,7 @@ import { toStringValue } from './utils';
 import { normalizePtbStopLossGapUnit } from './ptb-stop-loss';
 import { normalizePtbMode } from './ptb-modes';
 
-export const PAIR_LOCK_CONFIG_KEYS = [
-  'pairLockStrategy',
-  'pairLockDecisionQty',
-  'pairLockSingleEdgeThreshold',
-  'pairLockCostBuffer',
+const ADAPTIVE_MAX_PRICE_CONFIG_KEYS = [
   'adaptiveMaxPriceMissCount',
   'adaptiveMaxPriceRequiredGoodMissCount',
   'adaptiveMaxPriceRelaxCreditCent',
@@ -23,6 +19,25 @@ export const PAIR_LOCK_CONFIG_KEYS = [
   'adaptiveMaxPriceLateExtraBufferCent',
   'adaptiveMaxPriceLateSizeMultiplier',
   'adaptiveMaxPriceSlCooldownMarkets',
+  'notifyOnAdaptiveMaxPriceEvaluated',
+  'notifyOnAdaptiveMaxPriceRelax',
+  'notifyOnAdaptiveMaxPriceRelaxSl',
+  'notifyOnAdaptiveMaxPriceNoRelaxImportant',
+  'notifyOnAdaptiveMaxPriceMissResolved',
+  'notifyOnAdaptiveMaxPriceCooldown',
+  'notifyOnAdaptiveMaxPriceSummary',
+  'notifyOnAdaptiveMaxPriceAllNoRelax',
+  'adaptiveMaxPriceNotifyMinIntervalSec',
+  'adaptiveMaxPriceNotifyIncludePayload',
+  'adaptiveMaxPriceSummaryEveryMarkets',
+] as const;
+
+export const PAIR_LOCK_CONFIG_KEYS = [
+  'pairLockStrategy',
+  'pairLockDecisionQty',
+  'pairLockSingleEdgeThreshold',
+  'pairLockCostBuffer',
+  ...ADAPTIVE_MAX_PRICE_CONFIG_KEYS,
   'biasedHedge',
   'biasedHedgeStop',
   'biasedHedgePrimaryBudgetUsdc',
@@ -288,6 +303,17 @@ export function applyPairLockFormDefaults(
     setDefault(fields, 'adaptiveMaxPriceLateExtraBufferCent', '1');
     setDefault(fields, 'adaptiveMaxPriceLateSizeMultiplier', '0.35');
     setDefault(fields, 'adaptiveMaxPriceSlCooldownMarkets', '3');
+    setDefault(fields, 'notifyOnAdaptiveMaxPriceEvaluated', 'false');
+    setDefault(fields, 'notifyOnAdaptiveMaxPriceRelax', 'true');
+    setDefault(fields, 'notifyOnAdaptiveMaxPriceRelaxSl', 'true');
+    setDefault(fields, 'notifyOnAdaptiveMaxPriceNoRelaxImportant', 'true');
+    setDefault(fields, 'notifyOnAdaptiveMaxPriceMissResolved', 'true');
+    setDefault(fields, 'notifyOnAdaptiveMaxPriceCooldown', 'true');
+    setDefault(fields, 'notifyOnAdaptiveMaxPriceSummary', 'true');
+    setDefault(fields, 'notifyOnAdaptiveMaxPriceAllNoRelax', 'false');
+    setDefault(fields, 'adaptiveMaxPriceNotifyMinIntervalSec', '30');
+    setDefault(fields, 'adaptiveMaxPriceNotifyIncludePayload', 'false');
+    setDefault(fields, 'adaptiveMaxPriceSummaryEveryMarkets', '5');
   } else if (fields.pairLockStrategy === 'biased_hedge_v1') {
     applyBiasedHedgeFormDefaults(fields, cfg);
   }
@@ -359,6 +385,21 @@ function normalizeIntegerField(
 ): void {
   const value = Number(toStringValue(config[key]).trim());
   config[key] = Number.isInteger(value) && value >= min && value <= max ? value : fallback;
+}
+
+function normalizePositiveIntegerField(
+  config: Record<string, unknown>,
+  key: string,
+  fallback: number
+): void {
+  const value = Number(toStringValue(config[key]).trim());
+  config[key] = Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function deleteAdaptiveMaxPriceConfig(config: Record<string, unknown>): void {
+  for (const key of ADAPTIVE_MAX_PRICE_CONFIG_KEYS) {
+    delete config[key];
+  }
 }
 
 function positiveNumber(config: Record<string, unknown>, key: string, fallback: number): number {
@@ -441,22 +482,7 @@ function normalizeBiasedHedgeBuildConfig(config: Record<string, unknown>): void 
   delete config.pairLockDecisionQty;
   delete config.pairLockSingleEdgeThreshold;
   delete config.pairLockCostBuffer;
-  delete config.adaptiveMaxPriceMissCount;
-  delete config.adaptiveMaxPriceRequiredGoodMissCount;
-  delete config.adaptiveMaxPriceRelaxCreditCent;
-  delete config.adaptiveMaxPriceMaxRelaxCreditCent;
-  delete config.adaptiveMaxPriceHardCapCent;
-  delete config.adaptiveMaxPriceExtraBufferCent;
-  delete config.adaptiveMaxPricePairBufferCent;
-  delete config.adaptiveMaxPriceSizeMultiplier;
-  delete config.adaptiveMaxPriceWindowStartSec;
-  delete config.adaptiveMaxPriceWindowEndSec;
-  delete config.adaptiveMaxPriceLateRelaxCutoffS;
-  delete config.adaptiveMaxPriceLateRiskEnabled;
-  delete config.adaptiveMaxPriceLateRiskAfterSec;
-  delete config.adaptiveMaxPriceLateExtraBufferCent;
-  delete config.adaptiveMaxPriceLateSizeMultiplier;
-  delete config.adaptiveMaxPriceSlCooldownMarkets;
+  deleteAdaptiveMaxPriceConfig(config);
   delete config.pairTotalBudgetUsdc;
   delete config.counterLegSizeUsdc;
 }
@@ -479,22 +505,7 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     normalizePositiveNumberField(config, 'pairLockDecisionQty', 5);
     normalizeNonNegativeNumberField(config, 'pairLockSingleEdgeThreshold', 0.10);
     normalizeNonNegativeNumberField(config, 'pairLockCostBuffer', 0.005);
-    delete config.adaptiveMaxPriceMissCount;
-    delete config.adaptiveMaxPriceRequiredGoodMissCount;
-    delete config.adaptiveMaxPriceRelaxCreditCent;
-    delete config.adaptiveMaxPriceMaxRelaxCreditCent;
-    delete config.adaptiveMaxPriceHardCapCent;
-    delete config.adaptiveMaxPriceExtraBufferCent;
-    delete config.adaptiveMaxPricePairBufferCent;
-    delete config.adaptiveMaxPriceSizeMultiplier;
-    delete config.adaptiveMaxPriceWindowStartSec;
-    delete config.adaptiveMaxPriceWindowEndSec;
-    delete config.adaptiveMaxPriceLateRelaxCutoffS;
-    delete config.adaptiveMaxPriceLateRiskEnabled;
-    delete config.adaptiveMaxPriceLateRiskAfterSec;
-    delete config.adaptiveMaxPriceLateExtraBufferCent;
-    delete config.adaptiveMaxPriceLateSizeMultiplier;
-    delete config.adaptiveMaxPriceSlCooldownMarkets;
+    deleteAdaptiveMaxPriceConfig(config);
   } else if (pairLockStrategy === 'adaptive_max_price_v1') {
     config.pairLockStrategy = 'adaptive_max_price_v1';
     config.priceToBeatGuardEnabled = true;
@@ -515,6 +526,17 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     normalizeNonNegativeNumberField(config, 'adaptiveMaxPriceLateExtraBufferCent', 1);
     normalizePositiveNumberField(config, 'adaptiveMaxPriceLateSizeMultiplier', 0.35);
     normalizeNonNegativeNumberField(config, 'adaptiveMaxPriceSlCooldownMarkets', 3);
+    config.notifyOnAdaptiveMaxPriceEvaluated = booleanValue(config, 'notifyOnAdaptiveMaxPriceEvaluated', false);
+    config.notifyOnAdaptiveMaxPriceRelax = booleanValue(config, 'notifyOnAdaptiveMaxPriceRelax', true);
+    config.notifyOnAdaptiveMaxPriceRelaxSl = booleanValue(config, 'notifyOnAdaptiveMaxPriceRelaxSl', true);
+    config.notifyOnAdaptiveMaxPriceNoRelaxImportant = booleanValue(config, 'notifyOnAdaptiveMaxPriceNoRelaxImportant', true);
+    config.notifyOnAdaptiveMaxPriceMissResolved = booleanValue(config, 'notifyOnAdaptiveMaxPriceMissResolved', true);
+    config.notifyOnAdaptiveMaxPriceCooldown = booleanValue(config, 'notifyOnAdaptiveMaxPriceCooldown', true);
+    config.notifyOnAdaptiveMaxPriceSummary = booleanValue(config, 'notifyOnAdaptiveMaxPriceSummary', true);
+    config.notifyOnAdaptiveMaxPriceAllNoRelax = booleanValue(config, 'notifyOnAdaptiveMaxPriceAllNoRelax', false);
+    normalizeIntegerField(config, 'adaptiveMaxPriceNotifyMinIntervalSec', 30, 0, Number.MAX_SAFE_INTEGER);
+    config.adaptiveMaxPriceNotifyIncludePayload = booleanValue(config, 'adaptiveMaxPriceNotifyIncludePayload', false);
+    normalizePositiveIntegerField(config, 'adaptiveMaxPriceSummaryEveryMarkets', 5);
     delete config.pairLockDecisionQty;
     delete config.pairLockSingleEdgeThreshold;
     delete config.pairLockCostBuffer;
@@ -525,22 +547,7 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     delete config.pairLockDecisionQty;
     delete config.pairLockSingleEdgeThreshold;
     delete config.pairLockCostBuffer;
-    delete config.adaptiveMaxPriceMissCount;
-    delete config.adaptiveMaxPriceRequiredGoodMissCount;
-    delete config.adaptiveMaxPriceRelaxCreditCent;
-    delete config.adaptiveMaxPriceMaxRelaxCreditCent;
-    delete config.adaptiveMaxPriceHardCapCent;
-    delete config.adaptiveMaxPriceExtraBufferCent;
-    delete config.adaptiveMaxPricePairBufferCent;
-    delete config.adaptiveMaxPriceSizeMultiplier;
-    delete config.adaptiveMaxPriceWindowStartSec;
-    delete config.adaptiveMaxPriceWindowEndSec;
-    delete config.adaptiveMaxPriceLateRelaxCutoffS;
-    delete config.adaptiveMaxPriceLateRiskEnabled;
-    delete config.adaptiveMaxPriceLateRiskAfterSec;
-    delete config.adaptiveMaxPriceLateExtraBufferCent;
-    delete config.adaptiveMaxPriceLateSizeMultiplier;
-    delete config.adaptiveMaxPriceSlCooldownMarkets;
+    deleteAdaptiveMaxPriceConfig(config);
     delete config.biasedHedge;
     delete config.biasedHedgeStop;
     delete config.biasedHedgeMaxPairedEffectiveCostCent;
