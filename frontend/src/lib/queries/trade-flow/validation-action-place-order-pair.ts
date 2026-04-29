@@ -201,6 +201,14 @@ export function validateActionPlaceOrderPairLockConfig(
         'action.place_order adaptive_max_price_v1 requires mode=pair_lock.'
       );
     }
+    if (configuredPairLockStrategy === 'manual_adaptive_risk_v1') {
+      pushNodeError(
+        issues,
+        node,
+        'manual_adaptive_risk_requires_pair_lock_mode',
+        'action.place_order manual_adaptive_risk_v1 requires mode=pair_lock.'
+      );
+    }
     return;
   }
 
@@ -281,18 +289,20 @@ export function validateActionPlaceOrderPairLockConfig(
     pairLockStrategy !== 'legacy' &&
     pairLockStrategy !== 'edge_pairlock_v1' &&
     pairLockStrategy !== 'biased_hedge_v1' &&
-    pairLockStrategy !== 'adaptive_max_price_v1'
+    pairLockStrategy !== 'adaptive_max_price_v1' &&
+    pairLockStrategy !== 'manual_adaptive_risk_v1'
   ) {
     pushNodeError(
       issues,
       node,
       'invalid_pair_lock_strategy',
-      'action.place_order pairLockStrategy must be legacy, edge_pairlock_v1, biased_hedge_v1, or adaptive_max_price_v1.'
+      'action.place_order pairLockStrategy must be legacy, edge_pairlock_v1, biased_hedge_v1, adaptive_max_price_v1, or manual_adaptive_risk_v1.'
     );
   }
   const usesEdgePairLock = pairLockStrategy === 'edge_pairlock_v1';
   const usesBiasedHedge = pairLockStrategy === 'biased_hedge_v1';
   const usesAdaptiveMaxPrice = pairLockStrategy === 'adaptive_max_price_v1';
+  const usesManualAdaptiveRisk = pairLockStrategy === 'manual_adaptive_risk_v1';
   if (usesEdgePairLock) {
     if (toBooleanish(config.priceToBeatGuardEnabled) !== true) {
       pushNodeError(
@@ -452,6 +462,103 @@ export function validateActionPlaceOrderPairLockConfig(
     }
     if (summaryEveryProvided && (summaryEvery == null || !Number.isInteger(summaryEvery) || summaryEvery <= 0)) {
       pushNodeError(issues, node, 'invalid_adaptive_max_price_summary_every_markets', 'adaptiveMaxPriceSummaryEveryMarkets must be a positive integer.');
+    }
+  }
+  if (usesManualAdaptiveRisk) {
+    if (toBooleanish(config.priceToBeatGuardEnabled) !== true) {
+      pushNodeError(
+        issues,
+        node,
+        'manual_adaptive_risk_requires_ptb_guard',
+        'action.place_order manual_adaptive_risk_v1 requires priceToBeatGuardEnabled=true.'
+      );
+    }
+    if (toTrimmedString(config.priceToBeatMode).toLowerCase() !== 'manual') {
+      pushNodeError(
+        issues,
+        node,
+        'manual_adaptive_risk_requires_manual_ptb',
+        'action.place_order manual_adaptive_risk_v1 requires priceToBeatMode=manual.'
+      );
+    }
+    const windowStartProvided = hasProvidedConfigValue(config.manualAdaptiveWindowStartSec);
+    const windowEndProvided = hasProvidedConfigValue(config.manualAdaptiveWindowEndSec);
+    const windowStart = windowStartProvided ? toFiniteNumber(config.manualAdaptiveWindowStartSec) : null;
+    const windowEnd = windowEndProvided ? toFiniteNumber(config.manualAdaptiveWindowEndSec) : null;
+    if (windowStartProvided && (windowStart == null || !Number.isInteger(windowStart) || windowStart < 0 || windowStart > 300)) {
+      pushNodeError(issues, node, 'invalid_manual_adaptive_window_start', 'manualAdaptiveWindowStartSec must be an integer in [0, 300] when provided.');
+    }
+    if (windowEndProvided && (windowEnd == null || !Number.isInteger(windowEnd) || windowEnd < 0 || windowEnd > 300)) {
+      pushNodeError(issues, node, 'invalid_manual_adaptive_window_end', 'manualAdaptiveWindowEndSec must be an integer in [0, 300] when provided.');
+    }
+    if (windowStart != null && windowEnd != null && windowStart >= windowEnd) {
+      pushNodeError(issues, node, 'invalid_manual_adaptive_window_range', 'manualAdaptiveWindowStartSec must be < manualAdaptiveWindowEndSec.');
+    }
+    const normalLt = toFiniteNumber(config.manualAdaptiveVolumeNormalLt);
+    const elevatedLt = toFiniteNumber(config.manualAdaptiveVolumeElevatedLt);
+    const highLt = toFiniteNumber(config.manualAdaptiveVolumeHighLt);
+    if (
+      normalLt == null ||
+      elevatedLt == null ||
+      highLt == null ||
+      normalLt <= 0 ||
+      !(normalLt < elevatedLt && elevatedLt < highLt)
+    ) {
+      pushNodeError(issues, node, 'invalid_manual_adaptive_volume_thresholds', 'manual adaptive volume thresholds must be positive and ascending.');
+    }
+    for (const [key, code] of [
+      ['manualAdaptiveTrendDeltaUsd', 'invalid_manual_adaptive_trend_delta'],
+      ['manualAdaptiveNormalCollapsingMaxPriceCent', 'invalid_manual_adaptive_normal_collapsing_max_price'],
+      ['manualAdaptiveElevatedMaxPriceCent', 'invalid_manual_adaptive_elevated_max_price'],
+      ['manualAdaptiveHighMaxPriceCent', 'invalid_manual_adaptive_high_max_price'],
+    ] as const) {
+      const value = toFiniteNumber(config[key]);
+      if (value == null || value <= 0 || (key.endsWith('MaxPriceCent') && value >= 100)) {
+        pushNodeError(issues, node, code, `action.place_order ${key} must be in the valid positive range.`);
+      }
+    }
+    for (const [key, code] of [
+      ['manualAdaptiveNormalFlatSizeMultiplier', 'invalid_manual_adaptive_normal_flat_size'],
+      ['manualAdaptiveNormalCollapsingSizeMultiplier', 'invalid_manual_adaptive_normal_collapsing_size'],
+      ['manualAdaptiveElevatedSizeMultiplier', 'invalid_manual_adaptive_elevated_size'],
+      ['manualAdaptiveHighSizeMultiplier', 'invalid_manual_adaptive_high_size'],
+    ] as const) {
+      const value = toFiniteNumber(config[key]);
+      if (value == null || value <= 0 || value > 1) {
+        pushNodeError(issues, node, code, `action.place_order ${key} must be in (0, 1].`);
+      }
+    }
+    for (const [key, code] of [
+      ['manualAdaptiveNormalFlatMaxPriceSubCent', 'invalid_manual_adaptive_normal_flat_max_sub'],
+      ['manualAdaptiveNormalFlatPtbGapAddCent', 'invalid_manual_adaptive_normal_flat_ptb_add'],
+      ['manualAdaptiveNormalCollapsingPtbGapAddCent', 'invalid_manual_adaptive_normal_collapsing_ptb_add'],
+      ['manualAdaptiveElevatedPtbGapAddCent', 'invalid_manual_adaptive_elevated_ptb_add'],
+      ['manualAdaptiveHighPtbGapAddCent', 'invalid_manual_adaptive_high_ptb_add'],
+      ['manualAdaptiveAfterSlMaxPriceSubCent', 'invalid_manual_adaptive_after_sl_max_sub'],
+      ['manualAdaptiveAfterSlPtbGapAddCent', 'invalid_manual_adaptive_after_sl_ptb_add'],
+      ['manualAdaptiveSlCooldownMarkets', 'invalid_manual_adaptive_sl_cooldown'],
+      ['manualAdaptivePairBufferCent', 'invalid_manual_adaptive_pair_buffer'],
+    ] as const) {
+      const value = toFiniteNumber(config[key]);
+      if (value == null || value < 0) {
+        pushNodeError(issues, node, code, `action.place_order ${key} must be >= 0.`);
+      }
+    }
+    for (const [key, code] of [
+      ['notifyOnManualAdaptiveRiskBlock', 'invalid_notify_on_manual_adaptive_risk_block'],
+      ['notifyOnManualAdaptiveRiskStrict', 'invalid_notify_on_manual_adaptive_risk_strict'],
+      ['notifyOnManualAdaptiveRiskSlBump', 'invalid_notify_on_manual_adaptive_risk_sl_bump'],
+      ['notifyOnManualAdaptiveRiskSummary', 'invalid_notify_on_manual_adaptive_risk_summary'],
+      ['manualAdaptiveNotifyIncludePayload', 'invalid_manual_adaptive_notify_include_payload'],
+    ] as const) {
+      if (config[key] != null && toBooleanish(config[key]) == null) {
+        pushNodeError(issues, node, code, `action.place_order ${key} must be boolean (true/false).`);
+      }
+    }
+    const notifyMinIntervalProvided = hasProvidedConfigValue(config.manualAdaptiveNotifyMinIntervalSec);
+    const notifyMinInterval = notifyMinIntervalProvided ? toFiniteNumber(config.manualAdaptiveNotifyMinIntervalSec) : null;
+    if (notifyMinIntervalProvided && (notifyMinInterval == null || !Number.isInteger(notifyMinInterval) || notifyMinInterval < 0)) {
+      pushNodeError(issues, node, 'invalid_manual_adaptive_notify_min_interval', 'manualAdaptiveNotifyMinIntervalSec must be an integer >= 0.');
     }
   }
   if (usesBiasedHedge) {

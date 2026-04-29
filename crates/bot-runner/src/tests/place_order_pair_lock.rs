@@ -43,6 +43,7 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
         "Up",
         "trigger_pair",
         None,
+        None,
     );
     let counter = build_pair_lock_counter_leg_node(
         &node,
@@ -53,6 +54,7 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
         },
         &pair_lock,
         "trigger_pair",
+        None,
     );
 
     for candidate in [&primary, &counter] {
@@ -206,6 +208,7 @@ fn pair_lock_adaptive_max_price_override_only_changes_primary_child() {
         "Up",
         "trigger_pair",
         Some(&adaptive),
+        None,
     );
     let counter = build_pair_lock_counter_leg_node(
         &node,
@@ -216,6 +219,7 @@ fn pair_lock_adaptive_max_price_override_only_changes_primary_child() {
         },
         &pair_lock,
         "trigger_pair",
+        None,
     );
 
     assert_eq!(
@@ -243,6 +247,101 @@ fn pair_lock_adaptive_max_price_override_only_changes_primary_child() {
     );
     assert!(counter.config.get("adaptiveMaxPriceApplied").is_none());
     assert!(counter.config.get("adaptiveMaxPrice").is_none());
+}
+
+#[test]
+fn pair_lock_manual_adaptive_override_tightens_primary_and_counter_cap() {
+    let node = test_node(json!({
+        "mode": "pair_lock",
+        "pairLockStrategy": "manual_adaptive_risk_v1",
+        "side": "buy",
+        "executionMode": "market",
+        "sizeUsdc": 5,
+        "maxPriceCent": 70,
+        "pairMaxTotalCent": 96,
+        "priceToBeatGuardEnabled": true,
+        "priceToBeatMode": "manual",
+        "priceToBeatMaxDiff": 20,
+        "priceToBeatMaxDiffUnit": "cent",
+        "counterLegEnabled": true,
+        "counterLegSizeUsdc": 5,
+        "counterLegOutcomeLabel": "opposite",
+        "counterLegMaxPriceCent": 70,
+        "reenterOnSlHit": true,
+    }));
+    let pair_lock = resolve_action_place_order_pair_lock_config(&node)
+        .expect("pair lock config parse")
+        .expect("pair lock config");
+    let manual = PairLockManualAdaptiveRiskOverride {
+        effective_max_price: 0.58,
+        effective_size_usdc: 1.5,
+        effective_ptb_threshold_value: Some(45.0),
+        effective_ptb_threshold_unit: Some("cent".to_string()),
+        counter_max_price: Some(0.37),
+        diagnostics: json!({"decision": "ALLOW_STRICT"}),
+    };
+
+    let primary = build_pair_lock_single_leg_node(
+        &node,
+        "eth-updown-5m-1",
+        "tok-up",
+        "Up",
+        "trigger_pair",
+        None,
+        Some(&manual),
+    );
+    let counter = build_pair_lock_counter_leg_node(
+        &node,
+        "eth-updown-5m-1",
+        &ActionPlaceOrderPairResolvedCounterLeg {
+            token_id: "tok-down".to_string(),
+            outcome_label: "Down".to_string(),
+        },
+        &pair_lock,
+        "trigger_pair",
+        Some(&manual),
+    );
+
+    assert_eq!(
+        primary.config.get("maxPriceCent").and_then(Value::as_f64),
+        Some(58.0)
+    );
+    assert_eq!(
+        primary.config.get("sizeUsdc").and_then(Value::as_f64),
+        Some(1.5)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("priceToBeatMaxDiff")
+            .and_then(Value::as_f64),
+        Some(45.0)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("reenterOnSlHit")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("manualAdaptiveRiskApplied")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        counter.config.get("maxPriceCent").and_then(Value::as_f64),
+        Some(37.0)
+    );
+    assert_eq!(
+        counter
+            .config
+            .get("manualAdaptiveRiskCounterCapApplied")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
 }
 
 #[test]
@@ -292,6 +391,7 @@ fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
         "Up",
         "trigger_pair",
         None,
+        None,
     );
     let counter = build_pair_lock_counter_leg_node(
         &node,
@@ -302,6 +402,7 @@ fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
         },
         &pair_lock,
         "trigger_pair",
+        None,
     );
 
     assert_eq!(
@@ -441,6 +542,7 @@ fn pair_lock_counter_leg_keeps_stop_loss_fields_empty_when_counter_fields_missin
         },
         &pair_lock,
         "trigger_pair",
+        None,
     );
 
     assert!(counter.config.get("tpEnabled").is_none());
@@ -500,6 +602,7 @@ fn pair_lock_disabled_protective_unwind_forces_counter_guard_retries() {
         },
         &pair_lock,
         "trigger_pair",
+        None,
     );
 
     assert!(!pair_lock.protective_unwind_enabled);

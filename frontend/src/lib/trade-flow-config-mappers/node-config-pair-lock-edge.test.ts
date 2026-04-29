@@ -160,3 +160,50 @@ test('action.place_order adaptive max price strategy leaves blank window fields 
   assert.equal(rebuilt.notifyOnAdaptiveMaxPriceAllNoRelax, false);
   assert.equal(rebuilt.adaptiveMaxPriceSummaryEveryMarkets, 5);
 });
+
+test('action.place_order manual adaptive risk strategy round-trips guarded config', () => {
+  const form = parseNodeConfigToForm('action.place_order', {
+    mode: 'pair_lock',
+    pairLockStrategy: 'manual_adaptive_risk_v1',
+    pairSizingMode: 'auto_remaining_budget',
+    side: 'buy',
+    executionMode: 'market',
+    sizeMode: 'usdc',
+    sizeUsdc: 5,
+    maxPriceCent: 70,
+    pairMaxTotalCent: 96,
+    pairTotalBudgetUsdc: 10,
+    counterLegEnabled: true,
+    counterLegOutcomeLabel: 'opposite',
+    priceToBeatGuardEnabled: false,
+    priceToBeatMode: 'iv_mismatch_edge',
+    manualAdaptiveWindowStartSec: 120,
+    manualAdaptiveWindowEndSec: 290,
+    manualAdaptiveHighMaxPriceCent: 58,
+    manualAdaptiveHighSizeMultiplier: 0.3,
+    manualAdaptiveHighPtbGapAddCent: 25,
+    manualAdaptivePairBufferCent: 1,
+    notifyOnManualAdaptiveRiskBlock: true,
+    manualAdaptiveNotifyIncludePayload: false,
+    adaptiveMaxPriceHardCapCent: 76,
+  });
+
+  assert.equal(form.fields.pairLockStrategy, 'manual_adaptive_risk_v1');
+  assert.equal(form.fields.priceToBeatGuardEnabled, 'true');
+  assert.equal(form.fields.priceToBeatMode, 'manual');
+  assert.equal(form.fields.manualAdaptiveHighMaxPriceCent, '58');
+
+  const rebuilt = buildNodeConfigFromForm('action.place_order', form);
+  assert.equal(rebuilt.pairLockStrategy, 'manual_adaptive_risk_v1');
+  assert.equal(rebuilt.priceToBeatGuardEnabled, true);
+  assert.equal(rebuilt.priceToBeatMode, 'manual');
+  assert.equal(rebuilt.manualAdaptiveWindowStartSec, 120);
+  assert.equal(rebuilt.manualAdaptiveWindowEndSec, 290);
+  assert.equal(rebuilt.manualAdaptiveHighMaxPriceCent, 58);
+  assert.equal(rebuilt.manualAdaptiveHighSizeMultiplier, 0.3);
+  assert.equal(rebuilt.manualAdaptiveHighPtbGapAddCent, 25);
+  assert.equal(rebuilt.manualAdaptivePairBufferCent, 1);
+  assert.equal(rebuilt.notifyOnManualAdaptiveRiskBlock, true);
+  assert.equal(rebuilt.manualAdaptiveNotifyIncludePayload, false);
+  assert.equal('adaptiveMaxPriceHardCapCent' in rebuilt, false);
+});

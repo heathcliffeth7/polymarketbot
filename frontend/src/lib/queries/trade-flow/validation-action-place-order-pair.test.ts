@@ -201,6 +201,76 @@ function buildAdaptiveMaxPriceGraph(
   });
 }
 
+function buildManualAdaptiveRiskConfig(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    mode: 'pair_lock',
+    pairLockStrategy: 'manual_adaptive_risk_v1',
+    side: 'buy',
+    executionMode: 'market',
+    sizeMode: 'usdc',
+    sizeUsdc: 5,
+    maxPriceCent: 70,
+    priceToBeatGuardEnabled: true,
+    priceToBeatMode: 'manual',
+    priceToBeatMaxDiff: 20,
+    priceToBeatMaxDiffUnit: 'cent',
+    pairMaxTotalCent: 96,
+    pairOrphanGraceMs: 1500,
+    pairSizingMode: 'auto_remaining_budget',
+    pairTotalBudgetUsdc: 10,
+    counterLegEnabled: true,
+    counterLegOutcomeLabel: 'opposite',
+    manualAdaptiveVolumeNormalLt: 1.5,
+    manualAdaptiveVolumeElevatedLt: 2.5,
+    manualAdaptiveVolumeHighLt: 4,
+    manualAdaptiveTrendDeltaUsd: 0.05,
+    manualAdaptiveNormalFlatMaxPriceSubCent: 2,
+    manualAdaptiveNormalFlatSizeMultiplier: 0.8,
+    manualAdaptiveNormalFlatPtbGapAddCent: 5,
+    manualAdaptiveNormalCollapsingMaxPriceCent: 62,
+    manualAdaptiveNormalCollapsingSizeMultiplier: 0.4,
+    manualAdaptiveNormalCollapsingPtbGapAddCent: 15,
+    manualAdaptiveElevatedMaxPriceCent: 66,
+    manualAdaptiveElevatedSizeMultiplier: 0.6,
+    manualAdaptiveElevatedPtbGapAddCent: 10,
+    manualAdaptiveHighMaxPriceCent: 58,
+    manualAdaptiveHighSizeMultiplier: 0.3,
+    manualAdaptiveHighPtbGapAddCent: 25,
+    manualAdaptiveAfterSlMaxPriceSubCent: 5,
+    manualAdaptiveAfterSlPtbGapAddCent: 15,
+    manualAdaptiveSlCooldownMarkets: 3,
+    manualAdaptivePairBufferCent: 1,
+    notifyOnManualAdaptiveRiskBlock: true,
+    notifyOnManualAdaptiveRiskStrict: true,
+    notifyOnManualAdaptiveRiskSlBump: true,
+    notifyOnManualAdaptiveRiskSummary: true,
+    manualAdaptiveNotifyMinIntervalSec: 30,
+    manualAdaptiveNotifyIncludePayload: false,
+    ...overrides,
+  };
+}
+
+function buildManualAdaptiveRiskGraph(
+  actionOverrides: Record<string, unknown> = {}
+): TradeFlowGraph {
+  return normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_manual_adaptive_risk'),
+      {
+        key: 'pair_buy_manual_adaptive_risk',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: buildManualAdaptiveRiskConfig(actionOverrides),
+      },
+    ],
+    edges: [{ key: 'edge_manual_adaptive_risk', source: 'trigger_manual_adaptive_risk', target: 'pair_buy_manual_adaptive_risk', type: 'default', condition: null }],
+  });
+}
+
 function collectActionIssues(graph: TradeFlowGraph, nodeKey: string): TradeFlowValidationIssue[] {
   const node = graph.nodes.find((item) => item.key === nodeKey);
   assert.ok(node, `node ${nodeKey} should exist`);
@@ -365,6 +435,45 @@ test('validateActionPlaceOrderConfig rejects adaptive_max_price_v1 outside pair_
 
   const issues = collectActionIssues(graph, 'pair_buy_adaptive_max_price');
   assert.ok(issues.some((issue) => issue.code === 'adaptive_max_price_requires_pair_lock_mode'));
+});
+
+test('validateActionPlaceOrderConfig accepts manual_adaptive_risk_v1 manual PTB config', () => {
+  const graph = buildManualAdaptiveRiskGraph();
+
+  const issues = collectActionIssues(graph, 'pair_buy_manual_adaptive_risk');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig rejects manual_adaptive_risk_v1 invalid mode and PTB mode', () => {
+  const graph = buildManualAdaptiveRiskGraph({
+    priceToBeatMode: 'iv_mismatch_edge',
+    priceToBeatGuardEnabled: false,
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_manual_adaptive_risk');
+  assert.ok(issues.some((issue) => issue.code === 'manual_adaptive_risk_requires_ptb_guard'));
+  assert.ok(issues.some((issue) => issue.code === 'manual_adaptive_risk_requires_manual_ptb'));
+});
+
+test('validateActionPlaceOrderConfig rejects invalid manual_adaptive_risk_v1 ranges', () => {
+  const graph = buildManualAdaptiveRiskGraph({
+    manualAdaptiveWindowStartSec: 290,
+    manualAdaptiveWindowEndSec: 120,
+    manualAdaptiveVolumeNormalLt: 3,
+    manualAdaptiveVolumeElevatedLt: 2,
+    manualAdaptiveHighSizeMultiplier: 1.5,
+    manualAdaptiveAfterSlPtbGapAddCent: -1,
+    manualAdaptiveNotifyIncludePayload: 'payload',
+    manualAdaptiveNotifyMinIntervalSec: -1,
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_manual_adaptive_risk');
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_window_range'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_volume_thresholds'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_high_size'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_after_sl_ptb_add'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_notify_include_payload'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_notify_min_interval'));
 });
 
 test('validateActionPlaceOrderConfig accepts biased_hedge_v1 smoke config', () => {

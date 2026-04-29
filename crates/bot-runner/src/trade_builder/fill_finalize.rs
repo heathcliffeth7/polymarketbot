@@ -1146,6 +1146,16 @@ async fn finalize_builder_fill(
                 );
             }
             if let Err(err) =
+                maybe_notify_pair_lock_manual_adaptive_sl_bump(repo, parent_order, order).await
+            {
+                warn!(
+                    builder_order_id = order.id,
+                    parent_builder_order_id = parent_order.id,
+                    error = %err,
+                    "TRADE_BUILDER_MANUAL_ADAPTIVE_RISK_SL_BUMP_NOTIFY_FAILED"
+                );
+            }
+            if let Err(err) =
                 maybe_record_action_place_order_ptb_stop_loss_bump(repo, parent_order, order).await
             {
                 warn!(

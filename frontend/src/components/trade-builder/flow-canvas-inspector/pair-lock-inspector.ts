@@ -13,6 +13,8 @@ export function isPairLockField(key: string): boolean {
     key === 'pairLockCostBuffer' ||
     key.startsWith('adaptiveMaxPrice') ||
     key.startsWith('notifyOnAdaptiveMaxPrice') ||
+    key.startsWith('manualAdaptive') ||
+    key.startsWith('notifyOnManualAdaptiveRisk') ||
     key.startsWith('biasedHedge') ||
     key === 'pairSizingMode' ||
     key === 'pairTotalBudgetUsdc' ||
@@ -236,6 +238,8 @@ export function resolvePairLockSizingFieldVisibility(
     key !== 'pairLockCostBuffer' &&
     !key.startsWith('adaptiveMaxPrice') &&
     !key.startsWith('notifyOnAdaptiveMaxPrice') &&
+    !key.startsWith('manualAdaptive') &&
+    !key.startsWith('notifyOnManualAdaptiveRisk') &&
     !key.startsWith('biasedHedge') &&
     key !== 'pairSizingMode' &&
     key !== 'pairTotalBudgetUsdc' &&
@@ -259,6 +263,9 @@ export function resolvePairLockSizingFieldVisibility(
   }
   if (key.startsWith('adaptiveMaxPrice') || key.startsWith('notifyOnAdaptiveMaxPrice')) {
     return pairLockEnabled && strategy === 'adaptive_max_price_v1';
+  }
+  if (key.startsWith('manualAdaptive') || key.startsWith('notifyOnManualAdaptiveRisk')) {
+    return pairLockEnabled && strategy === 'manual_adaptive_risk_v1';
   }
   if (strategy === 'edge_pairlock_v1' || strategy === 'biased_hedge_v1') {
     return false;

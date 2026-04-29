@@ -13,6 +13,7 @@ struct ActionPlaceOrderPairLockPrimaryCandidateEval {
     quote: PairLockResolvedQuote,
     diagnostics: Value,
     adaptive_max_price_override: Option<PairLockAdaptiveMaxPriceOverride>,
+    manual_adaptive_risk_override: Option<PairLockManualAdaptiveRiskOverride>,
 }
 #[derive(Debug, Clone)]
 struct ActionPlaceOrderPairLockPrimarySelection {
@@ -21,6 +22,7 @@ struct ActionPlaceOrderPairLockPrimarySelection {
     selection_mode: &'static str,
     guard_reason: String,
     adaptive_max_price_override: Option<PairLockAdaptiveMaxPriceOverride>,
+    manual_adaptive_risk_override: Option<PairLockManualAdaptiveRiskOverride>,
 }
 #[derive(Debug, Clone)]
 struct ActionPlaceOrderPairLockPrimarySelectionAttempt {
@@ -719,6 +721,7 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
         reason_code: reason_code.clone(),
         quote: quote.clone(),
         adaptive_max_price_override: None,
+        manual_adaptive_risk_override: None,
         diagnostics: json!({
             "token_id": token_id,
             "outcome_label": outcome_label,
@@ -779,6 +782,7 @@ fn resolve_action_place_order_pair_lock_primary_selection_attempt(
                 selection_mode: "auto_guarded",
                 guard_reason: selected.reason_code.clone(),
                 adaptive_max_price_override: selected.adaptive_max_price_override.clone(),
+                manual_adaptive_risk_override: selected.manual_adaptive_risk_override.clone(),
             }),
             waiting: false,
             failure_reason: None,
@@ -800,6 +804,7 @@ fn resolve_action_place_order_pair_lock_primary_selection_attempt(
                         selection_mode: "auto_guarded_iv_mismatch_edge",
                         guard_reason: "selected_edge_passed".to_string(),
                         adaptive_max_price_override: selected.adaptive_max_price_override.clone(),
+                        manual_adaptive_risk_override: selected.manual_adaptive_risk_override.clone(),
                     }),
                     waiting: false,
                     failure_reason: None,
@@ -892,6 +897,30 @@ async fn resolve_action_place_order_pair_lock_primary_selection(
         )
         .await?;
         maybe_apply_pair_lock_adaptive_max_price_candidate_override(
+            repo,
+            run,
+            step,
+            node,
+            context,
+            market_slug,
+            pair_lock,
+            &mut down_candidate,
+            &up_candidate,
+        )
+        .await?;
+        maybe_apply_pair_lock_manual_adaptive_risk_candidate_override(
+            repo,
+            run,
+            step,
+            node,
+            context,
+            market_slug,
+            pair_lock,
+            &mut up_candidate,
+            &down_candidate,
+        )
+        .await?;
+        maybe_apply_pair_lock_manual_adaptive_risk_candidate_override(
             repo,
             run,
             step,
@@ -1365,6 +1394,7 @@ mod pair_lock_auto_primary_tests {
                     }
                 }),
                 adaptive_max_price_override: None,
+                manual_adaptive_risk_override: None,
             },
             ActionPlaceOrderPairLockPrimaryCandidateEval {
                 token_id: "no".to_string(),
@@ -1382,6 +1412,7 @@ mod pair_lock_auto_primary_tests {
                     }
                 }),
                 adaptive_max_price_override: None,
+                manual_adaptive_risk_override: None,
             },
         );
 

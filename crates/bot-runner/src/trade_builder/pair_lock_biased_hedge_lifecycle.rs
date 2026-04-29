@@ -155,6 +155,7 @@ async fn execute_biased_hedge_time_exit(
         &parent_order.outcome_label,
         session.flow_node_key.as_deref().unwrap_or(&node.key),
         None,
+        None,
     );
     if let Some(map) = exit_node.config.as_object_mut() {
         map.insert("mode".to_string(), json!(ACTION_PLACE_ORDER_MODE_SINGLE));

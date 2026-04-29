@@ -191,6 +191,62 @@ export function updateNodeFieldState(
           (nextFields.adaptiveMaxPriceNotifyIncludePayload ?? '').trim() || 'false';
         nextFields.adaptiveMaxPriceSummaryEveryMarkets =
           (nextFields.adaptiveMaxPriceSummaryEveryMarkets ?? '').trim() || '5';
+      } else if (pairLockStrategy === 'manual_adaptive_risk_v1') {
+        nextFields.priceToBeatGuardEnabled = 'true';
+        nextFields.priceToBeatMode = 'manual';
+        nextFields.counterLegEnabled = 'true';
+        nextFields.manualAdaptiveVolumeNormalLt =
+          (nextFields.manualAdaptiveVolumeNormalLt ?? '').trim() || '1.5';
+        nextFields.manualAdaptiveVolumeElevatedLt =
+          (nextFields.manualAdaptiveVolumeElevatedLt ?? '').trim() || '2.5';
+        nextFields.manualAdaptiveVolumeHighLt =
+          (nextFields.manualAdaptiveVolumeHighLt ?? '').trim() || '4';
+        nextFields.manualAdaptiveTrendDeltaUsd =
+          (nextFields.manualAdaptiveTrendDeltaUsd ?? '').trim() || '0.05';
+        nextFields.manualAdaptiveNormalFlatMaxPriceSubCent =
+          (nextFields.manualAdaptiveNormalFlatMaxPriceSubCent ?? '').trim() || '2';
+        nextFields.manualAdaptiveNormalFlatSizeMultiplier =
+          (nextFields.manualAdaptiveNormalFlatSizeMultiplier ?? '').trim() || '0.8';
+        nextFields.manualAdaptiveNormalFlatPtbGapAddCent =
+          (nextFields.manualAdaptiveNormalFlatPtbGapAddCent ?? '').trim() || '5';
+        nextFields.manualAdaptiveNormalCollapsingMaxPriceCent =
+          (nextFields.manualAdaptiveNormalCollapsingMaxPriceCent ?? '').trim() || '62';
+        nextFields.manualAdaptiveNormalCollapsingSizeMultiplier =
+          (nextFields.manualAdaptiveNormalCollapsingSizeMultiplier ?? '').trim() || '0.4';
+        nextFields.manualAdaptiveNormalCollapsingPtbGapAddCent =
+          (nextFields.manualAdaptiveNormalCollapsingPtbGapAddCent ?? '').trim() || '15';
+        nextFields.manualAdaptiveElevatedMaxPriceCent =
+          (nextFields.manualAdaptiveElevatedMaxPriceCent ?? '').trim() || '66';
+        nextFields.manualAdaptiveElevatedSizeMultiplier =
+          (nextFields.manualAdaptiveElevatedSizeMultiplier ?? '').trim() || '0.6';
+        nextFields.manualAdaptiveElevatedPtbGapAddCent =
+          (nextFields.manualAdaptiveElevatedPtbGapAddCent ?? '').trim() || '10';
+        nextFields.manualAdaptiveHighMaxPriceCent =
+          (nextFields.manualAdaptiveHighMaxPriceCent ?? '').trim() || '58';
+        nextFields.manualAdaptiveHighSizeMultiplier =
+          (nextFields.manualAdaptiveHighSizeMultiplier ?? '').trim() || '0.3';
+        nextFields.manualAdaptiveHighPtbGapAddCent =
+          (nextFields.manualAdaptiveHighPtbGapAddCent ?? '').trim() || '25';
+        nextFields.manualAdaptiveAfterSlMaxPriceSubCent =
+          (nextFields.manualAdaptiveAfterSlMaxPriceSubCent ?? '').trim() || '5';
+        nextFields.manualAdaptiveAfterSlPtbGapAddCent =
+          (nextFields.manualAdaptiveAfterSlPtbGapAddCent ?? '').trim() || '15';
+        nextFields.manualAdaptiveSlCooldownMarkets =
+          (nextFields.manualAdaptiveSlCooldownMarkets ?? '').trim() || '3';
+        nextFields.manualAdaptivePairBufferCent =
+          (nextFields.manualAdaptivePairBufferCent ?? '').trim() || '1';
+        nextFields.notifyOnManualAdaptiveRiskBlock =
+          (nextFields.notifyOnManualAdaptiveRiskBlock ?? '').trim() || 'true';
+        nextFields.notifyOnManualAdaptiveRiskStrict =
+          (nextFields.notifyOnManualAdaptiveRiskStrict ?? '').trim() || 'true';
+        nextFields.notifyOnManualAdaptiveRiskSlBump =
+          (nextFields.notifyOnManualAdaptiveRiskSlBump ?? '').trim() || 'true';
+        nextFields.notifyOnManualAdaptiveRiskSummary =
+          (nextFields.notifyOnManualAdaptiveRiskSummary ?? '').trim() || 'true';
+        nextFields.manualAdaptiveNotifyMinIntervalSec =
+          (nextFields.manualAdaptiveNotifyMinIntervalSec ?? '').trim() || '30';
+        nextFields.manualAdaptiveNotifyIncludePayload =
+          (nextFields.manualAdaptiveNotifyIncludePayload ?? '').trim() || 'false';
       } else if (pairLockStrategy === 'biased_hedge_v1') {
         nextFields.priceToBeatGuardEnabled = 'true';
         nextFields.priceToBeatMode = 'iv_mismatch_edge';

@@ -59,7 +59,10 @@ fn resolve_action_place_order_pair_lock_strategy(node: &TradeFlowNode) -> Result
         PAIR_LOCK_STRATEGY_ADAPTIVE_MAX_PRICE_V1 => {
             Ok(PAIR_LOCK_STRATEGY_ADAPTIVE_MAX_PRICE_V1)
         }
-        _ => anyhow::bail!("action.place_order pairLockStrategy must be legacy, edge_pairlock_v1, biased_hedge_v1, or adaptive_max_price_v1"),
+        PAIR_LOCK_STRATEGY_MANUAL_ADAPTIVE_RISK_V1 => {
+            Ok(PAIR_LOCK_STRATEGY_MANUAL_ADAPTIVE_RISK_V1)
+        }
+        _ => anyhow::bail!("action.place_order pairLockStrategy must be legacy, edge_pairlock_v1, biased_hedge_v1, adaptive_max_price_v1, or manual_adaptive_risk_v1"),
     }
 }
 
@@ -657,7 +660,7 @@ async fn execute_action_place_order_pair_lock_edge_strategy(
             outcome_label: lock.counter.outcome_label.clone(),
         };
         let counter_node =
-            build_pair_lock_counter_leg_node(node, &market_slug, &counter, pair_lock, trigger_node_key);
+            build_pair_lock_counter_leg_node(node, &market_slug, &counter, pair_lock, trigger_node_key, None);
         let mut counter_context = context.clone();
         let counter_result = execute_pair_lock_edge_share_buy_order(
             repo,
@@ -791,6 +794,7 @@ async fn execute_action_place_order_pair_lock_edge_strategy(
                 &primary.outcome_label,
                 trigger_node_key,
                 None,
+                None,
             );
             let counter_node = build_pair_lock_counter_leg_node(
                 node,
@@ -798,6 +802,7 @@ async fn execute_action_place_order_pair_lock_edge_strategy(
                 &counter,
                 pair_lock,
                 trigger_node_key,
+                None,
             );
             let mut primary_context = context.clone();
             let primary_result = execute_pair_lock_edge_share_buy_order(
@@ -951,6 +956,7 @@ async fn execute_action_place_order_pair_lock_edge_strategy(
             &selected.outcome_label,
             trigger_node_key,
             None,
+            None,
         );
         let mut selected_result = execute_pair_lock_edge_share_buy_order(
             repo,
@@ -1044,6 +1050,7 @@ mod pair_lock_edge_strategy_tests {
                 }
             }),
             adaptive_max_price_override: None,
+            manual_adaptive_risk_override: None,
         }
     }
 

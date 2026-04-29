@@ -49,9 +49,30 @@ fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Val
         "notifyOnAdaptiveMaxPriceSummary", "notifyOnAdaptiveMaxPriceAllNoRelax",
         "adaptiveMaxPriceNotifyMinIntervalSec", "adaptiveMaxPriceNotifyIncludePayload",
         "adaptiveMaxPriceSummaryEveryMarkets",
+        "manualAdaptiveWindowStartSec", "manualAdaptiveWindowEndSec",
+        "manualAdaptiveVolumeNormalLt", "manualAdaptiveVolumeElevatedLt",
+        "manualAdaptiveVolumeHighLt", "manualAdaptiveTrendDeltaUsd",
+        "manualAdaptiveNormalFlatMaxPriceSubCent",
+        "manualAdaptiveNormalFlatSizeMultiplier",
+        "manualAdaptiveNormalFlatPtbGapAddCent",
+        "manualAdaptiveNormalCollapsingMaxPriceCent",
+        "manualAdaptiveNormalCollapsingSizeMultiplier",
+        "manualAdaptiveNormalCollapsingPtbGapAddCent",
+        "manualAdaptiveElevatedMaxPriceCent", "manualAdaptiveElevatedSizeMultiplier",
+        "manualAdaptiveElevatedPtbGapAddCent", "manualAdaptiveHighMaxPriceCent",
+        "manualAdaptiveHighSizeMultiplier", "manualAdaptiveHighPtbGapAddCent",
+        "manualAdaptiveAfterSlMaxPriceSubCent", "manualAdaptiveAfterSlPtbGapAddCent",
+        "manualAdaptiveSlCooldownMarkets", "manualAdaptivePairBufferCent",
+        "notifyOnManualAdaptiveRiskBlock", "notifyOnManualAdaptiveRiskStrict",
+        "notifyOnManualAdaptiveRiskSlBump", "notifyOnManualAdaptiveRiskSummary",
+        "manualAdaptiveNotifyMinIntervalSec", "manualAdaptiveNotifyIncludePayload",
     ] {
         config.remove(key);
     }
+}
+
+fn pair_lock_child_price_cent(price: f64) -> f64 {
+    ((price * 100.0) * 1000.0).round() / 1000.0
 }
 
 fn build_pair_lock_single_leg_node(
@@ -61,6 +82,7 @@ fn build_pair_lock_single_leg_node(
     outcome_label: &str,
     trigger_node_key: &str,
     adaptive_max_price_override: Option<&PairLockAdaptiveMaxPriceOverride>,
+    manual_adaptive_risk_override: Option<&PairLockManualAdaptiveRiskOverride>,
 ) -> TradeFlowNode {
     let mut config = node
         .config
@@ -84,7 +106,7 @@ fn build_pair_lock_single_leg_node(
     if let Some(adaptive) = adaptive_max_price_override {
         config.insert(
             "maxPriceCent".to_string(),
-            json!(adaptive.effective_max_price * 100.0),
+            json!(pair_lock_child_price_cent(adaptive.effective_max_price)),
         );
         config.insert("sizeMode".to_string(), json!("usdc"));
         config.insert("sizeUsdc".to_string(), json!(adaptive.effective_size_usdc));
@@ -92,6 +114,26 @@ fn build_pair_lock_single_leg_node(
         config.insert(
             "adaptiveMaxPrice".to_string(),
             adaptive.diagnostics.clone(),
+        );
+    }
+    if let Some(manual) = manual_adaptive_risk_override {
+        config.insert(
+            "maxPriceCent".to_string(),
+            json!(pair_lock_child_price_cent(manual.effective_max_price)),
+        );
+        config.insert("sizeMode".to_string(), json!("usdc"));
+        config.insert("sizeUsdc".to_string(), json!(manual.effective_size_usdc));
+        config.insert("reenterOnSlHit".to_string(), json!(false));
+        if let Some(value) = manual.effective_ptb_threshold_value {
+            config.insert("priceToBeatMaxDiff".to_string(), json!(value));
+        }
+        if let Some(unit) = manual.effective_ptb_threshold_unit.as_ref() {
+            config.insert("priceToBeatMaxDiffUnit".to_string(), json!(unit));
+        }
+        config.insert("manualAdaptiveRiskApplied".to_string(), json!(true));
+        config.insert(
+            "manualAdaptiveRisk".to_string(),
+            manual.diagnostics.clone(),
         );
     }
 
@@ -108,6 +150,7 @@ fn build_pair_lock_counter_leg_node(
     counter: &ActionPlaceOrderPairResolvedCounterLeg,
     pair_lock: &ActionPlaceOrderPairLockConfig,
     trigger_node_key: &str,
+    manual_adaptive_risk_override: Option<&PairLockManualAdaptiveRiskOverride>,
 ) -> TradeFlowNode {
     let mut config = node
         .config
@@ -166,6 +209,22 @@ fn build_pair_lock_counter_leg_node(
         } else {
             config.remove(target_key);
         }
+    }
+    if let Some(max_price) =
+        manual_adaptive_risk_override.and_then(|manual| manual.counter_max_price)
+    {
+        let existing = config
+            .get("maxPriceCent")
+            .and_then(value_as_f64)
+            .map(|value| value / 100.0);
+        let effective = existing.map(|value| value.min(max_price)).unwrap_or(max_price);
+        let effective_cent = pair_lock_child_price_cent(effective);
+        config.insert("maxPriceCent".to_string(), json!(effective_cent));
+        config.insert("manualAdaptiveRiskCounterCapApplied".to_string(), json!(true));
+        config.insert(
+            "manualAdaptiveRiskCounterCapCent".to_string(),
+            json!(effective_cent),
+        );
     }
     if !pair_lock.protective_unwind_enabled {
         config.insert("retryOnPriceToBeatGuardBlock".to_string(), json!(true));

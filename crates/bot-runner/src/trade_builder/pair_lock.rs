@@ -86,6 +86,9 @@ fn resolve_action_place_order_pair_lock_config(
     if strategy == PAIR_LOCK_STRATEGY_ADAPTIVE_MAX_PRICE_V1 {
         resolve_pair_lock_adaptive_max_price_config(node)?;
     }
+    if strategy == PAIR_LOCK_STRATEGY_MANUAL_ADAPTIVE_RISK_V1 {
+        resolve_pair_lock_manual_adaptive_risk_config(node)?;
+    }
     let pair_max_total_cent = node_config_f64(node, "pairMaxTotalCent")
         .or_else(|| node_config_f64(node, "pairTargetTotalCent"))
         .unwrap_or(if uses_biased_hedge_strategy { 99.0 } else { f64::NAN });
@@ -345,6 +348,7 @@ async fn execute_action_place_order_pair_lock(
         primary_selection_diagnostics,
         selected_candidate_quotes,
         adaptive_max_price_override,
+        manual_adaptive_risk_override,
     ) =
         if let Some(primary_token_id) = explicit_primary_token_id {
             let primary_outcome_label = explicit_primary_outcome_label
@@ -368,6 +372,7 @@ async fn execute_action_place_order_pair_lock(
                 "explicit".to_string(),
                 "explicit".to_string(),
                 diagnostics,
+                None,
                 None,
                 None,
             )
@@ -469,6 +474,7 @@ async fn execute_action_place_order_pair_lock(
                     selection_attempt.no_candidate.quote.clone(),
                 )),
                 selection.adaptive_max_price_override,
+                selection.manual_adaptive_risk_override,
             )
         };
     let counter = resolve_action_place_order_pair_lock_counter_leg(
@@ -512,6 +518,23 @@ async fn execute_action_place_order_pair_lock(
         .await?;
     }
 
+    if let Some(override_payload) = manual_adaptive_risk_override.as_ref() {
+        repo.append_trade_flow_event(
+            Some(run.id),
+            run.definition_id,
+            Some(run.version_id),
+            "pair_lock_manual_adaptive_risk_applied",
+            &json!({
+                "node_key": node.key,
+                "market_slug": market_slug,
+                "selected_primary_token_id": primary_token_id,
+                "selected_primary_outcome_label": primary_outcome_label,
+                "manual_adaptive_risk": override_payload.diagnostics,
+            }),
+        )
+        .await?;
+    }
+
     let primary_node = build_pair_lock_single_leg_node(
         node,
         &market_slug,
@@ -519,8 +542,16 @@ async fn execute_action_place_order_pair_lock(
         &primary_outcome_label,
         &trigger_node_key,
         adaptive_max_price_override.as_ref(),
+        manual_adaptive_risk_override.as_ref(),
     );
-    let counter_node = build_pair_lock_counter_leg_node(node, &market_slug, &counter, &pair_lock, &trigger_node_key);
+    let counter_node = build_pair_lock_counter_leg_node(
+        node,
+        &market_slug,
+        &counter,
+        &pair_lock,
+        &trigger_node_key,
+        manual_adaptive_risk_override.as_ref(),
+    );
     let primary_step = pair_lock_candidate_quote_for_token(
         &primary_token_id,
         &resolved_tokens,
@@ -647,6 +678,7 @@ async fn execute_action_place_order_pair_lock(
             "selected_primary_guard_reason": &selected_primary_guard_reason,
             "primary_selection": primary_selection_diagnostics.clone(),
             "adaptive_max_price": adaptive_max_price_override.as_ref().map(|value| value.diagnostics.clone()),
+            "manual_adaptive_risk": manual_adaptive_risk_override.as_ref().map(|value| value.diagnostics.clone()),
         }),
     )
     .await?;
@@ -708,6 +740,7 @@ async fn execute_action_place_order_pair_lock(
             "selected_primary_guard_reason": selected_primary_guard_reason,
             "primary_selection": primary_selection_diagnostics,
             "adaptive_max_price": adaptive_max_price_override.map(|value| value.diagnostics),
+            "manual_adaptive_risk": manual_adaptive_risk_override.map(|value| value.diagnostics),
             "resolved_yes_token_id": resolved_tokens.yes_token_id,
             "resolved_no_token_id": resolved_tokens.no_token_id,
             "token_resolution_source": resolved_tokens.token_resolution_source,

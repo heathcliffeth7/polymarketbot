@@ -32,12 +32,44 @@ const ADAPTIVE_MAX_PRICE_CONFIG_KEYS = [
   'adaptiveMaxPriceSummaryEveryMarkets',
 ] as const;
 
+const MANUAL_ADAPTIVE_RISK_CONFIG_KEYS = [
+  'manualAdaptiveWindowStartSec',
+  'manualAdaptiveWindowEndSec',
+  'manualAdaptiveVolumeNormalLt',
+  'manualAdaptiveVolumeElevatedLt',
+  'manualAdaptiveVolumeHighLt',
+  'manualAdaptiveTrendDeltaUsd',
+  'manualAdaptiveNormalFlatMaxPriceSubCent',
+  'manualAdaptiveNormalFlatSizeMultiplier',
+  'manualAdaptiveNormalFlatPtbGapAddCent',
+  'manualAdaptiveNormalCollapsingMaxPriceCent',
+  'manualAdaptiveNormalCollapsingSizeMultiplier',
+  'manualAdaptiveNormalCollapsingPtbGapAddCent',
+  'manualAdaptiveElevatedMaxPriceCent',
+  'manualAdaptiveElevatedSizeMultiplier',
+  'manualAdaptiveElevatedPtbGapAddCent',
+  'manualAdaptiveHighMaxPriceCent',
+  'manualAdaptiveHighSizeMultiplier',
+  'manualAdaptiveHighPtbGapAddCent',
+  'manualAdaptiveAfterSlMaxPriceSubCent',
+  'manualAdaptiveAfterSlPtbGapAddCent',
+  'manualAdaptiveSlCooldownMarkets',
+  'manualAdaptivePairBufferCent',
+  'notifyOnManualAdaptiveRiskBlock',
+  'notifyOnManualAdaptiveRiskStrict',
+  'notifyOnManualAdaptiveRiskSlBump',
+  'notifyOnManualAdaptiveRiskSummary',
+  'manualAdaptiveNotifyMinIntervalSec',
+  'manualAdaptiveNotifyIncludePayload',
+] as const;
+
 export const PAIR_LOCK_CONFIG_KEYS = [
   'pairLockStrategy',
   'pairLockDecisionQty',
   'pairLockSingleEdgeThreshold',
   'pairLockCostBuffer',
   ...ADAPTIVE_MAX_PRICE_CONFIG_KEYS,
+  ...MANUAL_ADAPTIVE_RISK_CONFIG_KEYS,
   'biasedHedge',
   'biasedHedgeStop',
   'biasedHedgePrimaryBudgetUsdc',
@@ -176,13 +208,15 @@ export type PairLockStrategy =
   | 'legacy'
   | 'edge_pairlock_v1'
   | 'biased_hedge_v1'
-  | 'adaptive_max_price_v1';
+  | 'adaptive_max_price_v1'
+  | 'manual_adaptive_risk_v1';
 
 export function normalizePairLockStrategy(value: string): PairLockStrategy {
   const normalized = value.trim().toLowerCase();
   if (normalized === 'edge_pairlock_v1') return 'edge_pairlock_v1';
   if (normalized === 'biased_hedge_v1') return 'biased_hedge_v1';
   if (normalized === 'adaptive_max_price_v1') return 'adaptive_max_price_v1';
+  if (normalized === 'manual_adaptive_risk_v1') return 'manual_adaptive_risk_v1';
   return 'legacy';
 }
 
@@ -314,6 +348,35 @@ export function applyPairLockFormDefaults(
     setDefault(fields, 'adaptiveMaxPriceNotifyMinIntervalSec', '30');
     setDefault(fields, 'adaptiveMaxPriceNotifyIncludePayload', 'false');
     setDefault(fields, 'adaptiveMaxPriceSummaryEveryMarkets', '5');
+  } else if (fields.pairLockStrategy === 'manual_adaptive_risk_v1') {
+    fields.priceToBeatGuardEnabled = 'true';
+    fields.priceToBeatMode = 'manual';
+    setDefault(fields, 'manualAdaptiveVolumeNormalLt', '1.5');
+    setDefault(fields, 'manualAdaptiveVolumeElevatedLt', '2.5');
+    setDefault(fields, 'manualAdaptiveVolumeHighLt', '4');
+    setDefault(fields, 'manualAdaptiveTrendDeltaUsd', '0.05');
+    setDefault(fields, 'manualAdaptiveNormalFlatMaxPriceSubCent', '2');
+    setDefault(fields, 'manualAdaptiveNormalFlatSizeMultiplier', '0.8');
+    setDefault(fields, 'manualAdaptiveNormalFlatPtbGapAddCent', '5');
+    setDefault(fields, 'manualAdaptiveNormalCollapsingMaxPriceCent', '62');
+    setDefault(fields, 'manualAdaptiveNormalCollapsingSizeMultiplier', '0.4');
+    setDefault(fields, 'manualAdaptiveNormalCollapsingPtbGapAddCent', '15');
+    setDefault(fields, 'manualAdaptiveElevatedMaxPriceCent', '66');
+    setDefault(fields, 'manualAdaptiveElevatedSizeMultiplier', '0.6');
+    setDefault(fields, 'manualAdaptiveElevatedPtbGapAddCent', '10');
+    setDefault(fields, 'manualAdaptiveHighMaxPriceCent', '58');
+    setDefault(fields, 'manualAdaptiveHighSizeMultiplier', '0.3');
+    setDefault(fields, 'manualAdaptiveHighPtbGapAddCent', '25');
+    setDefault(fields, 'manualAdaptiveAfterSlMaxPriceSubCent', '5');
+    setDefault(fields, 'manualAdaptiveAfterSlPtbGapAddCent', '15');
+    setDefault(fields, 'manualAdaptiveSlCooldownMarkets', '3');
+    setDefault(fields, 'manualAdaptivePairBufferCent', '1');
+    setDefault(fields, 'notifyOnManualAdaptiveRiskBlock', 'true');
+    setDefault(fields, 'notifyOnManualAdaptiveRiskStrict', 'true');
+    setDefault(fields, 'notifyOnManualAdaptiveRiskSlBump', 'true');
+    setDefault(fields, 'notifyOnManualAdaptiveRiskSummary', 'true');
+    setDefault(fields, 'manualAdaptiveNotifyMinIntervalSec', '30');
+    setDefault(fields, 'manualAdaptiveNotifyIncludePayload', 'false');
   } else if (fields.pairLockStrategy === 'biased_hedge_v1') {
     applyBiasedHedgeFormDefaults(fields, cfg);
   }
@@ -402,6 +465,12 @@ function deleteAdaptiveMaxPriceConfig(config: Record<string, unknown>): void {
   }
 }
 
+function deleteManualAdaptiveRiskConfig(config: Record<string, unknown>): void {
+  for (const key of MANUAL_ADAPTIVE_RISK_CONFIG_KEYS) {
+    delete config[key];
+  }
+}
+
 function positiveNumber(config: Record<string, unknown>, key: string, fallback: number): number {
   const value = Number(toStringValue(config[key]).trim());
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -483,6 +552,7 @@ function normalizeBiasedHedgeBuildConfig(config: Record<string, unknown>): void 
   delete config.pairLockSingleEdgeThreshold;
   delete config.pairLockCostBuffer;
   deleteAdaptiveMaxPriceConfig(config);
+  deleteManualAdaptiveRiskConfig(config);
   delete config.pairTotalBudgetUsdc;
   delete config.counterLegSizeUsdc;
 }
@@ -506,6 +576,7 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     normalizeNonNegativeNumberField(config, 'pairLockSingleEdgeThreshold', 0.10);
     normalizeNonNegativeNumberField(config, 'pairLockCostBuffer', 0.005);
     deleteAdaptiveMaxPriceConfig(config);
+    deleteManualAdaptiveRiskConfig(config);
   } else if (pairLockStrategy === 'adaptive_max_price_v1') {
     config.pairLockStrategy = 'adaptive_max_price_v1';
     config.priceToBeatGuardEnabled = true;
@@ -540,6 +611,43 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     delete config.pairLockDecisionQty;
     delete config.pairLockSingleEdgeThreshold;
     delete config.pairLockCostBuffer;
+    deleteManualAdaptiveRiskConfig(config);
+  } else if (pairLockStrategy === 'manual_adaptive_risk_v1') {
+    config.pairLockStrategy = 'manual_adaptive_risk_v1';
+    config.priceToBeatGuardEnabled = true;
+    config.priceToBeatMode = 'manual';
+    normalizeOptionalIntegerField(config, 'manualAdaptiveWindowStartSec', 0, 300);
+    normalizeOptionalIntegerField(config, 'manualAdaptiveWindowEndSec', 0, 300);
+    normalizePositiveNumberField(config, 'manualAdaptiveVolumeNormalLt', 1.5);
+    normalizePositiveNumberField(config, 'manualAdaptiveVolumeElevatedLt', 2.5);
+    normalizePositiveNumberField(config, 'manualAdaptiveVolumeHighLt', 4);
+    normalizePositiveNumberField(config, 'manualAdaptiveTrendDeltaUsd', 0.05);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveNormalFlatMaxPriceSubCent', 2);
+    normalizePositiveNumberField(config, 'manualAdaptiveNormalFlatSizeMultiplier', 0.8);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveNormalFlatPtbGapAddCent', 5);
+    normalizePositiveNumberField(config, 'manualAdaptiveNormalCollapsingMaxPriceCent', 62);
+    normalizePositiveNumberField(config, 'manualAdaptiveNormalCollapsingSizeMultiplier', 0.4);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveNormalCollapsingPtbGapAddCent', 15);
+    normalizePositiveNumberField(config, 'manualAdaptiveElevatedMaxPriceCent', 66);
+    normalizePositiveNumberField(config, 'manualAdaptiveElevatedSizeMultiplier', 0.6);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveElevatedPtbGapAddCent', 10);
+    normalizePositiveNumberField(config, 'manualAdaptiveHighMaxPriceCent', 58);
+    normalizePositiveNumberField(config, 'manualAdaptiveHighSizeMultiplier', 0.3);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveHighPtbGapAddCent', 25);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveAfterSlMaxPriceSubCent', 5);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveAfterSlPtbGapAddCent', 15);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveSlCooldownMarkets', 3);
+    normalizeNonNegativeNumberField(config, 'manualAdaptivePairBufferCent', 1);
+    config.notifyOnManualAdaptiveRiskBlock = booleanValue(config, 'notifyOnManualAdaptiveRiskBlock', true);
+    config.notifyOnManualAdaptiveRiskStrict = booleanValue(config, 'notifyOnManualAdaptiveRiskStrict', true);
+    config.notifyOnManualAdaptiveRiskSlBump = booleanValue(config, 'notifyOnManualAdaptiveRiskSlBump', true);
+    config.notifyOnManualAdaptiveRiskSummary = booleanValue(config, 'notifyOnManualAdaptiveRiskSummary', true);
+    normalizeIntegerField(config, 'manualAdaptiveNotifyMinIntervalSec', 30, 0, Number.MAX_SAFE_INTEGER);
+    config.manualAdaptiveNotifyIncludePayload = booleanValue(config, 'manualAdaptiveNotifyIncludePayload', false);
+    delete config.pairLockDecisionQty;
+    delete config.pairLockSingleEdgeThreshold;
+    delete config.pairLockCostBuffer;
+    deleteAdaptiveMaxPriceConfig(config);
   } else if (pairLockStrategy === 'biased_hedge_v1') {
     normalizeBiasedHedgeBuildConfig(config);
   } else {
@@ -548,6 +656,7 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     delete config.pairLockSingleEdgeThreshold;
     delete config.pairLockCostBuffer;
     deleteAdaptiveMaxPriceConfig(config);
+    deleteManualAdaptiveRiskConfig(config);
     delete config.biasedHedge;
     delete config.biasedHedgeStop;
     delete config.biasedHedgeMaxPairedEffectiveCostCent;
