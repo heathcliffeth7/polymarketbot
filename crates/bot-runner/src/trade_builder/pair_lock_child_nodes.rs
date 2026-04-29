@@ -39,7 +39,10 @@ fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Val
         "adaptiveMaxPriceRelaxCreditCent", "adaptiveMaxPriceMaxRelaxCreditCent",
         "adaptiveMaxPriceHardCapCent", "adaptiveMaxPriceExtraBufferCent",
         "adaptiveMaxPricePairBufferCent", "adaptiveMaxPriceSizeMultiplier",
-        "adaptiveMaxPriceLateRelaxCutoffS", "adaptiveMaxPriceSlCooldownMarkets",
+        "adaptiveMaxPriceWindowStartSec", "adaptiveMaxPriceWindowEndSec",
+        "adaptiveMaxPriceLateRelaxCutoffS", "adaptiveMaxPriceLateRiskEnabled",
+        "adaptiveMaxPriceLateRiskAfterSec", "adaptiveMaxPriceLateExtraBufferCent",
+        "adaptiveMaxPriceLateSizeMultiplier", "adaptiveMaxPriceSlCooldownMarkets",
     ] {
         config.remove(key);
     }

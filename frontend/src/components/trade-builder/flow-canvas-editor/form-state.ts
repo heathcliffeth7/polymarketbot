@@ -159,8 +159,14 @@ export function updateNodeFieldState(
           (nextFields.adaptiveMaxPricePairBufferCent ?? '').trim() || '1';
         nextFields.adaptiveMaxPriceSizeMultiplier =
           (nextFields.adaptiveMaxPriceSizeMultiplier ?? '').trim() || '0.5';
-        nextFields.adaptiveMaxPriceLateRelaxCutoffS =
-          (nextFields.adaptiveMaxPriceLateRelaxCutoffS ?? '').trim() || '210';
+        nextFields.adaptiveMaxPriceLateRiskEnabled =
+          (nextFields.adaptiveMaxPriceLateRiskEnabled ?? '').trim() || 'true';
+        nextFields.adaptiveMaxPriceLateRiskAfterSec =
+          (nextFields.adaptiveMaxPriceLateRiskAfterSec ?? '').trim() || '210';
+        nextFields.adaptiveMaxPriceLateExtraBufferCent =
+          (nextFields.adaptiveMaxPriceLateExtraBufferCent ?? '').trim() || '1';
+        nextFields.adaptiveMaxPriceLateSizeMultiplier =
+          (nextFields.adaptiveMaxPriceLateSizeMultiplier ?? '').trim() || '0.35';
         nextFields.adaptiveMaxPriceSlCooldownMarkets =
           (nextFields.adaptiveMaxPriceSlCooldownMarkets ?? '').trim() || '3';
       } else if (pairLockStrategy === 'biased_hedge_v1') {

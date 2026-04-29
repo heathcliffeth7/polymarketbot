@@ -8,6 +8,10 @@ const DEFAULT_ADAPTIVE_MAX_PRICE_EXTRA_BUFFER_CENT: f64 = 1.0;
 const DEFAULT_ADAPTIVE_MAX_PRICE_PAIR_BUFFER_CENT: f64 = 1.0;
 const DEFAULT_ADAPTIVE_MAX_PRICE_SIZE_MULTIPLIER: f64 = 0.5;
 const DEFAULT_ADAPTIVE_MAX_PRICE_LATE_RELAX_CUTOFF_S: i64 = 210;
+const DEFAULT_ADAPTIVE_MAX_PRICE_LATE_RISK_ENABLED: bool = true;
+const DEFAULT_ADAPTIVE_MAX_PRICE_LATE_RISK_AFTER_S: i64 = 210;
+const DEFAULT_ADAPTIVE_MAX_PRICE_LATE_EXTRA_BUFFER_CENT: f64 = 1.0;
+const DEFAULT_ADAPTIVE_MAX_PRICE_LATE_SIZE_MULTIPLIER: f64 = 0.35;
 const DEFAULT_ADAPTIVE_MAX_PRICE_SL_COOLDOWN_MARKETS: usize = 3;
 const FLOW_NODE_STATE_PAIR_LOCK_ADAPTIVE_MAX_PRICE_RELAXED_MARKET: &str =
     "pair_lock_adaptive_max_price_relaxed_market";
@@ -24,8 +28,29 @@ struct PairLockAdaptiveMaxPriceConfig {
     extra_buffer_cent: f64,
     pair_buffer_cent: f64,
     size_multiplier: f64,
-    late_relax_cutoff_s: i64,
+    window_start_sec: Option<i64>,
+    window_end_sec: Option<i64>,
+    legacy_late_relax_cutoff_s: Option<i64>,
+    late_risk_enabled: bool,
+    late_risk_after_sec: i64,
+    late_extra_buffer_cent: f64,
+    late_size_multiplier: f64,
     sl_cooldown_markets: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PairLockAdaptiveMaxPriceTiming {
+    configured_window_start_sec: i64,
+    configured_window_end_sec: i64,
+    cycle_window_start_sec: Option<i64>,
+    cycle_window_end_sec: Option<i64>,
+    effective_window_start_sec: i64,
+    effective_window_end_sec: i64,
+    market_elapsed_s: Option<i64>,
+    in_adaptive_window: bool,
+    late_risk_enabled: bool,
+    late_risk_after_sec: i64,
+    late_risk_active: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -59,6 +84,8 @@ struct PairLockAdaptiveMaxPriceDecisionInput<'a> {
     volume_regime: &'a str,
     ptb_trend: &'a str,
     market_elapsed_s: Option<i64>,
+    cycle_window_start_sec: Option<i64>,
+    cycle_window_end_sec: Option<i64>,
     already_relaxed_current_market: bool,
     history: PairLockAdaptiveMaxPriceHistory,
 }
@@ -127,8 +154,17 @@ fn resolve_pair_lock_adaptive_max_price_config(
             .unwrap_or(DEFAULT_ADAPTIVE_MAX_PRICE_PAIR_BUFFER_CENT),
         size_multiplier: node_config_f64(node, "adaptiveMaxPriceSizeMultiplier")
             .unwrap_or(DEFAULT_ADAPTIVE_MAX_PRICE_SIZE_MULTIPLIER),
-        late_relax_cutoff_s: node_config_i64(node, "adaptiveMaxPriceLateRelaxCutoffS")
-            .unwrap_or(DEFAULT_ADAPTIVE_MAX_PRICE_LATE_RELAX_CUTOFF_S),
+        window_start_sec: node_config_i64(node, "adaptiveMaxPriceWindowStartSec"),
+        window_end_sec: node_config_i64(node, "adaptiveMaxPriceWindowEndSec"),
+        legacy_late_relax_cutoff_s: node_config_i64(node, "adaptiveMaxPriceLateRelaxCutoffS"),
+        late_risk_enabled: node_config_bool(node, "adaptiveMaxPriceLateRiskEnabled")
+            .unwrap_or(DEFAULT_ADAPTIVE_MAX_PRICE_LATE_RISK_ENABLED),
+        late_risk_after_sec: node_config_i64(node, "adaptiveMaxPriceLateRiskAfterSec")
+            .unwrap_or(DEFAULT_ADAPTIVE_MAX_PRICE_LATE_RISK_AFTER_S),
+        late_extra_buffer_cent: node_config_f64(node, "adaptiveMaxPriceLateExtraBufferCent")
+            .unwrap_or(DEFAULT_ADAPTIVE_MAX_PRICE_LATE_EXTRA_BUFFER_CENT),
+        late_size_multiplier: node_config_f64(node, "adaptiveMaxPriceLateSizeMultiplier")
+            .unwrap_or(DEFAULT_ADAPTIVE_MAX_PRICE_LATE_SIZE_MULTIPLIER),
         sl_cooldown_markets: node_config_i64(node, "adaptiveMaxPriceSlCooldownMarkets")
             .filter(|value| *value >= 0)
             .map(|value| value as usize)
@@ -166,11 +202,111 @@ fn resolve_pair_lock_adaptive_max_price_config(
             && config.size_multiplier <= 1.0,
         "action.place_order adaptiveMaxPriceSizeMultiplier must be in (0, 1]"
     );
+    if let Some(start) = config.window_start_sec {
+        anyhow::ensure!(
+            (0..=300).contains(&start),
+            "action.place_order adaptiveMaxPriceWindowStartSec must be in [0, 300]"
+        );
+    }
+    if let Some(end) = config.window_end_sec {
+        anyhow::ensure!(
+            (0..=300).contains(&end),
+            "action.place_order adaptiveMaxPriceWindowEndSec must be in [0, 300]"
+        );
+    }
+    if let (Some(start), Some(end)) = (config.window_start_sec, config.window_end_sec) {
+        anyhow::ensure!(
+            start < end,
+            "action.place_order adaptiveMaxPriceWindowStartSec must be < adaptiveMaxPriceWindowEndSec"
+        );
+    }
+    if let Some(cutoff) = config.legacy_late_relax_cutoff_s {
+        anyhow::ensure!(
+            (1..=300).contains(&cutoff),
+            "action.place_order adaptiveMaxPriceLateRelaxCutoffS must be in [1, 300]"
+        );
+    }
     anyhow::ensure!(
-        config.late_relax_cutoff_s > 0,
-        "action.place_order adaptiveMaxPriceLateRelaxCutoffS must be > 0"
+        (0..=300).contains(&config.late_risk_after_sec),
+        "action.place_order adaptiveMaxPriceLateRiskAfterSec must be in [0, 300]"
+    );
+    anyhow::ensure!(
+        config.late_extra_buffer_cent.is_finite() && config.late_extra_buffer_cent >= 0.0,
+        "action.place_order adaptiveMaxPriceLateExtraBufferCent must be >= 0"
+    );
+    anyhow::ensure!(
+        config.late_size_multiplier.is_finite()
+            && config.late_size_multiplier > 0.0
+            && config.late_size_multiplier <= 1.0,
+        "action.place_order adaptiveMaxPriceLateSizeMultiplier must be in (0, 1]"
     );
     Ok(config)
+}
+
+fn pair_lock_adaptive_step_i64(step: &TradeFlowRunStep, key: &str) -> Option<i64> {
+    step.input_json
+        .as_ref()
+        .and_then(|input| input.get(key))
+        .and_then(value_as_i64)
+}
+
+fn pair_lock_adaptive_cycle_window_from_step(
+    step: &TradeFlowRunStep,
+) -> (Option<i64>, Option<i64>) {
+    (
+        pair_lock_adaptive_step_i64(step, "cycleWindowStartSec")
+            .or_else(|| pair_lock_adaptive_step_i64(step, "cycle_window_start_sec")),
+        pair_lock_adaptive_step_i64(step, "cycleWindowEndSec")
+            .or_else(|| pair_lock_adaptive_step_i64(step, "cycle_window_end_sec")),
+    )
+}
+
+fn pair_lock_adaptive_timing(
+    input: &PairLockAdaptiveMaxPriceDecisionInput<'_>,
+) -> PairLockAdaptiveMaxPriceTiming {
+    let configured_window_start_sec = input
+        .config
+        .window_start_sec
+        .or(input.cycle_window_start_sec)
+        .unwrap_or(0);
+    let configured_window_end_sec = input
+        .config
+        .window_end_sec
+        .or(input.cycle_window_end_sec)
+        .or(input.config.legacy_late_relax_cutoff_s)
+        .unwrap_or(DEFAULT_ADAPTIVE_MAX_PRICE_LATE_RELAX_CUTOFF_S);
+    let effective_window_start_sec = input
+        .cycle_window_start_sec
+        .map(|cycle_start| configured_window_start_sec.max(cycle_start))
+        .unwrap_or(configured_window_start_sec);
+    let effective_window_end_sec = input
+        .cycle_window_end_sec
+        .map(|cycle_end| configured_window_end_sec.min(cycle_end))
+        .unwrap_or(configured_window_end_sec);
+    let in_adaptive_window = input
+        .market_elapsed_s
+        .is_some_and(|elapsed| {
+            elapsed >= effective_window_start_sec && elapsed <= effective_window_end_sec
+        });
+    let late_risk_active = input.config.late_risk_enabled
+        && in_adaptive_window
+        && input
+            .market_elapsed_s
+            .is_some_and(|elapsed| elapsed >= input.config.late_risk_after_sec);
+
+    PairLockAdaptiveMaxPriceTiming {
+        configured_window_start_sec,
+        configured_window_end_sec,
+        cycle_window_start_sec: input.cycle_window_start_sec,
+        cycle_window_end_sec: input.cycle_window_end_sec,
+        effective_window_start_sec,
+        effective_window_end_sec,
+        market_elapsed_s: input.market_elapsed_s,
+        in_adaptive_window,
+        late_risk_enabled: input.config.late_risk_enabled,
+        late_risk_after_sec: input.config.late_risk_after_sec,
+        late_risk_active,
+    }
 }
 
 fn pair_lock_adaptive_max_price_current_market_relaxed(
@@ -506,7 +642,18 @@ fn pair_lock_adaptive_diagnostics(
     effective_size_usdc: Option<f64>,
 ) -> Value {
     let config = input.config;
-    json!({
+    let timing = pair_lock_adaptive_timing(input);
+    let applied_extra_buffer_cent = if timing.late_risk_active {
+        config.extra_buffer_cent + config.late_extra_buffer_cent
+    } else {
+        config.extra_buffer_cent
+    };
+    let applied_size_multiplier = if timing.late_risk_active {
+        config.size_multiplier.min(config.late_size_multiplier)
+    } else {
+        config.size_multiplier
+    };
+    let mut payload = json!({
         "strategy": PAIR_LOCK_STRATEGY_ADAPTIVE_MAX_PRICE_V1,
         "evaluated": true,
         "base_max_price_cent": pair_lock_adaptive_cent_value(input.base_max_price),
@@ -516,6 +663,7 @@ fn pair_lock_adaptive_diagnostics(
         "q_final_cent": pair_lock_adaptive_cent_value(input.q_final),
         "dynamic_threshold_cent": pair_lock_adaptive_cent_value(input.dynamic_threshold),
         "extra_buffer_cent": config.extra_buffer_cent,
+        "applied_extra_buffer_cent": applied_extra_buffer_cent,
         "edge_price_cap_cent": edge_price_cap.map(|value| value * 100.0),
         "relax_credit_cent": config.relax_credit_cent.min(config.max_relax_credit_cent),
         "max_relax_credit_cent": config.max_relax_credit_cent,
@@ -527,16 +675,38 @@ fn pair_lock_adaptive_diagnostics(
         "relax_applied": relax_applied,
         "base_size_usdc": input.base_size_usdc,
         "size_multiplier": config.size_multiplier,
+        "applied_size_multiplier": applied_size_multiplier,
         "effective_size_usdc": effective_size_usdc,
         "ptb_pass": input.ptb_passed,
         "base_max_price_block": input.base_max_price_blocked,
         "depth_guard_pass": input.depth_guard_pass,
         "counter_depth_ok": input.counter_depth_ok,
         "book_reliability_ok": input.book_reliability_ok,
+    });
+    append_json_object_fields(&mut payload, &json!({
         "volume_regime": input.volume_regime,
         "ptb_trend": input.ptb_trend,
-        "market_elapsed_s": input.market_elapsed_s,
-        "late_relax_cutoff_s": config.late_relax_cutoff_s,
+        "timing": {
+            "market_elapsed_s": timing.market_elapsed_s,
+            "configured_window": {
+                "start_sec": timing.configured_window_start_sec,
+                "end_sec": timing.configured_window_end_sec,
+            },
+            "cycle_window": {
+                "start_sec": timing.cycle_window_start_sec,
+                "end_sec": timing.cycle_window_end_sec,
+            },
+            "effective_window": {
+                "start_sec": timing.effective_window_start_sec,
+                "end_sec": timing.effective_window_end_sec,
+            },
+            "in_adaptive_window": timing.in_adaptive_window,
+            "late_risk_enabled": timing.late_risk_enabled,
+            "late_risk_after_s": timing.late_risk_after_sec,
+            "late_risk_active": timing.late_risk_active,
+            "late_extra_buffer_cent": config.late_extra_buffer_cent,
+            "late_size_multiplier": config.late_size_multiplier,
+        },
         "already_relaxed_current_market": input.already_relaxed_current_market,
         "miss_count": config.miss_count,
         "required_good_miss_count": config.required_good_miss_count,
@@ -548,7 +718,8 @@ fn pair_lock_adaptive_diagnostics(
         "unknown_miss_count": input.history.unknown_miss_count,
         "decision": decision,
         "reason": reason,
-    })
+    }));
+    payload
 }
 
 fn evaluate_pair_lock_adaptive_max_price_decision(
@@ -586,7 +757,19 @@ fn evaluate_pair_lock_adaptive_max_price_decision(
         Some(value) if value.is_finite() && value >= 0.0 => value,
         _ => return no_relax_decision(&input, "dynamic_threshold_unavailable", None, None, None),
     };
-    let edge_price_cap = q_final - dynamic_threshold - input.config.extra_buffer_cent / 100.0;
+    let timing = pair_lock_adaptive_timing(&input);
+    let applied_extra_buffer_cent = if timing.late_risk_active {
+        input.config.extra_buffer_cent + input.config.late_extra_buffer_cent
+    } else {
+        input.config.extra_buffer_cent
+    };
+    let applied_size_multiplier = if timing.late_risk_active {
+        input.config.size_multiplier.min(input.config.late_size_multiplier)
+    } else {
+        input.config.size_multiplier
+    };
+    let edge_price_cap = q_final - dynamic_threshold - applied_extra_buffer_cent / 100.0;
+    let base_edge_price_cap = q_final - dynamic_threshold - input.config.extra_buffer_cent / 100.0;
     let pair_cap_price_limit =
         input.pair_max_total_price - counter_estimated_avg_fill - input.config.pair_buffer_cent / 100.0;
     let relaxed_cap = base_max_price
@@ -600,6 +783,15 @@ fn evaluate_pair_lock_adaptive_max_price_decision(
         .min(edge_price_cap)
         .min(hard_cap)
         .min(pair_cap_price_limit);
+    let base_effective_max_price = relaxed_cap
+        .min(base_edge_price_cap)
+        .min(hard_cap)
+        .min(pair_cap_price_limit);
+    let late_risk_caused_price_block = timing.late_risk_active
+        && base_edge_price_cap >= estimated_avg_fill
+        && base_effective_max_price > base_max_price
+        && estimated_avg_fill <= base_effective_max_price
+        && ask <= base_effective_max_price;
 
     if !input.ptb_passed {
         return no_relax_decision(
@@ -673,13 +865,10 @@ fn evaluate_pair_lock_adaptive_max_price_decision(
             Some(effective_max_price),
         );
     }
-    if input
-        .market_elapsed_s
-        .is_none_or(|elapsed| elapsed >= input.config.late_relax_cutoff_s)
-    {
+    if !timing.in_adaptive_window {
         return no_relax_decision(
             &input,
-            "late_market",
+            "outside_adaptive_window",
             Some(edge_price_cap),
             Some(pair_cap_price_limit),
             Some(effective_max_price),
@@ -706,7 +895,11 @@ fn evaluate_pair_lock_adaptive_max_price_decision(
     if edge_price_cap < estimated_avg_fill {
         return no_relax_decision(
             &input,
-            "edge_price_cap_below_estimated_fill",
+            if late_risk_caused_price_block {
+                "late_risk_block"
+            } else {
+                "edge_price_cap_below_estimated_fill"
+            },
             Some(edge_price_cap),
             Some(pair_cap_price_limit),
             Some(effective_max_price),
@@ -724,7 +917,11 @@ fn evaluate_pair_lock_adaptive_max_price_decision(
     if estimated_avg_fill > effective_max_price {
         return no_relax_decision(
             &input,
-            "estimated_avg_fill_above_effective_max_price",
+            if late_risk_caused_price_block {
+                "late_risk_block"
+            } else {
+                "estimated_avg_fill_above_effective_max_price"
+            },
             Some(edge_price_cap),
             Some(pair_cap_price_limit),
             Some(effective_max_price),
@@ -733,7 +930,11 @@ fn evaluate_pair_lock_adaptive_max_price_decision(
     if ask > effective_max_price {
         return no_relax_decision(
             &input,
-            "ask_above_effective_max_price",
+            if late_risk_caused_price_block {
+                "late_risk_block"
+            } else {
+                "ask_above_effective_max_price"
+            },
             Some(edge_price_cap),
             Some(pair_cap_price_limit),
             Some(effective_max_price),
@@ -742,7 +943,11 @@ fn evaluate_pair_lock_adaptive_max_price_decision(
     if effective_max_price <= base_max_price {
         return no_relax_decision(
             &input,
-            "effective_max_price_not_above_base",
+            if late_risk_caused_price_block {
+                "late_risk_block"
+            } else {
+                "effective_max_price_not_above_base"
+            },
             Some(edge_price_cap),
             Some(pair_cap_price_limit),
             Some(effective_max_price),
@@ -776,17 +981,22 @@ fn evaluate_pair_lock_adaptive_max_price_decision(
         );
     }
 
-    let effective_size_usdc = input.base_size_usdc * input.config.size_multiplier;
+    let effective_size_usdc = input.base_size_usdc * applied_size_multiplier;
+    let reason = if timing.late_risk_active {
+        "late_risk_size_reduced"
+    } else {
+        "resolved_good_miss_history_normal_expanding"
+    };
     PairLockAdaptiveMaxPriceDecision {
         relax_applied: true,
         decision: "RELAX_ALLOW",
-        reason: "resolved_good_miss_history_normal_expanding",
+        reason,
         effective_max_price: Some(effective_max_price),
         effective_size_usdc: Some(effective_size_usdc),
         diagnostics: pair_lock_adaptive_diagnostics(
             &input,
             "RELAX_ALLOW",
-            "resolved_good_miss_history_normal_expanding",
+            reason,
             true,
             Some(edge_price_cap),
             Some(pair_cap_price_limit),
@@ -799,6 +1009,7 @@ fn evaluate_pair_lock_adaptive_max_price_decision(
 async fn resolve_pair_lock_adaptive_max_price_decision_for_candidate(
     repo: &PostgresRepository,
     run: &TradeFlowRun,
+    step: &TradeFlowRunStep,
     node: &TradeFlowNode,
     context: &Value,
     market_slug: &str,
@@ -835,6 +1046,8 @@ async fn resolve_pair_lock_adaptive_max_price_decision_for_candidate(
                 .and_then(value_as_f64)
         })
         .and_then(|value| pair_lock_adaptive_probability_value(Some(value)));
+    let (cycle_window_start_sec, cycle_window_end_sec) =
+        pair_lock_adaptive_cycle_window_from_step(step);
     Ok(evaluate_pair_lock_adaptive_max_price_decision(
         PairLockAdaptiveMaxPriceDecisionInput {
             config,
@@ -855,6 +1068,8 @@ async fn resolve_pair_lock_adaptive_max_price_decision_for_candidate(
             volume_regime: pair_lock_adaptive_volume_regime(candidate),
             ptb_trend: pair_lock_adaptive_ptb_trend(candidate),
             market_elapsed_s: pair_lock_adaptive_market_elapsed_s(market_slug),
+            cycle_window_start_sec,
+            cycle_window_end_sec,
             already_relaxed_current_market: pair_lock_adaptive_max_price_current_market_relaxed(
                 context,
                 &node.key,
@@ -869,6 +1084,7 @@ async fn resolve_pair_lock_adaptive_max_price_decision_for_candidate(
 async fn maybe_apply_pair_lock_adaptive_max_price_candidate_override(
     repo: &PostgresRepository,
     run: &TradeFlowRun,
+    step: &TradeFlowRunStep,
     node: &TradeFlowNode,
     context: &Value,
     market_slug: &str,
@@ -882,6 +1098,7 @@ async fn maybe_apply_pair_lock_adaptive_max_price_candidate_override(
     let decision = resolve_pair_lock_adaptive_max_price_decision_for_candidate(
         repo,
         run,
+        step,
         node,
         context,
         market_slug,
@@ -944,7 +1161,13 @@ mod pair_lock_adaptive_max_price_tests {
             extra_buffer_cent: 1.0,
             pair_buffer_cent: 1.0,
             size_multiplier: 0.5,
-            late_relax_cutoff_s: 210,
+            window_start_sec: None,
+            window_end_sec: None,
+            legacy_late_relax_cutoff_s: None,
+            late_risk_enabled: true,
+            late_risk_after_sec: 210,
+            late_extra_buffer_cent: 1.0,
+            late_size_multiplier: 0.35,
             sl_cooldown_markets: 3,
         }
     }
@@ -977,6 +1200,8 @@ mod pair_lock_adaptive_max_price_tests {
             volume_regime: "normal",
             ptb_trend: "expanding",
             market_elapsed_s: Some(144),
+            cycle_window_start_sec: None,
+            cycle_window_end_sec: None,
             already_relaxed_current_market: false,
             history: good_history(),
         }
@@ -1075,12 +1300,113 @@ mod pair_lock_adaptive_max_price_tests {
     }
 
     #[test]
-    fn adaptive_max_price_blocks_late_market() {
+    fn adaptive_max_price_allows_configured_window_at_elapsed_250() {
         let mut input = default_input();
-        input.market_elapsed_s = Some(210);
+        input.config.window_start_sec = Some(120);
+        input.config.window_end_sec = Some(290);
+        input.market_elapsed_s = Some(250);
+        let decision = evaluate_pair_lock_adaptive_max_price_decision(input);
+        assert!(decision.relax_applied);
+    }
+
+    #[test]
+    fn adaptive_max_price_blocks_outside_adaptive_window() {
+        let mut input = default_input();
+        input.config.window_start_sec = Some(120);
+        input.config.window_end_sec = Some(210);
+        input.market_elapsed_s = Some(250);
         let decision = evaluate_pair_lock_adaptive_max_price_decision(input);
         assert!(!decision.relax_applied);
-        assert_eq!(decision.reason, "late_market");
+        assert_eq!(decision.reason, "outside_adaptive_window");
+    }
+
+    #[test]
+    fn adaptive_max_price_intersects_configured_and_cycle_windows() {
+        let mut input = default_input();
+        input.config.window_start_sec = Some(0);
+        input.config.window_end_sec = Some(210);
+        input.cycle_window_start_sec = Some(120);
+        input.cycle_window_end_sec = Some(290);
+        input.market_elapsed_s = Some(100);
+        let decision = evaluate_pair_lock_adaptive_max_price_decision(input);
+        assert_eq!(decision.reason, "outside_adaptive_window");
+        let timing = decision
+            .diagnostics
+            .get("timing")
+            .expect("timing payload");
+        assert_eq!(
+            timing
+                .pointer("/effective_window/start_sec")
+                .and_then(Value::as_i64),
+            Some(120)
+        );
+        assert_eq!(
+            timing
+                .pointer("/effective_window/end_sec")
+                .and_then(Value::as_i64),
+            Some(210)
+        );
+    }
+
+    #[test]
+    fn adaptive_max_price_late_risk_tightens_buffer_and_size() {
+        let mut input = default_input();
+        input.config.window_start_sec = Some(120);
+        input.config.window_end_sec = Some(290);
+        input.market_elapsed_s = Some(250);
+        let decision = evaluate_pair_lock_adaptive_max_price_decision(input);
+        assert!(decision.relax_applied);
+        assert_eq!(decision.reason, "late_risk_size_reduced");
+        assert_eq!(decision.effective_size_usdc, Some(1.75));
+        let payload = decision.diagnostics;
+        assert_eq!(
+            payload
+                .get("applied_extra_buffer_cent")
+                .and_then(Value::as_f64),
+            Some(2.0)
+        );
+        assert_eq!(
+            payload
+                .get("applied_size_multiplier")
+                .and_then(Value::as_f64),
+            Some(0.35)
+        );
+    }
+
+    #[test]
+    fn adaptive_max_price_late_risk_can_be_disabled() {
+        let mut input = default_input();
+        input.config.window_start_sec = Some(120);
+        input.config.window_end_sec = Some(290);
+        input.config.late_risk_enabled = false;
+        input.market_elapsed_s = Some(250);
+        let decision = evaluate_pair_lock_adaptive_max_price_decision(input);
+        assert!(decision.relax_applied);
+        assert_eq!(decision.reason, "resolved_good_miss_history_normal_expanding");
+        assert_eq!(decision.effective_size_usdc, Some(2.5));
+    }
+
+    #[test]
+    fn adaptive_max_price_late_risk_block_when_tightening_breaks_edge() {
+        let mut input = default_input();
+        input.config.window_start_sec = Some(120);
+        input.config.window_end_sec = Some(290);
+        input.market_elapsed_s = Some(250);
+        input.q_final = Some(0.79);
+        input.dynamic_threshold = Some(0.06);
+        let decision = evaluate_pair_lock_adaptive_max_price_decision(input);
+        assert!(!decision.relax_applied);
+        assert_eq!(decision.reason, "late_risk_block");
+    }
+
+    #[test]
+    fn adaptive_max_price_legacy_cutoff_is_fallback_window_end() {
+        let mut input = default_input();
+        input.config.legacy_late_relax_cutoff_s = Some(210);
+        input.market_elapsed_s = Some(250);
+        let decision = evaluate_pair_lock_adaptive_max_price_decision(input);
+        assert!(!decision.relax_applied);
+        assert_eq!(decision.reason, "outside_adaptive_window");
     }
 
     #[test]

@@ -882,6 +882,7 @@ async fn resolve_action_place_order_pair_lock_primary_selection(
         maybe_apply_pair_lock_adaptive_max_price_candidate_override(
             repo,
             run,
+            step,
             node,
             context,
             market_slug,
@@ -893,6 +894,7 @@ async fn resolve_action_place_order_pair_lock_primary_selection(
         maybe_apply_pair_lock_adaptive_max_price_candidate_override(
             repo,
             run,
+            step,
             node,
             context,
             market_slug,

@@ -66,7 +66,12 @@ test('action.place_order adaptive max price strategy round-trips guarded config'
     adaptiveMaxPriceExtraBufferCent: 1,
     adaptiveMaxPricePairBufferCent: 1,
     adaptiveMaxPriceSizeMultiplier: 0.5,
-    adaptiveMaxPriceLateRelaxCutoffS: 210,
+    adaptiveMaxPriceWindowStartSec: 120,
+    adaptiveMaxPriceWindowEndSec: 290,
+    adaptiveMaxPriceLateRiskEnabled: true,
+    adaptiveMaxPriceLateRiskAfterSec: 210,
+    adaptiveMaxPriceLateExtraBufferCent: 1,
+    adaptiveMaxPriceLateSizeMultiplier: 0.35,
     adaptiveMaxPriceSlCooldownMarkets: 3,
     pairLockDecisionQty: 9,
   });
@@ -76,6 +81,9 @@ test('action.place_order adaptive max price strategy round-trips guarded config'
   assert.equal(form.fields.priceToBeatMode, 'iv_mismatch_edge');
   assert.equal(form.fields.adaptiveMaxPriceHardCapCent, '76');
   assert.equal(form.fields.adaptiveMaxPriceSizeMultiplier, '0.5');
+  assert.equal(form.fields.adaptiveMaxPriceWindowStartSec, '120');
+  assert.equal(form.fields.adaptiveMaxPriceWindowEndSec, '290');
+  assert.equal(form.fields.adaptiveMaxPriceLateRiskEnabled, 'true');
 
   const rebuilt = buildNodeConfigFromForm('action.place_order', form);
   assert.equal(rebuilt.pairLockStrategy, 'adaptive_max_price_v1');
@@ -89,7 +97,39 @@ test('action.place_order adaptive max price strategy round-trips guarded config'
   assert.equal(rebuilt.adaptiveMaxPriceExtraBufferCent, 1);
   assert.equal(rebuilt.adaptiveMaxPricePairBufferCent, 1);
   assert.equal(rebuilt.adaptiveMaxPriceSizeMultiplier, 0.5);
-  assert.equal(rebuilt.adaptiveMaxPriceLateRelaxCutoffS, 210);
+  assert.equal(rebuilt.adaptiveMaxPriceWindowStartSec, 120);
+  assert.equal(rebuilt.adaptiveMaxPriceWindowEndSec, 290);
+  assert.equal(rebuilt.adaptiveMaxPriceLateRiskEnabled, true);
+  assert.equal(rebuilt.adaptiveMaxPriceLateRiskAfterSec, 210);
+  assert.equal(rebuilt.adaptiveMaxPriceLateExtraBufferCent, 1);
+  assert.equal(rebuilt.adaptiveMaxPriceLateSizeMultiplier, 0.35);
   assert.equal(rebuilt.adaptiveMaxPriceSlCooldownMarkets, 3);
   assert.equal('pairLockDecisionQty' in rebuilt, false);
+  assert.equal('adaptiveMaxPriceLateRelaxCutoffS' in rebuilt, false);
+});
+
+test('action.place_order adaptive max price strategy leaves blank window fields optional', () => {
+  const form = parseNodeConfigToForm('action.place_order', {
+    mode: 'pair_lock',
+    pairLockStrategy: 'adaptive_max_price_v1',
+    side: 'buy',
+    executionMode: 'limit',
+    sizeMode: 'usdc',
+    sizeUsdc: 5,
+    maxPriceCent: 70,
+    pairMaxTotalCent: 96,
+    counterLegEnabled: true,
+    counterLegOutcomeLabel: 'opposite',
+    counterLegSizeUsdc: 5,
+    priceToBeatGuardEnabled: true,
+    priceToBeatMode: 'iv_mismatch_edge',
+    adaptiveMaxPriceWindowStartSec: '',
+    adaptiveMaxPriceWindowEndSec: '',
+  });
+
+  const rebuilt = buildNodeConfigFromForm('action.place_order', form);
+  assert.equal('adaptiveMaxPriceWindowStartSec' in rebuilt, false);
+  assert.equal('adaptiveMaxPriceWindowEndSec' in rebuilt, false);
+  assert.equal(rebuilt.adaptiveMaxPriceLateRiskEnabled, true);
+  assert.equal(rebuilt.adaptiveMaxPriceLateRiskAfterSec, 210);
 });

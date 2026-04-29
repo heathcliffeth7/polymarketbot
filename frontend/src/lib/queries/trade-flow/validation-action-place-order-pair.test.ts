@@ -162,7 +162,10 @@ function buildAdaptiveMaxPriceConfig(
     adaptiveMaxPriceExtraBufferCent: 1,
     adaptiveMaxPricePairBufferCent: 1,
     adaptiveMaxPriceSizeMultiplier: 0.5,
-    adaptiveMaxPriceLateRelaxCutoffS: 210,
+    adaptiveMaxPriceLateRiskEnabled: true,
+    adaptiveMaxPriceLateRiskAfterSec: 210,
+    adaptiveMaxPriceLateExtraBufferCent: 1,
+    adaptiveMaxPriceLateSizeMultiplier: 0.35,
     adaptiveMaxPriceSlCooldownMarkets: 3,
     ...overrides,
   };
@@ -280,6 +283,41 @@ test('validateActionPlaceOrderConfig accepts adaptive_max_price_v1 pair lock IV 
 
   const issues = collectActionIssues(graph, 'pair_buy_adaptive_max_price');
   assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig accepts adaptive_max_price_v1 with blank optional window fields', () => {
+  const graph = buildAdaptiveMaxPriceGraph({
+    adaptiveMaxPriceWindowStartSec: '',
+    adaptiveMaxPriceWindowEndSec: '',
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_adaptive_max_price');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig rejects invalid adaptive_max_price_v1 window range', () => {
+  const graph = buildAdaptiveMaxPriceGraph({
+    adaptiveMaxPriceWindowStartSec: 250,
+    adaptiveMaxPriceWindowEndSec: 120,
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_adaptive_max_price');
+  assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_window_range'));
+});
+
+test('validateActionPlaceOrderConfig rejects invalid adaptive_max_price_v1 late risk fields', () => {
+  const graph = buildAdaptiveMaxPriceGraph({
+    adaptiveMaxPriceLateRiskEnabled: 'maybe',
+    adaptiveMaxPriceLateRiskAfterSec: 301,
+    adaptiveMaxPriceLateExtraBufferCent: -1,
+    adaptiveMaxPriceLateSizeMultiplier: 1.5,
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_adaptive_max_price');
+  assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_late_risk_enabled'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_late_risk_after'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_late_extra_buffer'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_adaptive_max_price_late_size_multiplier'));
 });
 
 test('validateActionPlaceOrderConfig rejects adaptive_max_price_v1 without PTB guard', () => {

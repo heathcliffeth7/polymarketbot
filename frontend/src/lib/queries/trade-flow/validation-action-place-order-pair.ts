@@ -61,6 +61,10 @@ function parseExitLadderRules(raw: unknown): {
   return { isArray: true, validRules, invalidItem };
 }
 
+function hasProvidedConfigValue(value: unknown): boolean {
+  return typeof value === 'string' ? value.trim().length > 0 : value != null;
+}
+
 function normalizeBinaryOutcome(value: string): 'yes' | 'no' | null {
   switch (value.trim().toLowerCase()) {
     case 'yes':
@@ -358,6 +362,17 @@ export function validateActionPlaceOrderPairLockConfig(
     const requiredGoodMiss = toFiniteNumber(config.adaptiveMaxPriceRequiredGoodMissCount);
     const sizeMultiplier = toFiniteNumber(config.adaptiveMaxPriceSizeMultiplier);
     const extraBuffer = toFiniteNumber(config.adaptiveMaxPriceExtraBufferCent);
+    const windowStartProvided = hasProvidedConfigValue(config.adaptiveMaxPriceWindowStartSec);
+    const windowEndProvided = hasProvidedConfigValue(config.adaptiveMaxPriceWindowEndSec);
+    const windowStart = windowStartProvided ? toFiniteNumber(config.adaptiveMaxPriceWindowStartSec) : null;
+    const windowEnd = windowEndProvided ? toFiniteNumber(config.adaptiveMaxPriceWindowEndSec) : null;
+    const lateRiskEnabled = toBooleanish(config.adaptiveMaxPriceLateRiskEnabled);
+    const lateRiskAfterProvided = hasProvidedConfigValue(config.adaptiveMaxPriceLateRiskAfterSec);
+    const lateExtraBufferProvided = hasProvidedConfigValue(config.adaptiveMaxPriceLateExtraBufferCent);
+    const lateSizeMultiplierProvided = hasProvidedConfigValue(config.adaptiveMaxPriceLateSizeMultiplier);
+    const lateRiskAfter = lateRiskAfterProvided ? toFiniteNumber(config.adaptiveMaxPriceLateRiskAfterSec) : null;
+    const lateExtraBuffer = lateExtraBufferProvided ? toFiniteNumber(config.adaptiveMaxPriceLateExtraBufferCent) : null;
+    const lateSizeMultiplier = lateSizeMultiplierProvided ? toFiniteNumber(config.adaptiveMaxPriceLateSizeMultiplier) : null;
     if (missCount == null || missCount <= 0 || !Number.isInteger(missCount)) {
       pushNodeError(issues, node, 'invalid_adaptive_max_price_miss_count', 'adaptiveMaxPriceMissCount must be a positive integer.');
     }
@@ -371,7 +386,6 @@ export function validateActionPlaceOrderPairLockConfig(
       ['adaptiveMaxPriceRelaxCreditCent', 'invalid_adaptive_max_price_relax_credit'],
       ['adaptiveMaxPriceMaxRelaxCreditCent', 'invalid_adaptive_max_price_max_relax'],
       ['adaptiveMaxPriceHardCapCent', 'invalid_adaptive_max_price_hard_cap'],
-      ['adaptiveMaxPriceLateRelaxCutoffS', 'invalid_adaptive_max_price_late_cutoff'],
     ] as const) {
       const value = toFiniteNumber(config[key]);
       if (value == null || value <= 0) {
@@ -392,6 +406,27 @@ export function validateActionPlaceOrderPairLockConfig(
     }
     if (sizeMultiplier == null || sizeMultiplier <= 0 || sizeMultiplier > 1) {
       pushNodeError(issues, node, 'invalid_adaptive_max_price_size_multiplier', 'adaptiveMaxPriceSizeMultiplier must be in (0, 1].');
+    }
+    if (windowStartProvided && (windowStart == null || !Number.isInteger(windowStart) || windowStart < 0 || windowStart > 300)) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_window_start', 'adaptiveMaxPriceWindowStartSec must be an integer in [0, 300] when provided.');
+    }
+    if (windowEndProvided && (windowEnd == null || !Number.isInteger(windowEnd) || windowEnd < 0 || windowEnd > 300)) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_window_end', 'adaptiveMaxPriceWindowEndSec must be an integer in [0, 300] when provided.');
+    }
+    if (windowStart != null && windowEnd != null && windowStart >= windowEnd) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_window_range', 'adaptiveMaxPriceWindowStartSec must be < adaptiveMaxPriceWindowEndSec.');
+    }
+    if (config.adaptiveMaxPriceLateRiskEnabled != null && lateRiskEnabled == null) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_late_risk_enabled', 'adaptiveMaxPriceLateRiskEnabled must be boolean (true/false).');
+    }
+    if (lateRiskAfterProvided && (lateRiskAfter == null || !Number.isInteger(lateRiskAfter) || lateRiskAfter < 0 || lateRiskAfter > 300)) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_late_risk_after', 'adaptiveMaxPriceLateRiskAfterSec must be an integer in [0, 300].');
+    }
+    if (lateExtraBufferProvided && (lateExtraBuffer == null || lateExtraBuffer < 0)) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_late_extra_buffer', 'adaptiveMaxPriceLateExtraBufferCent must be >= 0.');
+    }
+    if (lateSizeMultiplierProvided && (lateSizeMultiplier == null || lateSizeMultiplier <= 0 || lateSizeMultiplier > 1)) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_late_size_multiplier', 'adaptiveMaxPriceLateSizeMultiplier must be in (0, 1].');
     }
   }
   if (usesBiasedHedge) {
