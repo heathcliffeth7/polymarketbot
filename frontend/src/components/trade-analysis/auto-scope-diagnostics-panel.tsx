@@ -4,6 +4,7 @@ import { Download, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useTradeFlowAutoScopeTradeDiagnostic } from '@/hooks/use-trade-flow';
 import { cn } from '@/lib/utils';
+import type { AutoScopeTradeAnalysisRow } from '@/lib/types';
 import {
   formatDuration,
   formatDateTime,
@@ -20,6 +21,7 @@ interface AutoScopeDiagnosticsPanelProps {
   rootOrderId: number | null;
   onClose: () => void;
   className?: string;
+  selectedRow?: AutoScopeTradeAnalysisRow;
 }
 
 function DetailMetric({
@@ -48,6 +50,10 @@ function compactMetricValue(value: unknown): string {
 
 function formatNullablePnl(value: number | null | undefined): string {
   return value == null ? '-' : formatPnl(value);
+}
+
+function nullablePnlClassName(value: number | null | undefined): string {
+  return value == null ? 'text-zinc-300' : pnlClassName(value);
 }
 
 function formatFlagList(flags: string[] | undefined): string {
@@ -82,6 +88,7 @@ export function AutoScopeDiagnosticsPanel({
   rootOrderId,
   onClose,
   className,
+  selectedRow,
 }: AutoScopeDiagnosticsPanelProps) {
   const { data, error, isLoading } = useTradeFlowAutoScopeTradeDiagnostic(rootOrderId);
   if (!rootOrderId) return null;
@@ -91,6 +98,7 @@ export function AutoScopeDiagnosticsPanel({
   const blockedSignals = data?.blockedSignals ?? [];
   const signalRunId = diagnostic?.runId ?? rows[0]?.runId ?? null;
   const hasNoOrderSignals = blockedSignals.some((signal) => signal.noOrderTelemetry);
+  const activityCashPnlUsdc = selectedRow?.cashFillPnlUsdc ?? diagnostic?.cashFillPnlUsdc ?? null;
 
   function exportNoOrderCsv() {
     if (!signalRunId) return;
@@ -150,7 +158,12 @@ export function AutoScopeDiagnosticsPanel({
             )}
           </div>
 
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+            <DetailMetric
+              label="Activity Cash PnL"
+              value={formatNullablePnl(activityCashPnlUsdc)}
+              className={nullablePnlClassName(activityCashPnlUsdc)}
+            />
             <DetailMetric label="Maliyet" value={formatUsdc(diagnostic.costBasisUsdc)} />
             <DetailMetric label="Net Deger" value={formatUsdc(diagnostic.netValueUsdc)} />
             <DetailMetric label="Fee Drag" value={formatUsdc(diagnostic.feeDragUsdc)} />

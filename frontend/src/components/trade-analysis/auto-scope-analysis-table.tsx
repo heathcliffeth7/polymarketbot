@@ -714,6 +714,7 @@ export function AutoScopeAnalysisTable() {
                             rootOrderId={row.rootOrderId}
                             onClose={() => setSelectedDiagnostic(null)}
                             className="border-0 bg-transparent p-4"
+                            selectedRow={row}
                           />
                         </PopoverContent>
                       </Popover>
