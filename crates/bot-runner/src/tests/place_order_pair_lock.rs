@@ -36,8 +36,14 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
         .expect("pair lock config");
     assert!(pair_lock.ignore_stop_loss_after_locked);
 
-    let primary =
-        build_pair_lock_single_leg_node(&node, "btc-updown-5m-1", "tok-up", "Up", "trigger_pair");
+    let primary = build_pair_lock_single_leg_node(
+        &node,
+        "btc-updown-5m-1",
+        "tok-up",
+        "Up",
+        "trigger_pair",
+        None,
+    );
     let counter = build_pair_lock_counter_leg_node(
         &node,
         "btc-updown-5m-1",
@@ -168,6 +174,78 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
 }
 
 #[test]
+fn pair_lock_adaptive_max_price_override_only_changes_primary_child() {
+    let node = test_node(json!({
+        "mode": "pair_lock",
+        "pairLockStrategy": "adaptive_max_price_v1",
+        "side": "buy",
+        "executionMode": "market",
+        "sizeUsdc": 5,
+        "maxPriceCent": 70,
+        "pairMaxTotalCent": 96,
+        "priceToBeatGuardEnabled": true,
+        "priceToBeatMode": "iv_mismatch_edge",
+        "counterLegEnabled": true,
+        "counterLegSizeUsdc": 5,
+        "counterLegOutcomeLabel": "opposite",
+        "counterLegMaxPriceCent": 40,
+    }));
+    let pair_lock = resolve_action_place_order_pair_lock_config(&node)
+        .expect("pair lock config parse")
+        .expect("pair lock config");
+    let adaptive = PairLockAdaptiveMaxPriceOverride {
+        effective_max_price: 0.72,
+        effective_size_usdc: 2.5,
+        diagnostics: json!({"decision": "RELAX_ALLOW"}),
+    };
+
+    let primary = build_pair_lock_single_leg_node(
+        &node,
+        "btc-updown-5m-1",
+        "tok-up",
+        "Up",
+        "trigger_pair",
+        Some(&adaptive),
+    );
+    let counter = build_pair_lock_counter_leg_node(
+        &node,
+        "btc-updown-5m-1",
+        &ActionPlaceOrderPairResolvedCounterLeg {
+            token_id: "tok-down".to_string(),
+            outcome_label: "Down".to_string(),
+        },
+        &pair_lock,
+        "trigger_pair",
+    );
+
+    assert_eq!(
+        primary.config.get("maxPriceCent").and_then(Value::as_f64),
+        Some(72.0)
+    );
+    assert_eq!(
+        primary.config.get("sizeUsdc").and_then(Value::as_f64),
+        Some(2.5)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("adaptiveMaxPriceApplied")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        counter.config.get("maxPriceCent").and_then(Value::as_i64),
+        Some(40)
+    );
+    assert_eq!(
+        counter.config.get("sizeUsdc").and_then(Value::as_f64),
+        Some(5.0)
+    );
+    assert!(counter.config.get("adaptiveMaxPriceApplied").is_none());
+    assert!(counter.config.get("adaptiveMaxPrice").is_none());
+}
+
+#[test]
 fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
     let node = test_node(json!({
         "mode": "pair_lock",
@@ -207,8 +285,14 @@ fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
         .expect("pair lock config parse")
         .expect("pair lock config");
 
-    let primary =
-        build_pair_lock_single_leg_node(&node, "btc-updown-5m-1", "tok-up", "Up", "trigger_pair");
+    let primary = build_pair_lock_single_leg_node(
+        &node,
+        "btc-updown-5m-1",
+        "tok-up",
+        "Up",
+        "trigger_pair",
+        None,
+    );
     let counter = build_pair_lock_counter_leg_node(
         &node,
         "btc-updown-5m-1",

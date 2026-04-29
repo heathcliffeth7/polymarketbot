@@ -135,6 +135,58 @@ function buildBiasedHedgeGraph(
   });
 }
 
+function buildAdaptiveMaxPriceConfig(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    mode: 'pair_lock',
+    pairLockStrategy: 'adaptive_max_price_v1',
+    side: 'buy',
+    executionMode: 'limit',
+    sizeMode: 'usdc',
+    sizeUsdc: 5,
+    maxPriceCent: 70,
+    priceToBeatGuardEnabled: true,
+    priceToBeatMode: 'iv_mismatch_edge',
+    pairMaxTotalCent: 96,
+    pairOrphanGraceMs: 1500,
+    pairSizingMode: 'manual',
+    counterLegEnabled: true,
+    counterLegSizeUsdc: 5,
+    counterLegOutcomeLabel: 'opposite',
+    adaptiveMaxPriceMissCount: 3,
+    adaptiveMaxPriceRequiredGoodMissCount: 2,
+    adaptiveMaxPriceRelaxCreditCent: 2,
+    adaptiveMaxPriceMaxRelaxCreditCent: 5,
+    adaptiveMaxPriceHardCapCent: 76,
+    adaptiveMaxPriceExtraBufferCent: 1,
+    adaptiveMaxPricePairBufferCent: 1,
+    adaptiveMaxPriceSizeMultiplier: 0.5,
+    adaptiveMaxPriceLateRelaxCutoffS: 210,
+    adaptiveMaxPriceSlCooldownMarkets: 3,
+    ...overrides,
+  };
+}
+
+function buildAdaptiveMaxPriceGraph(
+  actionOverrides: Record<string, unknown> = {}
+): TradeFlowGraph {
+  return normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_adaptive_max_price'),
+      {
+        key: 'pair_buy_adaptive_max_price',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: buildAdaptiveMaxPriceConfig(actionOverrides),
+      },
+    ],
+    edges: [{ key: 'edge_adaptive_max_price', source: 'trigger_adaptive_max_price', target: 'pair_buy_adaptive_max_price', type: 'default', condition: null }],
+  });
+}
+
 function collectActionIssues(graph: TradeFlowGraph, nodeKey: string): TradeFlowValidationIssue[] {
   const node = graph.nodes.find((item) => item.key === nodeKey);
   assert.ok(node, `node ${nodeKey} should exist`);
@@ -221,6 +273,34 @@ test('validateActionPlaceOrderConfig accepts edge_pairlock_v1 share qty config',
 
   const issues = collectActionIssues(graph, 'pair_buy_edge');
   assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig accepts adaptive_max_price_v1 pair lock IV config', () => {
+  const graph = buildAdaptiveMaxPriceGraph();
+
+  const issues = collectActionIssues(graph, 'pair_buy_adaptive_max_price');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig rejects adaptive_max_price_v1 without PTB guard', () => {
+  const graph = buildAdaptiveMaxPriceGraph({ priceToBeatGuardEnabled: false });
+
+  const issues = collectActionIssues(graph, 'pair_buy_adaptive_max_price');
+  assert.ok(issues.some((issue) => issue.code === 'adaptive_max_price_requires_ptb_guard'));
+});
+
+test('validateActionPlaceOrderConfig rejects adaptive_max_price_v1 manual PTB mode', () => {
+  const graph = buildAdaptiveMaxPriceGraph({ priceToBeatMode: 'manual' });
+
+  const issues = collectActionIssues(graph, 'pair_buy_adaptive_max_price');
+  assert.ok(issues.some((issue) => issue.code === 'adaptive_max_price_requires_iv_mismatch_edge'));
+});
+
+test('validateActionPlaceOrderConfig rejects adaptive_max_price_v1 outside pair_lock mode', () => {
+  const graph = buildAdaptiveMaxPriceGraph({ mode: 'single' });
+
+  const issues = collectActionIssues(graph, 'pair_buy_adaptive_max_price');
+  assert.ok(issues.some((issue) => issue.code === 'adaptive_max_price_requires_pair_lock_mode'));
 });
 
 test('validateActionPlaceOrderConfig accepts biased_hedge_v1 smoke config', () => {

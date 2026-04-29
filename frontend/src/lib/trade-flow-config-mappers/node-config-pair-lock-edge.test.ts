@@ -41,3 +41,55 @@ test('action.place_order edge pair_lock strategy round-trips share qty config', 
   assert.equal(rebuilt.pairSizingMode, 'manual');
   assert.equal('counterLegSizeUsdc' in rebuilt, false);
 });
+
+test('action.place_order adaptive max price strategy round-trips guarded config', () => {
+  const form = parseNodeConfigToForm('action.place_order', {
+    mode: 'pair_lock',
+    pairLockStrategy: 'adaptive_max_price_v1',
+    pairSizingMode: 'manual',
+    side: 'buy',
+    executionMode: 'limit',
+    sizeMode: 'usdc',
+    sizeUsdc: 5,
+    maxPriceCent: 70,
+    pairMaxTotalCent: 96,
+    counterLegEnabled: true,
+    counterLegOutcomeLabel: 'opposite',
+    counterLegSizeUsdc: 5,
+    priceToBeatGuardEnabled: false,
+    priceToBeatMode: 'manual',
+    adaptiveMaxPriceMissCount: 3,
+    adaptiveMaxPriceRequiredGoodMissCount: 2,
+    adaptiveMaxPriceRelaxCreditCent: 2,
+    adaptiveMaxPriceMaxRelaxCreditCent: 5,
+    adaptiveMaxPriceHardCapCent: 76,
+    adaptiveMaxPriceExtraBufferCent: 1,
+    adaptiveMaxPricePairBufferCent: 1,
+    adaptiveMaxPriceSizeMultiplier: 0.5,
+    adaptiveMaxPriceLateRelaxCutoffS: 210,
+    adaptiveMaxPriceSlCooldownMarkets: 3,
+    pairLockDecisionQty: 9,
+  });
+
+  assert.equal(form.fields.pairLockStrategy, 'adaptive_max_price_v1');
+  assert.equal(form.fields.priceToBeatGuardEnabled, 'true');
+  assert.equal(form.fields.priceToBeatMode, 'iv_mismatch_edge');
+  assert.equal(form.fields.adaptiveMaxPriceHardCapCent, '76');
+  assert.equal(form.fields.adaptiveMaxPriceSizeMultiplier, '0.5');
+
+  const rebuilt = buildNodeConfigFromForm('action.place_order', form);
+  assert.equal(rebuilt.pairLockStrategy, 'adaptive_max_price_v1');
+  assert.equal(rebuilt.priceToBeatGuardEnabled, true);
+  assert.equal(rebuilt.priceToBeatMode, 'iv_mismatch_edge');
+  assert.equal(rebuilt.adaptiveMaxPriceMissCount, 3);
+  assert.equal(rebuilt.adaptiveMaxPriceRequiredGoodMissCount, 2);
+  assert.equal(rebuilt.adaptiveMaxPriceRelaxCreditCent, 2);
+  assert.equal(rebuilt.adaptiveMaxPriceMaxRelaxCreditCent, 5);
+  assert.equal(rebuilt.adaptiveMaxPriceHardCapCent, 76);
+  assert.equal(rebuilt.adaptiveMaxPriceExtraBufferCent, 1);
+  assert.equal(rebuilt.adaptiveMaxPricePairBufferCent, 1);
+  assert.equal(rebuilt.adaptiveMaxPriceSizeMultiplier, 0.5);
+  assert.equal(rebuilt.adaptiveMaxPriceLateRelaxCutoffS, 210);
+  assert.equal(rebuilt.adaptiveMaxPriceSlCooldownMarkets, 3);
+  assert.equal('pairLockDecisionQty' in rebuilt, false);
+});

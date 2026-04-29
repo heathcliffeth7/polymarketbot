@@ -139,6 +139,30 @@ export function updateNodeFieldState(
           (nextFields.pairLockSingleEdgeThreshold ?? '').trim() || '0.10';
         nextFields.pairLockCostBuffer = (nextFields.pairLockCostBuffer ?? '').trim() || '0.005';
         nextFields.pairMaxTotalCent = (nextFields.pairMaxTotalCent ?? '').trim() || '95';
+      } else if (pairLockStrategy === 'adaptive_max_price_v1') {
+        nextFields.priceToBeatGuardEnabled = 'true';
+        nextFields.priceToBeatMode = 'iv_mismatch_edge';
+        nextFields.counterLegEnabled = 'true';
+        nextFields.adaptiveMaxPriceMissCount =
+          (nextFields.adaptiveMaxPriceMissCount ?? '').trim() || '3';
+        nextFields.adaptiveMaxPriceRequiredGoodMissCount =
+          (nextFields.adaptiveMaxPriceRequiredGoodMissCount ?? '').trim() || '2';
+        nextFields.adaptiveMaxPriceRelaxCreditCent =
+          (nextFields.adaptiveMaxPriceRelaxCreditCent ?? '').trim() || '2';
+        nextFields.adaptiveMaxPriceMaxRelaxCreditCent =
+          (nextFields.adaptiveMaxPriceMaxRelaxCreditCent ?? '').trim() || '5';
+        nextFields.adaptiveMaxPriceHardCapCent =
+          (nextFields.adaptiveMaxPriceHardCapCent ?? '').trim() || '76';
+        nextFields.adaptiveMaxPriceExtraBufferCent =
+          (nextFields.adaptiveMaxPriceExtraBufferCent ?? '').trim() || '1';
+        nextFields.adaptiveMaxPricePairBufferCent =
+          (nextFields.adaptiveMaxPricePairBufferCent ?? '').trim() || '1';
+        nextFields.adaptiveMaxPriceSizeMultiplier =
+          (nextFields.adaptiveMaxPriceSizeMultiplier ?? '').trim() || '0.5';
+        nextFields.adaptiveMaxPriceLateRelaxCutoffS =
+          (nextFields.adaptiveMaxPriceLateRelaxCutoffS ?? '').trim() || '210';
+        nextFields.adaptiveMaxPriceSlCooldownMarkets =
+          (nextFields.adaptiveMaxPriceSlCooldownMarkets ?? '').trim() || '3';
       } else if (pairLockStrategy === 'biased_hedge_v1') {
         nextFields.priceToBeatGuardEnabled = 'true';
         nextFields.priceToBeatMode = 'iv_mismatch_edge';

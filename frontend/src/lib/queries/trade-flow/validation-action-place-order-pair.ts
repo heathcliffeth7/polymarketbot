@@ -187,7 +187,16 @@ export function validateActionPlaceOrderPairLockConfig(
   executionMode: string
 ) {
   const mode = toTrimmedString(config.mode).toLowerCase();
+  const configuredPairLockStrategy = toTrimmedString(config.pairLockStrategy).toLowerCase();
   if (!mode || mode === 'single') {
+    if (configuredPairLockStrategy === 'adaptive_max_price_v1') {
+      pushNodeError(
+        issues,
+        node,
+        'adaptive_max_price_requires_pair_lock_mode',
+        'action.place_order adaptive_max_price_v1 requires mode=pair_lock.'
+      );
+    }
     return;
   }
 
@@ -267,17 +276,19 @@ export function validateActionPlaceOrderPairLockConfig(
   if (
     pairLockStrategy !== 'legacy' &&
     pairLockStrategy !== 'edge_pairlock_v1' &&
-    pairLockStrategy !== 'biased_hedge_v1'
+    pairLockStrategy !== 'biased_hedge_v1' &&
+    pairLockStrategy !== 'adaptive_max_price_v1'
   ) {
     pushNodeError(
       issues,
       node,
       'invalid_pair_lock_strategy',
-      'action.place_order pairLockStrategy must be legacy, edge_pairlock_v1, or biased_hedge_v1.'
+      'action.place_order pairLockStrategy must be legacy, edge_pairlock_v1, biased_hedge_v1, or adaptive_max_price_v1.'
     );
   }
   const usesEdgePairLock = pairLockStrategy === 'edge_pairlock_v1';
   const usesBiasedHedge = pairLockStrategy === 'biased_hedge_v1';
+  const usesAdaptiveMaxPrice = pairLockStrategy === 'adaptive_max_price_v1';
   if (usesEdgePairLock) {
     if (toBooleanish(config.priceToBeatGuardEnabled) !== true) {
       pushNodeError(
@@ -324,6 +335,63 @@ export function validateActionPlaceOrderPairLockConfig(
         'invalid_pair_lock_cost_buffer',
         'action.place_order pairLockCostBuffer must be >= 0 for edge_pairlock_v1.'
       );
+    }
+  }
+  if (usesAdaptiveMaxPrice) {
+    if (toBooleanish(config.priceToBeatGuardEnabled) !== true) {
+      pushNodeError(
+        issues,
+        node,
+        'adaptive_max_price_requires_ptb_guard',
+        'action.place_order adaptive_max_price_v1 requires priceToBeatGuardEnabled=true.'
+      );
+    }
+    if (toTrimmedString(config.priceToBeatMode).toLowerCase() !== 'iv_mismatch_edge') {
+      pushNodeError(
+        issues,
+        node,
+        'adaptive_max_price_requires_iv_mismatch_edge',
+        'action.place_order adaptive_max_price_v1 requires priceToBeatMode=iv_mismatch_edge.'
+      );
+    }
+    const missCount = toFiniteNumber(config.adaptiveMaxPriceMissCount);
+    const requiredGoodMiss = toFiniteNumber(config.adaptiveMaxPriceRequiredGoodMissCount);
+    const sizeMultiplier = toFiniteNumber(config.adaptiveMaxPriceSizeMultiplier);
+    const extraBuffer = toFiniteNumber(config.adaptiveMaxPriceExtraBufferCent);
+    if (missCount == null || missCount <= 0 || !Number.isInteger(missCount)) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_miss_count', 'adaptiveMaxPriceMissCount must be a positive integer.');
+    }
+    if (requiredGoodMiss == null || requiredGoodMiss <= 0 || !Number.isInteger(requiredGoodMiss)) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_good_miss_count', 'adaptiveMaxPriceRequiredGoodMissCount must be a positive integer.');
+    }
+    if (missCount != null && requiredGoodMiss != null && requiredGoodMiss > missCount) {
+      pushNodeError(issues, node, 'adaptive_max_price_good_miss_above_miss_count', 'adaptiveMaxPriceRequiredGoodMissCount cannot exceed adaptiveMaxPriceMissCount.');
+    }
+    for (const [key, code] of [
+      ['adaptiveMaxPriceRelaxCreditCent', 'invalid_adaptive_max_price_relax_credit'],
+      ['adaptiveMaxPriceMaxRelaxCreditCent', 'invalid_adaptive_max_price_max_relax'],
+      ['adaptiveMaxPriceHardCapCent', 'invalid_adaptive_max_price_hard_cap'],
+      ['adaptiveMaxPriceLateRelaxCutoffS', 'invalid_adaptive_max_price_late_cutoff'],
+    ] as const) {
+      const value = toFiniteNumber(config[key]);
+      if (value == null || value <= 0) {
+        pushNodeError(issues, node, code, `action.place_order ${key} must be > 0.`);
+      }
+    }
+    for (const [key, code] of [
+      ['adaptiveMaxPricePairBufferCent', 'invalid_adaptive_max_price_pair_buffer'],
+      ['adaptiveMaxPriceSlCooldownMarkets', 'invalid_adaptive_max_price_sl_cooldown'],
+    ] as const) {
+      const value = toFiniteNumber(config[key]);
+      if (value == null || value < 0) {
+        pushNodeError(issues, node, code, `action.place_order ${key} must be >= 0.`);
+      }
+    }
+    if (extraBuffer == null || extraBuffer < 1) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_extra_buffer', 'adaptiveMaxPriceExtraBufferCent must be >= 1.');
+    }
+    if (sizeMultiplier == null || sizeMultiplier <= 0 || sizeMultiplier > 1) {
+      pushNodeError(issues, node, 'invalid_adaptive_max_price_size_multiplier', 'adaptiveMaxPriceSizeMultiplier must be in (0, 1].');
     }
   }
   if (usesBiasedHedge) {

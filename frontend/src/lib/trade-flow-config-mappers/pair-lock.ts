@@ -7,6 +7,16 @@ export const PAIR_LOCK_CONFIG_KEYS = [
   'pairLockDecisionQty',
   'pairLockSingleEdgeThreshold',
   'pairLockCostBuffer',
+  'adaptiveMaxPriceMissCount',
+  'adaptiveMaxPriceRequiredGoodMissCount',
+  'adaptiveMaxPriceRelaxCreditCent',
+  'adaptiveMaxPriceMaxRelaxCreditCent',
+  'adaptiveMaxPriceHardCapCent',
+  'adaptiveMaxPriceExtraBufferCent',
+  'adaptiveMaxPricePairBufferCent',
+  'adaptiveMaxPriceSizeMultiplier',
+  'adaptiveMaxPriceLateRelaxCutoffS',
+  'adaptiveMaxPriceSlCooldownMarkets',
   'biasedHedge',
   'biasedHedgeStop',
   'biasedHedgePrimaryBudgetUsdc',
@@ -141,12 +151,17 @@ export function normalizePairLockSizingMode(value: string): 'manual' | 'auto_rem
     : 'manual';
 }
 
-export type PairLockStrategy = 'legacy' | 'edge_pairlock_v1' | 'biased_hedge_v1';
+export type PairLockStrategy =
+  | 'legacy'
+  | 'edge_pairlock_v1'
+  | 'biased_hedge_v1'
+  | 'adaptive_max_price_v1';
 
 export function normalizePairLockStrategy(value: string): PairLockStrategy {
   const normalized = value.trim().toLowerCase();
   if (normalized === 'edge_pairlock_v1') return 'edge_pairlock_v1';
   if (normalized === 'biased_hedge_v1') return 'biased_hedge_v1';
+  if (normalized === 'adaptive_max_price_v1') return 'adaptive_max_price_v1';
   return 'legacy';
 }
 
@@ -251,6 +266,19 @@ export function applyPairLockFormDefaults(
     if (!(fields.pairLockSingleEdgeThreshold ?? '').trim()) fields.pairLockSingleEdgeThreshold = '0.10';
     if (!(fields.pairLockCostBuffer ?? '').trim()) fields.pairLockCostBuffer = '0.005';
     if (!(fields.pairMaxTotalCent ?? '').trim()) fields.pairMaxTotalCent = '95';
+  } else if (fields.pairLockStrategy === 'adaptive_max_price_v1') {
+    fields.priceToBeatGuardEnabled = 'true';
+    fields.priceToBeatMode = 'iv_mismatch_edge';
+    setDefault(fields, 'adaptiveMaxPriceMissCount', '3');
+    setDefault(fields, 'adaptiveMaxPriceRequiredGoodMissCount', '2');
+    setDefault(fields, 'adaptiveMaxPriceRelaxCreditCent', '2');
+    setDefault(fields, 'adaptiveMaxPriceMaxRelaxCreditCent', '5');
+    setDefault(fields, 'adaptiveMaxPriceHardCapCent', '76');
+    setDefault(fields, 'adaptiveMaxPriceExtraBufferCent', '1');
+    setDefault(fields, 'adaptiveMaxPricePairBufferCent', '1');
+    setDefault(fields, 'adaptiveMaxPriceSizeMultiplier', '0.5');
+    setDefault(fields, 'adaptiveMaxPriceLateRelaxCutoffS', '210');
+    setDefault(fields, 'adaptiveMaxPriceSlCooldownMarkets', '3');
   } else if (fields.pairLockStrategy === 'biased_hedge_v1') {
     applyBiasedHedgeFormDefaults(fields, cfg);
   }
@@ -374,6 +402,16 @@ function normalizeBiasedHedgeBuildConfig(config: Record<string, unknown>): void 
   delete config.pairLockDecisionQty;
   delete config.pairLockSingleEdgeThreshold;
   delete config.pairLockCostBuffer;
+  delete config.adaptiveMaxPriceMissCount;
+  delete config.adaptiveMaxPriceRequiredGoodMissCount;
+  delete config.adaptiveMaxPriceRelaxCreditCent;
+  delete config.adaptiveMaxPriceMaxRelaxCreditCent;
+  delete config.adaptiveMaxPriceHardCapCent;
+  delete config.adaptiveMaxPriceExtraBufferCent;
+  delete config.adaptiveMaxPricePairBufferCent;
+  delete config.adaptiveMaxPriceSizeMultiplier;
+  delete config.adaptiveMaxPriceLateRelaxCutoffS;
+  delete config.adaptiveMaxPriceSlCooldownMarkets;
   delete config.pairTotalBudgetUsdc;
   delete config.counterLegSizeUsdc;
 }
@@ -396,6 +434,33 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     normalizePositiveNumberField(config, 'pairLockDecisionQty', 5);
     normalizeNonNegativeNumberField(config, 'pairLockSingleEdgeThreshold', 0.10);
     normalizeNonNegativeNumberField(config, 'pairLockCostBuffer', 0.005);
+    delete config.adaptiveMaxPriceMissCount;
+    delete config.adaptiveMaxPriceRequiredGoodMissCount;
+    delete config.adaptiveMaxPriceRelaxCreditCent;
+    delete config.adaptiveMaxPriceMaxRelaxCreditCent;
+    delete config.adaptiveMaxPriceHardCapCent;
+    delete config.adaptiveMaxPriceExtraBufferCent;
+    delete config.adaptiveMaxPricePairBufferCent;
+    delete config.adaptiveMaxPriceSizeMultiplier;
+    delete config.adaptiveMaxPriceLateRelaxCutoffS;
+    delete config.adaptiveMaxPriceSlCooldownMarkets;
+  } else if (pairLockStrategy === 'adaptive_max_price_v1') {
+    config.pairLockStrategy = 'adaptive_max_price_v1';
+    config.priceToBeatGuardEnabled = true;
+    config.priceToBeatMode = 'iv_mismatch_edge';
+    normalizePositiveNumberField(config, 'adaptiveMaxPriceMissCount', 3);
+    normalizePositiveNumberField(config, 'adaptiveMaxPriceRequiredGoodMissCount', 2);
+    normalizePositiveNumberField(config, 'adaptiveMaxPriceRelaxCreditCent', 2);
+    normalizePositiveNumberField(config, 'adaptiveMaxPriceMaxRelaxCreditCent', 5);
+    normalizePositiveNumberField(config, 'adaptiveMaxPriceHardCapCent', 76);
+    normalizePositiveNumberField(config, 'adaptiveMaxPriceExtraBufferCent', 1);
+    normalizeNonNegativeNumberField(config, 'adaptiveMaxPricePairBufferCent', 1);
+    normalizePositiveNumberField(config, 'adaptiveMaxPriceSizeMultiplier', 0.5);
+    normalizePositiveNumberField(config, 'adaptiveMaxPriceLateRelaxCutoffS', 210);
+    normalizeNonNegativeNumberField(config, 'adaptiveMaxPriceSlCooldownMarkets', 3);
+    delete config.pairLockDecisionQty;
+    delete config.pairLockSingleEdgeThreshold;
+    delete config.pairLockCostBuffer;
   } else if (pairLockStrategy === 'biased_hedge_v1') {
     normalizeBiasedHedgeBuildConfig(config);
   } else {
@@ -403,6 +468,16 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     delete config.pairLockDecisionQty;
     delete config.pairLockSingleEdgeThreshold;
     delete config.pairLockCostBuffer;
+    delete config.adaptiveMaxPriceMissCount;
+    delete config.adaptiveMaxPriceRequiredGoodMissCount;
+    delete config.adaptiveMaxPriceRelaxCreditCent;
+    delete config.adaptiveMaxPriceMaxRelaxCreditCent;
+    delete config.adaptiveMaxPriceHardCapCent;
+    delete config.adaptiveMaxPriceExtraBufferCent;
+    delete config.adaptiveMaxPricePairBufferCent;
+    delete config.adaptiveMaxPriceSizeMultiplier;
+    delete config.adaptiveMaxPriceLateRelaxCutoffS;
+    delete config.adaptiveMaxPriceSlCooldownMarkets;
     delete config.biasedHedge;
     delete config.biasedHedgeStop;
     delete config.biasedHedgeMaxPairedEffectiveCostCent;

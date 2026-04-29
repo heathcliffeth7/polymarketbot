@@ -15,7 +15,7 @@ fn extract_source_trade_id(execution: &TradeFlowNodeExecution) -> Option<i64> {
 
 fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Value>) {
     for key in [
-        "mode", "pairMaxTotalCent", "pairTargetTotalCent", "pairSizingMode", "pairTotalBudgetUsdc",
+        "mode", "pairLockStrategy", "pairMaxTotalCent", "pairTargetTotalCent", "pairSizingMode", "pairTotalBudgetUsdc",
         "pairOrphanGraceMs", "pairProtectiveUnwindEnabled", "pairIgnoreStopLossAfterLocked", "notifyOnPairLocked", "notifyOnPairUnwind", "counterLegEnabled",
         "counterLegOutcomeLabel", "counterLegTriggerCondition", "counterLegTriggerPriceCent",
         "counterLegMaxPriceCent", "counterLegPriceToBeatGuardEnabled", "counterLegPriceToBeatMode",
@@ -35,6 +35,11 @@ fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Val
         "reentryPriceToBeatMaxDiffUnit", "reentrySkipCurrentWindow", "reentryThresholdDecay",
         "reentryMaxPriceTightenBps", "stagedSlReentryOnlyAfterAllStages",
         "biasedHedge", "biasedHedgeStop", "biasedHedgeMaxPairedEffectiveCostCent",
+        "adaptiveMaxPriceMissCount", "adaptiveMaxPriceRequiredGoodMissCount",
+        "adaptiveMaxPriceRelaxCreditCent", "adaptiveMaxPriceMaxRelaxCreditCent",
+        "adaptiveMaxPriceHardCapCent", "adaptiveMaxPriceExtraBufferCent",
+        "adaptiveMaxPricePairBufferCent", "adaptiveMaxPriceSizeMultiplier",
+        "adaptiveMaxPriceLateRelaxCutoffS", "adaptiveMaxPriceSlCooldownMarkets",
     ] {
         config.remove(key);
     }
@@ -46,6 +51,7 @@ fn build_pair_lock_single_leg_node(
     token_id: &str,
     outcome_label: &str,
     trigger_node_key: &str,
+    adaptive_max_price_override: Option<&PairLockAdaptiveMaxPriceOverride>,
 ) -> TradeFlowNode {
     let mut config = node
         .config
@@ -65,6 +71,19 @@ fn build_pair_lock_single_leg_node(
     }
     if let Some(value) = node.config.get("ptbStopLossRules") {
         config.insert("ptbStopLossRules".to_string(), value.clone());
+    }
+    if let Some(adaptive) = adaptive_max_price_override {
+        config.insert(
+            "maxPriceCent".to_string(),
+            json!(adaptive.effective_max_price * 100.0),
+        );
+        config.insert("sizeMode".to_string(), json!("usdc"));
+        config.insert("sizeUsdc".to_string(), json!(adaptive.effective_size_usdc));
+        config.insert("adaptiveMaxPriceApplied".to_string(), json!(true));
+        config.insert(
+            "adaptiveMaxPrice".to_string(),
+            adaptive.diagnostics.clone(),
+        );
     }
 
     TradeFlowNode {

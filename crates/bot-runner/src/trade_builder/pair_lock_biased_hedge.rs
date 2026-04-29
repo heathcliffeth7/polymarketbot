@@ -413,8 +413,14 @@ fn configure_biased_hedge_primary_node(
     trigger_node_key: &str,
     config: &ActionPlaceOrderBiasedHedgeConfig,
 ) -> TradeFlowNode {
-    let mut child =
-        build_pair_lock_single_leg_node(node, market_slug, &primary.token_id, &primary.outcome_label, trigger_node_key);
+    let mut child = build_pair_lock_single_leg_node(
+        node,
+        market_slug,
+        &primary.token_id,
+        &primary.outcome_label,
+        trigger_node_key,
+        None,
+    );
     let mut map = child.config.as_object().cloned().unwrap_or_default();
     map.insert("sizeMode".to_string(), json!("usdc"));
     map.insert("sizeUsdc".to_string(), json!(config.primary_budget_usdc));

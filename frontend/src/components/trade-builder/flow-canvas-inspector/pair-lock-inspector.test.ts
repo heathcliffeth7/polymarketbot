@@ -103,6 +103,23 @@ test('resolvePairLockSizingFieldVisibility shows edge strategy qty fields', () =
   assert.equal(resolvePairLockSizingFieldVisibility('counterLegSizeUsdc', true, fields), false);
 });
 
+test('resolvePairLockSizingFieldVisibility shows adaptive max price fields only for adaptive strategy', () => {
+  assert.equal(
+    resolvePairLockSizingFieldVisibility('adaptiveMaxPriceHardCapCent', true, {
+      pairLockStrategy: 'adaptive_max_price_v1',
+      pairSizingMode: 'manual',
+    }),
+    true
+  );
+  assert.equal(
+    resolvePairLockSizingFieldVisibility('adaptiveMaxPriceHardCapCent', true, {
+      pairLockStrategy: 'edge_pairlock_v1',
+      pairSizingMode: 'manual',
+    }),
+    false
+  );
+});
+
 test('isPairLockField includes locked pair stop-loss ignore toggle', () => {
   assert.equal(isPairLockField('pairIgnoreStopLossAfterLocked'), true);
   assert.equal(isPairLockField('pairLockStrategy'), true);

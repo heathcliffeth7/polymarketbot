@@ -56,7 +56,10 @@ fn resolve_action_place_order_pair_lock_strategy(node: &TradeFlowNode) -> Result
         "" | PAIR_LOCK_STRATEGY_LEGACY => Ok(PAIR_LOCK_STRATEGY_LEGACY),
         PAIR_LOCK_STRATEGY_EDGE_PAIRLOCK_V1 => Ok(PAIR_LOCK_STRATEGY_EDGE_PAIRLOCK_V1),
         PAIR_LOCK_STRATEGY_BIASED_HEDGE_V1 => Ok(PAIR_LOCK_STRATEGY_BIASED_HEDGE_V1),
-        _ => anyhow::bail!("action.place_order pairLockStrategy must be legacy, edge_pairlock_v1, or biased_hedge_v1"),
+        PAIR_LOCK_STRATEGY_ADAPTIVE_MAX_PRICE_V1 => {
+            Ok(PAIR_LOCK_STRATEGY_ADAPTIVE_MAX_PRICE_V1)
+        }
+        _ => anyhow::bail!("action.place_order pairLockStrategy must be legacy, edge_pairlock_v1, biased_hedge_v1, or adaptive_max_price_v1"),
     }
 }
 
@@ -787,6 +790,7 @@ async fn execute_action_place_order_pair_lock_edge_strategy(
                 &primary.token_id,
                 &primary.outcome_label,
                 trigger_node_key,
+                None,
             );
             let counter_node = build_pair_lock_counter_leg_node(
                 node,
@@ -946,6 +950,7 @@ async fn execute_action_place_order_pair_lock_edge_strategy(
             &selected.token_id,
             &selected.outcome_label,
             trigger_node_key,
+            None,
         );
         let mut selected_result = execute_pair_lock_edge_share_buy_order(
             repo,
@@ -1038,6 +1043,7 @@ mod pair_lock_edge_strategy_tests {
                     }
                 }
             }),
+            adaptive_max_price_override: None,
         }
     }
 

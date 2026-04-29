@@ -12,6 +12,7 @@ struct ActionPlaceOrderPairLockPrimaryCandidateEval {
     reason_code: String,
     quote: PairLockResolvedQuote,
     diagnostics: Value,
+    adaptive_max_price_override: Option<PairLockAdaptiveMaxPriceOverride>,
 }
 #[derive(Debug, Clone)]
 struct ActionPlaceOrderPairLockPrimarySelection {
@@ -19,6 +20,7 @@ struct ActionPlaceOrderPairLockPrimarySelection {
     outcome_label: String,
     selection_mode: &'static str,
     guard_reason: String,
+    adaptive_max_price_override: Option<PairLockAdaptiveMaxPriceOverride>,
 }
 #[derive(Debug, Clone)]
 struct ActionPlaceOrderPairLockPrimarySelectionAttempt {
@@ -639,7 +641,13 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
     let mut ptb_guard = Value::Null;
     let mut decision = guard_eval.effective_decision;
     let mut reason_code = guard_eval.effective_reason_code.to_string();
-    if pair_lock_primary_should_log_ptb_skip(node, decision) {
+    let adaptive_max_price_probe =
+        action_place_order_uses_adaptive_max_price_strategy(node)
+            && guard_eval.max_price_blocked
+            && !guard_eval.trigger_price_guard_blocked
+            && guard_eval.execution_floor_reason.is_none()
+            && guard_eval.pair_lock_market_waiting_reason.is_none();
+    if pair_lock_primary_should_log_ptb_skip(node, decision) && !adaptive_max_price_probe {
         tracing::debug!(
             message = "PAIR_LOCK_PRIMARY_PTB_SKIPPED_BY_PRE_GUARD",
             flow_run_id = run.id,
@@ -654,7 +662,9 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
             best_ask_floor_price = ?best_ask_floor_price,
         );
     }
-    if decision == "passed" && node_config_bool(node, "priceToBeatGuardEnabled").unwrap_or(false) {
+    if (decision == "passed" || adaptive_max_price_probe)
+        && node_config_bool(node, "priceToBeatGuardEnabled").unwrap_or(false)
+    {
         let evaluation =
             crate::trade_flow::guards::price_to_beat::evaluate_action_place_order_price_to_beat_guard_state(
                 ptb_runtime,
@@ -691,12 +701,14 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
             price_to_beat = ?ptb_log_snapshot.price_to_beat,
         );
         ptb_guard = evaluation.to_value();
-        decision = pair_lock_primary_ptb_guard_decision(
-            evaluation.passed,
-            node_config_bool(node, "retryOnPriceToBeatGuardBlock").unwrap_or(true),
-        );
-        if decision != "passed" {
-            reason_code = evaluation.reason_code.clone();
+        if !adaptive_max_price_probe {
+            decision = pair_lock_primary_ptb_guard_decision(
+                evaluation.passed,
+                node_config_bool(node, "retryOnPriceToBeatGuardBlock").unwrap_or(true),
+            );
+            if decision != "passed" {
+                reason_code = evaluation.reason_code.clone();
+            }
         }
     }
 
@@ -706,6 +718,7 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
         decision,
         reason_code: reason_code.clone(),
         quote: quote.clone(),
+        adaptive_max_price_override: None,
         diagnostics: json!({
             "token_id": token_id,
             "outcome_label": outcome_label,
@@ -765,6 +778,7 @@ fn resolve_action_place_order_pair_lock_primary_selection_attempt(
                 outcome_label: selected.outcome_label.clone(),
                 selection_mode: "auto_guarded",
                 guard_reason: selected.reason_code.clone(),
+                adaptive_max_price_override: selected.adaptive_max_price_override.clone(),
             }),
             waiting: false,
             failure_reason: None,
@@ -785,6 +799,7 @@ fn resolve_action_place_order_pair_lock_primary_selection_attempt(
                         outcome_label: selected.outcome_label.clone(),
                         selection_mode: "auto_guarded_iv_mismatch_edge",
                         guard_reason: "selected_edge_passed".to_string(),
+                        adaptive_max_price_override: selected.adaptive_max_price_override.clone(),
                     }),
                     waiting: false,
                     failure_reason: None,
@@ -820,6 +835,7 @@ fn pair_lock_primary_iv_edge(candidate: &ActionPlaceOrderPairLockPrimaryCandidat
 
 async fn resolve_action_place_order_pair_lock_primary_selection(
     ptb_runtime: Option<crate::trade_flow::guards::price_to_beat::PriceToBeatGuardRuntimeContext<'_>>,
+    adaptive_max_price_runtime: Option<(&PostgresRepository, &ActionPlaceOrderPairLockConfig)>,
     ws: &ClobWsClient,
     client: &dyn OrderExecutor,
     run: &TradeFlowRun,
@@ -836,7 +852,7 @@ async fn resolve_action_place_order_pair_lock_primary_selection(
     let no_token_id = no_token_id
         .ok_or_else(|| anyhow::anyhow!("pair_lock auto primary selection requires noTokenId"))?;
 
-    let up_candidate = evaluate_action_place_order_pair_lock_primary_candidate(
+    let mut up_candidate = evaluate_action_place_order_pair_lock_primary_candidate(
         ptb_runtime,
         ws,
         client,
@@ -849,7 +865,7 @@ async fn resolve_action_place_order_pair_lock_primary_selection(
         up_label,
     )
     .await?;
-    let down_candidate = evaluate_action_place_order_pair_lock_primary_candidate(
+    let mut down_candidate = evaluate_action_place_order_pair_lock_primary_candidate(
         ptb_runtime,
         ws,
         client,
@@ -862,6 +878,30 @@ async fn resolve_action_place_order_pair_lock_primary_selection(
         down_label,
     )
     .await?;
+    if let Some((repo, pair_lock)) = adaptive_max_price_runtime {
+        maybe_apply_pair_lock_adaptive_max_price_candidate_override(
+            repo,
+            run,
+            node,
+            context,
+            market_slug,
+            pair_lock,
+            &mut up_candidate,
+            &down_candidate,
+        )
+        .await?;
+        maybe_apply_pair_lock_adaptive_max_price_candidate_override(
+            repo,
+            run,
+            node,
+            context,
+            market_slug,
+            pair_lock,
+            &mut down_candidate,
+            &up_candidate,
+        )
+        .await?;
+    }
     let selection_attempt =
         resolve_action_place_order_pair_lock_primary_selection_attempt(up_candidate, down_candidate);
     if let Some(runtime) = ptb_runtime {
@@ -1002,6 +1042,7 @@ mod pair_lock_auto_primary_tests {
 
         let selection = resolve_action_place_order_pair_lock_primary_selection(
             None,
+            None,
             &ws,
             &executor,
             &pair_lock_test_run(),
@@ -1061,6 +1102,7 @@ mod pair_lock_auto_primary_tests {
         let mut context = json!({});
 
         let selection = resolve_action_place_order_pair_lock_primary_selection(
+            None,
             None,
             &ws,
             &executor,
@@ -1123,6 +1165,7 @@ mod pair_lock_auto_primary_tests {
         let mut context = json!({});
 
         let selection = resolve_action_place_order_pair_lock_primary_selection(
+            None,
             None,
             &ws,
             &executor,
@@ -1319,6 +1362,7 @@ mod pair_lock_auto_primary_tests {
                         "max_price_relax": { "max_price_relax_applied": true }
                     }
                 }),
+                adaptive_max_price_override: None,
             },
             ActionPlaceOrderPairLockPrimaryCandidateEval {
                 token_id: "no".to_string(),
@@ -1335,6 +1379,7 @@ mod pair_lock_auto_primary_tests {
                         "reason_code": "price_to_beat_gap_below_threshold"
                     }
                 }),
+                adaptive_max_price_override: None,
             },
         );
 

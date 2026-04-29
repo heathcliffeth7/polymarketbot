@@ -83,6 +83,9 @@ fn resolve_action_place_order_pair_lock_config(
     let strategy = resolve_action_place_order_pair_lock_strategy(node)?;
     let uses_edge_strategy = strategy == PAIR_LOCK_STRATEGY_EDGE_PAIRLOCK_V1;
     let uses_biased_hedge_strategy = strategy == PAIR_LOCK_STRATEGY_BIASED_HEDGE_V1;
+    if strategy == PAIR_LOCK_STRATEGY_ADAPTIVE_MAX_PRICE_V1 {
+        resolve_pair_lock_adaptive_max_price_config(node)?;
+    }
     let pair_max_total_cent = node_config_f64(node, "pairMaxTotalCent")
         .or_else(|| node_config_f64(node, "pairTargetTotalCent"))
         .unwrap_or(if uses_biased_hedge_strategy { 99.0 } else { f64::NAN });
@@ -341,6 +344,7 @@ async fn execute_action_place_order_pair_lock(
         selected_primary_guard_reason,
         primary_selection_diagnostics,
         selected_candidate_quotes,
+        adaptive_max_price_override,
     ) =
         if let Some(primary_token_id) = explicit_primary_token_id {
             let primary_outcome_label = explicit_primary_outcome_label
@@ -365,6 +369,7 @@ async fn execute_action_place_order_pair_lock(
                 "explicit".to_string(),
                 diagnostics,
                 None,
+                None,
             )
         } else {
             let selection_attempt = resolve_action_place_order_pair_lock_primary_selection(
@@ -376,6 +381,7 @@ async fn execute_action_place_order_pair_lock(
                         Some(client),
                     ),
                 ),
+                Some((repo, &pair_lock)),
                 ws,
                 client,
                 run,
@@ -462,6 +468,7 @@ async fn execute_action_place_order_pair_lock(
                     selection_attempt.yes_candidate.quote.clone(),
                     selection_attempt.no_candidate.quote.clone(),
                 )),
+                selection.adaptive_max_price_override,
             )
         };
     let counter = resolve_action_place_order_pair_lock_counter_leg(
@@ -472,7 +479,37 @@ async fn execute_action_place_order_pair_lock(
     )
     .await?;
 
-    let primary_node = build_pair_lock_single_leg_node(node, &market_slug, &primary_token_id, &primary_outcome_label, &trigger_node_key);
+    if let Some(override_payload) = adaptive_max_price_override.as_ref() {
+        mark_pair_lock_adaptive_max_price_relaxed(
+            context,
+            &node.key,
+            &market_slug,
+            &primary_outcome_label,
+        );
+        repo.append_trade_flow_event(
+            Some(run.id),
+            run.definition_id,
+            Some(run.version_id),
+            "pair_lock_adaptive_max_price_relax_applied",
+            &json!({
+                "node_key": node.key,
+                "market_slug": market_slug,
+                "selected_primary_token_id": primary_token_id,
+                "selected_primary_outcome_label": primary_outcome_label,
+                "adaptive_max_price": override_payload.diagnostics,
+            }),
+        )
+        .await?;
+    }
+
+    let primary_node = build_pair_lock_single_leg_node(
+        node,
+        &market_slug,
+        &primary_token_id,
+        &primary_outcome_label,
+        &trigger_node_key,
+        adaptive_max_price_override.as_ref(),
+    );
     let counter_node = build_pair_lock_counter_leg_node(node, &market_slug, &counter, &pair_lock, &trigger_node_key);
     let primary_step = pair_lock_candidate_quote_for_token(
         &primary_token_id,
@@ -599,6 +636,7 @@ async fn execute_action_place_order_pair_lock(
             "selected_primary_outcome_label": &primary_outcome_label,
             "selected_primary_guard_reason": &selected_primary_guard_reason,
             "primary_selection": primary_selection_diagnostics.clone(),
+            "adaptive_max_price": adaptive_max_price_override.as_ref().map(|value| value.diagnostics.clone()),
         }),
     )
     .await?;
@@ -659,6 +697,7 @@ async fn execute_action_place_order_pair_lock(
             "selected_primary_outcome_label": primary_outcome_label,
             "selected_primary_guard_reason": selected_primary_guard_reason,
             "primary_selection": primary_selection_diagnostics,
+            "adaptive_max_price": adaptive_max_price_override.map(|value| value.diagnostics),
             "resolved_yes_token_id": resolved_tokens.yes_token_id,
             "resolved_no_token_id": resolved_tokens.no_token_id,
             "token_resolution_source": resolved_tokens.token_resolution_source,

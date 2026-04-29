@@ -133,6 +133,31 @@ fn auto_tune_downstream_action_place_order_nodes(
     action_nodes
 }
 
+fn auto_tune_adaptive_max_price_payload_for_outcome(
+    metrics_source: &Value,
+    outcome_label: &str,
+) -> Value {
+    let target = normalize_pair_lock_binary_outcome(outcome_label);
+    let candidates = [
+        metrics_source.get("adaptive_max_price"),
+        metrics_source.pointer("/primary_selection/adaptive_max_price"),
+        metrics_source.pointer("/yes_candidate_guard/adaptive_max_price"),
+        metrics_source.pointer("/no_candidate_guard/adaptive_max_price"),
+        metrics_source.pointer("/primary_selection/yes_candidate_guard/adaptive_max_price"),
+        metrics_source.pointer("/primary_selection/no_candidate_guard/adaptive_max_price"),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        let candidate_outcome = candidate
+            .get("outcome_label")
+            .and_then(Value::as_str)
+            .and_then(normalize_pair_lock_binary_outcome);
+        if candidate_outcome.is_none() || candidate_outcome == target {
+            return candidate.clone();
+        }
+    }
+    Value::Null
+}
+
 fn first_terminal_guard_for_auto_tune(
     events: &[TradeFlowEventRecord],
     action_steps: &[TradeFlowRunStep],
@@ -356,6 +381,7 @@ fn auto_tune_summary_input(
         "book_data_status": diagnosis.get("book_data_status").cloned().unwrap_or(Value::Null),
         "quote_missing_reason": diagnosis.get("quote_missing_reason").cloned().unwrap_or(Value::Null),
         "depth_ok_seconds_count": depth_ok_seconds_count,
+        "adaptive_max_price": auto_tune_adaptive_max_price_payload_for_outcome(metrics_source, &node_spec.outcome_label),
     });
 
     bot_infra::db::TradeFlowAutoTuneMarketSummaryInput {
