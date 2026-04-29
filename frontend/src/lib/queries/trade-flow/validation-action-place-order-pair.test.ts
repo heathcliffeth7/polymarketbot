@@ -246,6 +246,9 @@ function buildManualAdaptiveRiskConfig(
     notifyOnManualAdaptiveRiskStrict: true,
     notifyOnManualAdaptiveRiskSlBump: true,
     notifyOnManualAdaptiveRiskSummary: true,
+    notifyOnManualAdaptiveCounterCap: true,
+    manualAdaptiveCounterCapNotifyMinDeltaCent: 3,
+    manualAdaptiveNotifySummaryEveryMarkets: 5,
     manualAdaptiveNotifyMinIntervalSec: 30,
     manualAdaptiveNotifyIncludePayload: false,
     ...overrides,
@@ -463,6 +466,9 @@ test('validateActionPlaceOrderConfig rejects invalid manual_adaptive_risk_v1 ran
     manualAdaptiveVolumeElevatedLt: 2,
     manualAdaptiveHighSizeMultiplier: 1.5,
     manualAdaptiveAfterSlPtbGapAddCent: -1,
+    notifyOnManualAdaptiveCounterCap: 'counter',
+    manualAdaptiveCounterCapNotifyMinDeltaCent: -1,
+    manualAdaptiveNotifySummaryEveryMarkets: 0,
     manualAdaptiveNotifyIncludePayload: 'payload',
     manualAdaptiveNotifyMinIntervalSec: -1,
   });
@@ -472,6 +478,9 @@ test('validateActionPlaceOrderConfig rejects invalid manual_adaptive_risk_v1 ran
   assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_volume_thresholds'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_high_size'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_after_sl_ptb_add'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_notify_on_manual_adaptive_counter_cap'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_counter_cap_notify_delta'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_notify_summary_every_markets'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_notify_include_payload'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_notify_min_interval'));
 });

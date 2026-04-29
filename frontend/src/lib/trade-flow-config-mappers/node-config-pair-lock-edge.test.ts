@@ -184,6 +184,9 @@ test('action.place_order manual adaptive risk strategy round-trips guarded confi
     manualAdaptiveHighPtbGapAddCent: 25,
     manualAdaptivePairBufferCent: 1,
     notifyOnManualAdaptiveRiskBlock: true,
+    notifyOnManualAdaptiveCounterCap: true,
+    manualAdaptiveCounterCapNotifyMinDeltaCent: 3,
+    manualAdaptiveNotifySummaryEveryMarkets: 5,
     manualAdaptiveNotifyIncludePayload: false,
     adaptiveMaxPriceHardCapCent: 76,
   });
@@ -204,6 +207,9 @@ test('action.place_order manual adaptive risk strategy round-trips guarded confi
   assert.equal(rebuilt.manualAdaptiveHighPtbGapAddCent, 25);
   assert.equal(rebuilt.manualAdaptivePairBufferCent, 1);
   assert.equal(rebuilt.notifyOnManualAdaptiveRiskBlock, true);
+  assert.equal(rebuilt.notifyOnManualAdaptiveCounterCap, true);
+  assert.equal(rebuilt.manualAdaptiveCounterCapNotifyMinDeltaCent, 3);
+  assert.equal(rebuilt.manualAdaptiveNotifySummaryEveryMarkets, 5);
   assert.equal(rebuilt.manualAdaptiveNotifyIncludePayload, false);
   assert.equal('adaptiveMaxPriceHardCapCent' in rebuilt, false);
 });

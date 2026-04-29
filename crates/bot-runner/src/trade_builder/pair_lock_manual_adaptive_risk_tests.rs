@@ -65,6 +65,9 @@ mod pair_lock_manual_adaptive_risk_tests {
             config: default_manual_config(),
             base_max_price: Some(0.70),
             base_size_usdc: 5.0,
+            base_reenter_on_sl_hit: true,
+            base_counter_max_price: Some(0.70),
+            counter_floor_price: Some(0.10),
             ask: Some(0.55),
             primary_estimated_avg_fill: Some(0.55),
             counter_estimated_avg_fill: Some(0.25),
@@ -204,5 +207,80 @@ mod pair_lock_manual_adaptive_risk_tests {
         assert_eq!(first, "flat");
         assert_eq!(second, "expanding");
         assert_eq!(down, "flat");
+    }
+
+    fn notify_config() -> PairLockManualAdaptiveNotifyConfig {
+        PairLockManualAdaptiveNotifyConfig {
+            notify_block: true,
+            notify_strict: true,
+            notify_sl_bump: true,
+            notify_summary: true,
+            notify_counter_cap: true,
+            min_interval_sec: 30,
+            summary_every_markets: 5,
+            counter_cap_notify_min_delta_cent: 3.0,
+            include_payload: false,
+        }
+    }
+
+    #[test]
+    fn manual_adaptive_counter_cap_notify_payload_requires_material_clamp() {
+        let mut input = input("high", "expanding");
+        input.primary_estimated_avg_fill = Some(0.56);
+        let decision = evaluate_pair_lock_manual_adaptive_risk_decision(input);
+        let (payload, reason, force) =
+            pair_lock_manual_counter_cap_event_payload(&decision.diagnostics, notify_config())
+                .expect("material counter clamp should notify");
+
+        assert_eq!(reason, "pair_cap_protection");
+        assert!(!force);
+        assert_eq!(
+            payload
+                .pointer("/counter_dynamic_cap/base_counter_max_cent")
+                .and_then(value_as_f64),
+            Some(70.0)
+        );
+        assert_eq!(
+            payload
+                .pointer("/counter_dynamic_cap/effective_counter_max_cent")
+                .and_then(value_as_f64),
+            Some(39.0)
+        );
+    }
+
+    #[test]
+    fn manual_adaptive_counter_cap_notify_payload_skips_small_clamp() {
+        let mut input = input("high", "expanding");
+        input.primary_estimated_avg_fill = Some(0.27);
+        let decision = evaluate_pair_lock_manual_adaptive_risk_decision(input);
+
+        assert!(
+            pair_lock_manual_counter_cap_event_payload(&decision.diagnostics, notify_config())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn manual_adaptive_counter_cap_notify_payload_respects_disabled_flag() {
+        let mut input = input("high", "expanding");
+        input.primary_estimated_avg_fill = Some(0.56);
+        let decision = evaluate_pair_lock_manual_adaptive_risk_decision(input);
+        let mut cfg = notify_config();
+        cfg.notify_counter_cap = false;
+
+        assert!(pair_lock_manual_counter_cap_notify_payload(&decision.diagnostics, cfg).is_none());
+    }
+
+    #[test]
+    fn manual_adaptive_counter_cap_notify_payload_marks_floor_block() {
+        let mut input = input("high", "expanding");
+        input.primary_estimated_avg_fill = Some(0.90);
+        let decision = evaluate_pair_lock_manual_adaptive_risk_decision(input);
+        let (_payload, reason, force) =
+            pair_lock_manual_counter_cap_event_payload(&decision.diagnostics, notify_config())
+                .expect("below-floor counter cap should notify");
+
+        assert_eq!(reason, "counter_cap_below_floor");
+        assert!(force);
     }
 }

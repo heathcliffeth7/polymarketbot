@@ -243,6 +243,12 @@ export function updateNodeFieldState(
           (nextFields.notifyOnManualAdaptiveRiskSlBump ?? '').trim() || 'true';
         nextFields.notifyOnManualAdaptiveRiskSummary =
           (nextFields.notifyOnManualAdaptiveRiskSummary ?? '').trim() || 'true';
+        nextFields.notifyOnManualAdaptiveCounterCap =
+          (nextFields.notifyOnManualAdaptiveCounterCap ?? '').trim() || 'true';
+        nextFields.manualAdaptiveCounterCapNotifyMinDeltaCent =
+          (nextFields.manualAdaptiveCounterCapNotifyMinDeltaCent ?? '').trim() || '3';
+        nextFields.manualAdaptiveNotifySummaryEveryMarkets =
+          (nextFields.manualAdaptiveNotifySummaryEveryMarkets ?? '').trim() || '5';
         nextFields.manualAdaptiveNotifyMinIntervalSec =
           (nextFields.manualAdaptiveNotifyMinIntervalSec ?? '').trim() || '30';
         nextFields.manualAdaptiveNotifyIncludePayload =

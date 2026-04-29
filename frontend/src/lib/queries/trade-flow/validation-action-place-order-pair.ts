@@ -538,6 +538,7 @@ export function validateActionPlaceOrderPairLockConfig(
       ['manualAdaptiveAfterSlPtbGapAddCent', 'invalid_manual_adaptive_after_sl_ptb_add'],
       ['manualAdaptiveSlCooldownMarkets', 'invalid_manual_adaptive_sl_cooldown'],
       ['manualAdaptivePairBufferCent', 'invalid_manual_adaptive_pair_buffer'],
+      ['manualAdaptiveCounterCapNotifyMinDeltaCent', 'invalid_manual_adaptive_counter_cap_notify_delta'],
     ] as const) {
       const value = toFiniteNumber(config[key]);
       if (value == null || value < 0) {
@@ -549,6 +550,7 @@ export function validateActionPlaceOrderPairLockConfig(
       ['notifyOnManualAdaptiveRiskStrict', 'invalid_notify_on_manual_adaptive_risk_strict'],
       ['notifyOnManualAdaptiveRiskSlBump', 'invalid_notify_on_manual_adaptive_risk_sl_bump'],
       ['notifyOnManualAdaptiveRiskSummary', 'invalid_notify_on_manual_adaptive_risk_summary'],
+      ['notifyOnManualAdaptiveCounterCap', 'invalid_notify_on_manual_adaptive_counter_cap'],
       ['manualAdaptiveNotifyIncludePayload', 'invalid_manual_adaptive_notify_include_payload'],
     ] as const) {
       if (config[key] != null && toBooleanish(config[key]) == null) {
@@ -559,6 +561,11 @@ export function validateActionPlaceOrderPairLockConfig(
     const notifyMinInterval = notifyMinIntervalProvided ? toFiniteNumber(config.manualAdaptiveNotifyMinIntervalSec) : null;
     if (notifyMinIntervalProvided && (notifyMinInterval == null || !Number.isInteger(notifyMinInterval) || notifyMinInterval < 0)) {
       pushNodeError(issues, node, 'invalid_manual_adaptive_notify_min_interval', 'manualAdaptiveNotifyMinIntervalSec must be an integer >= 0.');
+    }
+    const summaryEveryProvided = hasProvidedConfigValue(config.manualAdaptiveNotifySummaryEveryMarkets);
+    const summaryEvery = summaryEveryProvided ? toFiniteNumber(config.manualAdaptiveNotifySummaryEveryMarkets) : null;
+    if (summaryEveryProvided && (summaryEvery == null || !Number.isInteger(summaryEvery) || summaryEvery <= 0)) {
+      pushNodeError(issues, node, 'invalid_manual_adaptive_notify_summary_every_markets', 'manualAdaptiveNotifySummaryEveryMarkets must be a positive integer.');
     }
   }
   if (usesBiasedHedge) {

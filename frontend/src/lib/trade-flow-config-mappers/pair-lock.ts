@@ -59,6 +59,9 @@ const MANUAL_ADAPTIVE_RISK_CONFIG_KEYS = [
   'notifyOnManualAdaptiveRiskStrict',
   'notifyOnManualAdaptiveRiskSlBump',
   'notifyOnManualAdaptiveRiskSummary',
+  'notifyOnManualAdaptiveCounterCap',
+  'manualAdaptiveCounterCapNotifyMinDeltaCent',
+  'manualAdaptiveNotifySummaryEveryMarkets',
   'manualAdaptiveNotifyMinIntervalSec',
   'manualAdaptiveNotifyIncludePayload',
 ] as const;
@@ -375,6 +378,9 @@ export function applyPairLockFormDefaults(
     setDefault(fields, 'notifyOnManualAdaptiveRiskStrict', 'true');
     setDefault(fields, 'notifyOnManualAdaptiveRiskSlBump', 'true');
     setDefault(fields, 'notifyOnManualAdaptiveRiskSummary', 'true');
+    setDefault(fields, 'notifyOnManualAdaptiveCounterCap', 'true');
+    setDefault(fields, 'manualAdaptiveCounterCapNotifyMinDeltaCent', '3');
+    setDefault(fields, 'manualAdaptiveNotifySummaryEveryMarkets', '5');
     setDefault(fields, 'manualAdaptiveNotifyMinIntervalSec', '30');
     setDefault(fields, 'manualAdaptiveNotifyIncludePayload', 'false');
   } else if (fields.pairLockStrategy === 'biased_hedge_v1') {
@@ -642,6 +648,9 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     config.notifyOnManualAdaptiveRiskStrict = booleanValue(config, 'notifyOnManualAdaptiveRiskStrict', true);
     config.notifyOnManualAdaptiveRiskSlBump = booleanValue(config, 'notifyOnManualAdaptiveRiskSlBump', true);
     config.notifyOnManualAdaptiveRiskSummary = booleanValue(config, 'notifyOnManualAdaptiveRiskSummary', true);
+    config.notifyOnManualAdaptiveCounterCap = booleanValue(config, 'notifyOnManualAdaptiveCounterCap', true);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveCounterCapNotifyMinDeltaCent', 3);
+    normalizePositiveIntegerField(config, 'manualAdaptiveNotifySummaryEveryMarkets', 5);
     normalizeIntegerField(config, 'manualAdaptiveNotifyMinIntervalSec', 30, 0, Number.MAX_SAFE_INTEGER);
     config.manualAdaptiveNotifyIncludePayload = booleanValue(config, 'manualAdaptiveNotifyIncludePayload', false);
     delete config.pairLockDecisionQty;

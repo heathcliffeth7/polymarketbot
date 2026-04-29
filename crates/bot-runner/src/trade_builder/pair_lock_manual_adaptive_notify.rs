@@ -2,14 +2,17 @@ const DEFAULT_MANUAL_ADAPTIVE_NOTIFY_BLOCK: bool = true;
 const DEFAULT_MANUAL_ADAPTIVE_NOTIFY_STRICT: bool = true;
 const DEFAULT_MANUAL_ADAPTIVE_NOTIFY_SL_BUMP: bool = true;
 const DEFAULT_MANUAL_ADAPTIVE_NOTIFY_SUMMARY: bool = true;
+const DEFAULT_MANUAL_ADAPTIVE_NOTIFY_COUNTER_CAP: bool = true;
 const DEFAULT_MANUAL_ADAPTIVE_NOTIFY_MIN_INTERVAL_SEC: i64 = 30;
 const DEFAULT_MANUAL_ADAPTIVE_NOTIFY_INCLUDE_PAYLOAD: bool = false;
 const DEFAULT_MANUAL_ADAPTIVE_SUMMARY_EVERY_MARKETS: i64 = 5;
+const DEFAULT_MANUAL_ADAPTIVE_COUNTER_CAP_NOTIFY_MIN_DELTA_CENT: f64 = 3.0;
 
 const MANUAL_ADAPTIVE_EVENT_BLOCK: &str = "manual_adaptive_risk_block";
 const MANUAL_ADAPTIVE_EVENT_STRICT: &str = "manual_adaptive_risk_strict";
 const MANUAL_ADAPTIVE_EVENT_SL_BUMP: &str = "manual_adaptive_risk_sl_bump";
 const MANUAL_ADAPTIVE_EVENT_SUMMARY: &str = "manual_adaptive_risk_summary";
+const MANUAL_ADAPTIVE_EVENT_COUNTER_CAP: &str = "manual_adaptive_counter_cap";
 
 #[derive(Debug, Clone, Copy)]
 struct PairLockManualAdaptiveNotifyConfig {
@@ -17,7 +20,10 @@ struct PairLockManualAdaptiveNotifyConfig {
     notify_strict: bool,
     notify_sl_bump: bool,
     notify_summary: bool,
+    notify_counter_cap: bool,
     min_interval_sec: i64,
+    summary_every_markets: i64,
+    counter_cap_notify_min_delta_cent: f64,
     include_payload: bool,
 }
 
@@ -30,6 +36,22 @@ fn resolve_pair_lock_manual_adaptive_notify_config(
         min_interval_sec >= 0,
         "action.place_order manualAdaptiveNotifyMinIntervalSec must be >= 0"
     );
+    let summary_every_markets = node_config_i64(node, "manualAdaptiveNotifySummaryEveryMarkets")
+        .unwrap_or(DEFAULT_MANUAL_ADAPTIVE_SUMMARY_EVERY_MARKETS);
+    anyhow::ensure!(
+        summary_every_markets > 0,
+        "action.place_order manualAdaptiveNotifySummaryEveryMarkets must be > 0"
+    );
+    let counter_cap_notify_min_delta_cent = node_config_f64(
+        node,
+        "manualAdaptiveCounterCapNotifyMinDeltaCent",
+    )
+    .unwrap_or(DEFAULT_MANUAL_ADAPTIVE_COUNTER_CAP_NOTIFY_MIN_DELTA_CENT);
+    anyhow::ensure!(
+        counter_cap_notify_min_delta_cent.is_finite()
+            && counter_cap_notify_min_delta_cent >= 0.0,
+        "action.place_order manualAdaptiveCounterCapNotifyMinDeltaCent must be >= 0"
+    );
     Ok(PairLockManualAdaptiveNotifyConfig {
         notify_block: node_config_bool(node, "notifyOnManualAdaptiveRiskBlock")
             .unwrap_or(DEFAULT_MANUAL_ADAPTIVE_NOTIFY_BLOCK),
@@ -39,7 +61,11 @@ fn resolve_pair_lock_manual_adaptive_notify_config(
             .unwrap_or(DEFAULT_MANUAL_ADAPTIVE_NOTIFY_SL_BUMP),
         notify_summary: node_config_bool(node, "notifyOnManualAdaptiveRiskSummary")
             .unwrap_or(DEFAULT_MANUAL_ADAPTIVE_NOTIFY_SUMMARY),
+        notify_counter_cap: node_config_bool(node, "notifyOnManualAdaptiveCounterCap")
+            .unwrap_or(DEFAULT_MANUAL_ADAPTIVE_NOTIFY_COUNTER_CAP),
         min_interval_sec,
+        summary_every_markets,
+        counter_cap_notify_min_delta_cent,
         include_payload: node_config_bool(node, "manualAdaptiveNotifyIncludePayload")
             .unwrap_or(DEFAULT_MANUAL_ADAPTIVE_NOTIFY_INCLUDE_PAYLOAD),
     })
@@ -204,7 +230,7 @@ fn build_pair_lock_manual_adaptive_summary_message(
     payload: &Value,
 ) -> String {
     format!(
-        "📊 Manual Adaptive Summary {} {}\nmarkets={} | evaluated={}\nblocks={} | strict={} | base={}\nlast_reason={}",
+        "📊 Manual Adaptive Summary {} {}\nmarkets={} | evaluated={}\nblocks={} | strict={} | base={} | counter_clamp={}\nlast_reason={}",
         pair_lock_manual_notify_asset_label(market_slug),
         outcome_label,
         payload
@@ -228,9 +254,91 @@ fn build_pair_lock_manual_adaptive_summary_message(
             .and_then(Value::as_i64)
             .unwrap_or_default(),
         payload
+            .get("counter_clamp")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        payload
             .get("last_reason")
             .and_then(Value::as_str)
             .unwrap_or("unknown"),
+    )
+}
+
+fn pair_lock_manual_counter_cap_event_payload(
+    payload: &Value,
+    cfg: PairLockManualAdaptiveNotifyConfig,
+) -> Option<(Value, &'static str, bool)> {
+    if payload
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or("BASE")
+        == "BASE"
+    {
+        return None;
+    }
+    let counter = payload.get("counter_dynamic_cap")?;
+    if !counter
+        .get("applied")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let delta_cent = counter.get("delta_cent").and_then(value_as_f64)?;
+    if delta_cent < cfg.counter_cap_notify_min_delta_cent {
+        return None;
+    }
+    let effective_cent = counter
+        .get("effective_counter_max_cent")
+        .and_then(value_as_f64)?;
+    let floor_cent = counter.get("counter_floor_cent").and_then(value_as_f64);
+    let below_floor = floor_cent.is_some_and(|floor| effective_cent < floor);
+    let reason = if below_floor {
+        "counter_cap_below_floor"
+    } else {
+        "pair_cap_protection"
+    };
+    let mut event_payload = payload.clone();
+    if let Some(obj) = event_payload.as_object_mut() {
+        obj.insert("counter_cap_reason".to_string(), json!(reason));
+        obj.insert("counter_cap_force_notify".to_string(), json!(below_floor));
+    }
+    Some((event_payload, reason, below_floor))
+}
+
+fn pair_lock_manual_counter_cap_notify_payload(
+    payload: &Value,
+    cfg: PairLockManualAdaptiveNotifyConfig,
+) -> Option<(Value, &'static str, bool)> {
+    if !cfg.notify_counter_cap {
+        return None;
+    }
+    pair_lock_manual_counter_cap_event_payload(payload, cfg)
+}
+
+fn build_pair_lock_manual_counter_cap_message(
+    market_slug: &str,
+    outcome_label: &str,
+    payload: &Value,
+    reason: &str,
+) -> String {
+    let counter = payload.get("counter_dynamic_cap").unwrap_or(&Value::Null);
+    let title = if reason == "counter_cap_below_floor" {
+        "🔴 Counter BLOCK"
+    } else {
+        "🟠 Counter Dynamic Cap"
+    };
+    format!(
+        "{title} {} {}\nbase counter max={} -> effective={}\nprimary fill≈{} | counter VWAP≈{}\npairMax={} | buffer={}\nreason={}",
+        pair_lock_manual_notify_asset_label(market_slug),
+        outcome_label,
+        pair_lock_manual_notify_cent(counter.get("base_counter_max_cent").and_then(value_as_f64)),
+        pair_lock_manual_notify_cent(counter.get("effective_counter_max_cent").and_then(value_as_f64)),
+        pair_lock_manual_notify_cent(counter.get("primary_estimated_avg_fill_cent").and_then(value_as_f64)),
+        pair_lock_manual_notify_cent(counter.get("counter_estimated_avg_fill_cent").and_then(value_as_f64)),
+        pair_lock_manual_notify_cent(counter.get("pair_max_total_cent").and_then(value_as_f64)),
+        pair_lock_manual_notify_cent(counter.get("pair_buffer_cent").and_then(value_as_f64)),
+        reason,
     )
 }
 
@@ -243,13 +351,14 @@ async fn emit_pair_lock_manual_adaptive_notification(
     market_slug: &str,
     outcome_label: &str,
     reason: &str,
+    signature_reason: Option<&str>,
     payload: Value,
     message: String,
     force: bool,
 ) -> Result<bool> {
     let cfg = resolve_pair_lock_manual_adaptive_notify_config(node)?;
     let signature =
-        pair_lock_manual_notify_signature(event_type, market_slug, outcome_label, reason);
+        pair_lock_manual_notify_signature(event_type, market_slug, outcome_label, signature_reason.unwrap_or(reason));
     if !pair_lock_manual_notify_allowed(context, &node.key, event_type, &signature, cfg, force) {
         return Ok(false);
     }
@@ -295,6 +404,7 @@ async fn maybe_notify_pair_lock_manual_adaptive_risk_decision(
         .get("reason")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let counter_cap_payload = pair_lock_manual_counter_cap_event_payload(payload, cfg);
     maybe_notify_pair_lock_manual_adaptive_summary(
         repo,
         run,
@@ -304,7 +414,18 @@ async fn maybe_notify_pair_lock_manual_adaptive_risk_decision(
         outcome_label,
         decision,
         reason,
+        counter_cap_payload.is_some(),
         cfg,
+    )
+    .await?;
+    maybe_notify_pair_lock_manual_adaptive_counter_cap(
+        repo,
+        run,
+        node,
+        context,
+        market_slug,
+        outcome_label,
+        pair_lock_manual_counter_cap_notify_payload(payload, cfg),
     )
     .await?;
     let event_type = match decision {
@@ -323,6 +444,7 @@ async fn maybe_notify_pair_lock_manual_adaptive_risk_decision(
         market_slug,
         outcome_label,
         reason,
+        None,
         payload.clone(),
         build_pair_lock_manual_adaptive_decision_message(market_slug, outcome_label, payload),
         false,
@@ -340,6 +462,7 @@ async fn maybe_notify_pair_lock_manual_adaptive_summary(
     outcome_label: &str,
     decision: &str,
     reason: &str,
+    counter_cap_applied: bool,
     cfg: PairLockManualAdaptiveNotifyConfig,
 ) -> Result<()> {
     if !cfg.notify_summary {
@@ -352,6 +475,7 @@ async fn maybe_notify_pair_lock_manual_adaptive_summary(
     let blocks_key = pair_lock_manual_summary_state_key(&scope_side, "blocks");
     let strict_key = pair_lock_manual_summary_state_key(&scope_side, "strict");
     let base_key = pair_lock_manual_summary_state_key(&scope_side, "base");
+    let counter_key = pair_lock_manual_summary_state_key(&scope_side, "counter_clamp");
     let sent_market_key = pair_lock_manual_summary_state_key(&scope_side, "sent_market");
     let previous_market = flow_node_state_string(context, &node.key, &market_key);
     if previous_market.as_deref() != Some(market_slug) {
@@ -377,8 +501,14 @@ async fn maybe_notify_pair_lock_manual_adaptive_summary(
             .saturating_add(1);
         set_flow_node_state(context, &node.key, count_key, json!(count));
     }
+    if counter_cap_applied {
+        let count = flow_node_state_i64(context, &node.key, &counter_key)
+            .unwrap_or_default()
+            .saturating_add(1);
+        set_flow_node_state(context, &node.key, &counter_key, json!(count));
+    }
     let markets = flow_node_state_i64(context, &node.key, &markets_key).unwrap_or_default();
-    if markets <= 0 || markets % DEFAULT_MANUAL_ADAPTIVE_SUMMARY_EVERY_MARKETS != 0 {
+    if markets <= 0 || markets % cfg.summary_every_markets != 0 {
         return Ok(());
     }
     if flow_node_state_string(context, &node.key, &sent_market_key).as_deref()
@@ -393,6 +523,7 @@ async fn maybe_notify_pair_lock_manual_adaptive_summary(
         "blocks": flow_node_state_i64(context, &node.key, &blocks_key).unwrap_or_default(),
         "strict": flow_node_state_i64(context, &node.key, &strict_key).unwrap_or_default(),
         "base": flow_node_state_i64(context, &node.key, &base_key).unwrap_or_default(),
+        "counter_clamp": flow_node_state_i64(context, &node.key, &counter_key).unwrap_or_default(),
         "last_reason": reason,
     });
     if emit_pair_lock_manual_adaptive_notification(
@@ -404,6 +535,7 @@ async fn maybe_notify_pair_lock_manual_adaptive_summary(
         market_slug,
         outcome_label,
         "manual_adaptive_summary",
+        None,
         summary_payload.clone(),
         build_pair_lock_manual_adaptive_summary_message(
             market_slug,
@@ -416,6 +548,46 @@ async fn maybe_notify_pair_lock_manual_adaptive_summary(
     {
         set_flow_node_state(context, &node.key, &sent_market_key, json!(market_slug));
     }
+    Ok(())
+}
+
+async fn maybe_notify_pair_lock_manual_adaptive_counter_cap(
+    repo: &PostgresRepository,
+    run: &TradeFlowRun,
+    node: &TradeFlowNode,
+    context: &mut Value,
+    market_slug: &str,
+    outcome_label: &str,
+    counter_cap_payload: Option<(Value, &'static str, bool)>,
+) -> Result<()> {
+    let Some((payload, reason, force)) = counter_cap_payload else {
+        return Ok(());
+    };
+    let effective_cent = payload
+        .pointer("/counter_dynamic_cap/effective_counter_max_cent")
+        .and_then(value_as_f64)
+        .unwrap_or_default();
+    let signature_reason = format!("{reason}:{effective_cent:.3}");
+    emit_pair_lock_manual_adaptive_notification(
+        repo,
+        run,
+        node,
+        context,
+        MANUAL_ADAPTIVE_EVENT_COUNTER_CAP,
+        market_slug,
+        outcome_label,
+        reason,
+        Some(&signature_reason),
+        payload.clone(),
+        build_pair_lock_manual_counter_cap_message(
+            market_slug,
+            outcome_label,
+            &payload,
+            reason,
+        ),
+        force,
+    )
+    .await?;
     Ok(())
 }
 
@@ -557,6 +729,7 @@ async fn maybe_notify_pair_lock_manual_adaptive_sl_bump(
             &parent_order.market_slug,
             &parent_order.outcome_label,
             "manual_adaptive_sl_cooldown_started",
+            None,
             payload.clone(),
             build_pair_lock_manual_adaptive_sl_bump_message(
                 parent_order,

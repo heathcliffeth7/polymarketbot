@@ -86,6 +86,9 @@ struct PairLockManualAdaptiveDecisionInput {
     config: PairLockManualAdaptiveRiskConfig,
     base_max_price: Option<f64>,
     base_size_usdc: f64,
+    base_reenter_on_sl_hit: bool,
+    base_counter_max_price: Option<f64>,
+    counter_floor_price: Option<f64>,
     ask: Option<f64>,
     primary_estimated_avg_fill: Option<f64>,
     counter_estimated_avg_fill: Option<f64>,
@@ -623,10 +626,16 @@ fn mark_pair_lock_manual_adaptive_sl_cooldown(
 fn pair_lock_manual_adaptive_cent(value: Option<f64>) -> Option<f64> {
     let value = value?;
     if value.is_finite() && value > 0.0 {
-        Some(if value <= 1.0 { value * 100.0 } else { value })
+        Some(pair_lock_manual_adaptive_round_payload_number(
+            if value <= 1.0 { value * 100.0 } else { value },
+        ))
     } else {
         None
     }
+}
+
+fn pair_lock_manual_adaptive_round_payload_number(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
 }
 
 fn pair_lock_manual_adaptive_probability(value: Option<f64>) -> Option<f64> {
@@ -667,7 +676,14 @@ fn pair_lock_manual_adaptive_diagnostics(
     effective_ptb_threshold_value: Option<f64>,
     effective_ptb_threshold_unit: Option<&str>,
     counter_max_price: Option<f64>,
+    ptb_gap_add_cent: f64,
 ) -> Value {
+    let base_counter_max_cent = pair_lock_manual_adaptive_cent(input.base_counter_max_price);
+    let effective_counter_max_cent = pair_lock_manual_adaptive_cent(counter_max_price);
+    let counter_delta_cent = base_counter_max_cent
+        .zip(effective_counter_max_cent)
+        .map(|(base, effective)| pair_lock_manual_adaptive_round_payload_number((base - effective).max(0.0)));
+    let counter_cap_applied = counter_delta_cent.is_some_and(|delta| delta > 0.0);
     json!({
         "enabled": true,
         "strategy": PAIR_LOCK_STRATEGY_MANUAL_ADAPTIVE_RISK_V1,
@@ -699,6 +715,7 @@ fn pair_lock_manual_adaptive_diagnostics(
         "base": {
             "max_price_cent": pair_lock_manual_adaptive_cent(input.base_max_price),
             "size_usdc": input.base_size_usdc,
+            "reenter_on_sl_hit": input.base_reenter_on_sl_hit,
             "ptb_threshold_value": input.ptb_threshold_value,
             "ptb_threshold_unit": input.ptb_threshold_unit,
             "ptb_threshold_usd": input.ptb_threshold_usd,
@@ -710,17 +727,30 @@ fn pair_lock_manual_adaptive_diagnostics(
             "size_usdc": effective_size_usdc,
             "ptb_threshold_value": effective_ptb_threshold_value,
             "ptb_threshold_unit": effective_ptb_threshold_unit,
+            "ptb_gap_add_cent": ptb_gap_add_cent,
             "counter_max_price_cent": pair_lock_manual_adaptive_cent(counter_max_price),
-            "reentry_allowed": !applied,
+            "reentry_allowed": input.base_reenter_on_sl_hit && !applied,
+            "reenter_on_sl_hit": input.base_reenter_on_sl_hit && !applied,
         },
         "market": {
             "ask_cent": pair_lock_manual_adaptive_cent(input.ask),
             "primary_estimated_avg_fill_cent": pair_lock_manual_adaptive_cent(input.primary_estimated_avg_fill),
             "counter_estimated_avg_fill_cent": pair_lock_manual_adaptive_cent(input.counter_estimated_avg_fill),
-            "pair_max_total_cent": input.pair_max_total_price * 100.0,
+            "pair_max_total_cent": pair_lock_manual_adaptive_cent(Some(input.pair_max_total_price)),
             "pair_buffer_cent": input.config.pair_buffer_cent,
             "ptb_passed": input.ptb_passed,
             "directional_gap": input.ptb_directional_gap,
+        },
+        "counter_dynamic_cap": {
+            "applied": counter_cap_applied,
+            "base_counter_max_cent": base_counter_max_cent,
+            "effective_counter_max_cent": effective_counter_max_cent,
+            "primary_estimated_avg_fill_cent": pair_lock_manual_adaptive_cent(input.primary_estimated_avg_fill),
+            "counter_estimated_avg_fill_cent": pair_lock_manual_adaptive_cent(input.counter_estimated_avg_fill),
+            "counter_floor_cent": pair_lock_manual_adaptive_cent(input.counter_floor_price),
+            "pair_max_total_cent": pair_lock_manual_adaptive_cent(Some(input.pair_max_total_price)),
+            "pair_buffer_cent": input.config.pair_buffer_cent,
+            "delta_cent": counter_delta_cent,
         }
     })
 }
@@ -733,6 +763,7 @@ fn pair_lock_manual_adaptive_block(
     effective_ptb_threshold_value: Option<f64>,
     effective_ptb_threshold_unit: Option<&str>,
     counter_max_price: Option<f64>,
+    ptb_gap_add_cent: f64,
 ) -> PairLockManualAdaptiveRiskDecision {
     PairLockManualAdaptiveRiskDecision {
         applied: true,
@@ -753,6 +784,7 @@ fn pair_lock_manual_adaptive_block(
             effective_ptb_threshold_value,
             effective_ptb_threshold_unit,
             counter_max_price,
+            ptb_gap_add_cent,
         ),
     }
 }
@@ -780,6 +812,7 @@ fn pair_lock_manual_adaptive_noop(
             input.ptb_threshold_value,
             input.ptb_threshold_unit.as_deref(),
             None,
+            0.0,
         ),
     }
 }
@@ -874,6 +907,7 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
             effective_ptb_threshold_value,
             effective_ptb_threshold_unit.as_deref(),
             counter_max_price,
+            ptb_gap_add_cent,
         );
     }
     if let Some(fill) = primary_estimated_avg_fill {
@@ -886,6 +920,7 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
                 effective_ptb_threshold_value,
                 effective_ptb_threshold_unit.as_deref(),
                 counter_max_price,
+                ptb_gap_add_cent,
             );
         }
     }
@@ -899,6 +934,7 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
                 effective_ptb_threshold_value,
                 effective_ptb_threshold_unit.as_deref(),
                 counter_max_price,
+                ptb_gap_add_cent,
             );
         }
     }
@@ -913,6 +949,7 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
                 effective_ptb_threshold_value,
                 effective_ptb_threshold_unit.as_deref(),
                 counter_max_price,
+                ptb_gap_add_cent,
             );
         }
     }
@@ -937,6 +974,7 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
             effective_ptb_threshold_value,
             effective_ptb_threshold_unit.as_deref(),
             counter_max_price,
+            ptb_gap_add_cent,
         ),
     }
 }
@@ -991,11 +1029,18 @@ async fn resolve_pair_lock_manual_adaptive_risk_decision_for_candidate(
         .best_ask
         .or(Some(counter.quote.current_price))
         .and_then(|value| pair_lock_manual_adaptive_probability(Some(value)));
+    let base_counter_max_price = node_config_f64(node, "counterLegMaxPriceCent")
+        .and_then(|value| pair_lock_manual_adaptive_probability(Some(value)));
+    let counter_floor_price = node_config_f64(node, "counterLegExecutionFloorPriceCent")
+        .and_then(|value| pair_lock_manual_adaptive_probability(Some(value)));
     Ok(evaluate_pair_lock_manual_adaptive_risk_decision(
         PairLockManualAdaptiveDecisionInput {
             config,
             base_max_price,
             base_size_usdc: pair_lock.primary_leg_size_usdc,
+            base_reenter_on_sl_hit: node_config_bool(node, "reenterOnSlHit").unwrap_or(false),
+            base_counter_max_price,
+            counter_floor_price,
             ask,
             primary_estimated_avg_fill: ask,
             counter_estimated_avg_fill,

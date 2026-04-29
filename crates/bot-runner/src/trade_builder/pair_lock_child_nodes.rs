@@ -65,6 +65,8 @@ fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Val
         "manualAdaptiveSlCooldownMarkets", "manualAdaptivePairBufferCent",
         "notifyOnManualAdaptiveRiskBlock", "notifyOnManualAdaptiveRiskStrict",
         "notifyOnManualAdaptiveRiskSlBump", "notifyOnManualAdaptiveRiskSummary",
+        "notifyOnManualAdaptiveCounterCap", "manualAdaptiveCounterCapNotifyMinDeltaCent",
+        "manualAdaptiveNotifySummaryEveryMarkets",
         "manualAdaptiveNotifyMinIntervalSec", "manualAdaptiveNotifyIncludePayload",
     ] {
         config.remove(key);
