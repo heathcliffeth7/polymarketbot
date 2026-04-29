@@ -32,6 +32,10 @@ import type {
 
 const PAGE_SIZE = 50;
 type SortOption = 'default' | 'pnl_asc' | 'pnl_desc';
+type SelectedDiagnostic = {
+  rowId: string;
+  rootOrderId: number;
+};
 
 const EMPTY_SUMMARY: AutoScopeTradeAnalysisSummary = {
   rowCount: 0,
@@ -268,7 +272,7 @@ export function AutoScopeAnalysisTable() {
   const [timeRange, setTimeRange] = useState<AutoScopeTradeAnalysisTimeRange>('all');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
-  const [selectedRootOrderId, setSelectedRootOrderId] = useState<number | null>(null);
+  const [selectedDiagnostic, setSelectedDiagnostic] = useState<SelectedDiagnostic | null>(null);
 
   const sortBy: AutoScopeTradeAnalysisSortBy =
     sortOption === 'default' ? 'default' : 'pnl';
@@ -568,7 +572,10 @@ export function AutoScopeAnalysisTable() {
                   <TableRow
                     key={row.rowId}
                     className={`border-zinc-800 hover:bg-zinc-950/60 ${
-                      selectedRootOrderId === row.rootOrderId ? 'bg-zinc-950/80' : ''
+                      selectedDiagnostic?.rowId === row.rowId &&
+                      selectedDiagnostic.rootOrderId === row.rootOrderId
+                        ? 'bg-zinc-950/80'
+                        : ''
                     }`}
                   >
                     <TableCell>
@@ -658,16 +665,33 @@ export function AutoScopeAnalysisTable() {
                     </TableCell>
                     <TableCell>
                       <Popover
-                        open={selectedRootOrderId === row.rootOrderId}
-                        onOpenChange={(open) =>
-                          setSelectedRootOrderId(open ? row.rootOrderId : null)
+                        open={
+                          selectedDiagnostic?.rowId === row.rowId &&
+                          selectedDiagnostic.rootOrderId === row.rootOrderId
                         }
+                        onOpenChange={(open) => {
+                          if (
+                            !open &&
+                            selectedDiagnostic?.rowId === row.rowId &&
+                            selectedDiagnostic.rootOrderId === row.rootOrderId
+                          ) {
+                            setSelectedDiagnostic(null);
+                          }
+                        }}
                       >
                         <PopoverTrigger asChild>
                           <button
                             type="button"
                             className="group -mx-2 block w-[300px] rounded-md px-2 py-1 text-left outline-none transition-colors hover:bg-zinc-900 focus-visible:ring-2 focus-visible:ring-sky-500/60"
                             aria-label={`Trade detayini ac: ${row.marketSlug}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setSelectedDiagnostic((current) =>
+                                current?.rowId === row.rowId
+                                  ? null
+                                  : { rowId: row.rowId, rootOrderId: row.rootOrderId }
+                              );
+                            }}
                           >
                             <span className="block truncate font-medium text-zinc-100 group-hover:text-white">
                               {row.marketSlug}
@@ -686,7 +710,7 @@ export function AutoScopeAnalysisTable() {
                         >
                           <AutoScopeDiagnosticsPanel
                             rootOrderId={row.rootOrderId}
-                            onClose={() => setSelectedRootOrderId(null)}
+                            onClose={() => setSelectedDiagnostic(null)}
                             className="border-0 bg-transparent p-4"
                           />
                         </PopoverContent>
