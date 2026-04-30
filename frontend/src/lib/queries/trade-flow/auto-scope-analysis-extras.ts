@@ -535,6 +535,63 @@ function buildForensicSummary(
   };
 }
 
+function pickJsonFields(source: JsonObject | null, keys: string[]): JsonObject | null {
+  if (!source) return null;
+  const picked: JsonObject = {};
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) picked[key] = source[key];
+  }
+  return Object.keys(picked).length > 0 ? picked : null;
+}
+
+function compactEntryDecision(entry: JsonObject | null): JsonObject | null {
+  if (!entry) return null;
+  const compact: JsonObject = {};
+  const ptb = pickJsonFields(objectValue(entry.ptb), ['trend', 'slope_5s']);
+  const polymarketVolume = pickJsonFields(
+    objectValue(objectValue(entry.volume)?.polymarket),
+    ['regime', 'ratio']
+  );
+  const shadowVolumeGuard = pickJsonFields(
+    objectValue(objectValue(entry.guard_breakdown)?.shadow_volume_guard),
+    ['would_block', 'reason']
+  );
+
+  if (ptb) compact.ptb = ptb;
+  if (polymarketVolume) compact.volume = { polymarket: polymarketVolume };
+  if (shadowVolumeGuard) {
+    compact.guard_breakdown = { shadow_volume_guard: shadowVolumeGuard };
+  }
+  if (Array.isArray(entry.risk_tags)) compact.risk_tags = entry.risk_tags;
+
+  return Object.keys(compact).length > 0 ? compact : null;
+}
+
+function compactForensicSummary(
+  forensic: AutoScopeTradeForensicSummary
+): AutoScopeTradeForensicSummary {
+  return {
+    entryDecision: compactEntryDecision(forensic.entryDecision),
+    entryStopLossPlan: null,
+    nodeSnapshot: null,
+    entryNodeKey: forensic.entryNodeKey,
+    entryNodeType: forensic.entryNodeType,
+    entryNodeConfigHash: forensic.entryNodeConfigHash,
+    orderLifecycle: [],
+    stopLossTrigger: null,
+    postSlRecovery: null,
+    slClassification: null,
+    rawEvents: [],
+  };
+}
+
+function compactExtra(extra: AutoScopeAnalysisExtra): AutoScopeAnalysisExtra {
+  return {
+    ...extra,
+    forensic: compactForensicSummary(extra.forensic),
+  };
+}
+
 function buildExtra(
   rootOrderId: number,
   rootRows: AnalysisExtraRowDb[],
@@ -576,6 +633,16 @@ export function attachExtrasToRows(
   extras: Map<number, AutoScopeAnalysisExtra>
 ): AutoScopeTradeAnalysisRow[] {
   return rows.map((row) => attachExtraToRow(row, extras.get(row.rootOrderId)));
+}
+
+export function attachCompactExtrasToRows(
+  rows: AutoScopeTradeAnalysisRow[],
+  extras: Map<number, AutoScopeAnalysisExtra>
+): AutoScopeTradeAnalysisRow[] {
+  return rows.map((row) => {
+    const extra = extras.get(row.rootOrderId);
+    return attachExtraToRow(row, extra ? compactExtra(extra) : undefined);
+  });
 }
 
 export async function getAutoScopeTradeAnalysisExtrasForRoots(

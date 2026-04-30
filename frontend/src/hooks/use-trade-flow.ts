@@ -197,7 +197,7 @@ export function useTradeFlowAutoScopeAnalysis({
     to,
   });
   const endpoint = enabled ? `/api/trade-flow/analytics/auto-scope?${query}` : null;
-  return usePolling<AutoScopeTradeAnalysisResponse>(endpoint, 3000);
+  return usePolling<AutoScopeTradeAnalysisResponse>(endpoint, 0);
 }
 
 export function useTradeFlowAutoScopeTradeDiagnostic(

@@ -10,6 +10,7 @@ import type {
   TradeFlowNodeRuntimeRow, TradeFlowPtbStateResponse, TradeFlowPtbStateRow,
 } from '@/lib/types';
 import {
+  attachCompactExtrasToRows,
   attachExtraToDiagnostic,
   attachExtrasToRows,
   getAutoScopeBlockedSignalsForRun,
@@ -644,7 +645,7 @@ export async function getAutoScopeTradeAnalysis(
   }
 
   return {
-    data: attachExtrasToRows(polymarketRows, extras),
+    data: attachCompactExtrasToRows(polymarketRows, extras),
     total,
     page,
     limit,

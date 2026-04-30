@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { Download } from 'lucide-react';
+import { Download, RefreshCw } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -282,7 +282,7 @@ export function AutoScopeAnalysisTable() {
   const from = isCustomTimeRange ? dateStartIso(fromDate) : undefined;
   const to = isCustomTimeRange ? dateEndIso(toDate) : undefined;
 
-  const { data, error, isLoading } = useTradeFlowAutoScopeAnalysis({
+  const { data, error, isLoading, isValidating, mutate } = useTradeFlowAutoScopeAnalysis({
     page,
     limit: PAGE_SIZE,
     sortBy,
@@ -299,6 +299,7 @@ export function AutoScopeAnalysisTable() {
   const totalPages = data?.totalPages ?? 0;
   const refreshedAt = data?.refreshedAt ?? null;
   const summary = data?.summary ?? EMPTY_SUMMARY;
+  const isRefreshing = isValidating && !isLoading;
   const pagePnl = useMemo(
     () => rows.reduce((sum, row) => sum + row.rowPnlUsdc, 0),
     [rows]
@@ -389,6 +390,17 @@ export function AutoScopeAnalysisTable() {
             <div className="text-xs text-zinc-500">
               Son yenileme: {formatDateTime(refreshedAt)}
             </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-zinc-700 text-zinc-200"
+              disabled={isRefreshing}
+              onClick={() => void mutate()}
+            >
+              <RefreshCw className={`size-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+              {isRefreshing ? 'Yenileniyor' : 'Yenile'}
+            </Button>
             <Button
               type="button"
               variant="outline"
