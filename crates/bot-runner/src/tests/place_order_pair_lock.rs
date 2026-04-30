@@ -275,8 +275,6 @@ fn pair_lock_manual_adaptive_override_tightens_primary_and_counter_cap() {
     let manual = PairLockManualAdaptiveRiskOverride {
         effective_max_price: 0.58,
         effective_size_usdc: 1.5,
-        effective_ptb_threshold_value: Some(45.0),
-        effective_ptb_threshold_unit: Some("cent".to_string()),
         counter_max_price: Some(0.37),
         diagnostics: json!({"decision": "ALLOW_STRICT"}),
     };
@@ -315,7 +313,7 @@ fn pair_lock_manual_adaptive_override_tightens_primary_and_counter_cap() {
             .config
             .get("priceToBeatMaxDiff")
             .and_then(Value::as_f64),
-        Some(45.0)
+        Some(20.0)
     );
     assert_eq!(
         primary

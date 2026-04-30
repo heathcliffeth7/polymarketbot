@@ -116,8 +116,6 @@ struct PairLockManualAdaptiveRiskDecision {
     reason: &'static str,
     effective_max_price: Option<f64>,
     effective_size_usdc: Option<f64>,
-    effective_ptb_threshold_value: Option<f64>,
-    effective_ptb_threshold_unit: Option<String>,
     counter_max_price: Option<f64>,
     diagnostics: Value,
 }
@@ -126,8 +124,6 @@ struct PairLockManualAdaptiveRiskDecision {
 struct PairLockManualAdaptiveRiskOverride {
     effective_max_price: f64,
     effective_size_usdc: f64,
-    effective_ptb_threshold_value: Option<f64>,
-    effective_ptb_threshold_unit: Option<String>,
     counter_max_price: Option<f64>,
     diagnostics: Value,
 }
@@ -884,8 +880,6 @@ fn pair_lock_manual_adaptive_block(
         reason,
         effective_max_price,
         effective_size_usdc,
-        effective_ptb_threshold_value,
-        effective_ptb_threshold_unit: effective_ptb_threshold_unit.map(str::to_string),
         counter_max_price,
         diagnostics: pair_lock_manual_adaptive_diagnostics(
             input,
@@ -914,8 +908,6 @@ fn pair_lock_manual_adaptive_noop(
         reason,
         effective_max_price: input.base_max_price,
         effective_size_usdc: Some(input.base_size_usdc),
-        effective_ptb_threshold_value: input.ptb_threshold_value,
-        effective_ptb_threshold_unit: input.ptb_threshold_unit.clone(),
         counter_max_price: None,
         diagnostics: pair_lock_manual_adaptive_diagnostics(
             input,
@@ -1112,18 +1104,20 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
     }
     if let (Some(gap), Some(threshold)) = (input.ptb_directional_gap, strict_ptb_threshold_usd) {
         if gap < threshold {
-            return pair_lock_manual_adaptive_block(
-                &input,
-                "manual_adaptive_ptb_gap_below_strict_threshold",
-                Some(effective_max_price),
-                Some(effective_size_usdc),
-                effective_ptb_threshold_value,
-                effective_ptb_threshold_unit.as_deref(),
-                counter_max_price,
-                strict_ptb_add_cent,
-                miss_relax_cent,
-                sl_bump_cent,
-            );
+            if !input.base_decision_passed {
+                return pair_lock_manual_adaptive_block(
+                    &input,
+                    "manual_adaptive_ptb_gap_below_strict_threshold",
+                    Some(effective_max_price),
+                    Some(effective_size_usdc),
+                    effective_ptb_threshold_value,
+                    effective_ptb_threshold_unit.as_deref(),
+                    counter_max_price,
+                    strict_ptb_add_cent,
+                    miss_relax_cent,
+                    sl_bump_cent,
+                );
+            }
         }
     }
     let applied = reason != "base_normal_expanding";
@@ -1133,8 +1127,6 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
         reason,
         effective_max_price: Some(effective_max_price),
         effective_size_usdc: Some(effective_size_usdc),
-        effective_ptb_threshold_value,
-        effective_ptb_threshold_unit: effective_ptb_threshold_unit.clone(),
         counter_max_price,
         diagnostics: pair_lock_manual_adaptive_diagnostics(
             &input,
@@ -1316,8 +1308,6 @@ async fn maybe_apply_pair_lock_manual_adaptive_risk_candidate_override(
             effective_size_usdc: decision
                 .effective_size_usdc
                 .expect("manual adaptive applied requires effective size"),
-            effective_ptb_threshold_value: decision.effective_ptb_threshold_value,
-            effective_ptb_threshold_unit: decision.effective_ptb_threshold_unit,
             counter_max_price: decision.counter_max_price,
             diagnostics: decision.diagnostics,
         };

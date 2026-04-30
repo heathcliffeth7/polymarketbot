@@ -114,6 +114,15 @@ mod pair_lock_manual_adaptive_risk_tests {
         input
     }
 
+    fn effective_ptb_threshold_value(
+        decision: &PairLockManualAdaptiveRiskDecision,
+    ) -> Option<f64> {
+        decision
+            .diagnostics
+            .pointer("/effective/ptb_threshold_value")
+            .and_then(value_as_f64)
+    }
+
     #[test]
     fn manual_adaptive_normal_expanding_keeps_base() {
         let decision = evaluate_pair_lock_manual_adaptive_risk_decision(input("normal", "expanding"));
@@ -133,7 +142,7 @@ mod pair_lock_manual_adaptive_risk_tests {
         assert_eq!(decision.reason, "elevated_volume_strict");
         assert_eq!(decision.effective_max_price, Some(0.66));
         assert_eq!(decision.effective_size_usdc, Some(3.0));
-        assert_eq!(decision.effective_ptb_threshold_value, Some(30.0));
+        assert_eq!(effective_ptb_threshold_value(&decision), Some(30.0));
     }
 
     #[test]
@@ -176,7 +185,7 @@ mod pair_lock_manual_adaptive_risk_tests {
         assert_eq!(decision.decision, "ALLOW_STRICT");
         assert_eq!(decision.reason, "recent_sl_strict_mode");
         assert_eq!(decision.effective_max_price, Some(0.65));
-        assert_eq!(decision.effective_ptb_threshold_value, Some(35.0));
+        assert_eq!(effective_ptb_threshold_value(&decision), Some(35.0));
     }
 
     #[test]
@@ -195,7 +204,7 @@ mod pair_lock_manual_adaptive_risk_tests {
 
         assert!(decision.applied);
         assert_eq!(decision.reason, "manual_self_tune_safe_miss_relax");
-        assert_eq!(decision.effective_ptb_threshold_value, Some(115.0));
+        assert_eq!(effective_ptb_threshold_value(&decision), Some(115.0));
         assert_eq!(decision.effective_max_price, Some(0.87));
     }
 
@@ -216,7 +225,7 @@ mod pair_lock_manual_adaptive_risk_tests {
         );
 
         assert_eq!(decision.reason, "manual_self_tune_sl_strict");
-        assert_eq!(decision.effective_ptb_threshold_value, Some(130.0));
+        assert_eq!(effective_ptb_threshold_value(&decision), Some(130.0));
         assert_eq!(decision.effective_max_price, Some(0.82));
     }
 
@@ -233,7 +242,7 @@ mod pair_lock_manual_adaptive_risk_tests {
 
         assert_eq!(decision.reason, "high_volume_strict");
         assert_eq!(decision.effective_max_price, Some(0.58));
-        assert_eq!(decision.effective_ptb_threshold_value, Some(45.0));
+        assert_eq!(effective_ptb_threshold_value(&decision), Some(45.0));
     }
 
     #[test]
@@ -249,8 +258,22 @@ mod pair_lock_manual_adaptive_risk_tests {
     }
 
     #[test]
-    fn manual_adaptive_strict_ptb_can_block_otherwise_passed_candidate() {
+    fn manual_adaptive_strict_ptb_does_not_block_base_passed_candidate() {
         let mut input = input("elevated", "expanding");
+        input.ptb_directional_gap = Some(0.25);
+        let decision = evaluate_pair_lock_manual_adaptive_risk_decision(input);
+
+        assert_eq!(decision.decision, "ALLOW_STRICT");
+        assert_eq!(decision.reason, "elevated_volume_strict");
+        assert_eq!(effective_ptb_threshold_value(&decision), Some(30.0));
+    }
+
+    #[test]
+    fn manual_adaptive_strict_ptb_still_blocks_base_ptb_failure() {
+        let mut input = input("elevated", "expanding");
+        input.base_decision_passed = false;
+        input.base_reason_code = "price_to_beat_gap_below_threshold".to_string();
+        input.config.self_tune.enabled = true;
         input.ptb_directional_gap = Some(0.25);
         let decision = evaluate_pair_lock_manual_adaptive_risk_decision(input);
 

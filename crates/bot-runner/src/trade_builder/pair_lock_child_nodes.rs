@@ -140,12 +140,6 @@ fn build_pair_lock_single_leg_node(
         config.insert("sizeMode".to_string(), json!("usdc"));
         config.insert("sizeUsdc".to_string(), json!(manual.effective_size_usdc));
         config.insert("reenterOnSlHit".to_string(), json!(false));
-        if let Some(value) = manual.effective_ptb_threshold_value {
-            config.insert("priceToBeatMaxDiff".to_string(), json!(value));
-        }
-        if let Some(unit) = manual.effective_ptb_threshold_unit.as_ref() {
-            config.insert("priceToBeatMaxDiffUnit".to_string(), json!(unit));
-        }
         config.insert("manualAdaptiveRiskApplied".to_string(), json!(true));
         config.insert(
             "manualAdaptiveRisk".to_string(),
