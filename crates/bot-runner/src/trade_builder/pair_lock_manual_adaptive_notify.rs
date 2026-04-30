@@ -129,11 +129,10 @@ fn pair_lock_manual_notify_allowed(
     cfg: PairLockManualAdaptiveNotifyConfig,
     force: bool,
 ) -> bool {
-    if force {
-        return true;
-    }
     let signature_key = pair_lock_manual_notify_state_key(event_type, "signature");
-    if flow_node_state_string(context, node_key, &signature_key).as_deref() == Some(signature) {
+    if !force
+        && flow_node_state_string(context, node_key, &signature_key).as_deref() == Some(signature)
+    {
         return false;
     }
     if cfg.min_interval_sec <= 0 {
@@ -380,9 +379,7 @@ async fn emit_pair_lock_manual_adaptive_notification(
         }),
     )
     .await?;
-    if sent {
-        set_pair_lock_manual_notify_state(context, &node.key, event_type, &signature);
-    }
+    set_pair_lock_manual_notify_state(context, &node.key, event_type, &signature);
     Ok(sent)
 }
 

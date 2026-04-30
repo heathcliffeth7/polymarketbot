@@ -2,6 +2,7 @@ mod dca;
 mod trade_flow;
 
 include!("lib_parts/part_000.rs");
+include!("telegram_notification.rs");
 include!("lib_parts/part_001.rs");
 include!("lib_parts/part_002.rs");
 include!("lib_parts/part_003.rs");

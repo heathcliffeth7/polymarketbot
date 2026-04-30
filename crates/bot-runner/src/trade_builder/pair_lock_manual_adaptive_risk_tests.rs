@@ -376,4 +376,69 @@ mod pair_lock_manual_adaptive_risk_tests {
         assert_eq!(reason, "counter_cap_below_floor");
         assert!(force);
     }
+
+    #[test]
+    fn manual_adaptive_force_counter_cap_still_respects_min_interval() {
+        let mut context = json!({});
+        let cfg = notify_config();
+        let signature = pair_lock_manual_notify_signature(
+            MANUAL_ADAPTIVE_EVENT_COUNTER_CAP,
+            "eth-updown-5m-1",
+            "Up",
+            "counter_cap_below_floor",
+        );
+
+        assert!(pair_lock_manual_notify_allowed(
+            &context,
+            "action",
+            MANUAL_ADAPTIVE_EVENT_COUNTER_CAP,
+            &signature,
+            cfg,
+            true,
+        ));
+
+        set_pair_lock_manual_notify_state(
+            &mut context,
+            "action",
+            MANUAL_ADAPTIVE_EVENT_COUNTER_CAP,
+            &signature,
+        );
+
+        assert!(!pair_lock_manual_notify_allowed(
+            &context,
+            "action",
+            MANUAL_ADAPTIVE_EVENT_COUNTER_CAP,
+            &signature,
+            cfg,
+            true,
+        ));
+    }
+
+    #[test]
+    fn manual_adaptive_attempt_state_suppresses_duplicate_signature() {
+        let mut context = json!({});
+        let cfg = notify_config();
+        let signature = pair_lock_manual_notify_signature(
+            MANUAL_ADAPTIVE_EVENT_BLOCK,
+            "eth-updown-5m-1",
+            "Down",
+            "manual_adaptive_max_price_block",
+        );
+
+        set_pair_lock_manual_notify_state(
+            &mut context,
+            "action",
+            MANUAL_ADAPTIVE_EVENT_BLOCK,
+            &signature,
+        );
+
+        assert!(!pair_lock_manual_notify_allowed(
+            &context,
+            "action",
+            MANUAL_ADAPTIVE_EVENT_BLOCK,
+            &signature,
+            cfg,
+            false,
+        ));
+    }
 }

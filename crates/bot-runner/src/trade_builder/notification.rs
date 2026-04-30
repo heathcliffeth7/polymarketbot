@@ -115,19 +115,17 @@ async fn send_trade_builder_notification_with_payload(
         return false;
     }
 
-    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-    let result = TELEGRAM_HTTP_CLIENT
-        .post(&url)
-        .json(&serde_json::json!({
-            "chat_id": chat_id,
-            "text": message.as_str(),
-        }))
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await;
+    let send_result = send_telegram_message(
+        order.user_id,
+        &bot_token,
+        chat_id,
+        message.as_str(),
+        None,
+        notification_type,
+    )
+    .await;
 
-    match result {
-        Ok(resp) if resp.status().is_success() => {
+    if send_result.sent {
             let mut event_payload = json!({
                 "notification_type": notification_type,
                 "message": message.as_str(),
@@ -162,25 +160,24 @@ async fn send_trade_builder_notification_with_payload(
                 "TRADE_BUILDER_NOTIFICATION_SENT"
             );
             true
-        }
-        Ok(resp) => {
+    } else if send_result.skipped_by_backoff {
             warn!(
                 builder_order_id = order.id,
                 notification_type,
-                http_status = resp.status().as_u16(),
-                "TRADE_BUILDER_NOTIFICATION_FAILED"
+                backoff_until_ms = send_result.backoff_until_ms,
+                "TRADE_BUILDER_NOTIFICATION_SKIPPED_TELEGRAM_BACKOFF"
             );
             false
-        }
-        Err(err) => {
+    } else {
             warn!(
                 builder_order_id = order.id,
                 notification_type,
-                error = %err,
+                http_status = send_result.http_status,
+                retry_after_sec = send_result.retry_after_sec,
+                error = ?send_result.error_message,
                 "TRADE_BUILDER_NOTIFICATION_FAILED"
             );
             false
-        }
     }
 }
 
@@ -213,19 +210,17 @@ async fn send_trade_flow_notification(
         return false;
     }
 
-    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-    let result = TELEGRAM_HTTP_CLIENT
-        .post(&url)
-        .json(&serde_json::json!({
-            "chat_id": chat_id,
-            "text": message.as_str(),
-        }))
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await;
+    let send_result = send_telegram_message(
+        run.user_id,
+        &bot_token,
+        chat_id,
+        message.as_str(),
+        None,
+        notification_type,
+    )
+    .await;
 
-    match result {
-        Ok(resp) if resp.status().is_success() => {
+    if send_result.sent {
             info!(
                 flow_run_id = run.id,
                 notification_type,
@@ -233,27 +228,26 @@ async fn send_trade_flow_notification(
                 "TRADE_FLOW_NOTIFICATION_SENT"
             );
             true
-        }
-        Ok(resp) => {
+    } else if send_result.skipped_by_backoff {
             warn!(
                 flow_run_id = run.id,
                 notification_type,
                 node_key,
-                http_status = resp.status().as_u16(),
-                "TRADE_FLOW_NOTIFICATION_FAILED"
+                backoff_until_ms = send_result.backoff_until_ms,
+                "TRADE_FLOW_NOTIFICATION_SKIPPED_TELEGRAM_BACKOFF"
             );
             false
-        }
-        Err(err) => {
+    } else {
             warn!(
                 flow_run_id = run.id,
                 notification_type,
                 node_key,
-                error = %err,
+                http_status = send_result.http_status,
+                retry_after_sec = send_result.retry_after_sec,
+                error = ?send_result.error_message,
                 "TRADE_FLOW_NOTIFICATION_FAILED"
             );
             false
-        }
     }
 }
 

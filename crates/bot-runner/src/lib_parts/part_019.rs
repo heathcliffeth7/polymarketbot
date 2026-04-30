@@ -189,17 +189,15 @@ async fn execute_action_telegram_notify(
         .map(|value| value.with_timezone(&Utc));
     let action_started_at = Utc::now();
 
-    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-    let resp = TELEGRAM_HTTP_CLIENT
-        .post(&url)
-        .json(&serde_json::json!({
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "HTML",
-        }))
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await;
+    let send_result = send_telegram_message(
+        run.user_id,
+        &bot_token,
+        &chat_id,
+        &message,
+        Some("HTML"),
+        "action_telegram_notify",
+    )
+    .await;
     let action_finished_at = Utc::now();
     let latency_from_enqueue_ms = parsed_queued_at.map(|queued| {
         action_finished_at
@@ -207,8 +205,8 @@ async fn execute_action_telegram_notify(
             .num_milliseconds()
     });
 
-    let (edge_type, output) = match resp {
-        Ok(r) if r.status().is_success() => (
+    let (edge_type, output) = if send_result.sent {
+        (
             "on_success".to_string(),
             json!({
                 "node_key": node.key,
@@ -220,36 +218,42 @@ async fn execute_action_telegram_notify(
                 "sent_at": action_finished_at,
                 "latency_from_enqueue_ms": latency_from_enqueue_ms,
             }),
-        ),
-        Ok(r) => {
-            let status = r.status().as_u16();
-            let body = r.text().await.unwrap_or_default();
-            (
-                "on_error".to_string(),
-                json!({
-                    "node_key": node.key,
-                    "status": "error",
-                    "http_status": status,
-                    "error": body,
-                    "queued_at": queued_at,
-                    "action_started_at": action_started_at,
-                    "sent_at": Value::Null,
-                    "latency_from_enqueue_ms": latency_from_enqueue_ms,
-                }),
-            )
-        }
-        Err(e) => (
+        )
+    } else if send_result.skipped_by_backoff {
+        (
+            "on_success".to_string(),
+            json!({
+                "node_key": node.key,
+                "status": "skipped",
+                "skipped_reason": "telegram_backoff",
+                "chat_id": chat_id,
+                "message": message,
+                "queued_at": queued_at,
+                "action_started_at": action_started_at,
+                "sent_at": Value::Null,
+                "latency_from_enqueue_ms": latency_from_enqueue_ms,
+                "backoff_until_ms": send_result.backoff_until_ms,
+            }),
+        )
+    } else {
+        (
             "on_error".to_string(),
             json!({
                 "node_key": node.key,
                 "status": "error",
-                "error": e.to_string(),
+                "http_status": send_result.http_status,
+                "error": send_result
+                    .error_body
+                    .or(send_result.error_message)
+                    .unwrap_or_else(|| "telegram send failed".to_string()),
+                "retry_after_sec": send_result.retry_after_sec,
+                "backoff_until_ms": send_result.backoff_until_ms,
                 "queued_at": queued_at,
                 "action_started_at": action_started_at,
                 "sent_at": Value::Null,
                 "latency_from_enqueue_ms": latency_from_enqueue_ms,
             }),
-        ),
+        )
     };
 
     repo.append_trade_flow_event(

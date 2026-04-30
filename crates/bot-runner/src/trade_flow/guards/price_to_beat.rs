@@ -1340,37 +1340,34 @@ pub(crate) async fn send_price_to_beat_guard_notification(
         return false;
     }
 
-    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-    let result = crate::TELEGRAM_HTTP_CLIENT
-        .post(&url)
-        .json(&json!({
-            "chat_id": chat_id,
-            "text": message,
-        }))
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await;
+    let send_result = crate::send_telegram_message(
+        user_id,
+        &bot_token,
+        chat_id,
+        message,
+        None,
+        "price_to_beat_guard",
+    )
+    .await;
 
-    match result {
-        Ok(resp) if resp.status().is_success() => {
-            tracing::info!(user_id, "PRICE_TO_BEAT_GUARD_NOTIFICATION_SENT");
-            true
-        }
-        Ok(resp) => {
-            tracing::warn!(
-                user_id,
-                http_status = resp.status().as_u16(),
-                "PRICE_TO_BEAT_GUARD_NOTIFICATION_FAILED"
-            );
-            false
-        }
-        Err(err) => {
-            tracing::warn!(
-                user_id,
-                error = %err,
-                "PRICE_TO_BEAT_GUARD_NOTIFICATION_FAILED"
-            );
-            false
-        }
+    if send_result.sent {
+        tracing::info!(user_id, "PRICE_TO_BEAT_GUARD_NOTIFICATION_SENT");
+        true
+    } else if send_result.skipped_by_backoff {
+        tracing::warn!(
+            user_id,
+            backoff_until_ms = send_result.backoff_until_ms,
+            "PRICE_TO_BEAT_GUARD_NOTIFICATION_SKIPPED_TELEGRAM_BACKOFF"
+        );
+        false
+    } else {
+        tracing::warn!(
+            user_id,
+            http_status = send_result.http_status,
+            retry_after_sec = send_result.retry_after_sec,
+            error = ?send_result.error_message,
+            "PRICE_TO_BEAT_GUARD_NOTIFICATION_FAILED"
+        );
+        false
     }
 }

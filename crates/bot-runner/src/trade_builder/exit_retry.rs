@@ -268,27 +268,35 @@ async fn maybe_send_trade_builder_system_alert(
         order.side,
         truncated_error
     );
-    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-    let result = TELEGRAM_HTTP_CLIENT
-        .post(&url)
-        .json(&serde_json::json!({ "chat_id": chat_id, "text": message }))
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await;
-    match result {
-        Ok(resp) if resp.status().is_success() => {
+    let send_result = send_telegram_message(
+        order.user_id,
+        &bot_token,
+        chat_id,
+        &message,
+        None,
+        "trade_builder_system_alert",
+    )
+    .await;
+    if send_result.sent {
             info!(
                 builder_order_id = order.id,
                 alert_type,
                 "TRADE_BUILDER_SYSTEM_ALERT_SENT"
             );
-        }
-        _ => {
+    } else if send_result.skipped_by_backoff {
             warn!(
                 builder_order_id = order.id,
                 alert_type,
+                backoff_until_ms = send_result.backoff_until_ms,
+                "TRADE_BUILDER_SYSTEM_ALERT_SKIPPED_TELEGRAM_BACKOFF"
+            );
+    } else {
+            warn!(
+                builder_order_id = order.id,
+                alert_type,
+                http_status = send_result.http_status,
+                retry_after_sec = send_result.retry_after_sec,
                 "TRADE_BUILDER_SYSTEM_ALERT_FAILED"
             );
-        }
     }
 }
