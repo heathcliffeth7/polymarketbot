@@ -216,6 +216,80 @@ pub(super) fn normalize_clob_order_type(raw: &str) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ClobRoundingConfig {
+    price_decimals: u32,
+    size_decimals: u32,
+    amount_decimals: u32,
+}
+
+pub(super) fn clob_rounding_config(min_tick_size: Option<f64>) -> ClobRoundingConfig {
+    let price_decimals = match min_tick_size.unwrap_or(0.01) {
+        tick if tick <= 0.0001 => 4,
+        tick if tick <= 0.001 => 3,
+        tick if tick <= 0.01 => 2,
+        _ => 1,
+    };
+    ClobRoundingConfig {
+        price_decimals,
+        size_decimals: 2,
+        amount_decimals: price_decimals + 2,
+    }
+}
+
+fn decimal_factor(decimals: u32) -> f64 {
+    10_f64.powi(decimals as i32)
+}
+
+fn round_down_to(value: f64, decimals: u32) -> f64 {
+    let factor = decimal_factor(decimals);
+    ((value * factor) + 1e-9).floor() / factor
+}
+
+fn round_normal_to(value: f64, decimals: u32) -> f64 {
+    let factor = decimal_factor(decimals);
+    ((value + f64::EPSILON) * factor).round() / factor
+}
+
+fn raw_amount_to_units(value: f64) -> U256 {
+    U256::from(((value.max(0.0) * 1_000_000.0) + 0.5).floor() as u64)
+}
+
+pub(super) fn clob_order_amounts(
+    price: f64,
+    size: f64,
+    is_buy: bool,
+    order_type: &str,
+    rounding: ClobRoundingConfig,
+) -> (U256, U256) {
+    let is_market_order = matches!(order_type, "FAK" | "FOK");
+    let raw_price = if is_market_order {
+        round_down_to(price, rounding.price_decimals)
+    } else {
+        round_normal_to(price, rounding.price_decimals)
+    }
+    .max(0.000001);
+
+    let (raw_maker, raw_taker) = if is_market_order && is_buy {
+        let notional = round_down_to(price * size, rounding.size_decimals);
+        let shares = round_down_to(notional / raw_price, rounding.amount_decimals);
+        (notional, shares)
+    } else if is_buy {
+        let shares = round_down_to(size, rounding.size_decimals);
+        let notional = round_down_to(shares * raw_price, rounding.amount_decimals);
+        (notional, shares)
+    } else {
+        let shares = round_down_to(size, rounding.size_decimals);
+        let notional = round_down_to(shares * raw_price, rounding.amount_decimals);
+        (shares, notional)
+    };
+
+    (
+        raw_amount_to_units(raw_maker),
+        raw_amount_to_units(raw_taker),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_place_order_body(
     salt_u64: u64,
@@ -632,14 +706,12 @@ impl ClobRestClient for ClobHttpClient {
         let token_id = U256::from_dec_str(token_id_str).unwrap_or(U256::zero());
 
         let is_buy = req.side.eq_ignore_ascii_case("buy");
-        let cost_units = ((req.price * req.size * 10_000.0).round() as u64) * 100;
-        let size_units = ((req.size * 100.0).round() as u64) * 10_000;
-
-        let (maker_amount, taker_amount) = if is_buy {
-            (U256::from(cost_units), U256::from(size_units))
-        } else {
-            (U256::from(size_units), U256::from(cost_units))
-        };
+        let min_tick_size = self
+            .cached_market_info_by_token(token_id_str)
+            .and_then(|info| info.min_tick_size);
+        let rounding = clob_rounding_config(min_tick_size);
+        let (maker_amount, taker_amount) =
+            clob_order_amounts(req.price, req.size, is_buy, normalized_order_type, rounding);
         let side_u8: u8 = if is_buy { 0 } else { 1 };
 
         let salt_u32 = u32::from_be_bytes(Uuid::new_v4().as_bytes()[0..4].try_into().unwrap());

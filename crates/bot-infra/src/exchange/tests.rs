@@ -1,6 +1,7 @@
 use super::clob::{
-    build_place_order_body, extract_best_bid_ask_from_book, extract_order_book_from_book,
-    normalize_clob_order_type, parse_clob_market_info_response, parse_fee_rate_bps_response,
+    build_place_order_body, clob_order_amounts, clob_rounding_config,
+    extract_best_bid_ask_from_book, extract_order_book_from_book, normalize_clob_order_type,
+    parse_clob_market_info_response, parse_fee_rate_bps_response,
 };
 use super::parse::{parse_gamma_market, parse_gamma_market_any, parse_yes_no_token_ids};
 use super::{ClobHttpClient, ClobRestClient, OrderBookLevel, PlaceOrderRequest};
@@ -370,6 +371,24 @@ fn clob_v2_order_type_maps_legacy_ioc_to_fak() {
     assert_eq!(normalize_clob_order_type("GTD"), "GTD");
     assert_eq!(normalize_clob_order_type("GTC"), "GTC");
     assert_eq!(normalize_clob_order_type("unknown"), "GTC");
+}
+
+#[test]
+fn clob_v2_market_buy_amounts_match_precision_rules() {
+    let rounding = clob_rounding_config(Some(0.01));
+    let (maker_amount, taker_amount) = clob_order_amounts(0.87, 4.6, true, "FAK", rounding);
+
+    assert_eq!(maker_amount, U256::from(4_000_000_u64));
+    assert_eq!(taker_amount, U256::from(4_597_700_u64));
+}
+
+#[test]
+fn clob_v2_limit_buy_amounts_keep_share_size_precision() {
+    let rounding = clob_rounding_config(Some(0.01));
+    let (maker_amount, taker_amount) = clob_order_amounts(0.87, 4.6, true, "GTC", rounding);
+
+    assert_eq!(maker_amount, U256::from(4_002_000_u64));
+    assert_eq!(taker_amount, U256::from(4_600_000_u64));
 }
 
 #[test]
