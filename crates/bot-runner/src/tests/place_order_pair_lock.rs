@@ -725,6 +725,26 @@ fn pair_lock_buy_guard_eval_marks_max_price_as_waiting_when_retry_enabled() {
 }
 
 #[test]
+fn pair_lock_counter_buy_guard_waits_when_current_ask_is_above_dynamic_cap() {
+    let evaluation = evaluate_trade_builder_buy_guards(
+        "market",
+        Some("counter_candidate"),
+        0.17,
+        Some(0.17),
+        0.17,
+        None,
+        Some(0.11),
+        None,
+        false,
+        false,
+        true,
+    );
+
+    assert_eq!(evaluation.effective_decision, "waiting");
+    assert_eq!(evaluation.effective_reason_code, "above_max_price");
+}
+
+#[test]
 fn pair_lock_buy_guard_eval_marks_execution_floor_as_waiting_when_retry_enabled() {
     let evaluation = evaluate_trade_builder_buy_guards(
         "market",

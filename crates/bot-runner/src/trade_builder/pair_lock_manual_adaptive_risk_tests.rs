@@ -259,14 +259,70 @@ mod pair_lock_manual_adaptive_risk_tests {
     }
 
     #[test]
-    fn manual_adaptive_counter_pair_cap_blocks_when_vwap_breaks_pair_total() {
+    fn manual_adaptive_counter_pair_cap_is_telemetry_not_primary_block() {
         let mut input = input("normal", "expanding");
         input.primary_estimated_avg_fill = Some(0.70);
         input.counter_estimated_avg_fill = Some(0.27);
         let decision = evaluate_pair_lock_manual_adaptive_risk_decision(input);
 
-        assert_eq!(decision.decision, "BLOCK");
-        assert_eq!(decision.reason, "manual_adaptive_pair_cap_block");
+        assert_eq!(decision.decision, "BASE");
+        assert_eq!(decision.reason, "base_normal_expanding");
+        assert_eq!(
+            decision
+                .diagnostics
+                .pointer("/counter_dynamic_cap/effective_counter_max_cent")
+                .and_then(value_as_f64),
+            Some(25.0)
+        );
+        assert_eq!(
+            decision
+                .diagnostics
+                .pointer("/counter_dynamic_cap/counter_viable")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn manual_adaptive_high_primary_allows_counter_to_wait_for_dynamic_cap() {
+        let mut input = input("normal", "expanding");
+        input.base_max_price = Some(0.85);
+        input.ask = Some(0.84);
+        input.primary_estimated_avg_fill = Some(0.84);
+        input.counter_estimated_avg_fill = Some(0.17);
+        input.pair_max_total_price = 0.96;
+        let decision = evaluate_pair_lock_manual_adaptive_risk_decision(input);
+
+        assert_eq!(decision.decision, "BASE");
+        assert_eq!(decision.reason, "base_normal_expanding");
+        assert_eq!(
+            decision
+                .diagnostics
+                .pointer("/counter_dynamic_cap/primary_estimated_fill_cent")
+                .and_then(value_as_f64),
+            Some(84.0)
+        );
+        assert_eq!(
+            decision
+                .diagnostics
+                .pointer("/counter_dynamic_cap/effective_counter_max_cent")
+                .and_then(value_as_f64),
+            Some(11.0)
+        );
+        assert_eq!(
+            decision
+                .diagnostics
+                .pointer("/counter_dynamic_cap/counter_estimated_avg_fill_cent")
+                .and_then(value_as_f64),
+            Some(17.0)
+        );
+        assert_eq!(
+            decision
+                .diagnostics
+                .pointer("/counter_dynamic_cap/counter_viable")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]

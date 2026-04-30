@@ -770,9 +770,14 @@ fn pair_lock_manual_adaptive_diagnostics(
         .map(|(base, effective)| pair_lock_manual_adaptive_round_payload_number((base - effective).max(0.0)));
     let counter_cap_applied = counter_delta_cent.is_some_and(|delta| delta > 0.0);
     let counter_viable = effective_counter_max_cent
-        .zip(pair_lock_manual_adaptive_cent(input.counter_floor_price))
-        .map(|(effective, floor)| effective >= floor)
-        .unwrap_or_else(|| effective_counter_max_cent.is_none_or(|effective| effective > 0.0));
+        .map(|effective| {
+            let above_floor = pair_lock_manual_adaptive_cent(input.counter_floor_price)
+                .is_none_or(|floor| effective >= floor);
+            let current_counter_fits = pair_lock_manual_adaptive_cent(input.counter_estimated_avg_fill)
+                .is_none_or(|counter| counter <= effective);
+            above_floor && current_counter_fits
+        })
+        .unwrap_or(true);
     json!({
         "enabled": true,
         "strategy": PAIR_LOCK_STRATEGY_MANUAL_ADAPTIVE_RISK_V1,
@@ -1070,9 +1075,6 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
         .primary_estimated_avg_fill
         .or(input.ask)
         .filter(|value| value.is_finite() && *value > 0.0);
-    let counter_estimated_avg_fill = input
-        .counter_estimated_avg_fill
-        .filter(|value| value.is_finite() && *value > 0.0);
     let counter_max_price = primary_estimated_avg_fill.map(|primary_fill| {
         (input.pair_max_total_price - primary_fill - input.config.pair_buffer_cent / 100.0)
             .max(0.0)
@@ -1124,24 +1126,6 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
             );
         }
     }
-    if let (Some(primary), Some(counter)) = (primary_estimated_avg_fill, counter_estimated_avg_fill)
-    {
-        if primary + counter + input.config.pair_buffer_cent / 100.0 > input.pair_max_total_price {
-            return pair_lock_manual_adaptive_block(
-                &input,
-                "manual_adaptive_pair_cap_block",
-                Some(effective_max_price),
-                Some(effective_size_usdc),
-                effective_ptb_threshold_value,
-                effective_ptb_threshold_unit.as_deref(),
-                counter_max_price,
-                strict_ptb_add_cent,
-                miss_relax_cent,
-                sl_bump_cent,
-            );
-        }
-    }
-
     let applied = reason != "base_normal_expanding";
     PairLockManualAdaptiveRiskDecision {
         applied,
