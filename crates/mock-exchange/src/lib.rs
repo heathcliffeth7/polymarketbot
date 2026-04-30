@@ -149,20 +149,20 @@ async fn post_order(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-    // Handle both old flat format and new EIP-712 nested format
+    // Handle both old flat format and CLOB V2 EIP-712 nested format.
     let (market, side, price, size, client_order_id) = if let Some(order) = body.get("order") {
         let required_fields = [
             "salt",
             "maker",
             "signer",
-            "taker",
             "tokenId",
             "makerAmount",
             "takerAmount",
             "side",
             "expiration",
-            "nonce",
-            "feeRateBps",
+            "timestamp",
+            "metadata",
+            "builder",
             "signatureType",
             "signature",
         ];
@@ -181,7 +181,7 @@ async fn post_order(
             )
                 .into_response();
         }
-        let forbidden_fields = ["timestamp", "metadata", "builder"]
+        let forbidden_fields = ["nonce", "feeRateBps", "taker"]
             .iter()
             .copied()
             .filter(|field| order.get(field).is_some())

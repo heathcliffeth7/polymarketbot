@@ -1,6 +1,6 @@
 use super::clob::{
     build_place_order_body, extract_best_bid_ask_from_book, extract_order_book_from_book,
-    parse_clob_market_info_response, parse_fee_rate_bps_response,
+    normalize_clob_order_type, parse_clob_market_info_response, parse_fee_rate_bps_response,
 };
 use super::parse::{parse_gamma_market, parse_gamma_market_any, parse_yes_no_token_ids};
 use super::{ClobHttpClient, ClobRestClient, OrderBookLevel, PlaceOrderRequest};
@@ -363,7 +363,17 @@ fn fee_rate_parser_preserves_existing_fee_rate_fields() {
 }
 
 #[test]
-fn place_order_body_includes_signed_order_fee_rate_bps() {
+fn clob_v2_order_type_maps_legacy_ioc_to_fak() {
+    assert_eq!(normalize_clob_order_type("IOC"), "FAK");
+    assert_eq!(normalize_clob_order_type("fak"), "FAK");
+    assert_eq!(normalize_clob_order_type("FOK"), "FOK");
+    assert_eq!(normalize_clob_order_type("GTD"), "GTD");
+    assert_eq!(normalize_clob_order_type("GTC"), "GTC");
+    assert_eq!(normalize_clob_order_type("unknown"), "GTC");
+}
+
+#[test]
+fn place_order_body_uses_clob_v2_wire_fields() {
     let body = build_place_order_body(
         1,
         "0x0000000000000000000000000000000000000000",
@@ -373,23 +383,31 @@ fn place_order_body_includes_signed_order_fee_rate_bps() {
         U256::from(789_u64),
         "BUY",
         0,
+        1_713_398_400_000,
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "0x1111111111111111111111111111111111111111111111111111111111111111",
         "0xsignature",
         "api-key",
-        "IOC",
-        1_000,
+        "FAK",
     );
 
     let order = body.get("order").expect("order");
     assert_eq!(
-        order.get("feeRateBps").and_then(Value::as_str),
-        Some("1000")
+        order.get("timestamp").and_then(Value::as_str),
+        Some("1713398400000")
     );
-    assert_eq!(order.get("nonce").and_then(Value::as_str), Some("0"));
     assert_eq!(
-        order.get("taker").and_then(Value::as_str),
-        Some("0x0000000000000000000000000000000000000000")
+        order.get("metadata").and_then(Value::as_str),
+        Some("0x0000000000000000000000000000000000000000000000000000000000000000")
     );
+    assert_eq!(
+        order.get("builder").and_then(Value::as_str),
+        Some("0x1111111111111111111111111111111111111111111111111111111111111111")
+    );
+    assert!(order.get("nonce").is_none());
+    assert!(order.get("feeRateBps").is_none());
+    assert!(order.get("taker").is_none());
     assert!(body.get("feeRateBps").is_none());
     assert_eq!(body.get("owner").and_then(Value::as_str), Some("api-key"));
-    assert_eq!(body.get("orderType").and_then(Value::as_str), Some("IOC"));
+    assert_eq!(body.get("orderType").and_then(Value::as_str), Some("FAK"));
 }
