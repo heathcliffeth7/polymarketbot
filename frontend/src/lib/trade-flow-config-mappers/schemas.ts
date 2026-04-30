@@ -13,6 +13,17 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'Otomatik Scope (auto_scope)', value: 'auto_scope' },
       ],
     },
+    {
+      key: 'bindingMode',
+      label: 'Aksiyon Binding Modu',
+      input: 'select',
+      options: [
+        { label: 'Standard', value: 'standard' },
+        { label: 'Pair Lock', value: 'pair_lock_only' },
+        { label: 'DCA Live', value: 'dca_live_only' },
+      ],
+      help: 'Pair Lock icin downstream action.place_order mode=pair_lock; DCA Live icin downstream action.place_order mode=dca_live_v1 gerekir. Ek olarak action.notify/action.telegram_notify baglanabilir.',
+    },
     { key: 'marketSlug', label: 'Market Slug', input: 'text' },
     {
       key: 'marketScope',
@@ -110,17 +121,6 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'Market', value: 'market' },
       ],
       help: '`run` ilk basarili tetikten sonra workflow run boyunca tekrar almaz. `market` her yeni auto_scope markette bir kez daha tetikleyebilir. Auto-scope + once varsayilani markettir.',
-    },
-    {
-      key: 'bindingMode',
-      label: 'Binding Modu',
-      input: 'select',
-      options: [
-        { label: 'standard', value: 'standard' },
-        { label: 'pair_lock_only', value: 'pair_lock_only' },
-        { label: 'dca_live_only', value: 'dca_live_only' },
-      ],
-      help: 'pair_lock_only icin downstream pair_lock; dca_live_only icin downstream action.place_order mode=dca_live_v1 gerekir. Ek olarak action.notify/action.telegram_notify baglanabilir.',
     },
     { key: 'minIntervalMs', label: 'Kontrol Aralığı (ms)', input: 'number', help: 'Varsayılan: 10000 (10sn). Minimum: 250ms.' },
     { key: 'confirmationMs', label: 'Onay Süresi (ms)', input: 'number', help: 'Cross sonrası fiyatın eşikte kalması gereken süre. Boş = onay kapalı, 0 = anında tetik.' },

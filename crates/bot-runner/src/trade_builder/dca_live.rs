@@ -5,35 +5,66 @@ struct DcaLiveSelectedOutcome {
     token_id: String,
 }
 
-fn dca_live_direct_trigger_key(
+fn dca_live_trigger_binding_mode(node: &TradeFlowNode) -> String {
+    node_config_string(node, "bindingMode")
+        .unwrap_or_else(|| "standard".to_string())
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn dca_live_upstream_market_trigger_keys(
+    node_key: &str,
+    graph: &TradeFlowGraphRuntime,
+) -> Vec<String> {
+    let mut incoming_by_target: HashMap<String, Vec<String>> = HashMap::new();
+    for edge in &graph.edges {
+        incoming_by_target
+            .entry(edge.target.clone())
+            .or_default()
+            .push(edge.source.clone());
+    }
+
+    let mut visited = HashSet::new();
+    let mut trigger_keys = BTreeSet::new();
+    let mut queue = VecDeque::from([node_key.to_string()]);
+    while let Some(current_key) = queue.pop_front() {
+        if !visited.insert(current_key.clone()) {
+            continue;
+        }
+        for source_key in incoming_by_target.get(&current_key).into_iter().flatten() {
+            if let Some(source_node) = flow_node(graph, source_key) {
+                if source_node.node_type == "trigger.market_price" {
+                    trigger_keys.insert(source_key.clone());
+                }
+            }
+            queue.push_back(source_key.clone());
+        }
+    }
+
+    trigger_keys.into_iter().collect()
+}
+
+fn dca_live_binding_trigger_key(
     node: &TradeFlowNode,
     graph: &TradeFlowGraphRuntime,
 ) -> Result<Option<String>> {
-    let incoming = graph
+    let has_incoming = graph
         .edges
         .iter()
-        .filter(|edge| edge.target == node.key)
-        .collect::<Vec<_>>();
-    if incoming.is_empty() {
+        .any(|edge| edge.target == node.key);
+    if !has_incoming {
         return Ok(None);
     }
+    let trigger_keys = dca_live_upstream_market_trigger_keys(&node.key, graph);
     anyhow::ensure!(
-        incoming.len() == 1,
-        "action.place_order dca_live_v1 requires exactly one direct upstream trigger.market_price when trigger-bound"
+        trigger_keys.len() == 1,
+        "action.place_order dca_live_v1 requires exactly one upstream trigger.market_price when trigger-bound"
     );
-    let trigger_key = incoming[0].source.as_str();
+    let trigger_key = trigger_keys[0].as_str();
     let trigger = flow_node(graph, trigger_key)
         .ok_or_else(|| anyhow::anyhow!("dca_live_v1 upstream trigger node not found"))?;
     anyhow::ensure!(
-        trigger.node_type == "trigger.market_price",
-        "action.place_order dca_live_v1 only supports a direct upstream trigger.market_price"
-    );
-    let binding_mode = node_config_string(trigger, "bindingMode")
-        .unwrap_or_else(|| "standard".to_string())
-        .trim()
-        .to_ascii_lowercase();
-    anyhow::ensure!(
-        binding_mode == "dca_live_only",
+        dca_live_trigger_binding_mode(trigger) == "dca_live_only",
         "action.place_order dca_live_v1 requires upstream trigger.market_price bindingMode=dca_live_only"
     );
     Ok(Some(trigger_key.to_string()))
@@ -246,6 +277,7 @@ fn build_dca_live_pair_node(
 fn dca_live_pair_graph(
     graph: &TradeFlowGraphRuntime,
     trigger_key: &str,
+    dca_node_key: &str,
 ) -> TradeFlowGraphRuntime {
     let nodes = graph
         .nodes
@@ -267,10 +299,22 @@ fn dca_live_pair_graph(
             }
         })
         .collect();
+    let mut edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.target != dca_node_key)
+        .cloned()
+        .collect::<Vec<_>>();
+    edges.push(TradeFlowEdge {
+        source: trigger_key.to_string(),
+        target: dca_node_key.to_string(),
+        edge_type: "default".to_string(),
+        condition: None,
+    });
     TradeFlowGraphRuntime {
         context: graph.context.clone(),
         nodes,
-        edges: graph.edges.clone(),
+        edges,
     }
 }
 
@@ -289,7 +333,7 @@ async fn execute_action_place_order_dca_live(
     graph: &TradeFlowGraphRuntime,
     context: &mut Value,
 ) -> Result<TradeFlowNodeExecution> {
-    let trigger_key = dca_live_direct_trigger_key(node, graph)?;
+    let trigger_key = dca_live_binding_trigger_key(node, graph)?;
     if let Some(blocked) = dca_live_outside_binding_window(context) {
         return Ok(dca_live_blocked_execution(node, blocked));
     }
@@ -309,11 +353,11 @@ async fn execute_action_place_order_dca_live(
     if side_mode == "two_sided_pair" {
         let trigger_key = trigger_key.ok_or_else(|| {
             anyhow::anyhow!(
-                "action.place_order dca_live_v1 two_sided_pair requires direct trigger.market_price bindingMode=dca_live_only"
+                "action.place_order dca_live_v1 two_sided_pair requires upstream trigger.market_price bindingMode=dca_live_only"
             )
         })?;
         let pair_node = build_dca_live_pair_node(node, context, shares)?;
-        let pair_graph = dca_live_pair_graph(graph, &trigger_key);
+        let pair_graph = dca_live_pair_graph(graph, &trigger_key, &node.key);
         let mut pair_context = context.clone();
         let execution = execute_action_place_order_pair_lock(
             repo,
@@ -399,4 +443,116 @@ async fn execute_action_place_order_dca_live(
         repeat_at: None,
         repeat_idempotency_key: None,
     })
+}
+
+#[cfg(test)]
+mod dca_live_tests {
+    use super::*;
+
+    fn dca_test_node(key: &str, node_type: &str, config: Value) -> TradeFlowNode {
+        TradeFlowNode {
+            key: key.to_string(),
+            node_type: node_type.to_string(),
+            config,
+        }
+    }
+
+    fn dca_test_edge(source: &str, target: &str) -> TradeFlowEdge {
+        TradeFlowEdge {
+            source: source.to_string(),
+            target: target.to_string(),
+            edge_type: "default".to_string(),
+            condition: None,
+        }
+    }
+
+    #[test]
+    fn dca_live_binding_trigger_key_accepts_logic_upstream() {
+        let graph = TradeFlowGraphRuntime {
+            context: json!({}),
+            nodes: vec![
+                dca_test_node(
+                    "trigger_dca",
+                    "trigger.market_price",
+                    json!({ "bindingMode": "dca_live_only" }),
+                ),
+                dca_test_node("logic_guard", "logic.if", json!({ "expression": { "var": "ok" } })),
+                dca_test_node("dca_buy", "action.place_order", json!({ "mode": "dca_live_v1" })),
+            ],
+            edges: vec![
+                dca_test_edge("trigger_dca", "logic_guard"),
+                dca_test_edge("logic_guard", "dca_buy"),
+            ],
+        };
+
+        let node = flow_node(&graph, "dca_buy").expect("dca node");
+        let trigger_key = dca_live_binding_trigger_key(node, &graph).expect("binding trigger");
+        assert_eq!(trigger_key.as_deref(), Some("trigger_dca"));
+    }
+
+    #[test]
+    fn dca_live_binding_trigger_key_rejects_standard_upstream_trigger() {
+        let graph = TradeFlowGraphRuntime {
+            context: json!({}),
+            nodes: vec![
+                dca_test_node(
+                    "trigger_standard",
+                    "trigger.market_price",
+                    json!({ "bindingMode": "standard" }),
+                ),
+                dca_test_node("dca_buy", "action.place_order", json!({ "mode": "dca_live_v1" })),
+            ],
+            edges: vec![dca_test_edge("trigger_standard", "dca_buy")],
+        };
+
+        let node = flow_node(&graph, "dca_buy").expect("dca node");
+        let err = dca_live_binding_trigger_key(node, &graph).expect_err("standard binding fails");
+        assert!(err.to_string().contains("bindingMode=dca_live_only"));
+    }
+
+    #[test]
+    fn dca_live_pair_graph_rewires_guarded_action_to_trigger() {
+        let graph = TradeFlowGraphRuntime {
+            context: json!({}),
+            nodes: vec![
+                dca_test_node(
+                    "trigger_dca",
+                    "trigger.market_price",
+                    json!({ "bindingMode": "dca_live_only" }),
+                ),
+                dca_test_node("logic_guard", "logic.if", json!({ "expression": { "var": "ok" } })),
+                dca_test_node("dca_pair", "action.place_order", json!({ "mode": "dca_live_v1" })),
+            ],
+            edges: vec![
+                dca_test_edge("trigger_dca", "logic_guard"),
+                dca_test_edge("logic_guard", "dca_pair"),
+            ],
+        };
+
+        let pair_graph = dca_live_pair_graph(&graph, "trigger_dca", "dca_pair");
+        let direct_sources = pair_graph
+            .edges
+            .iter()
+            .filter(|edge| edge.target == "dca_pair")
+            .map(|edge| edge.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(direct_sources, vec!["trigger_dca"]);
+        let trigger = flow_node(&pair_graph, "trigger_dca").expect("trigger");
+        assert_eq!(dca_live_trigger_binding_mode(trigger), "pair_lock_only");
+    }
+
+    #[test]
+    fn dca_live_outside_binding_window_blocks_outside_custom_range() {
+        let now = Utc::now();
+        let context = json!({
+            "flowContext": {
+                "cycleWindowMode": "custom_range",
+                "cycleWindowOpenAt": (now + ChronoDuration::seconds(60)).to_rfc3339(),
+                "cycleWindowEndAt": (now + ChronoDuration::seconds(120)).to_rfc3339(),
+            },
+        });
+
+        let blocked = dca_live_outside_binding_window(&context).expect("outside window");
+        assert_eq!(blocked["reason"], json!("outside_dca_binding_window"));
+    }
 }

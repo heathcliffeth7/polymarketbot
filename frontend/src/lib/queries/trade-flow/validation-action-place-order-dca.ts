@@ -28,6 +28,36 @@ function directIncomingNodes(nodeKey: string, graph: TradeFlowGraph): TradeFlowN
     .filter((candidate): candidate is TradeFlowNode => !!candidate);
 }
 
+function upstreamMarketPriceTriggers(nodeKey: string, graph: TradeFlowGraph): TradeFlowNode[] {
+  const nodeMap = new Map(graph.nodes.map((candidate) => [candidate.key, candidate]));
+  const incomingByTarget = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const incoming = incomingByTarget.get(edge.target) ?? [];
+    incoming.push(edge.source);
+    incomingByTarget.set(edge.target, incoming);
+  }
+
+  const visited = new Set<string>();
+  const triggersByKey = new Map<string, TradeFlowNode>();
+  const queue = [nodeKey];
+  while (queue.length > 0) {
+    const currentKey = queue.shift() as string;
+    if (visited.has(currentKey)) continue;
+    visited.add(currentKey);
+
+    for (const sourceKey of incomingByTarget.get(currentKey) ?? []) {
+      const sourceNode = nodeMap.get(sourceKey);
+      if (!sourceNode) continue;
+      if (sourceNode.type === 'trigger.market_price') {
+        triggersByKey.set(sourceKey, sourceNode);
+      }
+      queue.push(sourceKey);
+    }
+  }
+
+  return [...triggersByKey.values()];
+}
+
 function selectedOutcomeRows(config: Record<string, unknown>): Record<string, unknown>[] {
   return Array.isArray(config.selectedOutcomes)
     ? config.selectedOutcomes.filter((item): item is Record<string, unknown> => isRecord(item))
@@ -122,17 +152,17 @@ export function validateActionPlaceOrderDcaLiveConfig(
   }
 
   const incomingNodes = directIncomingNodes(node.key, graph);
-  const directMarketPriceTriggers = incomingNodes.filter((candidate) => candidate.type === 'trigger.market_price');
   if (incomingNodes.length > 0) {
-    if (directMarketPriceTriggers.length !== 1 || incomingNodes.length !== 1) {
+    const marketPriceTriggers = upstreamMarketPriceTriggers(node.key, graph);
+    if (marketPriceTriggers.length !== 1) {
       pushNodeError(
         issues,
         node,
         'dca_live_requires_single_market_price_binding',
-        'action.place_order dca_live_v1 must have exactly one direct upstream trigger.market_price when it is trigger-bound.'
+        'action.place_order dca_live_v1 must have exactly one upstream trigger.market_price when it is trigger-bound.'
       );
     } else {
-      const triggerConfig = isRecord(directMarketPriceTriggers[0].config) ? directMarketPriceTriggers[0].config : {};
+      const triggerConfig = isRecord(marketPriceTriggers[0].config) ? marketPriceTriggers[0].config : {};
       const bindingMode = toTrimmedString(triggerConfig.bindingMode).toLowerCase() || 'standard';
       if (bindingMode !== 'dca_live_only') {
         pushNodeError(

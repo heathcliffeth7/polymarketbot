@@ -13,6 +13,15 @@ export function TriggerPairLockHint({ visible }: TriggerPairLockHintProps) {
   );
 }
 
+export function TriggerDcaLiveHint({ visible }: TriggerPairLockHintProps) {
+  if (!visible) return null;
+  return (
+    <div className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-2 text-[10px] leading-relaxed text-emerald-700">
+      Bu trigger downstream <span className="font-semibold">action.place_order mode=dca_live_v1</span> node’unu calistirir. Guard/logic node’lari araya girebilir; <span className="font-semibold">custom_range</span> varsa DCA emirleri sadece o ozel aralikta gonderilir.
+    </div>
+  );
+}
+
 interface PairLockSummarySectionProps {
   visible: boolean;
   primaryOutcomeLabel: string;

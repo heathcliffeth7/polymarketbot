@@ -24,7 +24,7 @@ import { PriceToBeatStopLossBumpSection } from './price-to-beat-stop-loss-bump-s
 import { PtbStopLossSection } from './ptb-stop-loss-section';
 import { updateEntryTimingProfileRowsFormState, updatePtbIvTimeRuleRowsFormState, updatePtbStopLossRuleRowsFormState, updateTimeExitRuleRowsFormState } from './rule-row-state';
 import { TimeExitRulesSection } from './time-exit-rules-section';
-import { PairLockSummarySection, TriggerPairLockHint } from './pair-lock-binding-section';
+import { PairLockSummarySection, TriggerDcaLiveHint, TriggerPairLockHint } from './pair-lock-binding-section';
 import { PairLockStaleConfigSection } from './pair-lock-stale-config-section';
 import {
   isPairLockField,
@@ -66,6 +66,7 @@ export function NodeInspectorPanel({
   const triggerMarketMode = (form.fields.marketMode ?? '').trim().toLowerCase();
   const { triggerBindingMode, placeOrderPairLockEnabled, placeOrderCounterOutcomePreview } =
     resolvePairLockUiState(nodeTypeDraft, form.fields);
+  const triggerBindingOnly = triggerBindingMode === 'pair_lock_only' || triggerBindingMode === 'dca_live_only';
   const triggerRepeatMode = (form.fields.repeatMode ?? '').trim().toLowerCase();
   const triggerCycleWindowMode = (form.fields.cycleWindowMode ?? '').trim().toLowerCase();
   const triggerPriceToBeatEnabled = (form.fields.priceToBeatTriggerEnabled ?? '').toString().trim().toLowerCase() === 'true';
@@ -439,7 +440,7 @@ export function NodeInspectorPanel({
         return true;
       }
       if (
-        triggerBindingMode === 'pair_lock_only' &&
+        triggerBindingOnly &&
         (
           field.key === 'priceToBeatTriggerEnabled' ||
           field.key === 'priceToBeatMode' ||
@@ -791,6 +792,13 @@ export function NodeInspectorPanel({
                     field.key === 'bindingMode' &&
                     nodeTypeDraft === 'trigger.market_price' &&
                     triggerBindingMode === 'pair_lock_only'
+                  }
+                />
+                <TriggerDcaLiveHint
+                  visible={
+                    field.key === 'bindingMode' &&
+                    nodeTypeDraft === 'trigger.market_price' &&
+                    triggerBindingMode === 'dca_live_only'
                   }
                 />
                 <PairLockSummarySection
@@ -1352,7 +1360,7 @@ export function NodeInspectorPanel({
 
             {(nodeTypeDraft === 'trigger.open_positions' ||
               (nodeTypeDraft === 'trigger.market_price' &&
-                triggerBindingMode !== 'pair_lock_only')) && (
+                !triggerBindingOnly)) && (
               <OutcomeConditionsSection
                 rows={form.outcomeConditionRows}
                 marketOutcomes={marketOutcomes}
@@ -1372,6 +1380,11 @@ export function NodeInspectorPanel({
             {nodeTypeDraft === 'trigger.market_price' && triggerBindingMode === 'pair_lock_only' && (
               <div className="rounded-lg border border-sky-200/80 bg-sky-50/80 p-3 text-[10px] leading-relaxed text-sky-700">
                 Bu modda trigger outcome secmez; marketi pair_lock node’una baglar. Up/Down secimi ve fiyat/PTB/max price mantigi pair_lock node’unda kalir.
+              </div>
+            )}
+            {nodeTypeDraft === 'trigger.market_price' && triggerBindingMode === 'dca_live_only' && (
+              <div className="rounded-lg border border-emerald-200/80 bg-emerald-50/80 p-3 text-[10px] leading-relaxed text-emerald-700">
+                Bu modda trigger outcome secmez; marketi DCA action node’una baglar. Ozel aralik aktifse DCA sadece o pencere icinde emir gonderir.
               </div>
             )}
 

@@ -26,6 +26,13 @@ const PAIR_LOCK_ALLOWED_NOTIFICATION_ACTIONS = new Set([
   'action.telegram_notify',
 ]);
 
+const DCA_LIVE_ALLOWED_PASSTHROUGH_NODES = new Set([
+  'logic.if',
+  'logic.switch',
+  'logic.delay',
+  'logic.retry',
+]);
+
 function isPairLockDownstreamNode(node: TradeFlowNode): boolean {
   const downstreamConfig = isRecord(node.config) ? node.config : {};
   const downstreamMode = toTrimmedString(downstreamConfig.mode).toLowerCase() || 'single';
@@ -40,6 +47,52 @@ function isDcaLiveDownstreamNode(node: TradeFlowNode): boolean {
 
 function isPairLockAllowedNotificationNode(node: TradeFlowNode): boolean {
   return PAIR_LOCK_ALLOWED_NOTIFICATION_ACTIONS.has(node.type);
+}
+
+function collectReachableDcaLiveBindingNodes(
+  nodeKey: string,
+  graph: TradeFlowGraph
+): { dcaLiveNodes: TradeFlowNode[]; invalidNodes: TradeFlowNode[] } {
+  const nodeMap = new Map(graph.nodes.map((candidate) => [candidate.key, candidate]));
+  const outgoingBySource = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const outgoing = outgoingBySource.get(edge.source) ?? [];
+    outgoing.push(edge.target);
+    outgoingBySource.set(edge.source, outgoing);
+  }
+
+  const visited = new Set<string>();
+  const dcaLiveByKey = new Map<string, TradeFlowNode>();
+  const invalidByKey = new Map<string, TradeFlowNode>();
+  const queue = [...(outgoingBySource.get(nodeKey) ?? [])];
+
+  while (queue.length > 0) {
+    const currentKey = queue.shift() as string;
+    if (visited.has(currentKey)) continue;
+    visited.add(currentKey);
+
+    const currentNode = nodeMap.get(currentKey);
+    if (!currentNode) continue;
+
+    const isDcaLive = isDcaLiveDownstreamNode(currentNode);
+    const isNotification = isPairLockAllowedNotificationNode(currentNode);
+    const isPassthrough = DCA_LIVE_ALLOWED_PASSTHROUGH_NODES.has(currentNode.type);
+
+    if (isDcaLive) {
+      dcaLiveByKey.set(currentKey, currentNode);
+    } else if (!isNotification && !isPassthrough) {
+      invalidByKey.set(currentKey, currentNode);
+    }
+
+    if (isDcaLive || isPassthrough) {
+      queue.push(...(outgoingBySource.get(currentKey) ?? []));
+    }
+  }
+
+  return {
+    dcaLiveNodes: [...dcaLiveByKey.values()],
+    invalidNodes: [...invalidByKey.values()],
+  };
 }
 
 export function validateTriggerMarketPriceNodeConfig(
@@ -374,19 +427,13 @@ export function validateTriggerMarketPriceNodeConfig(
         'trigger.market_price bindingMode=dca_live_only does not allow priceToBeatTrigger* fields.'
       );
     }
-    const downstreamNodes = directOutgoingNodes(node.key, graph);
-    const dcaLiveNodes = downstreamNodes.filter(isDcaLiveDownstreamNode);
-    const invalidNodes = downstreamNodes.filter(
-      (downstreamNode) =>
-        !isDcaLiveDownstreamNode(downstreamNode) &&
-        !isPairLockAllowedNotificationNode(downstreamNode)
-    );
+    const { dcaLiveNodes, invalidNodes } = collectReachableDcaLiveBindingNodes(node.key, graph);
     if (dcaLiveNodes.length !== 1) {
       pushNodeError(
         issues,
         node,
         'dca_live_only_requires_single_dca_downstream',
-        'trigger.market_price bindingMode=dca_live_only requires exactly one downstream action.place_order mode=dca_live_v1.'
+        'trigger.market_price bindingMode=dca_live_only requires exactly one reachable downstream action.place_order mode=dca_live_v1.'
       );
     }
     if (invalidNodes.length > 0) {
@@ -394,7 +441,7 @@ export function validateTriggerMarketPriceNodeConfig(
         issues,
         node,
         'dca_live_only_disallows_non_notification_downstream',
-        'trigger.market_price bindingMode=dca_live_only allows only one action.place_order mode=dca_live_v1 plus optional action.notify/action.telegram_notify nodes.'
+        'trigger.market_price bindingMode=dca_live_only allows one action.place_order mode=dca_live_v1, optional logic/guard nodes, and optional notification nodes.'
       );
     }
   }

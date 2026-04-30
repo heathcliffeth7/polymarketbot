@@ -8,9 +8,9 @@ export const ACTION_PLACE_ORDER_FIELD_SCHEMA: NodeFieldSchema[] = [
       label: 'Mod',
       input: 'select',
       options: [
-        { label: 'single', value: 'single' },
-        { label: 'pair_lock', value: 'pair_lock' },
-        { label: 'dca_live_v1', value: 'dca_live_v1' },
+        { label: 'Single', value: 'single' },
+        { label: 'Pair Lock', value: 'pair_lock' },
+        { label: 'DCA Live', value: 'dca_live_v1' },
       ],
       help: 'single tek-bacak davranisidir. pair_lock binary iki bacak toplar. dca_live_v1 generic Polymarket slug/outcome DCA modudur.',
     },

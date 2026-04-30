@@ -273,6 +273,99 @@ test('validateTriggerMarketPriceNodeConfig accepts pair_lock_only with pair_lock
   assert.equal(issues.length, 0);
 });
 
+test('validateTriggerMarketPriceNodeConfig accepts dca_live_only through logic guard', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_dca_guard', 'btc_5m_updown', 'auto_vol_pct', {
+        bindingMode: 'dca_live_only',
+        priceToBeatTriggerEnabled: false,
+        outcomeConditions: [],
+        cycleWindowMode: 'custom_range',
+        cycleWindowStartSec: 120,
+        cycleWindowEndSec: 240,
+      }),
+      {
+        key: 'logic_guard',
+        type: 'logic.if',
+        positionX: 220,
+        positionY: 0,
+        config: { expression: { '==': [{ var: 'guard_ok' }, true] } },
+      },
+      {
+        key: 'dca_buy',
+        type: 'action.place_order',
+        positionX: 440,
+        positionY: 0,
+        config: {
+          mode: 'dca_live_v1',
+          side: 'buy',
+          executionMode: 'limit',
+          marketSelectionMode: 'manual_slug',
+          manualSlug: 'btc-updown-5m-1777493700',
+          sideMode: 'one_sided',
+          selectedOutcomes: [
+            { slug: 'btc-updown-5m-1777493700', outcomeLabel: 'Up', tokenId: 'up-token' },
+          ],
+          initialOrderShares: 1,
+          maxTotalCostPerSlugUsdc: 2,
+          maxTotalCostAllSlugsUsdc: 2,
+        },
+      },
+      {
+        key: 'notify_ui',
+        type: 'action.notify',
+        positionX: 440,
+        positionY: 80,
+        config: { channel: 'ui', message: 'dca armed' },
+      },
+    ],
+    edges: [
+      { key: 'edge_guard', source: 'trigger_dca_guard', target: 'logic_guard', type: 'default', condition: null },
+      { key: 'edge_dca', source: 'logic_guard', target: 'dca_buy', type: 'default', condition: null },
+      { key: 'edge_notify', source: 'trigger_dca_guard', target: 'notify_ui', type: 'default', condition: null },
+    ],
+  });
+
+  const issues = collectTriggerIssues(graph, 'trigger_dca_guard');
+  assert.equal(issues.length, 0);
+});
+
+test('validateTriggerMarketPriceNodeConfig rejects dca_live_only with non-DCA action downstream', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_dca_bad_action', 'btc_5m_updown', 'auto_vol_pct', {
+        bindingMode: 'dca_live_only',
+        priceToBeatTriggerEnabled: false,
+        outcomeConditions: [],
+      }),
+      {
+        key: 'logic_guard',
+        type: 'logic.if',
+        positionX: 220,
+        positionY: 0,
+        config: { expression: { var: 'guard_ok' } },
+      },
+      {
+        key: 'cancel_order',
+        type: 'action.cancel_order',
+        positionX: 440,
+        positionY: 0,
+        config: {},
+      },
+    ],
+    edges: [
+      { key: 'edge_guard', source: 'trigger_dca_bad_action', target: 'logic_guard', type: 'default', condition: null },
+      { key: 'edge_cancel', source: 'logic_guard', target: 'cancel_order', type: 'default', condition: null },
+    ],
+  });
+
+  const issues = collectTriggerIssues(graph, 'trigger_dca_bad_action');
+  assert.ok(issues.some((issue) => issue.code === 'dca_live_only_requires_single_dca_downstream'));
+  assert.ok(issues.some((issue) => issue.code === 'dca_live_only_disallows_non_notification_downstream'));
+});
+
 test('validateTriggerMarketPriceNodeConfig accepts pair_lock_only with pair_lock and action.telegram_notify downstream', () => {
   const graph = normalizeTradeFlowGraph({
     context: {},
