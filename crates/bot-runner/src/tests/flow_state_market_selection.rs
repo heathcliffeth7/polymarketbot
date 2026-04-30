@@ -498,7 +498,7 @@ fn initial_seed_prefers_triggers_when_present() {
     let graph = runtime_graph(
         vec![
             ("trigger_tick", "trigger.market_price"),
-            ("dual_root", "action.dual_dca"),
+            ("dca_root", "action.place_order"),
         ],
         vec![],
     );
@@ -511,27 +511,27 @@ fn initial_seed_prefers_triggers_when_present() {
 }
 
 #[test]
-fn initial_seed_allows_dual_dca_roots_without_triggers() {
+fn initial_seed_allows_dca_live_roots_without_triggers() {
     let graph = runtime_graph(
         vec![
-            ("dual_root", "action.dual_dca"),
-            ("dual_child", "action.dual_dca"),
+            ("dca_root", "action.place_order"),
+            ("dca_child", "action.place_order"),
         ],
-        vec![("dual_root", "dual_child")],
+        vec![("dca_root", "dca_child")],
     );
 
     let (mode, start_nodes) =
         select_trade_flow_initial_seed_nodes(&graph).expect("selection should succeed");
-    assert_eq!(mode, TradeFlowSeedMode::DualDcaRoot);
+    assert_eq!(mode, TradeFlowSeedMode::DcaLiveRoot);
     assert_eq!(start_nodes.len(), 1);
-    assert_eq!(start_nodes[0].key, "dual_root");
+    assert_eq!(start_nodes[0].key, "dca_root");
 }
 
 #[test]
-fn initial_seed_rejects_non_dual_roots_without_triggers() {
+fn initial_seed_rejects_non_dca_roots_without_triggers() {
     let graph = runtime_graph(
         vec![
-            ("dual_root", "action.dual_dca"),
+            ("dca_root", "action.place_order"),
             ("notify_root", "action.notify"),
         ],
         vec![],
@@ -542,7 +542,7 @@ fn initial_seed_rejects_non_dual_roots_without_triggers() {
 }
 
 #[test]
-fn initial_seed_requires_trigger_when_dual_dca_absent() {
+fn initial_seed_requires_trigger_when_dca_live_absent() {
     let graph = runtime_graph(vec![("notify_root", "action.notify")], vec![]);
 
     let err = select_trade_flow_initial_seed_nodes(&graph).expect_err("should fail");

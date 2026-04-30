@@ -313,6 +313,13 @@ export function openPositionNodeLabel(config: Record<string, unknown>): string |
 }
 
 export function placeOrderNodeLabel(config: Record<string, unknown>): string {
+  const mode = typeof config.mode === 'string' ? config.mode.trim().toLowerCase() : '';
+  if (mode === 'dca_live_v1') {
+    const sideMode = typeof config.sideMode === 'string' ? config.sideMode.trim() : '';
+    const source = typeof config.marketSelectionMode === 'string' ? config.marketSelectionMode.trim() : '';
+    return `DCA Live${sideMode ? ` | ${sideMode}` : ''}${source ? ` | ${source}` : ''}`;
+  }
+
   const side = typeof config.side === 'string' ? config.side.trim().toLowerCase() : '';
   const executionMode =
     typeof config.executionMode === 'string' ? config.executionMode.trim().toLowerCase() : '';

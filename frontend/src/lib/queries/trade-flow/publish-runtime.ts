@@ -115,6 +115,14 @@ function isFixedOnceMarketPriceNode(node: TradeFlowNode): boolean {
   );
 }
 
+function isDcaLivePlaceOrderNode(node: TradeFlowNode): boolean {
+  const config = isRecord(node.config) ? node.config : {};
+  return (
+    node.type === 'action.place_order' &&
+    String(config.mode ?? '').trim().toLowerCase() === 'dca_live_v1'
+  );
+}
+
 function resetFixedOnceMarketPriceStateForPublish(stateForNode: Record<string, unknown>): boolean {
   let changed = false;
 
@@ -274,18 +282,18 @@ function selectTradeFlowSeedNodes(graph: TradeFlowGraph): TradeFlowNode[] {
 
   const rootNodeKeys = collectRootNodeKeys(graph.nodes, graph.edges);
   const invalidRoots = graph.nodes.filter(
-    (node) => rootNodeKeys.has(node.key) && node.type !== 'action.dual_dca'
+    (node) => rootNodeKeys.has(node.key) && !isDcaLivePlaceOrderNode(node)
   );
   if (invalidRoots.length > 0) {
     throw new Error('flow_invalid_roots_without_trigger');
   }
-  const dualRoots = graph.nodes.filter(
-    (node) => node.type === 'action.dual_dca' && rootNodeKeys.has(node.key)
+  const dcaRoots = graph.nodes.filter(
+    (node) => isDcaLivePlaceOrderNode(node) && rootNodeKeys.has(node.key)
   );
-  if (dualRoots.length === 0) {
+  if (dcaRoots.length === 0) {
     throw new Error('flow_missing_trigger');
   }
-  return dualRoots;
+  return dcaRoots;
 }
 
 async function appendTradeFlowEvent(

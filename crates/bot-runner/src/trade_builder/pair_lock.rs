@@ -1,5 +1,6 @@
 const ACTION_PLACE_ORDER_MODE_SINGLE: &str = "single";
 const ACTION_PLACE_ORDER_MODE_PAIR_LOCK: &str = "pair_lock";
+const ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1: &str = "dca_live_v1";
 const TRADE_BUILDER_PAIR_STATUS_WORKING: &str = "working";
 const TRADE_BUILDER_PAIR_STATUS_LOCKED: &str = "locked";
 const TRADE_BUILDER_PAIR_STATUS_UNWINDING: &str = "unwinding";
@@ -40,12 +41,17 @@ fn action_place_order_mode(node: &TradeFlowNode) -> &'static str {
         .as_str()
     {
         ACTION_PLACE_ORDER_MODE_PAIR_LOCK => ACTION_PLACE_ORDER_MODE_PAIR_LOCK,
+        ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1 => ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1,
         _ => ACTION_PLACE_ORDER_MODE_SINGLE,
     }
 }
 
 fn action_place_order_uses_pair_lock(node: &TradeFlowNode) -> bool {
     action_place_order_mode(node) == ACTION_PLACE_ORDER_MODE_PAIR_LOCK
+}
+
+fn action_place_order_uses_dca_live(node: &TradeFlowNode) -> bool {
+    action_place_order_mode(node) == ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1
 }
 
 fn trade_builder_order_uses_pair_lock(order: &TradeBuilderOrder) -> bool {
@@ -767,6 +773,13 @@ async fn execute_action_place_order_dispatch(
     graph: &TradeFlowGraphRuntime,
     context: &mut Value,
 ) -> Result<TradeFlowNodeExecution> {
+    if action_place_order_uses_dca_live(node) {
+        return execute_action_place_order_dca_live(
+            repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
+        )
+        .await;
+    }
+
     if action_place_order_uses_pair_lock(node) {
         let (
             side,

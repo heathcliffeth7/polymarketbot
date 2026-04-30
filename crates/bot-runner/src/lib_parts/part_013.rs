@@ -30,7 +30,9 @@ async fn execute_trade_flow_node(
         "logic.delay" => execute_logic_delay(node),
         "logic.retry" => execute_logic_retry(node, step, context),
         "action.resolve_market" => execute_action_resolve_market(cfg, node, context).await,
-        "action.dual_dca" => execute_action_dual_dca(repo, run, node, context).await,
+        "action.dual_dca" => Err(anyhow::anyhow!(
+            "action.dual_dca is deprecated; use action.place_order mode=dca_live_v1"
+        )),
         "action.place_order" => {
             execute_action_place_order_dispatch(
                 repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,

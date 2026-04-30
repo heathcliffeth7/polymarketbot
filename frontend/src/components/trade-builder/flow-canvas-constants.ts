@@ -85,7 +85,6 @@ export const NODE_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'logic.delay', label: 'Mantik: Gecikme' },
   { value: 'logic.retry', label: 'Mantik: Retry' },
   { value: 'action.resolve_market', label: 'Aksiyon: Market Coz' },
-  { value: 'action.dual_dca', label: 'Aksiyon: Cift Tarafli DCA' },
   { value: 'action.place_order', label: 'Aksiyon: Emir Gonder' },
   { value: 'action.cancel_order', label: 'Aksiyon: Emir Iptal' },
   { value: 'action.update_order', label: 'Aksiyon: Emir Guncelle' },

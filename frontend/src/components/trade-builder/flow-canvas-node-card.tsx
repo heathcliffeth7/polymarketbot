@@ -1,7 +1,6 @@
 import { Handle, Position, NodeResizer, useReactFlow, type NodeProps } from '@xyflow/react';
 import { NODE_TYPE_LABEL, type FlowNode } from './flow-canvas-constants';
 import {
-  dualDcaNodeLabel,
   nodeKindTone,
   openPositionNodeLabel,
   placeOrderNodeLabel,
@@ -33,8 +32,6 @@ export function FlowCanvasNodeCard({ data, selected, id }: NodeProps<FlowNode>) 
       ? openPositionNodeLabel(data.config) || data.nodeType
       : data.nodeType === 'action.resolve_market'
         ? resolveMarketNodeLabel(data.config)
-      : data.nodeType === 'action.dual_dca'
-        ? dualDcaNodeLabel(data.config)
       : data.nodeType === 'action.place_order'
         ? placeOrderNodeLabel(data.config)
         : data.nodeType;

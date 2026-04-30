@@ -173,14 +173,14 @@ fn ensure_object_mut(value: &mut Value) -> &mut serde_json::Map<String, Value> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TradeFlowSeedMode {
     Trigger,
-    DualDcaRoot,
+    DcaLiveRoot,
 }
 
 impl TradeFlowSeedMode {
     fn as_str(self) -> &'static str {
         match self {
             TradeFlowSeedMode::Trigger => "trigger",
-            TradeFlowSeedMode::DualDcaRoot => "dual_dca_root",
+            TradeFlowSeedMode::DcaLiveRoot => "dca_live_root",
         }
     }
 }
@@ -211,11 +211,11 @@ fn select_trade_flow_initial_seed_nodes<'a>(
         return Ok((TradeFlowSeedMode::Trigger, trigger_nodes));
     }
 
-    let has_dual_dca = graph
+    let has_dca_live_root = graph
         .nodes
         .iter()
-        .any(|node| node.node_type == "action.dual_dca");
-    if !has_dual_dca {
+        .any(|node| node.node_type == "action.place_order" && action_place_order_uses_dca_live(node));
+    if !has_dca_live_root {
         return Err("flow_missing_trigger");
     }
 
@@ -223,9 +223,9 @@ fn select_trade_flow_initial_seed_nodes<'a>(
     if !root_nodes.is_empty()
         && root_nodes
             .iter()
-            .all(|node| node.node_type == "action.dual_dca")
+            .all(|node| node.node_type == "action.place_order" && action_place_order_uses_dca_live(node))
     {
-        return Ok((TradeFlowSeedMode::DualDcaRoot, root_nodes));
+        return Ok((TradeFlowSeedMode::DcaLiveRoot, root_nodes));
     }
 
     Err("flow_invalid_roots_without_trigger")
@@ -246,10 +246,10 @@ async fn seed_trade_flow_trigger_steps(
     let (seed_mode, nodes_to_seed) = match select_trade_flow_initial_seed_nodes(graph) {
         Ok(selection) => selection,
         Err(reason) => {
-            let has_dual_dca = graph
+            let has_dca_live_root = graph
                 .nodes
                 .iter()
-                .any(|node| node.node_type == "action.dual_dca");
+                .any(|node| node.node_type == "action.place_order" && action_place_order_uses_dca_live(node));
             let root_nodes_payload: Vec<Value> = collect_trade_flow_root_nodes(graph)
                 .iter()
                 .map(|node| {
@@ -268,7 +268,7 @@ async fn seed_trade_flow_trigger_steps(
                 "run_failed",
                 &json!({
                     "reason": reason,
-                    "hasDualDca": has_dual_dca,
+                    "hasDcaLiveRoot": has_dca_live_root,
                     "rootNodes": root_nodes_payload
                 }),
             )

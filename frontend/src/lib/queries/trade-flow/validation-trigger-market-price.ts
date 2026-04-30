@@ -32,6 +32,12 @@ function isPairLockDownstreamNode(node: TradeFlowNode): boolean {
   return node.type === 'action.place_order' && downstreamMode === 'pair_lock';
 }
 
+function isDcaLiveDownstreamNode(node: TradeFlowNode): boolean {
+  const downstreamConfig = isRecord(node.config) ? node.config : {};
+  const downstreamMode = toTrimmedString(downstreamConfig.mode).toLowerCase() || 'single';
+  return node.type === 'action.place_order' && downstreamMode === 'dca_live_v1';
+}
+
 function isPairLockAllowedNotificationNode(node: TradeFlowNode): boolean {
   return PAIR_LOCK_ALLOWED_NOTIFICATION_ACTIONS.has(node.type);
 }
@@ -49,12 +55,14 @@ export function validateTriggerMarketPriceNodeConfig(
   const protectionPreset = toTrimmedString(config.protectionPreset).toLowerCase();
   const bindingMode = toTrimmedString(config.bindingMode).toLowerCase() || 'standard';
   const pairLockOnly = bindingMode === 'pair_lock_only';
-  if (bindingMode !== 'standard' && bindingMode !== 'pair_lock_only') {
+  const dcaLiveOnly = bindingMode === 'dca_live_only';
+  const bindingOnly = pairLockOnly || dcaLiveOnly;
+  if (bindingMode !== 'standard' && bindingMode !== 'pair_lock_only' && bindingMode !== 'dca_live_only') {
     pushNodeError(
       issues,
       node,
       'invalid_binding_mode',
-      'trigger.market_price bindingMode must be standard or pair_lock_only.'
+      'trigger.market_price bindingMode must be standard, pair_lock_only, or dca_live_only.'
     );
   }
 
@@ -249,7 +257,7 @@ export function validateTriggerMarketPriceNodeConfig(
     normalizedPtbMode,
   });
 
-  if (Array.isArray(config.outcomeConditions) && !pairLockOnly) {
+  if (Array.isArray(config.outcomeConditions) && !bindingOnly) {
     for (const item of config.outcomeConditions) {
       if (!isRecord(item)) continue;
       const triggerCondition = toTrimmedString(item.triggerCondition).toLowerCase();
@@ -294,7 +302,7 @@ export function validateTriggerMarketPriceNodeConfig(
     }
   }
 
-  if (!pairLockOnly && countValidMarketPriceOutcomeConditions(config) <= 0) {
+  if (!bindingOnly && countValidMarketPriceOutcomeConditions(config) <= 0) {
     pushNodeError(
       issues,
       node,
@@ -343,6 +351,50 @@ export function validateTriggerMarketPriceNodeConfig(
         node,
         'pair_lock_only_disallows_non_notification_downstream',
         'trigger.market_price bindingMode=pair_lock_only allows only one action.place_order mode=pair_lock plus optional action.notify/action.telegram_notify nodes.'
+      );
+    }
+  }
+
+  if (bindingMode === 'dca_live_only') {
+    const hasOutcomeRows =
+      Array.isArray(config.outcomeConditions) && config.outcomeConditions.length > 0;
+    if (hasOutcomeRows) {
+      pushNodeError(
+        issues,
+        node,
+        'dca_live_only_disallows_outcome_conditions',
+        'trigger.market_price bindingMode=dca_live_only does not allow outcomeConditions.'
+      );
+    }
+    if (priceToBeatTriggerEnabled === true) {
+      pushNodeError(
+        issues,
+        node,
+        'dca_live_only_disallows_ptb_trigger',
+        'trigger.market_price bindingMode=dca_live_only does not allow priceToBeatTrigger* fields.'
+      );
+    }
+    const downstreamNodes = directOutgoingNodes(node.key, graph);
+    const dcaLiveNodes = downstreamNodes.filter(isDcaLiveDownstreamNode);
+    const invalidNodes = downstreamNodes.filter(
+      (downstreamNode) =>
+        !isDcaLiveDownstreamNode(downstreamNode) &&
+        !isPairLockAllowedNotificationNode(downstreamNode)
+    );
+    if (dcaLiveNodes.length !== 1) {
+      pushNodeError(
+        issues,
+        node,
+        'dca_live_only_requires_single_dca_downstream',
+        'trigger.market_price bindingMode=dca_live_only requires exactly one downstream action.place_order mode=dca_live_v1.'
+      );
+    }
+    if (invalidNodes.length > 0) {
+      pushNodeError(
+        issues,
+        node,
+        'dca_live_only_disallows_non_notification_downstream',
+        'trigger.market_price bindingMode=dca_live_only allows only one action.place_order mode=dca_live_v1 plus optional action.notify/action.telegram_notify nodes.'
       );
     }
   }

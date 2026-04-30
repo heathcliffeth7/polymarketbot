@@ -49,6 +49,12 @@ fn is_pair_lock_only_market_trigger(node: &TradeFlowNode) -> bool {
             .is_some_and(|value| value.trim().eq_ignore_ascii_case("pair_lock_only"))
 }
 
+fn is_dca_live_only_market_trigger(node: &TradeFlowNode) -> bool {
+    node.node_type == "trigger.market_price"
+        && node_config_string(node, "bindingMode")
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("dca_live_only"))
+}
+
 fn pair_lock_monitor_outcome_labels(market_slug: Option<&str>) -> (&'static str, &'static str) {
     if market_slug.is_some_and(|slug| slug.contains("-updown-")) {
         ("Up", "Down")
@@ -206,7 +212,9 @@ fn build_open_position_ws_price_node_specs(
         } else {
             None
         };
-    if is_pair_lock_only_market_trigger(node) && is_auto_scope {
+    if (is_pair_lock_only_market_trigger(node) || is_dca_live_only_market_trigger(node))
+        && is_auto_scope
+    {
         let (yes_label, no_label) = pair_lock_monitor_outcome_labels(market_slug.as_deref());
         let candidates = [
             (

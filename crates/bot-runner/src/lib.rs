@@ -51,6 +51,7 @@ include!("trade_builder/pair_lock_quote.rs");
 include!("trade_builder/pair_lock_auto_primary.rs");
 include!("trade_builder/pair_lock_step_quote.rs");
 include!("trade_builder/pair_lock_take_profit.rs");
+include!("trade_builder/dca_live.rs");
 include!("trade_builder/pair_lock.rs");
 include!("trade_builder/pair_lock_child_nodes.rs");
 include!("trade_builder/pair_lock_edge_strategy.rs");

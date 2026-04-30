@@ -23,7 +23,6 @@ const SUPPORTED_NODE_TYPES = new Set([
   'logic.delay',
   'logic.retry',
   'action.resolve_market',
-  'action.dual_dca',
   'action.place_order',
   'action.cancel_order',
   'action.update_order',

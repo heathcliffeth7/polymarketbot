@@ -96,8 +96,15 @@ export function validateTradeFlowGraph(graphJson: unknown): TradeFlowValidationR
   const rootNodeKeys = collectRootNodeKeys(graph.nodes, graph.edges);
 
   if (triggerCount === 0) {
-    const hasDualDcaNode = graph.nodes.some((node) => node.type === 'action.dual_dca');
-    if (!hasDualDcaNode) {
+    const hasDcaLiveRoot = graph.nodes.some((node) => {
+      const config = isRecord(node.config) ? node.config : {};
+      return (
+        rootNodeKeys.has(node.key) &&
+        node.type === 'action.place_order' &&
+        String(config.mode ?? '').trim().toLowerCase() === 'dca_live_v1'
+      );
+    });
+    if (!hasDcaLiveRoot) {
       issues.push({
         severity: 'error',
         code: 'missing_trigger',
@@ -105,13 +112,22 @@ export function validateTradeFlowGraph(graphJson: unknown): TradeFlowValidationR
       });
     } else {
       const invalidRootNodes = graph.nodes
-        .filter((node) => rootNodeKeys.has(node.key) && node.type !== 'action.dual_dca')
+        .filter((node) => {
+          const config = isRecord(node.config) ? node.config : {};
+          return (
+            rootNodeKeys.has(node.key) &&
+            !(
+              node.type === 'action.place_order' &&
+              String(config.mode ?? '').trim().toLowerCase() === 'dca_live_v1'
+            )
+          );
+        })
         .map((node) => node.key);
       if (invalidRootNodes.length > 0) {
         issues.push({
           severity: 'error',
-          code: 'missing_trigger_invalid_roots_for_dual_dca',
-          message: `Trigger yoksa root node'lar sadece action.dual_dca olabilir: ${invalidRootNodes.join(', ')}`,
+          code: 'missing_trigger_invalid_roots_for_dca_live',
+          message: `Trigger yoksa root node'lar sadece action.place_order mode=dca_live_v1 olabilir: ${invalidRootNodes.join(', ')}`,
         });
       }
     }

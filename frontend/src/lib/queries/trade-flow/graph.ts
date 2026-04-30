@@ -261,7 +261,10 @@ function normalizeNodeConfig(
   return {
     ...normalizeTriggerMarketPriceCycleWindowConfig(config),
     priceMode: validPriceModes.has(priceModeRaw) ? priceModeRaw : 'composite',
-    bindingMode: bindingModeRaw === 'pair_lock_only' ? 'pair_lock_only' : 'standard',
+    bindingMode:
+      bindingModeRaw === 'pair_lock_only' || bindingModeRaw === 'dca_live_only'
+        ? bindingModeRaw
+        : 'standard',
   };
 }
 
@@ -424,6 +427,14 @@ function collectRootNodeKeys(nodes: TradeFlowNode[], edges: TradeFlowEdge[]): Se
   return new Set(nodes.filter((node) => !incoming.has(node.key)).map((node) => node.key));
 }
 
+function isDcaLivePlaceOrderNode(node: TradeFlowNode): boolean {
+  const config = isRecord(node.config) ? node.config : {};
+  return (
+    node.type === 'action.place_order' &&
+    toTrimmedString(config.mode).toLowerCase() === 'dca_live_v1'
+  );
+}
+
 function collectReachableFromTriggers(nodes: TradeFlowNode[], edges: TradeFlowEdge[]): Set<string> {
   const adjacency = new Map<string, string[]>();
   for (const node of nodes) adjacency.set(node.key, []);
@@ -436,10 +447,10 @@ function collectReachableFromTriggers(nodes: TradeFlowNode[], edges: TradeFlowEd
     .filter((node) => node.type.startsWith('trigger.'))
     .map((node) => node.key);
   const rootNodeKeys = collectRootNodeKeys(nodes, edges);
-  const dualDcaRootStarts = nodes
-    .filter((node) => node.type === 'action.dual_dca' && rootNodeKeys.has(node.key))
+  const dcaLiveRootStarts = nodes
+    .filter((node) => isDcaLivePlaceOrderNode(node) && rootNodeKeys.has(node.key))
     .map((node) => node.key);
-  const queue = triggerStarts.length > 0 ? triggerStarts : dualDcaRootStarts;
+  const queue = triggerStarts.length > 0 ? triggerStarts : dcaLiveRootStarts;
   const reachable = new Set<string>(queue);
 
   while (queue.length > 0) {

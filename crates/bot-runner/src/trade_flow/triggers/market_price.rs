@@ -34,8 +34,12 @@ async fn execute_trigger_market_price(
         node.config.get("priceMode").and_then(|v| v.as_str()),
         WsPriceMode::Composite,
     );
-    let pair_lock_only_mode = node_config_string(node, "bindingMode")
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("pair_lock_only"));
+    let binding_mode = node_config_string(node, "bindingMode")
+        .unwrap_or_else(|| "standard".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    let pair_lock_only_mode = binding_mode == "pair_lock_only";
+    let dca_live_only_mode = binding_mode == "dca_live_only";
     // --- Early WS-sourced detection for auto_scope guard ---
     let ws_sourced = step
         .input_json
@@ -380,7 +384,7 @@ async fn execute_trigger_market_price(
         .get("outcomeConditions")
         .and_then(|v| v.as_array())
         .cloned();
-    let pair_lock_only_path = pair_lock_only_mode
+    let binding_only_path = (pair_lock_only_mode || dca_live_only_mode)
         && outcome_conditions
             .as_ref()
             .map(|rows| rows.is_empty())
@@ -430,8 +434,10 @@ async fn execute_trigger_market_price(
         ws_hard_ignore_reason.as_deref(),
     ) {
         "cross_confirm_short_circuit"
-    } else if pair_lock_only_path {
+    } else if pair_lock_only_mode && binding_only_path {
         "pair_lock_only"
+    } else if dca_live_only_mode && binding_only_path {
+        "dca_live_only"
     } else if outcome_conditions.is_some() {
         "multi_outcome"
     } else {
@@ -457,7 +463,7 @@ async fn execute_trigger_market_price(
         );
     }
 
-    if pair_lock_only_path {
+    if binding_only_path {
         pair_lock_yes_token_id = node_auto_scope_yes_token_id(context, &node.key)
             .or_else(|| flow_context_string(context, "yesTokenId"));
         pair_lock_no_token_id = node_auto_scope_no_token_id(context, &node.key)
@@ -477,7 +483,11 @@ async fn execute_trigger_market_price(
         pass = ws_hard_ignore_reason.is_none();
         current_price = ws_price_from_step;
         triggered_max_price = selected_entry_max_price;
-        trigger_evaluation_mode = "pair_lock_only";
+        trigger_evaluation_mode = if dca_live_only_mode {
+            "dca_live_only"
+        } else {
+            "pair_lock_only"
+        };
     } else if ws_execution_path == "cross_confirm_short_circuit" {
         let conf_token_id = ws_token_id_from_step.clone().unwrap_or_default();
         let conf_price = ws_price_from_step;
@@ -1248,7 +1258,7 @@ async fn execute_trigger_market_price(
         _ => (None, None),
     };
 
-    if pair_lock_only_path && pass {
+    if binding_only_path && pass {
         if let Some(scope) = find_updown_scope_by_slug(&market_slug) {
             set_flow_context(context, "marketScope", json!(scope.scope));
             set_flow_context(context, "marketAsset", json!(scope.asset));

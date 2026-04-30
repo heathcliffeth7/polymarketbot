@@ -23,6 +23,18 @@ import {
   validateOutcomeConditionRow,
 } from './utils';
 
+function parseJsonArrayField(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) return value;
+  const text = toStringValue(value).trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeConfigFormState {
   const cfg = isRecord(config) ? config : {};
   const fields: Record<string, string> = {};
@@ -45,6 +57,12 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     fields.botToken = toStringValue(cfg.botToken);
   }
   if (nodeType === 'action.place_order') {
+    if (Array.isArray(cfg.manualSlugs)) {
+      fields.manualSlugs = safeJsonStringify(cfg.manualSlugs);
+    }
+    if (Array.isArray(cfg.selectedOutcomes)) {
+      fields.selectedOutcomes = safeJsonStringify(cfg.selectedOutcomes);
+    }
     if (!fields.tpPriceCent.trim()) {
       const legacyTpPrice = Number(cfg.tpPrice);
       if (Number.isFinite(legacyTpPrice) && legacyTpPrice > 0 && legacyTpPrice <= 1) {
@@ -339,7 +357,10 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     fields.repeatMode = repeatModeRaw === 'once' ? 'once' : 'loop';
     fields.onceScope = resolveTriggerMarketOnceScope(cfg, marketMode, fields.repeatMode as 'once' | 'loop');
     const bindingModeRaw = toStringValue(cfg.bindingMode).trim().toLowerCase();
-    fields.bindingMode = bindingModeRaw === 'pair_lock_only' ? 'pair_lock_only' : 'standard';
+    fields.bindingMode =
+      bindingModeRaw === 'pair_lock_only' || bindingModeRaw === 'dca_live_only'
+        ? bindingModeRaw
+        : 'standard';
 
     const cycleWindowFields = readTriggerMarketPriceCycleWindowFields(cfg);
     fields.cycleWindowMode = cycleWindowFields.cycleWindowMode;
@@ -372,7 +393,10 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
   if (nodeType === 'trigger.open_positions' || nodeType === 'trigger.market_price') {
     const pairLockOnlyTrigger =
       nodeType === 'trigger.market_price' &&
-      toStringValue(cfg.bindingMode).trim().toLowerCase() === 'pair_lock_only';
+      (
+        toStringValue(cfg.bindingMode).trim().toLowerCase() === 'pair_lock_only' ||
+        toStringValue(cfg.bindingMode).trim().toLowerCase() === 'dca_live_only'
+      );
     if (Array.isArray(cfg.outcomeConditions) && !pairLockOnlyTrigger) {
       for (const item of cfg.outcomeConditions as Record<string, unknown>[]) {
         if (!isRecord(item)) continue;
@@ -583,6 +607,25 @@ export function buildNodeConfigFromForm(
     const sideRaw = toStringValue(config.side).trim().toLowerCase();
     const isBuySide = sideRaw === 'buy';
     const pairLockMode = toStringValue(config.mode).trim().toLowerCase() === 'pair_lock';
+    const dcaLiveMode = toStringValue(config.mode).trim().toLowerCase() === 'dca_live_v1';
+    if (dcaLiveMode) {
+      config.mode = 'dca_live_v1';
+      const manualSlugs = parseJsonArrayField(config.manualSlugs)
+        ?.map((item) => String(item).trim())
+        .filter(Boolean);
+      if (manualSlugs && manualSlugs.length > 0) {
+        config.manualSlugs = manualSlugs;
+      } else {
+        delete config.manualSlugs;
+      }
+      const selectedOutcomes = parseJsonArrayField(config.selectedOutcomes)
+        ?.filter((item): item is Record<string, unknown> => isRecord(item));
+      if (selectedOutcomes && selectedOutcomes.length > 0) {
+        config.selectedOutcomes = selectedOutcomes;
+      } else {
+        delete config.selectedOutcomes;
+      }
+    }
     const tpRules = (form.tpRuleRows || [])
       .map((row) => {
         const priceCent = Number(row.priceCent.trim());
@@ -1131,7 +1174,10 @@ export function buildNodeConfigFromForm(
         delete config.priceToBeatTriggerMinGap;
         delete config.priceToBeatTriggerMaxGap;
       }
-      if (toStringValue(config.bindingMode).trim().toLowerCase() === 'pair_lock_only') {
+      if (
+        toStringValue(config.bindingMode).trim().toLowerCase() === 'pair_lock_only' ||
+        toStringValue(config.bindingMode).trim().toLowerCase() === 'dca_live_only'
+      ) {
         delete config.priceToBeatTriggerEnabled;
         delete config.priceToBeatMode;
         delete config.priceToBeatTriggerUnit;
@@ -1249,7 +1295,10 @@ export function buildNodeConfigFromForm(
     form.outcomeConditionRows.length > 0 &&
     !(
       nodeType === 'trigger.market_price' &&
-      toStringValue(config.bindingMode).trim().toLowerCase() === 'pair_lock_only'
+      (
+        toStringValue(config.bindingMode).trim().toLowerCase() === 'pair_lock_only' ||
+        toStringValue(config.bindingMode).trim().toLowerCase() === 'dca_live_only'
+      )
     )
   ) {
     const ptbTriggerEnabled = nodeType === 'trigger.market_price' && config.priceToBeatTriggerEnabled === true;

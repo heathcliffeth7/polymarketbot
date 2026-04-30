@@ -961,6 +961,7 @@ fn build_trigger_market_price_output(
         .as_str()
     {
         "pair_lock_only" => "pair_lock_only",
+        "dca_live_only" => "dca_live_only",
         _ => "standard",
     };
     let mut output = json!({

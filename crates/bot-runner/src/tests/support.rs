@@ -11,7 +11,11 @@ pub(super) fn runtime_graph(
             .map(|(key, node_type)| TradeFlowNode {
                 key: key.to_string(),
                 node_type: node_type.to_string(),
-                config: json!({}),
+                config: if node_type == "action.place_order" && key.contains("dca") {
+                    json!({ "mode": "dca_live_v1" })
+                } else {
+                    json!({})
+                },
             })
             .collect(),
         edges: edges

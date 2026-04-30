@@ -20,6 +20,10 @@ import {
 import { validateActionPlaceOrderExecutionFloorConfig } from './validation-action-place-order-execution-floor';
 import { validateActionPlaceOrderAutoTuneConfig } from './validation-action-place-order-auto-tune';
 import { validateActionPlaceOrderBuyFillLockConfig } from './validation-action-place-order-buy-fill-lock';
+import {
+  isDcaLivePlaceOrderConfig,
+  validateActionPlaceOrderDcaLiveConfig,
+} from './validation-action-place-order-dca';
 import { validateActionPlaceOrderPairLockConfig } from './validation-action-place-order-pair';
 import { validateActionPlaceOrderPtbStopLossBumpConfig } from './validation-action-place-order-ptb-bump';
 import { validateActionPlaceOrderPtbIvTimeRulesConfig } from './validation-action-place-order-ptb-iv-time-rules';
@@ -167,6 +171,7 @@ export function validateActionPlaceOrderConfig(
 ) {
   const config = isRecord(node.config) ? node.config : {};
   const mode = toTrimmedString(config.mode).toLowerCase();
+  const isDcaLiveMode = isDcaLivePlaceOrderConfig(config);
   const pairLockStrategy = toTrimmedString(config.pairLockStrategy).toLowerCase();
   const allowsZeroReentryMaxAttempts =
     mode === 'pair_lock' && pairLockStrategy === 'biased_hedge_v1';
@@ -210,7 +215,8 @@ export function validateActionPlaceOrderConfig(
   if (
     !String(config.marketSlug ?? graphMarketSlug).trim() &&
     !hasResolveMarketNode &&
-    !(side === 'buy' && hasUpstreamMarketPriceAutoScope)
+    !(side === 'buy' && hasUpstreamMarketPriceAutoScope) &&
+    !isDcaLiveMode
   ) {
     pushNodeError(
       issues,
@@ -222,7 +228,8 @@ export function validateActionPlaceOrderConfig(
   if (
     !String(config.tokenId ?? graphTokenId).trim() &&
     !hasResolveMarketNode &&
-    !(side === 'buy' && hasUpstreamMarketPriceAutoScope)
+    !(side === 'buy' && hasUpstreamMarketPriceAutoScope) &&
+    !isDcaLiveMode
   ) {
     pushNodeError(
       issues,
@@ -254,6 +261,7 @@ export function validateActionPlaceOrderConfig(
     );
   }
   validateActionPlaceOrderPairLockConfig(issues, node, graph, config, side, executionMode);
+  validateActionPlaceOrderDcaLiveConfig(issues, node, graph, config, side, executionMode);
 
   const maxTriggers = toFiniteNumber(config.maxTriggers);
   if (maxTriggers != null && (maxTriggers < 1 || maxTriggers > 20)) {
@@ -358,7 +366,7 @@ export function validateActionPlaceOrderConfig(
           'action.place_order targetQty must be > 0 when sizeMode is shares.'
         );
       }
-    } else if (sizeUsdc == null || sizeUsdc <= 0) {
+    } else if (!isDcaLiveMode && (sizeUsdc == null || sizeUsdc <= 0)) {
       pushNodeError(
         issues,
         node,

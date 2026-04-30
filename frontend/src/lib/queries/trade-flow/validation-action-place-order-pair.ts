@@ -225,12 +225,16 @@ export function validateActionPlaceOrderPairLockConfig(
     return;
   }
 
+  if (mode === 'dca_live_v1') {
+    return;
+  }
+
   if (mode !== 'pair_lock') {
     pushNodeError(
       issues,
       node,
       'invalid_place_order_mode',
-      'action.place_order mode must be single or pair_lock.'
+      'action.place_order mode must be single, pair_lock, or dca_live_v1.'
     );
     return;
   }
