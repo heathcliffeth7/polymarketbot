@@ -46,6 +46,38 @@ fn share_submit_min_size_decision_blocks_when_total_qty_is_below_market_minimum(
 }
 
 #[test]
+fn latched_stop_loss_below_market_min_allows_submit_path() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(4.44);
+    order.remaining_qty = Some(4.44);
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_latched = true;
+    order.trigger_latched_reason = Some("stop_loss".to_string());
+
+    assert_eq!(
+        trade_builder_share_submit_min_size_decision(Some(4.44), 4.38, Some(5.0)),
+        Some(TradeBuilderShareSubmitMinSizeDecision::Block)
+    );
+    assert!(trade_builder_should_allow_latched_stop_loss_below_market_min(&order));
+}
+
+#[test]
+fn take_profit_below_market_min_still_blocks_submit_path() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(4.44);
+    order.remaining_qty = Some(4.44);
+    order.trigger_condition = Some("cross_above".to_string());
+
+    assert_eq!(
+        trade_builder_share_submit_min_size_decision(Some(4.44), 4.38, Some(5.0)),
+        Some(TradeBuilderShareSubmitMinSizeDecision::Block)
+    );
+    assert!(!trade_builder_should_allow_latched_stop_loss_below_market_min(&order));
+}
+
+#[test]
 fn share_submit_min_size_decision_ignores_valid_submit_qty() {
     assert_eq!(
         trade_builder_share_submit_min_size_decision(Some(7.57), 5.01, Some(5.0)),
@@ -154,6 +186,33 @@ fn midpoint_404_processing_error_is_retryable_for_exit_sell() {
         );
 
     assert!(trade_builder_should_retry_after_processing_error(&order));
+}
+
+#[test]
+fn clob_min_size_rejection_is_retryable_for_latched_stop_loss() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.trigger_latched = true;
+    order.trigger_latched_reason = Some("stop_loss".to_string());
+    order.last_error = Some(
+        "HTTP status 400 Bad Request for POST /order | body: {\"error\":\"invalid order: size below market minimum\"}"
+            .to_string(),
+    );
+
+    assert!(trade_builder_should_retry_after_processing_error(&order));
+}
+
+#[test]
+fn clob_min_size_rejection_is_not_retryable_for_take_profit_processing_error() {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.trigger_condition = Some("cross_above".to_string());
+    order.last_error = Some(
+        "HTTP status 400 Bad Request for POST /order | body: {\"error\":\"invalid order: size below market minimum\"}"
+            .to_string(),
+    );
+
+    assert!(!trade_builder_should_retry_after_processing_error(&order));
 }
 
 #[test]

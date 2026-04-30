@@ -184,6 +184,12 @@ fn trade_builder_share_submit_min_size_decision(
     })
 }
 
+fn trade_builder_should_allow_latched_stop_loss_below_market_min(
+    order: &TradeBuilderOrder,
+) -> bool {
+    trade_builder_is_child_exit_sell(order) && trade_builder_stop_loss_latched(order)
+}
+
 fn trade_builder_next_min_size_retry_stage(
     attempt_stage: Option<TradeBuilderExitSubmitStage>,
 ) -> Option<TradeBuilderExitSubmitStage> {
@@ -233,6 +239,37 @@ async fn maybe_handle_trade_builder_share_submit_below_market_min(
     let reason = format!(
         "{submit_kind} size ({submit_qty:.2}) below market minimum: {order_min_size:.2}"
     );
+
+    if decision == TradeBuilderShareSubmitMinSizeDecision::Block
+        && trade_builder_should_allow_latched_stop_loss_below_market_min(order)
+    {
+        repo.append_trade_builder_order_event(
+            order.id,
+            "sl_below_market_min_retry",
+            &json!({
+                "reason": "latched_sl_retry_below_min",
+                "reason_detail": reason,
+                "reason_code": "below_market_min_size",
+                "status_before": &order.status,
+                "status_after": &order.status,
+                "submit_kind": submit_kind,
+                "current_price": current_price,
+                "desired_price": desired_price,
+                "requested_qty": requested_qty,
+                "attempted_qty": submit_qty,
+                "available_qty": available_qty,
+                "order_min_size": order_min_size,
+                "attempt_stage": attempt_stage.map(TradeBuilderExitSubmitStage::as_str),
+                "size_basis": &order.size_basis,
+                "target_qty": order.target_qty,
+                "remaining_qty": requested_qty,
+                "market_window_end": resolve_updown_market_cycle_bounds(&order.market_slug)
+                    .map(|(_, end, _)| end.to_rfc3339()),
+            }),
+        )
+        .await?;
+        return Ok(false);
+    }
 
     match decision {
         TradeBuilderShareSubmitMinSizeDecision::Retry => {
