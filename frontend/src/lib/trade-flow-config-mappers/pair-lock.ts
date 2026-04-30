@@ -1,4 +1,4 @@
-import { toStringValue } from './utils';
+import { safeJsonStringify, toStringValue } from './utils';
 import { normalizePtbStopLossGapUnit } from './ptb-stop-loss';
 import { normalizePtbMode } from './ptb-modes';
 
@@ -55,6 +55,30 @@ const MANUAL_ADAPTIVE_RISK_CONFIG_KEYS = [
   'manualAdaptiveAfterSlPtbGapAddCent',
   'manualAdaptiveSlCooldownMarkets',
   'manualAdaptivePairBufferCent',
+  'manualAdaptiveSelfTuneEnabled',
+  'manualAdaptiveMissRelaxEnabled',
+  'manualAdaptiveMissRelaxAfterNoOrderMarkets',
+  'manualAdaptiveTrendDeltaUsdByScope',
+  'manualAdaptivePtbRelaxStepCent',
+  'manualAdaptivePtbRelaxMaxCent',
+  'manualAdaptiveMaxPriceRelaxStepCent',
+  'manualAdaptiveMaxPriceRelaxMaxCent',
+  'manualAdaptiveMaxPriceRelaxHardCapCent',
+  'manualAdaptiveMissRelaxSizeMultiplier',
+  'manualAdaptiveSlTightenEnabled',
+  'manualAdaptivePtbSlBumpStepCent',
+  'manualAdaptivePtbSlBumpMaxCent',
+  'manualAdaptiveMaxPriceSlPenaltyStepCent',
+  'manualAdaptiveMaxPriceSlPenaltyMaxCent',
+  'manualAdaptiveSlDisableReentry',
+  'manualAdaptiveConsecutiveSlLockdownAfter',
+  'manualAdaptiveLockdownReleaseCleanMarkets',
+  'manualAdaptiveLockdownMaxMarkets',
+  'manualAdaptiveCleanMarketDecayEnabled',
+  'manualAdaptivePtbRelaxDecayPerMarketCent',
+  'manualAdaptivePtbSlBumpDecayPerCleanMarketCent',
+  'manualAdaptiveMaxPriceRelaxDecayPerMarketCent',
+  'manualAdaptiveMaxPriceSlPenaltyDecayPerCleanMarketCent',
   'notifyOnManualAdaptiveRiskBlock',
   'notifyOnManualAdaptiveRiskStrict',
   'notifyOnManualAdaptiveRiskSlBump',
@@ -245,6 +269,46 @@ function readNestedField(
   else if (fallback != null) setDefault(fields, fieldKey, fallback);
 }
 
+function readJsonObjectField(
+  fields: Record<string, string>,
+  source: Record<string, unknown>,
+  sourceKey: string,
+  fieldKey: string,
+  fallback?: string
+): void {
+  const raw = source[sourceKey];
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    fields[fieldKey] = safeJsonStringify(raw);
+    return;
+  }
+  const value = toStringValue(raw).trim();
+  if (value) fields[fieldKey] = value;
+  else if (fallback != null) setDefault(fields, fieldKey, fallback);
+}
+
+function normalizeOptionalJsonObjectField(
+  config: Record<string, unknown>,
+  key: string
+): void {
+  const raw = config[key];
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return;
+  const value = toStringValue(raw).trim();
+  if (!value) {
+    delete config[key];
+    return;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      config[key] = parsed;
+      return;
+    }
+  } catch {
+    // Keep the raw string so validation can show the user the exact bad value.
+  }
+  config[key] = value;
+}
+
 function parseBiasedHedgeTimeExitRulesJson(value: unknown): Array<{ elapsedSec: number; remainingPct: number }> {
   if (Array.isArray(value)) {
     return value
@@ -374,6 +438,36 @@ export function applyPairLockFormDefaults(
     setDefault(fields, 'manualAdaptiveAfterSlPtbGapAddCent', '15');
     setDefault(fields, 'manualAdaptiveSlCooldownMarkets', '3');
     setDefault(fields, 'manualAdaptivePairBufferCent', '1');
+    setDefault(fields, 'manualAdaptiveSelfTuneEnabled', 'false');
+    setDefault(fields, 'manualAdaptiveMissRelaxEnabled', 'true');
+    setDefault(fields, 'manualAdaptiveMissRelaxAfterNoOrderMarkets', '3');
+    readJsonObjectField(
+      fields,
+      cfg,
+      'manualAdaptiveTrendDeltaUsdByScope',
+      'manualAdaptiveTrendDeltaUsdByScope',
+      '{"eth_5m_updown":0.5,"btc_5m_updown":10,"sol_5m_updown":0.05}'
+    );
+    setDefault(fields, 'manualAdaptivePtbRelaxStepCent', '5');
+    setDefault(fields, 'manualAdaptivePtbRelaxMaxCent', '20');
+    setDefault(fields, 'manualAdaptiveMaxPriceRelaxStepCent', '1');
+    setDefault(fields, 'manualAdaptiveMaxPriceRelaxMaxCent', '5');
+    setDefault(fields, 'manualAdaptiveMaxPriceRelaxHardCapCent', '90');
+    setDefault(fields, 'manualAdaptiveMissRelaxSizeMultiplier', '0.8');
+    setDefault(fields, 'manualAdaptiveSlTightenEnabled', 'true');
+    setDefault(fields, 'manualAdaptivePtbSlBumpStepCent', '15');
+    setDefault(fields, 'manualAdaptivePtbSlBumpMaxCent', '45');
+    setDefault(fields, 'manualAdaptiveMaxPriceSlPenaltyStepCent', '5');
+    setDefault(fields, 'manualAdaptiveMaxPriceSlPenaltyMaxCent', '15');
+    setDefault(fields, 'manualAdaptiveSlDisableReentry', 'true');
+    setDefault(fields, 'manualAdaptiveConsecutiveSlLockdownAfter', '3');
+    setDefault(fields, 'manualAdaptiveLockdownReleaseCleanMarkets', '3');
+    setDefault(fields, 'manualAdaptiveLockdownMaxMarkets', '5');
+    setDefault(fields, 'manualAdaptiveCleanMarketDecayEnabled', 'true');
+    setDefault(fields, 'manualAdaptivePtbRelaxDecayPerMarketCent', '5');
+    setDefault(fields, 'manualAdaptivePtbSlBumpDecayPerCleanMarketCent', '5');
+    setDefault(fields, 'manualAdaptiveMaxPriceRelaxDecayPerMarketCent', '1');
+    setDefault(fields, 'manualAdaptiveMaxPriceSlPenaltyDecayPerCleanMarketCent', '2');
     setDefault(fields, 'notifyOnManualAdaptiveRiskBlock', 'true');
     setDefault(fields, 'notifyOnManualAdaptiveRiskStrict', 'true');
     setDefault(fields, 'notifyOnManualAdaptiveRiskSlBump', 'true');
@@ -644,6 +738,30 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     normalizeNonNegativeNumberField(config, 'manualAdaptiveAfterSlPtbGapAddCent', 15);
     normalizeNonNegativeNumberField(config, 'manualAdaptiveSlCooldownMarkets', 3);
     normalizeNonNegativeNumberField(config, 'manualAdaptivePairBufferCent', 1);
+    config.manualAdaptiveSelfTuneEnabled = booleanValue(config, 'manualAdaptiveSelfTuneEnabled', false);
+    config.manualAdaptiveMissRelaxEnabled = booleanValue(config, 'manualAdaptiveMissRelaxEnabled', true);
+    normalizePositiveIntegerField(config, 'manualAdaptiveMissRelaxAfterNoOrderMarkets', 3);
+    normalizeOptionalJsonObjectField(config, 'manualAdaptiveTrendDeltaUsdByScope');
+    normalizeNonNegativeNumberField(config, 'manualAdaptivePtbRelaxStepCent', 5);
+    normalizeNonNegativeNumberField(config, 'manualAdaptivePtbRelaxMaxCent', 20);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveMaxPriceRelaxStepCent', 1);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveMaxPriceRelaxMaxCent', 5);
+    normalizePositiveNumberField(config, 'manualAdaptiveMaxPriceRelaxHardCapCent', 90);
+    normalizePositiveNumberField(config, 'manualAdaptiveMissRelaxSizeMultiplier', 0.8);
+    config.manualAdaptiveSlTightenEnabled = booleanValue(config, 'manualAdaptiveSlTightenEnabled', true);
+    normalizeNonNegativeNumberField(config, 'manualAdaptivePtbSlBumpStepCent', 15);
+    normalizeNonNegativeNumberField(config, 'manualAdaptivePtbSlBumpMaxCent', 45);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveMaxPriceSlPenaltyStepCent', 5);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveMaxPriceSlPenaltyMaxCent', 15);
+    config.manualAdaptiveSlDisableReentry = booleanValue(config, 'manualAdaptiveSlDisableReentry', true);
+    normalizePositiveIntegerField(config, 'manualAdaptiveConsecutiveSlLockdownAfter', 3);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveLockdownReleaseCleanMarkets', 3);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveLockdownMaxMarkets', 5);
+    config.manualAdaptiveCleanMarketDecayEnabled = booleanValue(config, 'manualAdaptiveCleanMarketDecayEnabled', true);
+    normalizeNonNegativeNumberField(config, 'manualAdaptivePtbRelaxDecayPerMarketCent', 5);
+    normalizeNonNegativeNumberField(config, 'manualAdaptivePtbSlBumpDecayPerCleanMarketCent', 5);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveMaxPriceRelaxDecayPerMarketCent', 1);
+    normalizeNonNegativeNumberField(config, 'manualAdaptiveMaxPriceSlPenaltyDecayPerCleanMarketCent', 2);
     config.notifyOnManualAdaptiveRiskBlock = booleanValue(config, 'notifyOnManualAdaptiveRiskBlock', true);
     config.notifyOnManualAdaptiveRiskStrict = booleanValue(config, 'notifyOnManualAdaptiveRiskStrict', true);
     config.notifyOnManualAdaptiveRiskSlBump = booleanValue(config, 'notifyOnManualAdaptiveRiskSlBump', true);

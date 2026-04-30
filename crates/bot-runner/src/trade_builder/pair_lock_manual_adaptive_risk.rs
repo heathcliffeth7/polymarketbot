@@ -52,6 +52,7 @@ struct PairLockManualAdaptiveRiskConfig {
     after_sl_ptb_gap_add_cent: f64,
     sl_cooldown_markets: usize,
     pair_buffer_cent: f64,
+    self_tune: PairLockManualSelfTuneConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +105,8 @@ struct PairLockManualAdaptiveDecisionInput {
     ptb_trend: &'static str,
     timing: PairLockManualAdaptiveTiming,
     cooldown: PairLockManualAdaptiveCooldown,
+    scope_side: String,
+    self_tune: PairLockManualSelfTuneRuntime,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +265,7 @@ fn resolve_pair_lock_manual_adaptive_risk_config(
             "manualAdaptivePairBufferCent",
             DEFAULT_MANUAL_ADAPTIVE_PAIR_BUFFER_CENT,
         ),
+        self_tune: resolve_pair_lock_manual_self_tune_config(node)?,
     };
     validate_pair_lock_manual_adaptive_risk_config(config)?;
     Ok(config)
@@ -648,22 +652,93 @@ fn pair_lock_manual_adaptive_probability(value: Option<f64>) -> Option<f64> {
     .filter(|value| *value > 0.0 && *value < 1.0)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PairLockManualAdaptivePtbTuning {
+    base_raw_value_cent: Option<f64>,
+    effective_required_gap_cent: Option<f64>,
+    effective_value: Option<f64>,
+    effective_unit: Option<&'static str>,
+}
+
 fn pair_lock_manual_adaptive_effective_ptb_value(
     base_value: Option<f64>,
     base_unit: Option<&str>,
-    add_cent: f64,
-) -> (Option<f64>, Option<String>) {
+    strict_add_cent: f64,
+    miss_relax_cent: f64,
+    sl_bump_cent: f64,
+) -> PairLockManualAdaptivePtbTuning {
     let value = base_value.filter(|value| value.is_finite() && *value > 0.0);
     let unit = base_unit.unwrap_or("usd").trim().to_ascii_lowercase();
-    let add_value = if unit == "cent" {
-        add_cent
+    let base_cent = value.map(|value| if unit == "cent" { value } else { value * 100.0 });
+    let effective_cent = base_cent.map(|base| {
+        (base + strict_add_cent.max(0.0) - miss_relax_cent.max(0.0) + sl_bump_cent.max(0.0))
+            .max(0.000_001)
+    });
+    let effective_value = effective_cent.map(|cent| {
+        if unit == "cent" {
+            cent
+        } else {
+            cent / 100.0
+        }
+    });
+    PairLockManualAdaptivePtbTuning {
+        base_raw_value_cent: base_cent,
+        effective_required_gap_cent: effective_cent,
+        effective_value,
+        effective_unit: Some(if unit == "cent" { "cent" } else { "usd" }),
+    }
+}
+
+fn pair_lock_manual_adaptive_ptb_tuning_payload(
+    tuning: PairLockManualAdaptivePtbTuning,
+    strict_add_cent: f64,
+    miss_relax_cent: f64,
+    sl_bump_cent: f64,
+) -> Value {
+    json!({
+        "base_raw_value_cent": tuning.base_raw_value_cent,
+        "semantic": "required_gap",
+        "strict_add_cent": pair_lock_manual_adaptive_round_payload_number(strict_add_cent),
+        "miss_relax_cent": pair_lock_manual_adaptive_round_payload_number(miss_relax_cent),
+        "sl_bump_cent": pair_lock_manual_adaptive_round_payload_number(sl_bump_cent),
+        "effective_required_gap_cent": tuning.effective_required_gap_cent,
+    })
+}
+
+fn pair_lock_manual_adaptive_ptb_threshold_usd(
+    base_threshold_usd: Option<f64>,
+    strict_add_cent: f64,
+    miss_relax_cent: f64,
+    sl_bump_cent: f64,
+) -> Option<f64> {
+    base_threshold_usd.map(|threshold| {
+        (threshold
+            + strict_add_cent.max(0.0) / 100.0
+            - miss_relax_cent.max(0.0) / 100.0
+            + sl_bump_cent.max(0.0) / 100.0)
+            .max(0.000_001)
+    })
+}
+
+fn pair_lock_manual_adaptive_effective_unit_string(unit: Option<&'static str>) -> Option<String> {
+    unit.map(str::to_string)
+}
+
+fn pair_lock_manual_adaptive_reason_with_self_tune(
+    current: &'static str,
+    miss_relax_cent: f64,
+    sl_bump_cent: f64,
+    lockdown_active: bool,
+) -> &'static str {
+    if lockdown_active {
+        "manual_self_tune_lockdown"
+    } else if sl_bump_cent > 0.0 {
+        "manual_self_tune_sl_strict"
+    } else if miss_relax_cent > 0.0 {
+        "manual_self_tune_safe_miss_relax"
     } else {
-        add_cent / 100.0
-    };
-    (
-        value.map(|value| value + add_value.max(0.0)),
-        Some(if unit == "cent" { "cent" } else { "usd" }.to_string()),
-    )
+        current
+    }
 }
 
 fn pair_lock_manual_adaptive_diagnostics(
@@ -676,17 +751,32 @@ fn pair_lock_manual_adaptive_diagnostics(
     effective_ptb_threshold_value: Option<f64>,
     effective_ptb_threshold_unit: Option<&str>,
     counter_max_price: Option<f64>,
-    ptb_gap_add_cent: f64,
+    strict_ptb_add_cent: f64,
+    miss_relax_cent: f64,
+    sl_bump_cent: f64,
 ) -> Value {
+    let ptb_tuning = pair_lock_manual_adaptive_effective_ptb_value(
+        input.ptb_threshold_value,
+        input.ptb_threshold_unit.as_deref(),
+        strict_ptb_add_cent,
+        miss_relax_cent,
+        sl_bump_cent,
+    );
+    let net_ptb_gap_add_cent = strict_ptb_add_cent - miss_relax_cent + sl_bump_cent;
     let base_counter_max_cent = pair_lock_manual_adaptive_cent(input.base_counter_max_price);
     let effective_counter_max_cent = pair_lock_manual_adaptive_cent(counter_max_price);
     let counter_delta_cent = base_counter_max_cent
         .zip(effective_counter_max_cent)
         .map(|(base, effective)| pair_lock_manual_adaptive_round_payload_number((base - effective).max(0.0)));
     let counter_cap_applied = counter_delta_cent.is_some_and(|delta| delta > 0.0);
+    let counter_viable = effective_counter_max_cent
+        .zip(pair_lock_manual_adaptive_cent(input.counter_floor_price))
+        .map(|(effective, floor)| effective >= floor)
+        .unwrap_or_else(|| effective_counter_max_cent.is_none_or(|effective| effective > 0.0));
     json!({
         "enabled": true,
         "strategy": PAIR_LOCK_STRATEGY_MANUAL_ADAPTIVE_RISK_V1,
+        "scope_side": input.scope_side,
         "decision": decision,
         "reason": reason,
         "applied": applied,
@@ -701,6 +791,14 @@ fn pair_lock_manual_adaptive_diagnostics(
             "remaining_before": input.cooldown.remaining_before,
             "remaining_after": input.cooldown.remaining_after,
             "configured_markets": input.config.sl_cooldown_markets,
+        },
+        "self_tune": {
+            "enabled": input.config.self_tune.enabled,
+            "scope_side": input.scope_side,
+            "miss_relax_applies": input.self_tune.miss_relax_applies,
+            "cooldown_active": input.self_tune.cooldown_active,
+            "lockdown_active": input.self_tune.lockdown_active,
+            "state": pair_lock_manual_self_tune_state_value(&input.self_tune.state),
         },
         "timing": {
             "market_elapsed_s": input.timing.market_elapsed_s,
@@ -727,11 +825,17 @@ fn pair_lock_manual_adaptive_diagnostics(
             "size_usdc": effective_size_usdc,
             "ptb_threshold_value": effective_ptb_threshold_value,
             "ptb_threshold_unit": effective_ptb_threshold_unit,
-            "ptb_gap_add_cent": ptb_gap_add_cent,
+            "ptb_gap_add_cent": pair_lock_manual_adaptive_round_payload_number(net_ptb_gap_add_cent),
             "counter_max_price_cent": pair_lock_manual_adaptive_cent(counter_max_price),
             "reentry_allowed": input.base_reenter_on_sl_hit && !applied,
             "reenter_on_sl_hit": input.base_reenter_on_sl_hit && !applied,
         },
+        "ptb_tuning": pair_lock_manual_adaptive_ptb_tuning_payload(
+            ptb_tuning,
+            strict_ptb_add_cent,
+            miss_relax_cent,
+            sl_bump_cent,
+        ),
         "market": {
             "ask_cent": pair_lock_manual_adaptive_cent(input.ask),
             "primary_estimated_avg_fill_cent": pair_lock_manual_adaptive_cent(input.primary_estimated_avg_fill),
@@ -745,12 +849,14 @@ fn pair_lock_manual_adaptive_diagnostics(
             "applied": counter_cap_applied,
             "base_counter_max_cent": base_counter_max_cent,
             "effective_counter_max_cent": effective_counter_max_cent,
+            "primary_estimated_fill_cent": pair_lock_manual_adaptive_cent(input.primary_estimated_avg_fill),
             "primary_estimated_avg_fill_cent": pair_lock_manual_adaptive_cent(input.primary_estimated_avg_fill),
             "counter_estimated_avg_fill_cent": pair_lock_manual_adaptive_cent(input.counter_estimated_avg_fill),
             "counter_floor_cent": pair_lock_manual_adaptive_cent(input.counter_floor_price),
             "pair_max_total_cent": pair_lock_manual_adaptive_cent(Some(input.pair_max_total_price)),
             "pair_buffer_cent": input.config.pair_buffer_cent,
             "delta_cent": counter_delta_cent,
+            "counter_viable": counter_viable,
         }
     })
 }
@@ -763,7 +869,9 @@ fn pair_lock_manual_adaptive_block(
     effective_ptb_threshold_value: Option<f64>,
     effective_ptb_threshold_unit: Option<&str>,
     counter_max_price: Option<f64>,
-    ptb_gap_add_cent: f64,
+    strict_ptb_add_cent: f64,
+    miss_relax_cent: f64,
+    sl_bump_cent: f64,
 ) -> PairLockManualAdaptiveRiskDecision {
     PairLockManualAdaptiveRiskDecision {
         applied: true,
@@ -784,7 +892,9 @@ fn pair_lock_manual_adaptive_block(
             effective_ptb_threshold_value,
             effective_ptb_threshold_unit,
             counter_max_price,
-            ptb_gap_add_cent,
+            strict_ptb_add_cent,
+            miss_relax_cent,
+            sl_bump_cent,
         ),
     }
 }
@@ -813,6 +923,8 @@ fn pair_lock_manual_adaptive_noop(
             input.ptb_threshold_unit.as_deref(),
             None,
             0.0,
+            0.0,
+            0.0,
         ),
     }
 }
@@ -823,16 +935,26 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
     if !input.timing.in_window {
         return pair_lock_manual_adaptive_noop(&input, "outside_manual_adaptive_window");
     }
-    if !input.base_decision_passed {
+    let self_tune_safe_recheck = input.config.self_tune.enabled
+        && matches!(
+            input.base_reason_code.as_str(),
+            "above_max_price"
+                | "price_to_beat_gap_below_threshold"
+                | "price_to_beat_pending"
+                | "price_to_beat_unavailable"
+        );
+    if !input.base_decision_passed && !self_tune_safe_recheck {
         return pair_lock_manual_adaptive_noop(&input, "base_candidate_not_passed");
     }
     let base_max_price = match input.base_max_price {
         Some(value) if value.is_finite() && value > 0.0 => value,
         _ => return pair_lock_manual_adaptive_noop(&input, "base_max_price_unavailable"),
     };
-    let mut max_price_cent = base_max_price * 100.0;
+    let base_max_price_cent = base_max_price * 100.0;
+    let mut max_price_penalty_cent = 0.0;
+    let mut max_price_cap_cent: Option<f64> = None;
     let mut size_multiplier = 1.0;
-    let mut ptb_gap_add_cent = 0.0;
+    let mut strict_ptb_add_cent = 0.0;
     let mut reason = "base_normal_expanding";
     let mut block_reason: Option<&'static str> = None;
 
@@ -841,51 +963,109 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
         ("high", "collapsing") => block_reason = Some("high_volume_gap_collapsing"),
         ("elevated", "collapsing") => block_reason = Some("elevated_volume_gap_collapsing"),
         ("normal", "collapsing") => {
-            max_price_cent = max_price_cent.min(input.config.normal_collapsing_max_price_cent);
+            max_price_cap_cent = Some(input.config.normal_collapsing_max_price_cent);
             size_multiplier = input.config.normal_collapsing_size_multiplier;
-            ptb_gap_add_cent = input.config.normal_collapsing_ptb_gap_add_cent;
+            strict_ptb_add_cent = input.config.normal_collapsing_ptb_gap_add_cent;
             reason = "normal_collapsing_strict";
         }
         ("normal", "flat") => {
-            max_price_cent =
-                (max_price_cent - input.config.normal_flat_max_price_sub_cent).max(1.0);
+            max_price_penalty_cent += input.config.normal_flat_max_price_sub_cent;
             size_multiplier = input.config.normal_flat_size_multiplier;
-            ptb_gap_add_cent = input.config.normal_flat_ptb_gap_add_cent;
+            strict_ptb_add_cent = input.config.normal_flat_ptb_gap_add_cent;
             reason = "normal_flat_strict";
         }
         ("elevated", _) => {
-            max_price_cent = max_price_cent.min(input.config.elevated_max_price_cent);
+            max_price_cap_cent = Some(input.config.elevated_max_price_cent);
             size_multiplier = input.config.elevated_size_multiplier;
-            ptb_gap_add_cent = input.config.elevated_ptb_gap_add_cent;
+            strict_ptb_add_cent = input.config.elevated_ptb_gap_add_cent;
             reason = "elevated_volume_strict";
         }
         ("high", _) => {
-            max_price_cent = max_price_cent.min(input.config.high_max_price_cent);
+            max_price_cap_cent = Some(input.config.high_max_price_cent);
             size_multiplier = input.config.high_size_multiplier;
-            ptb_gap_add_cent = input.config.high_ptb_gap_add_cent;
+            strict_ptb_add_cent = input.config.high_ptb_gap_add_cent;
             reason = "high_volume_strict";
         }
         _ => {}
     }
 
-    if input.cooldown.active {
-        max_price_cent = (max_price_cent - input.config.after_sl_max_price_sub_cent).max(1.0);
-        ptb_gap_add_cent += input.config.after_sl_ptb_gap_add_cent;
+    let self_tune_has_sl_signal = input.config.self_tune.enabled
+        && (input.self_tune.state.ptb_sl_bump_cent > 0.0
+            || input.self_tune.state.max_price_sl_penalty_cent > 0.0);
+    if input.cooldown.active && !self_tune_has_sl_signal {
+        max_price_penalty_cent += input.config.after_sl_max_price_sub_cent;
+        strict_ptb_add_cent += input.config.after_sl_ptb_gap_add_cent;
         size_multiplier = size_multiplier.min(input.config.high_size_multiplier);
         reason = "recent_sl_strict_mode";
+    } else if input.self_tune.cooldown_active {
+        size_multiplier = size_multiplier.min(input.config.high_size_multiplier);
+        reason = "manual_self_tune_recent_sl_strict";
     }
 
-    let effective_max_price = (max_price_cent / 100.0).min(base_max_price);
+    let miss_relax_cent = if input.self_tune.miss_relax_applies {
+        input.self_tune.state.ptb_relax_credit_cent
+    } else {
+        0.0
+    };
+    let max_price_relax_cent = if input.self_tune.miss_relax_applies {
+        input.self_tune.state.max_price_relax_credit_cent
+    } else {
+        0.0
+    };
+    let sl_bump_cent = if input.config.self_tune.enabled {
+        input.self_tune.state.ptb_sl_bump_cent
+    } else {
+        0.0
+    };
+    let max_price_sl_penalty_cent = if input.config.self_tune.enabled {
+        input.self_tune.state.max_price_sl_penalty_cent
+    } else {
+        0.0
+    };
+    if input.self_tune.lockdown_active {
+        block_reason = Some("manual_self_tune_lockdown");
+        size_multiplier = 0.0;
+    }
+    if max_price_relax_cent > 0.0 {
+        size_multiplier = size_multiplier.min(input.config.self_tune.miss_relax_size_multiplier);
+    }
+    reason = pair_lock_manual_adaptive_reason_with_self_tune(
+        reason,
+        miss_relax_cent,
+        sl_bump_cent,
+        input.self_tune.lockdown_active,
+    );
+    let mut max_price_cent = base_max_price_cent + max_price_relax_cent
+        - max_price_penalty_cent
+        - max_price_sl_penalty_cent;
+    if input.config.self_tune.enabled {
+        max_price_cent = max_price_cent.min(input.config.self_tune.max_price_relax_hard_cap_cent);
+    }
+    if let Some(cap) = max_price_cap_cent {
+        max_price_cent = max_price_cent.min(cap);
+    }
+    let effective_max_price = (max_price_cent.max(1.0) / 100.0).min(if input.config.self_tune.enabled {
+        input.config.self_tune.max_price_relax_hard_cap_cent / 100.0
+    } else {
+        base_max_price
+    });
     let effective_size_usdc = (input.base_size_usdc * size_multiplier).max(0.0);
-    let (effective_ptb_threshold_value, effective_ptb_threshold_unit) =
-        pair_lock_manual_adaptive_effective_ptb_value(
-            input.ptb_threshold_value,
-            input.ptb_threshold_unit.as_deref(),
-            ptb_gap_add_cent,
-        );
-    let strict_ptb_threshold_usd = input
-        .ptb_threshold_usd
-        .map(|threshold| threshold + ptb_gap_add_cent / 100.0);
+    let ptb_tuning = pair_lock_manual_adaptive_effective_ptb_value(
+        input.ptb_threshold_value,
+        input.ptb_threshold_unit.as_deref(),
+        strict_ptb_add_cent,
+        miss_relax_cent,
+        sl_bump_cent,
+    );
+    let effective_ptb_threshold_value = ptb_tuning.effective_value;
+    let effective_ptb_threshold_unit =
+        pair_lock_manual_adaptive_effective_unit_string(ptb_tuning.effective_unit);
+    let strict_ptb_threshold_usd = pair_lock_manual_adaptive_ptb_threshold_usd(
+        input.ptb_threshold_usd,
+        strict_ptb_add_cent,
+        miss_relax_cent,
+        sl_bump_cent,
+    );
     let primary_estimated_avg_fill = input
         .primary_estimated_avg_fill
         .or(input.ask)
@@ -907,7 +1087,9 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
             effective_ptb_threshold_value,
             effective_ptb_threshold_unit.as_deref(),
             counter_max_price,
-            ptb_gap_add_cent,
+            strict_ptb_add_cent,
+            miss_relax_cent,
+            sl_bump_cent,
         );
     }
     if let Some(fill) = primary_estimated_avg_fill {
@@ -920,7 +1102,9 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
                 effective_ptb_threshold_value,
                 effective_ptb_threshold_unit.as_deref(),
                 counter_max_price,
-                ptb_gap_add_cent,
+                strict_ptb_add_cent,
+                miss_relax_cent,
+                sl_bump_cent,
             );
         }
     }
@@ -934,7 +1118,9 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
                 effective_ptb_threshold_value,
                 effective_ptb_threshold_unit.as_deref(),
                 counter_max_price,
-                ptb_gap_add_cent,
+                strict_ptb_add_cent,
+                miss_relax_cent,
+                sl_bump_cent,
             );
         }
     }
@@ -949,7 +1135,9 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
                 effective_ptb_threshold_value,
                 effective_ptb_threshold_unit.as_deref(),
                 counter_max_price,
-                ptb_gap_add_cent,
+                strict_ptb_add_cent,
+                miss_relax_cent,
+                sl_bump_cent,
             );
         }
     }
@@ -974,7 +1162,9 @@ fn evaluate_pair_lock_manual_adaptive_risk_decision(
             effective_ptb_threshold_value,
             effective_ptb_threshold_unit.as_deref(),
             counter_max_price,
-            ptb_gap_add_cent,
+            strict_ptb_add_cent,
+            miss_relax_cent,
+            sl_bump_cent,
         ),
     }
 }
@@ -995,21 +1185,35 @@ async fn resolve_pair_lock_manual_adaptive_risk_decision_for_candidate(
         .get("price_to_beat_guard")
         .unwrap_or(&Value::Null);
     let directional_gap = ptb_guard.get("directional_gap").and_then(value_as_f64);
+    let scope_side =
+        pair_lock_manual_adaptive_scope_side(market_slug, &candidate.outcome_label);
+    let trend_delta_usd = manual_adaptive_trend_delta_usd_for_scope(
+        node,
+        market_slug,
+        config.trend_delta_usd,
+        config.self_tune.enabled,
+    );
     let ptb_trend = pair_lock_manual_adaptive_ptb_trend(
         context,
         &node.key,
         market_slug,
         &candidate.outcome_label,
         directional_gap,
-        config.trend_delta_usd,
+        trend_delta_usd,
     );
-    let scope_side =
-        pair_lock_manual_adaptive_scope_side(market_slug, &candidate.outcome_label);
     let cooldown =
         pair_lock_manual_adaptive_cooldown_state(context, &node.key, market_slug, &scope_side);
     let timing = pair_lock_manual_adaptive_timing(config, step, market_slug);
     let volume =
         resolve_pair_lock_manual_adaptive_volume_context(repo, market_slug, config).await;
+    let self_tune = pair_lock_manual_self_tune_runtime(
+        context,
+        &node.key,
+        &scope_side,
+        volume.regime,
+        ptb_trend,
+        config.self_tune,
+    );
     let base_max_price = candidate
         .diagnostics
         .pointer("/max_price_guard/details/max_price")
@@ -1062,6 +1266,8 @@ async fn resolve_pair_lock_manual_adaptive_risk_decision_for_candidate(
             ptb_trend,
             timing,
             cooldown,
+            scope_side,
+            self_tune,
         },
     ))
 }
@@ -1131,6 +1337,17 @@ async fn maybe_apply_pair_lock_manual_adaptive_risk_candidate_override(
             counter_max_price: decision.counter_max_price,
             diagnostics: decision.diagnostics,
         };
+        candidate.decision = "passed";
+        candidate.reason_code = decision.reason.to_string();
+        if let Some(obj) = candidate.diagnostics.as_object_mut() {
+            obj.insert("passed".to_string(), json!(true));
+            obj.insert("decision".to_string(), json!("passed"));
+            obj.insert("reason_code".to_string(), json!(decision.reason));
+            obj.insert(
+                "manual_adaptive_risk".to_string(),
+                override_result.diagnostics.clone(),
+            );
+        }
         candidate.manual_adaptive_risk_override = Some(override_result);
     }
     Ok(())

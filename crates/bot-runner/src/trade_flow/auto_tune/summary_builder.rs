@@ -1,7 +1,7 @@
 pub(super) async fn maybe_record_trade_flow_auto_tune_market(
     repo: &PostgresRepository,
     client: Option<&dyn OrderExecutor>,
-    run_spec: &WsOpenPositionPriceRunSpec,
+    run_spec: &mut WsOpenPositionPriceRunSpec,
     node_spec: &WsOpenPositionPriceNodeSpec,
     window_end_at: DateTime<Utc>,
 ) -> Result<()> {
@@ -26,7 +26,10 @@ pub(super) async fn maybe_record_trade_flow_auto_tune_market(
             );
             let adaptive_summary_enabled =
                 crate::action_place_order_uses_adaptive_max_price_strategy(&action_node);
-            (cfg.advice_enabled() || adaptive_summary_enabled).then_some((action_node, cfg))
+            let manual_self_tune_enabled =
+                crate::action_place_order_uses_manual_adaptive_self_tune_strategy(&action_node);
+            (cfg.advice_enabled() || adaptive_summary_enabled || manual_self_tune_enabled)
+                .then_some((action_node, cfg))
         })
         .collect::<Vec<_>>();
     if enabled_action_nodes.is_empty() {
@@ -101,6 +104,16 @@ pub(super) async fn maybe_record_trade_flow_auto_tune_market(
             order_rollup,
         );
         repo.upsert_trade_flow_auto_tune_market_summary(&input).await?;
+        if crate::action_place_order_uses_manual_adaptive_self_tune_strategy(&action_node) {
+            crate::maybe_record_pair_lock_manual_self_tune_market(
+                repo,
+                run_spec,
+                &action_node,
+                &input,
+                &node_spec.outcome_label,
+            )
+            .await?;
+        }
         if crate::action_place_order_uses_adaptive_max_price_strategy(&action_node) {
             crate::maybe_notify_pair_lock_adaptive_market_summary(
                 repo,
@@ -175,6 +188,46 @@ fn auto_tune_adaptive_max_price_payload_for_outcome(
         }
     }
     Value::Null
+}
+
+fn auto_tune_manual_adaptive_payload_for_outcome(
+    metrics_source: &Value,
+    outcome_label: &str,
+) -> Value {
+    let target = normalize_pair_lock_binary_outcome(outcome_label);
+    let candidate_paths = [
+        &["yes_candidate_guard"][..],
+        &["no_candidate_guard"][..],
+        &["primary_selection", "yes_candidate_guard"][..],
+        &["primary_selection", "no_candidate_guard"][..],
+    ];
+    for path in candidate_paths {
+        let mut current = metrics_source;
+        for key in path {
+            current = current.get(*key).unwrap_or(&Value::Null);
+        }
+        if current.is_null() {
+            continue;
+        }
+        let candidate_outcome = current
+            .get("outcome_label")
+            .and_then(Value::as_str)
+            .and_then(normalize_pair_lock_binary_outcome);
+        if candidate_outcome.is_none() || candidate_outcome == target {
+            if let Some(payload) = current.get("manual_adaptive_risk") {
+                return payload.clone();
+            }
+        }
+    }
+    [
+        metrics_source.get("manual_adaptive_risk"),
+        metrics_source.pointer("/primary_selection/manual_adaptive_risk"),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    .cloned()
+    .unwrap_or(Value::Null)
 }
 
 fn first_terminal_guard_for_auto_tune(
@@ -401,6 +454,7 @@ fn auto_tune_summary_input(
         "quote_missing_reason": diagnosis.get("quote_missing_reason").cloned().unwrap_or(Value::Null),
         "depth_ok_seconds_count": depth_ok_seconds_count,
         "adaptive_max_price": auto_tune_adaptive_max_price_payload_for_outcome(metrics_source, &node_spec.outcome_label),
+        "manual_adaptive_risk": auto_tune_manual_adaptive_payload_for_outcome(metrics_source, &node_spec.outcome_label),
     });
 
     bot_infra::db::TradeFlowAutoTuneMarketSummaryInput {

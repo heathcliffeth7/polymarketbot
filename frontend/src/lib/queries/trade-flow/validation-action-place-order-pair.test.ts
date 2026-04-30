@@ -447,6 +447,28 @@ test('validateActionPlaceOrderConfig accepts manual_adaptive_risk_v1 manual PTB 
   assert.equal(issues.length, 0);
 });
 
+test('validateActionPlaceOrderConfig accepts manual self-tune config', () => {
+  const graph = buildManualAdaptiveRiskGraph({
+    manualAdaptiveSelfTuneEnabled: true,
+    manualAdaptiveTrendDeltaUsdByScope: { eth_5m_updown: 0.5, btc_5m_updown: 10 },
+    manualAdaptivePtbRelaxStepCent: 5,
+    manualAdaptivePtbRelaxMaxCent: 20,
+    manualAdaptiveMaxPriceRelaxStepCent: 1,
+    manualAdaptiveMaxPriceRelaxMaxCent: 5,
+    manualAdaptiveMaxPriceRelaxHardCapCent: 90,
+    manualAdaptivePtbSlBumpStepCent: 15,
+    manualAdaptivePtbSlBumpMaxCent: 45,
+    manualAdaptiveMaxPriceSlPenaltyStepCent: 5,
+    manualAdaptiveMaxPriceSlPenaltyMaxCent: 15,
+    manualAdaptiveConsecutiveSlLockdownAfter: 3,
+    manualAdaptiveLockdownReleaseCleanMarkets: 3,
+    manualAdaptiveLockdownMaxMarkets: 5,
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_manual_adaptive_risk');
+  assert.equal(issues.length, 0);
+});
+
 test('validateActionPlaceOrderConfig rejects manual_adaptive_risk_v1 invalid mode and PTB mode', () => {
   const graph = buildManualAdaptiveRiskGraph({
     priceToBeatMode: 'iv_mismatch_edge',
@@ -466,6 +488,11 @@ test('validateActionPlaceOrderConfig rejects invalid manual_adaptive_risk_v1 ran
     manualAdaptiveVolumeElevatedLt: 2,
     manualAdaptiveHighSizeMultiplier: 1.5,
     manualAdaptiveAfterSlPtbGapAddCent: -1,
+    manualAdaptiveTrendDeltaUsdByScope: '{"eth_5m_updown":0}',
+    manualAdaptiveMaxPriceRelaxHardCapCent: 100,
+    manualAdaptivePtbRelaxStepCent: -1,
+    manualAdaptiveConsecutiveSlLockdownAfter: 0,
+    manualAdaptiveSelfTuneEnabled: 'maybe',
     notifyOnManualAdaptiveCounterCap: 'counter',
     manualAdaptiveCounterCapNotifyMinDeltaCent: -1,
     manualAdaptiveNotifySummaryEveryMarkets: 0,
@@ -478,6 +505,11 @@ test('validateActionPlaceOrderConfig rejects invalid manual_adaptive_risk_v1 ran
   assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_volume_thresholds'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_high_size'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_after_sl_ptb_add'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_trend_delta_by_scope_value'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_max_price_relax_hard_cap'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_ptb_relax_step'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_lockdown_after'));
+  assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_self_tune_enabled'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_notify_on_manual_adaptive_counter_cap'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_counter_cap_notify_delta'));
   assert.ok(issues.some((issue) => issue.code === 'invalid_manual_adaptive_notify_summary_every_markets'));

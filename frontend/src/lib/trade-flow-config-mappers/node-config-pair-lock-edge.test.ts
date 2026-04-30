@@ -183,6 +183,12 @@ test('action.place_order manual adaptive risk strategy round-trips guarded confi
     manualAdaptiveHighSizeMultiplier: 0.3,
     manualAdaptiveHighPtbGapAddCent: 25,
     manualAdaptivePairBufferCent: 1,
+    manualAdaptiveSelfTuneEnabled: true,
+    manualAdaptiveTrendDeltaUsdByScope: { eth_5m_updown: 0.5, btc_5m_updown: 10 },
+    manualAdaptivePtbRelaxStepCent: 5,
+    manualAdaptiveMaxPriceRelaxHardCapCent: 90,
+    manualAdaptivePtbSlBumpMaxCent: 45,
+    manualAdaptiveLockdownMaxMarkets: 5,
     notifyOnManualAdaptiveRiskBlock: true,
     notifyOnManualAdaptiveCounterCap: true,
     manualAdaptiveCounterCapNotifyMinDeltaCent: 3,
@@ -195,6 +201,8 @@ test('action.place_order manual adaptive risk strategy round-trips guarded confi
   assert.equal(form.fields.priceToBeatGuardEnabled, 'true');
   assert.equal(form.fields.priceToBeatMode, 'manual');
   assert.equal(form.fields.manualAdaptiveHighMaxPriceCent, '58');
+  assert.equal(form.fields.manualAdaptiveSelfTuneEnabled, 'true');
+  assert.match(form.fields.manualAdaptiveTrendDeltaUsdByScope, /eth_5m_updown/);
 
   const rebuilt = buildNodeConfigFromForm('action.place_order', form);
   assert.equal(rebuilt.pairLockStrategy, 'manual_adaptive_risk_v1');
@@ -206,6 +214,12 @@ test('action.place_order manual adaptive risk strategy round-trips guarded confi
   assert.equal(rebuilt.manualAdaptiveHighSizeMultiplier, 0.3);
   assert.equal(rebuilt.manualAdaptiveHighPtbGapAddCent, 25);
   assert.equal(rebuilt.manualAdaptivePairBufferCent, 1);
+  assert.equal(rebuilt.manualAdaptiveSelfTuneEnabled, true);
+  assert.deepEqual(rebuilt.manualAdaptiveTrendDeltaUsdByScope, { eth_5m_updown: 0.5, btc_5m_updown: 10 });
+  assert.equal(rebuilt.manualAdaptivePtbRelaxStepCent, 5);
+  assert.equal(rebuilt.manualAdaptiveMaxPriceRelaxHardCapCent, 90);
+  assert.equal(rebuilt.manualAdaptivePtbSlBumpMaxCent, 45);
+  assert.equal(rebuilt.manualAdaptiveLockdownMaxMarkets, 5);
   assert.equal(rebuilt.notifyOnManualAdaptiveRiskBlock, true);
   assert.equal(rebuilt.notifyOnManualAdaptiveCounterCap, true);
   assert.equal(rebuilt.manualAdaptiveCounterCapNotifyMinDeltaCent, 3);

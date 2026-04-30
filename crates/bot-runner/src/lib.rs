@@ -58,6 +58,7 @@ include!("trade_builder/pair_lock_adaptive_max_price_notify.rs");
 #[cfg(test)]
 include!("trade_builder/pair_lock_adaptive_max_price_tests.rs");
 include!("trade_builder/pair_lock_manual_adaptive_risk.rs");
+include!("trade_builder/pair_lock_manual_self_tuning.rs");
 include!("trade_builder/pair_lock_manual_adaptive_notify.rs");
 #[cfg(test)]
 include!("trade_builder/pair_lock_manual_adaptive_risk_tests.rs");

@@ -235,6 +235,55 @@ export function updateNodeFieldState(
           (nextFields.manualAdaptiveSlCooldownMarkets ?? '').trim() || '3';
         nextFields.manualAdaptivePairBufferCent =
           (nextFields.manualAdaptivePairBufferCent ?? '').trim() || '1';
+        nextFields.manualAdaptiveSelfTuneEnabled =
+          (nextFields.manualAdaptiveSelfTuneEnabled ?? '').trim() || 'false';
+        nextFields.manualAdaptiveMissRelaxEnabled =
+          (nextFields.manualAdaptiveMissRelaxEnabled ?? '').trim() || 'true';
+        nextFields.manualAdaptiveMissRelaxAfterNoOrderMarkets =
+          (nextFields.manualAdaptiveMissRelaxAfterNoOrderMarkets ?? '').trim() || '3';
+        nextFields.manualAdaptiveTrendDeltaUsdByScope =
+          (nextFields.manualAdaptiveTrendDeltaUsdByScope ?? '').trim() ||
+          '{"eth_5m_updown":0.5,"btc_5m_updown":10,"sol_5m_updown":0.05}';
+        nextFields.manualAdaptivePtbRelaxStepCent =
+          (nextFields.manualAdaptivePtbRelaxStepCent ?? '').trim() || '5';
+        nextFields.manualAdaptivePtbRelaxMaxCent =
+          (nextFields.manualAdaptivePtbRelaxMaxCent ?? '').trim() || '20';
+        nextFields.manualAdaptiveMaxPriceRelaxStepCent =
+          (nextFields.manualAdaptiveMaxPriceRelaxStepCent ?? '').trim() || '1';
+        nextFields.manualAdaptiveMaxPriceRelaxMaxCent =
+          (nextFields.manualAdaptiveMaxPriceRelaxMaxCent ?? '').trim() || '5';
+        nextFields.manualAdaptiveMaxPriceRelaxHardCapCent =
+          (nextFields.manualAdaptiveMaxPriceRelaxHardCapCent ?? '').trim() || '90';
+        nextFields.manualAdaptiveMissRelaxSizeMultiplier =
+          (nextFields.manualAdaptiveMissRelaxSizeMultiplier ?? '').trim() || '0.8';
+        nextFields.manualAdaptiveSlTightenEnabled =
+          (nextFields.manualAdaptiveSlTightenEnabled ?? '').trim() || 'true';
+        nextFields.manualAdaptivePtbSlBumpStepCent =
+          (nextFields.manualAdaptivePtbSlBumpStepCent ?? '').trim() || '15';
+        nextFields.manualAdaptivePtbSlBumpMaxCent =
+          (nextFields.manualAdaptivePtbSlBumpMaxCent ?? '').trim() || '45';
+        nextFields.manualAdaptiveMaxPriceSlPenaltyStepCent =
+          (nextFields.manualAdaptiveMaxPriceSlPenaltyStepCent ?? '').trim() || '5';
+        nextFields.manualAdaptiveMaxPriceSlPenaltyMaxCent =
+          (nextFields.manualAdaptiveMaxPriceSlPenaltyMaxCent ?? '').trim() || '15';
+        nextFields.manualAdaptiveSlDisableReentry =
+          (nextFields.manualAdaptiveSlDisableReentry ?? '').trim() || 'true';
+        nextFields.manualAdaptiveConsecutiveSlLockdownAfter =
+          (nextFields.manualAdaptiveConsecutiveSlLockdownAfter ?? '').trim() || '3';
+        nextFields.manualAdaptiveLockdownReleaseCleanMarkets =
+          (nextFields.manualAdaptiveLockdownReleaseCleanMarkets ?? '').trim() || '3';
+        nextFields.manualAdaptiveLockdownMaxMarkets =
+          (nextFields.manualAdaptiveLockdownMaxMarkets ?? '').trim() || '5';
+        nextFields.manualAdaptiveCleanMarketDecayEnabled =
+          (nextFields.manualAdaptiveCleanMarketDecayEnabled ?? '').trim() || 'true';
+        nextFields.manualAdaptivePtbRelaxDecayPerMarketCent =
+          (nextFields.manualAdaptivePtbRelaxDecayPerMarketCent ?? '').trim() || '5';
+        nextFields.manualAdaptivePtbSlBumpDecayPerCleanMarketCent =
+          (nextFields.manualAdaptivePtbSlBumpDecayPerCleanMarketCent ?? '').trim() || '5';
+        nextFields.manualAdaptiveMaxPriceRelaxDecayPerMarketCent =
+          (nextFields.manualAdaptiveMaxPriceRelaxDecayPerMarketCent ?? '').trim() || '1';
+        nextFields.manualAdaptiveMaxPriceSlPenaltyDecayPerCleanMarketCent =
+          (nextFields.manualAdaptiveMaxPriceSlPenaltyDecayPerCleanMarketCent ?? '').trim() || '2';
         nextFields.notifyOnManualAdaptiveRiskBlock =
           (nextFields.notifyOnManualAdaptiveRiskBlock ?? '').trim() || 'true';
         nextFields.notifyOnManualAdaptiveRiskStrict =

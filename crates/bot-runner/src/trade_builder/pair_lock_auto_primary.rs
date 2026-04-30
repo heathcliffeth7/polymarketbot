@@ -649,7 +649,16 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
             && !guard_eval.trigger_price_guard_blocked
             && guard_eval.execution_floor_reason.is_none()
             && guard_eval.pair_lock_market_waiting_reason.is_none();
-    if pair_lock_primary_should_log_ptb_skip(node, decision) && !adaptive_max_price_probe {
+    let manual_self_tune_probe =
+        action_place_order_uses_manual_adaptive_self_tune_strategy(node)
+            && guard_eval.max_price_blocked
+            && !guard_eval.trigger_price_guard_blocked
+            && guard_eval.execution_floor_reason.is_none()
+            && guard_eval.pair_lock_market_waiting_reason.is_none();
+    if pair_lock_primary_should_log_ptb_skip(node, decision)
+        && !adaptive_max_price_probe
+        && !manual_self_tune_probe
+    {
         tracing::debug!(
             message = "PAIR_LOCK_PRIMARY_PTB_SKIPPED_BY_PRE_GUARD",
             flow_run_id = run.id,
@@ -664,7 +673,7 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
             best_ask_floor_price = ?best_ask_floor_price,
         );
     }
-    if (decision == "passed" || adaptive_max_price_probe)
+    if (decision == "passed" || adaptive_max_price_probe || manual_self_tune_probe)
         && node_config_bool(node, "priceToBeatGuardEnabled").unwrap_or(false)
     {
         let evaluation =
@@ -703,7 +712,7 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
             price_to_beat = ?ptb_log_snapshot.price_to_beat,
         );
         ptb_guard = evaluation.to_value();
-        if !adaptive_max_price_probe {
+        if !adaptive_max_price_probe && !manual_self_tune_probe {
             decision = pair_lock_primary_ptb_guard_decision(
                 evaluation.passed,
                 node_config_bool(node, "retryOnPriceToBeatGuardBlock").unwrap_or(true),

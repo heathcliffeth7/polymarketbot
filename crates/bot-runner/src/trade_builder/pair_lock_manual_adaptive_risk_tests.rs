@@ -26,6 +26,7 @@ mod pair_lock_manual_adaptive_risk_tests {
             after_sl_ptb_gap_add_cent: 15.0,
             sl_cooldown_markets: 3,
             pair_buffer_cent: 1.0,
+            self_tune: PairLockManualSelfTuneConfig::default(),
         }
     }
 
@@ -87,7 +88,30 @@ mod pair_lock_manual_adaptive_risk_tests {
                 remaining_before: 0,
                 remaining_after: 0,
             },
+            scope_side: "eth_5m_updown:UP".to_string(),
+            self_tune: PairLockManualSelfTuneRuntime {
+                state: PairLockManualSelfTuneState::default(),
+                miss_relax_applies: false,
+                cooldown_active: false,
+                lockdown_active: false,
+            },
         }
+    }
+
+    fn enable_self_tune(
+        mut input: PairLockManualAdaptiveDecisionInput,
+        state: PairLockManualSelfTuneState,
+        miss_relax_applies: bool,
+    ) -> PairLockManualAdaptiveDecisionInput {
+        input.config.self_tune.enabled = true;
+        input.config.self_tune.max_price_relax_hard_cap_cent = 90.0;
+        input.self_tune = PairLockManualSelfTuneRuntime {
+            cooldown_active: state.cooldown_markets_left > 0,
+            lockdown_active: state.lockdown_markets_left > 0,
+            state,
+            miss_relax_applies,
+        };
+        input
     }
 
     #[test]
@@ -153,6 +177,75 @@ mod pair_lock_manual_adaptive_risk_tests {
         assert_eq!(decision.reason, "recent_sl_strict_mode");
         assert_eq!(decision.effective_max_price, Some(0.65));
         assert_eq!(decision.effective_ptb_threshold_value, Some(35.0));
+    }
+
+    #[test]
+    fn manual_self_tune_safe_miss_relaxes_ptb_and_max_price() {
+        let mut state = PairLockManualSelfTuneState::default();
+        state.ptb_relax_credit_cent = 10.0;
+        state.max_price_relax_credit_cent = 2.0;
+        let mut input = input("normal", "expanding");
+        input.base_max_price = Some(0.85);
+        input.ptb_threshold_value = Some(125.0);
+        input.ptb_threshold_usd = Some(1.25);
+        input.ptb_directional_gap = Some(1.5);
+        let decision = evaluate_pair_lock_manual_adaptive_risk_decision(
+            enable_self_tune(input, state, true),
+        );
+
+        assert!(decision.applied);
+        assert_eq!(decision.reason, "manual_self_tune_safe_miss_relax");
+        assert_eq!(decision.effective_ptb_threshold_value, Some(115.0));
+        assert_eq!(decision.effective_max_price, Some(0.87));
+    }
+
+    #[test]
+    fn manual_self_tune_sl_bump_dominates_existing_miss_relax() {
+        let mut state = PairLockManualSelfTuneState::default();
+        state.ptb_relax_credit_cent = 10.0;
+        state.max_price_relax_credit_cent = 2.0;
+        state.ptb_sl_bump_cent = 15.0;
+        state.max_price_sl_penalty_cent = 5.0;
+        let mut input = input("normal", "expanding");
+        input.base_max_price = Some(0.85);
+        input.ptb_threshold_value = Some(125.0);
+        input.ptb_threshold_usd = Some(1.25);
+        input.ptb_directional_gap = Some(1.5);
+        let decision = evaluate_pair_lock_manual_adaptive_risk_decision(
+            enable_self_tune(input, state, true),
+        );
+
+        assert_eq!(decision.reason, "manual_self_tune_sl_strict");
+        assert_eq!(decision.effective_ptb_threshold_value, Some(130.0));
+        assert_eq!(decision.effective_max_price, Some(0.82));
+    }
+
+    #[test]
+    fn manual_self_tune_high_volume_cap_beats_miss_relax() {
+        let mut state = PairLockManualSelfTuneState::default();
+        state.ptb_relax_credit_cent = 20.0;
+        state.max_price_relax_credit_cent = 10.0;
+        let mut input = input("high", "expanding");
+        input.base_max_price = Some(0.85);
+        let decision = evaluate_pair_lock_manual_adaptive_risk_decision(
+            enable_self_tune(input, state, false),
+        );
+
+        assert_eq!(decision.reason, "high_volume_strict");
+        assert_eq!(decision.effective_max_price, Some(0.58));
+        assert_eq!(decision.effective_ptb_threshold_value, Some(45.0));
+    }
+
+    #[test]
+    fn manual_self_tune_lockdown_blocks_scope_side() {
+        let mut state = PairLockManualSelfTuneState::default();
+        state.lockdown_markets_left = 3;
+        let decision = evaluate_pair_lock_manual_adaptive_risk_decision(
+            enable_self_tune(input("normal", "expanding"), state, false),
+        );
+
+        assert_eq!(decision.decision, "BLOCK");
+        assert_eq!(decision.reason, "manual_self_tune_lockdown");
     }
 
     #[test]

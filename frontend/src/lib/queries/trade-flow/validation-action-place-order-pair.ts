@@ -23,6 +23,19 @@ interface ParsedRemainingWindow {
   endRemainingSec: number;
 }
 
+function parseOptionalJsonObject(raw: unknown): Record<string, unknown> | null | 'invalid' {
+  if (raw == null || raw === '') return null;
+  if (isRecord(raw)) return raw;
+  const text = toTrimmedString(raw);
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return isRecord(parsed) ? parsed : 'invalid';
+  } catch {
+    return 'invalid';
+  }
+}
+
 function parseExitLadderRules(raw: unknown): {
   isArray: boolean;
   validRules: ParsedExitLadderRule[];
@@ -511,10 +524,37 @@ export function validateActionPlaceOrderPairLockConfig(
       ['manualAdaptiveNormalCollapsingMaxPriceCent', 'invalid_manual_adaptive_normal_collapsing_max_price'],
       ['manualAdaptiveElevatedMaxPriceCent', 'invalid_manual_adaptive_elevated_max_price'],
       ['manualAdaptiveHighMaxPriceCent', 'invalid_manual_adaptive_high_max_price'],
+      ['manualAdaptiveMaxPriceRelaxHardCapCent', 'invalid_manual_adaptive_max_price_relax_hard_cap'],
     ] as const) {
+      if (key === 'manualAdaptiveMaxPriceRelaxHardCapCent' && !hasProvidedConfigValue(config[key])) {
+        continue;
+      }
       const value = toFiniteNumber(config[key]);
-      if (value == null || value <= 0 || (key.endsWith('MaxPriceCent') && value >= 100)) {
+      const isCentCap = key.endsWith('MaxPriceCent') || key === 'manualAdaptiveMaxPriceRelaxHardCapCent';
+      if (value == null || value <= 0 || (isCentCap && value >= 100)) {
         pushNodeError(issues, node, code, `action.place_order ${key} must be in the valid positive range.`);
+      }
+    }
+    const trendDeltaByScope = parseOptionalJsonObject(config.manualAdaptiveTrendDeltaUsdByScope);
+    if (trendDeltaByScope === 'invalid') {
+      pushNodeError(
+        issues,
+        node,
+        'invalid_manual_adaptive_trend_delta_by_scope',
+        'manualAdaptiveTrendDeltaUsdByScope must be a JSON object with positive numeric values.'
+      );
+    } else if (trendDeltaByScope) {
+      for (const [scope, rawValue] of Object.entries(trendDeltaByScope)) {
+        const value = toFiniteNumber(rawValue);
+        if (value == null || value <= 0) {
+          pushNodeError(
+            issues,
+            node,
+            'invalid_manual_adaptive_trend_delta_by_scope_value',
+            `manualAdaptiveTrendDeltaUsdByScope.${scope} must be > 0.`
+          );
+          break;
+        }
       }
     }
     for (const [key, code] of [
@@ -522,7 +562,11 @@ export function validateActionPlaceOrderPairLockConfig(
       ['manualAdaptiveNormalCollapsingSizeMultiplier', 'invalid_manual_adaptive_normal_collapsing_size'],
       ['manualAdaptiveElevatedSizeMultiplier', 'invalid_manual_adaptive_elevated_size'],
       ['manualAdaptiveHighSizeMultiplier', 'invalid_manual_adaptive_high_size'],
+      ['manualAdaptiveMissRelaxSizeMultiplier', 'invalid_manual_adaptive_miss_relax_size'],
     ] as const) {
+      if (key === 'manualAdaptiveMissRelaxSizeMultiplier' && !hasProvidedConfigValue(config[key])) {
+        continue;
+      }
       const value = toFiniteNumber(config[key]);
       if (value == null || value <= 0 || value > 1) {
         pushNodeError(issues, node, code, `action.place_order ${key} must be in (0, 1].`);
@@ -538,14 +582,46 @@ export function validateActionPlaceOrderPairLockConfig(
       ['manualAdaptiveAfterSlPtbGapAddCent', 'invalid_manual_adaptive_after_sl_ptb_add'],
       ['manualAdaptiveSlCooldownMarkets', 'invalid_manual_adaptive_sl_cooldown'],
       ['manualAdaptivePairBufferCent', 'invalid_manual_adaptive_pair_buffer'],
+      ['manualAdaptivePtbRelaxStepCent', 'invalid_manual_adaptive_ptb_relax_step'],
+      ['manualAdaptivePtbRelaxMaxCent', 'invalid_manual_adaptive_ptb_relax_max'],
+      ['manualAdaptiveMaxPriceRelaxStepCent', 'invalid_manual_adaptive_max_relax_step'],
+      ['manualAdaptiveMaxPriceRelaxMaxCent', 'invalid_manual_adaptive_max_relax_max'],
+      ['manualAdaptivePtbSlBumpStepCent', 'invalid_manual_adaptive_ptb_sl_bump_step'],
+      ['manualAdaptivePtbSlBumpMaxCent', 'invalid_manual_adaptive_ptb_sl_bump_max'],
+      ['manualAdaptiveMaxPriceSlPenaltyStepCent', 'invalid_manual_adaptive_max_sl_penalty_step'],
+      ['manualAdaptiveMaxPriceSlPenaltyMaxCent', 'invalid_manual_adaptive_max_sl_penalty_max'],
+      ['manualAdaptiveLockdownReleaseCleanMarkets', 'invalid_manual_adaptive_lockdown_release_clean'],
+      ['manualAdaptiveLockdownMaxMarkets', 'invalid_manual_adaptive_lockdown_max'],
+      ['manualAdaptivePtbRelaxDecayPerMarketCent', 'invalid_manual_adaptive_ptb_relax_decay'],
+      ['manualAdaptivePtbSlBumpDecayPerCleanMarketCent', 'invalid_manual_adaptive_ptb_sl_bump_decay'],
+      ['manualAdaptiveMaxPriceRelaxDecayPerMarketCent', 'invalid_manual_adaptive_max_relax_decay'],
+      ['manualAdaptiveMaxPriceSlPenaltyDecayPerCleanMarketCent', 'invalid_manual_adaptive_max_sl_penalty_decay'],
       ['manualAdaptiveCounterCapNotifyMinDeltaCent', 'invalid_manual_adaptive_counter_cap_notify_delta'],
     ] as const) {
+      if (key.startsWith('manualAdaptivePtb') || key.startsWith('manualAdaptiveMaxPrice') || key.startsWith('manualAdaptiveLockdown')) {
+        if (!hasProvidedConfigValue(config[key])) continue;
+      }
       const value = toFiniteNumber(config[key]);
       if (value == null || value < 0) {
         pushNodeError(issues, node, code, `action.place_order ${key} must be >= 0.`);
       }
     }
     for (const [key, code] of [
+      ['manualAdaptiveMissRelaxAfterNoOrderMarkets', 'invalid_manual_adaptive_miss_relax_after'],
+      ['manualAdaptiveConsecutiveSlLockdownAfter', 'invalid_manual_adaptive_lockdown_after'],
+    ] as const) {
+      if (!hasProvidedConfigValue(config[key])) continue;
+      const value = toFiniteNumber(config[key]);
+      if (value == null || !Number.isInteger(value) || value <= 0) {
+        pushNodeError(issues, node, code, `action.place_order ${key} must be a positive integer.`);
+      }
+    }
+    for (const [key, code] of [
+      ['manualAdaptiveSelfTuneEnabled', 'invalid_manual_adaptive_self_tune_enabled'],
+      ['manualAdaptiveMissRelaxEnabled', 'invalid_manual_adaptive_miss_relax_enabled'],
+      ['manualAdaptiveSlTightenEnabled', 'invalid_manual_adaptive_sl_tighten_enabled'],
+      ['manualAdaptiveSlDisableReentry', 'invalid_manual_adaptive_sl_disable_reentry'],
+      ['manualAdaptiveCleanMarketDecayEnabled', 'invalid_manual_adaptive_clean_decay_enabled'],
       ['notifyOnManualAdaptiveRiskBlock', 'invalid_notify_on_manual_adaptive_risk_block'],
       ['notifyOnManualAdaptiveRiskStrict', 'invalid_notify_on_manual_adaptive_risk_strict'],
       ['notifyOnManualAdaptiveRiskSlBump', 'invalid_notify_on_manual_adaptive_risk_sl_bump'],

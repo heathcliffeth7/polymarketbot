@@ -687,9 +687,6 @@ async fn maybe_notify_pair_lock_manual_adaptive_sl_bump(
     else {
         return Ok(());
     };
-    let Some(manual_payload) = pair_lock_manual_payload_from_flow_payload(&flow_payload) else {
-        return Ok(());
-    };
     let Some(node) = pair_lock_manual_source_action_node(repo, &run, parent_order, &flow_payload)
         .await?
     else {
@@ -699,6 +696,7 @@ async fn maybe_notify_pair_lock_manual_adaptive_sl_bump(
         return Ok(());
     }
     let cfg = resolve_pair_lock_manual_adaptive_notify_config(&node)?;
+    let risk_config = resolve_pair_lock_manual_adaptive_risk_config(&node)?;
     let cooldown_markets = node_config_i64(&node, "manualAdaptiveSlCooldownMarkets")
         .filter(|value| *value >= 0)
         .map(|value| value as usize)
@@ -711,15 +709,32 @@ async fn maybe_notify_pair_lock_manual_adaptive_sl_bump(
         &parent_order.outcome_label,
         cooldown_markets,
     );
-    repo.update_trade_flow_run_context(run.id, &context).await?;
-    let _ = replace_trade_flow_ws_fast_path_run_context(run.id, &context).await;
+    let self_tune_update = pair_lock_manual_self_tune_record_sl(
+        &mut context,
+        &node,
+        &parent_order.market_slug,
+        &parent_order.outcome_label,
+        risk_config.self_tune,
+        cooldown_markets,
+    );
+    let manual_payload_opt = pair_lock_manual_payload_from_flow_payload(&flow_payload);
+    let manual_payload = manual_payload_opt.clone().unwrap_or_else(|| json!({}));
     let payload = json!({
         "parent_builder_order_id": parent_order.id,
         "sl_builder_order_id": stop_loss_order.id,
         "cooldown_markets": cooldown_markets,
         "manual_adaptive_risk": manual_payload,
     });
-    if cfg.notify_sl_bump {
+    if let Some(update) = self_tune_update {
+        maybe_notify_pair_lock_manual_self_tune_update(
+            repo,
+            &run,
+            &node,
+            &mut context,
+            update,
+        )
+        .await?;
+    } else if cfg.notify_sl_bump && manual_payload_opt.is_some() {
         emit_pair_lock_manual_adaptive_notification(
             repo,
             &run,
@@ -740,5 +755,7 @@ async fn maybe_notify_pair_lock_manual_adaptive_sl_bump(
         )
         .await?;
     }
+    repo.update_trade_flow_run_context(run.id, &context).await?;
+    let _ = replace_trade_flow_ws_fast_path_run_context(run.id, &context).await;
     Ok(())
 }
