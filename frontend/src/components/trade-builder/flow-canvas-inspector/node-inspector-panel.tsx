@@ -22,6 +22,7 @@ import { PriceToBeatIvTimeRulesSection } from './price-to-beat-iv-time-rules-sec
 import { resolvePriceToBeatStopLossBumpUiState, updatePtbStopLossBumpLossRuleRowsFormState } from './price-to-beat-stop-loss-bump-state';
 import { PriceToBeatStopLossBumpSection } from './price-to-beat-stop-loss-bump-section';
 import { PtbStopLossSection } from './ptb-stop-loss-section';
+import { ReentryAdvancedSection } from './reentry-advanced-section';
 import { updateEntryTimingProfileRowsFormState, updatePtbIvTimeRuleRowsFormState, updatePtbStopLossRuleRowsFormState, updateTimeExitRuleRowsFormState } from './rule-row-state';
 import { TimeExitRulesSection } from './time-exit-rules-section';
 import { PairLockSummarySection, TriggerDcaLiveHint, TriggerPairLockHint } from './pair-lock-binding-section';
@@ -161,7 +162,6 @@ export function NodeInspectorPanel({
     nodeTypeDraft === 'action.place_order'
       ? (form.fields.reentryMaxPriceCent ?? '').toString().trim()
       : '';
-  const placeOrderReentryPriceToBeatMaxDiffValue = nodeTypeDraft === 'action.place_order' ? (form.fields.reentryPriceToBeatMaxDiff ?? '').toString().trim() : '';
   const placeOrderTriggerGuardChecked =
     (form.fields.triggerPriceGuardEnabled ?? '').toString().trim().toLowerCase() === 'true';
   const reentryTriggerGuardActive =
@@ -226,15 +226,6 @@ export function NodeInspectorPanel({
     (form.fields.ptbStopLossGapUnit ?? '').toString().trim().toLowerCase();
   const ptbStopLossGapUnit: PtbGapUnit =
     ptbStopLossGapUnitRaw === 'cent' ? 'cent' : 'usd';
-  const reentryPriceToBeatOverrideUnitRaw = nodeTypeDraft === 'action.place_order'
-    ? (form.fields.reentryPriceToBeatMaxDiffUnit ?? '').toString().trim().toLowerCase()
-    : '';
-  const reentryPriceToBeatOverrideUnit =
-    reentryPriceToBeatOverrideUnitRaw === 'usd' || reentryPriceToBeatOverrideUnitRaw === 'cent'
-      ? reentryPriceToBeatOverrideUnitRaw
-      : priceToBeatGuardMode === 'manual'
-        ? priceToBeatGuardUnit
-        : '';
   const showDedicatedTriggerGuard =
     nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy';
   const triggerGuardDisabled =
@@ -834,6 +825,16 @@ export function NodeInspectorPanel({
                     bu alan icin de gecerlidir.
                   </p>
                 )}
+                {field.key === 'reentryMaxPriceCent' && (
+                  <ReentryAdvancedSection
+                    visible={placeOrderReentryChecked}
+                    fields={form.fields}
+                    priceToBeatGuardChecked={priceToBeatGuardChecked}
+                    priceToBeatGuardMode={priceToBeatGuardMode}
+                    priceToBeatGuardUnit={priceToBeatGuardUnit}
+                    onUpdateField={actions.onUpdateField}
+                  />
+                )}
                 {field.key === 'maxPriceCent' && placeOrderHasInheritedMaxPrice && (
                   <p className="text-[10px] leading-relaxed text-sky-600">
                     Upstream `trigger.market_price` tavanindan otomatik dolduruldu. Config&apos;e
@@ -1082,56 +1083,6 @@ export function NodeInspectorPanel({
                           stepValue={form.fields.priceToBeatMaxPriceRelaxStepValue ?? ''}
                           stepUnit={priceToBeatMaxPriceRelaxStepUnit} onUpdateField={actions.onUpdateField}
                         />
-                        {placeOrderReentryChecked && (
-                          <div className="space-y-2 rounded-md border border-slate-200/80 bg-slate-50/70 p-2">
-                            <div className="space-y-1">
-                              <Label className="text-[11px] font-medium text-slate-600">Re-entry PTB Min Fark</Label>
-                              <Input
-                                type="number"
-                                step="any"
-                                value={placeOrderReentryPriceToBeatMaxDiffValue}
-                                onChange={(event) => actions.onUpdateField('reentryPriceToBeatMaxDiff', event.target.value)}
-                                placeholder={priceToBeatGuardMode === 'manual' ? '2' : 'bos birak'}
-                                className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300"
-                              />
-                            </div>
-                            <div className="space-y-1">
-                              <Label className="text-[11px] font-medium text-slate-600">Re-entry PTB Birimi</Label>
-                              <Select value={reentryPriceToBeatOverrideUnit || undefined} onValueChange={(value) => actions.onUpdateField('reentryPriceToBeatMaxDiffUnit', value)}>
-                                <SelectTrigger className="h-8 w-full border-slate-200 bg-white text-xs text-slate-900" size="sm">
-                                  <SelectValue placeholder="Birim sec" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="usd">USD</SelectItem>
-                                  <SelectItem value="cent">Cent</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            {priceToBeatGuardMode === 'manual' ? (
-                              <p className="text-[10px] leading-relaxed text-slate-400 italic">Bu override yalniz re-entry denemelerinde uygulanir. Birim secilmezse ana PTB birimi kullanilir: `{priceToBeatGuardUnit}`.</p>
-                            ) : (
-                              <p className="text-[10px] leading-relaxed text-slate-400 italic">Ana PTB auto modda kalsa bile re-entry denemesinde bu deger manual override olarak kullanilir. Bu modda birim secimi zorunludur.</p>
-                            )}
-                            <div className="grid grid-cols-2 gap-2">
-                              <div className="space-y-1">
-                                <Label className="text-[11px] font-medium text-slate-600">Cooldown (sn)</Label>
-                                <Input type="number" step="1" min="0" value={form.fields.reentryCooldownSec ?? ''} onChange={(event) => actions.onUpdateField('reentryCooldownSec', event.target.value)} placeholder="0" className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300" />
-                              </div>
-                              <div className="space-y-1">
-                                <Label className="text-[11px] font-medium text-slate-600">PTB Decay</Label>
-                                <Input type="number" step="any" value={form.fields.reentryThresholdDecay ?? ''} onChange={(event) => actions.onUpdateField('reentryThresholdDecay', event.target.value)} placeholder="0.8" className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300" />
-                              </div>
-                              <div className="space-y-1">
-                                <Label className="text-[11px] font-medium text-slate-600">MaxPrice Tighten (bps)</Label>
-                                <Input type="number" step="1" min="0" value={form.fields.reentryMaxPriceTightenBps ?? ''} onChange={(event) => actions.onUpdateField('reentryMaxPriceTightenBps', event.target.value)} placeholder="500" className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300" />
-                              </div>
-                              <div className="flex items-center justify-between gap-2 rounded-md border border-slate-200 bg-white px-2 py-2">
-                                <Label className="text-[11px] font-medium text-slate-600">Ayni pencereyi atla</Label>
-                                <input type="checkbox" checked={(form.fields.reentrySkipCurrentWindow ?? '').toString().trim().toLowerCase() === 'true'} onChange={(event) => actions.onUpdateField('reentrySkipCurrentWindow', event.target.checked ? 'true' : 'false')} className="h-4 w-4 rounded border-slate-300" />
-                              </div>
-                            </div>
-                          </div>
-                        )}
                         <div className="flex items-center justify-between gap-2">
                           <Label className="text-[11px] font-medium text-slate-600">
                             Price to Beat Engel Bildirimi
