@@ -12,7 +12,7 @@ import {
 } from '@/lib/queries/claim-sweep';
 import type { ClaimSweepQueueStatus, ClaimSweepRunResult, ClaimSweepStatus } from '@/lib/types';
 
-const CLAIM_SWEEP_THRESHOLD_USDC = 0.01;
+const CLAIM_SWEEP_THRESHOLD_USDC = 0;
 const CLAIM_SWEEP_PAGE_SIZE = 200;
 const CLAIM_SWEEP_CACHE_TTL_MS = 30_000;
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -397,7 +397,7 @@ function resolveDisabledReason(params: {
   if (eligibleCount === 0) {
     return {
       code: 'no_eligible_claims',
-      message: `>= ${CLAIM_SWEEP_THRESHOLD_USDC.toFixed(2)} USDC claimable dust bulunmuyor.`,
+      message: 'Pozitif redeemable claim pozisyonu bulunmuyor.',
     };
   }
   return null;
@@ -430,11 +430,15 @@ function resolveCurrentValue(row: DataApiPositionRow): number {
     return currentValue;
   }
   const price = parseNumber(row.curPrice);
-  const size = parseNumber(row.size) || parseNumber(row.balance);
+  const size = resolveTokenAmount(row);
   if (price > 0 && size > 0) {
     return price * size;
   }
-  return 0;
+  return size > 0 ? size : 0;
+}
+
+function resolveTokenAmount(row: DataApiPositionRow): number {
+  return parseNumber(row.size) || parseNumber(row.balance);
 }
 
 function parseNumber(rawValue: unknown): number {
@@ -455,6 +459,10 @@ function roundUsdc(value: number): number {
 function uniqueAddresses(values: Array<string | null>): string[] {
   return Array.from(new Set(values.filter((value): value is string => !!value)));
 }
+
+export const __claimSweepTestUtils = {
+  resolveCurrentValue,
+};
 
 async function getConfiguredMaxAttempts(context: UserConfigContext): Promise<number> {
   const raw: Record<string, unknown> = await readConfig('claim', context).catch(

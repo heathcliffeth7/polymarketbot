@@ -46,6 +46,42 @@ fn meets_min_claim_value_falls_back_to_cur_price_times_size() {
 }
 
 #[test]
+fn meets_min_claim_value_falls_back_to_redeemable_size_when_prices_are_zero() {
+    let position = DataApiPosition {
+        proxy_wallet: None,
+        condition_id: None,
+        market_slug: None,
+        slug: None,
+        current_value: Some(json!(0.0)),
+        cur_price: Some(json!(0.0)),
+        redeemable: Some(true),
+        size: Some(json!(2.25)),
+        balance: None,
+    };
+    assert!(meets_min_claim_value(&position, 0.0));
+    assert!(meets_min_claim_value(&position, 2.0));
+    assert!(!meets_min_claim_value(&position, 3.0));
+}
+
+#[test]
+fn meets_min_claim_value_falls_back_to_balance_when_size_is_missing() {
+    let position = DataApiPosition {
+        proxy_wallet: None,
+        condition_id: None,
+        market_slug: None,
+        slug: None,
+        current_value: Some(json!(0.0)),
+        cur_price: Some(json!(0.0)),
+        redeemable: Some(true),
+        size: None,
+        balance: Some(json!(1.5)),
+    };
+    assert!(meets_min_claim_value(&position, 0.0));
+    assert!(meets_min_claim_value(&position, 1.0));
+    assert!(!meets_min_claim_value(&position, 2.0));
+}
+
+#[test]
 fn meets_min_claim_value_is_fail_closed_without_enough_notional_data() {
     let missing_size = DataApiPosition {
         proxy_wallet: None,
@@ -68,25 +104,19 @@ fn meets_min_claim_value_is_fail_closed_without_enough_notional_data() {
 }
 
 #[test]
-fn meets_min_claim_value_requires_positive_value_when_threshold_is_non_positive() {
-    let zero_value = DataApiPosition {
+fn meets_min_claim_value_rejects_zero_amount_when_threshold_is_non_positive() {
+    let zero_amount = DataApiPosition {
         proxy_wallet: None,
         condition_id: None,
         market_slug: None,
         slug: None,
         current_value: Some(json!(0.0)),
-        cur_price: Some(json!(1.0)),
+        cur_price: Some(json!(0.0)),
         redeemable: Some(true),
-        size: Some(json!(1.0)),
-        balance: None,
+        size: Some(json!(0.0)),
+        balance: Some(json!(0.0)),
     };
-    assert!(!meets_min_claim_value(&zero_value, 0.0));
-
-    let positive_value = DataApiPosition {
-        current_value: Some(json!(0.01)),
-        ..zero_value
-    };
-    assert!(meets_min_claim_value(&positive_value, -5.0));
+    assert!(!meets_min_claim_value(&zero_amount, 0.0));
 }
 
 #[test]

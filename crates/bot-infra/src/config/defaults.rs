@@ -198,7 +198,7 @@ pub(crate) fn default_claim_retry_backoff_ms() -> u64 {
 }
 
 pub(crate) fn default_claim_min_claim_usdc() -> f64 {
-    1.0
+    0.0
 }
 
 pub(crate) fn supported_market_scope_names_csv() -> String {

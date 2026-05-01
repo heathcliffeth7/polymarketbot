@@ -26,21 +26,35 @@ pub(super) fn normalize_position_owner_address(
 }
 
 pub(super) fn meets_min_claim_value(position: &DataApiPosition, min_usdc: f64) -> bool {
-    let threshold = if min_usdc > 0.0 {
-        min_usdc
-    } else {
-        f64::MIN_POSITIVE
-    };
-    if let Some(current_value) = parse_json_f64(position.current_value.as_ref()) {
-        return current_value >= threshold;
-    }
-    if let Some(cur_price) = parse_json_f64(position.cur_price.as_ref()) {
-        if let Some(size) = parse_json_f64(position.size.as_ref()) {
-            return cur_price * size >= threshold;
-        }
+    let value = redeemable_position_value(position);
+    if value <= 0.0 {
         return false;
     }
-    false
+    let threshold = min_usdc.max(0.0);
+    if threshold <= 0.0 {
+        return true;
+    }
+    value >= threshold
+}
+
+fn redeemable_position_value(position: &DataApiPosition) -> f64 {
+    if let Some(current_value) = parse_json_f64(position.current_value.as_ref()) {
+        if current_value > 0.0 {
+            return current_value;
+        }
+    }
+    let size = parse_json_f64(position.size.as_ref())
+        .or_else(|| parse_json_f64(position.balance.as_ref()))
+        .unwrap_or(0.0);
+    if size <= 0.0 {
+        return 0.0;
+    }
+    if let Some(cur_price) = parse_json_f64(position.cur_price.as_ref()) {
+        if cur_price > 0.0 {
+            return cur_price * size;
+        }
+    }
+    size
 }
 
 pub(super) fn build_safe_prevalidated_signature(owner: Address) -> Bytes {
