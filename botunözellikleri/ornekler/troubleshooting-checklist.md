@@ -1,5 +1,7 @@
 # Troubleshooting Checklist
 
+Güncelleme tarihi: 2026-05-01
+
 Bu dosya canlı operasyonda görülen yaygın belirtiler için hızlı kontrol adımları verir.
 
 ## 1. Trigger Geçti Ama Order Yok
@@ -16,6 +18,8 @@ Kontrol sırası:
 8. Risk gate block etmiş mi?
 9. Existing order reuse olduğu için yeni order açılmamış mı?
 10. `buyFillLockEnabled` ikinci buy'ı engellemiş mi?
+11. DCA live ise upstream `bindingMode="dca_live_only"` mi?
+12. Pair adaptive strategy ise node snapshot'ta strategy payload var mı?
 
 İlk bakılacak dosyalar:
 
@@ -192,6 +196,10 @@ Bu karar ağacı ilk ayrımı doğru yapar: sorun entry öncesi mi, submit sonra
 | SL sonrası tekrar girmiyor | Re-entry attempt | Cooldown | Current window skip |
 | Pair lock yok | Binding mode | Pair max total | Edge decision |
 | Relax yok | Global toggle | Miss count | Min depth |
+| DCA live yok | Binding mode | Selected outcome | Budget/window guard |
+| Adaptive pair gevşemedi | Good miss count | SL cooldown | Strategy window |
+| PnL farklı | cashStatus | Activity cash | Node snapshot |
+| Claim activation yok | execution_mode | USDC.e balance | relayer adapter |
 
 ## 15. Guard Block Sonrası Ne Değiştirilir?
 
@@ -203,6 +211,9 @@ Bu karar ağacı ilk ayrımı doğru yapar: sorun entry öncesi mi, submit sonra
 | Execution floor | Depth ve VWAP | Size veya floor threshold |
 | Risk gate | Limit ve exposure | Size veya risk limit |
 | Stale market | Window ve slug | Auto-scope/boundary ayarı |
+| DCA budget | Cost per slug/all slugs | Budget veya level count |
+| Adaptive lockdown | SL serisi ve clean market | Lockdown/decay ayarları |
+| Funds activation | Safe USDC.e/pUSD balance | Adapter/env/config |
 
 Config'i doğrudan gevşetmeden önce block'un doğru sınıfta olduğundan emin ol. Yanlış guard'ı değiştirmek sorunu çözmez.
 
@@ -236,3 +247,48 @@ Bu şablon ekip içi debug için yeterli bağlam sağlar. Özellikle market slug
 4. En son strateji davranışını değiştir: re-entry, relax, pair lock, TP/SL.
 
 Bu sıra ters yapılırsa bir debug değişikliği gerçek strateji riskini artırabilir.
+
+## 18. DCA Live Çalışmıyor
+
+Kontrol sırası:
+
+1. Trigger `bindingMode="dca_live_only"` mı?
+2. Downstream tek reachable `action.place_order mode="dca_live_v1"` mı?
+3. `side="buy"` mı?
+4. `sideMode` ile `selectedOutcomes` sayısı uyumlu mu?
+5. `initialOrderShares`, `firstDcaShares` veya `targetQty` var mı?
+6. `maxTotalCostPerSlugUsdc` ve `maxTotalCostAllSlugsUsdc` budget'ı block ediyor mu?
+7. `cycleWindowMode="custom_range"` dışına çıkılmış mı?
+
+## 19. Adaptive Pair Lock Beklenen Kararı Vermiyor
+
+Kontrol sırası:
+
+1. `pairLockStrategy` doğru mu?
+2. `adaptive_max_price_v1` için `priceToBeatMode="iv_mismatch_edge"` mi?
+3. `manual_adaptive_risk_v1` için `priceToBeatMode="manual"` mı?
+4. Strategy window içinde miyiz?
+5. SL cooldown, lockdown veya late risk aktif mi?
+6. `bot_decision_logs` ve node snapshot aynı market için okunmuş mu?
+7. Notification throttle yüzünden Telegram sessiz olabilir mi?
+
+## 20. Analiz PnL Polymarket Profiliyle Uyuşmuyor
+
+Kontrol sırası:
+
+1. 48h, 30d veya custom aralık doğru mu?
+2. `cashStatus` pending, redeemed veya unclaimed mı?
+3. Activity cash PnL mi diagnostic PnL mi okunuyor?
+4. Redeem/claim eventleri tamamlanmış mı?
+5. Node snapshot geçmiş config'i gösteriyor mu?
+
+## 21. Claim Funds Activation Hatası
+
+Kontrol sırası:
+
+1. `execution_mode` `builder_relayer` veya `relayer_api_key` mı?
+2. Safe üzerinde USDC.e balance `activate_min_usdc` üstünde mi?
+3. `CLAIM_RELAYER_ADAPTER_TOKEN` iki tarafta aynı mı?
+4. `CLAIM_FUNDS_ACTIVATION_ADAPTER_URL` doğru internal route'a mı gidiyor?
+5. Hata `relayer_wallet_activation_required` ise dashboard `Activate Funds` denenmiş mi?
+6. Raw hata için `auto_claim_events.payload_json` okunmuş mu?

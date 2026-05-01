@@ -1,6 +1,6 @@
 # Trade Flow Node Özellikleri
 
-Güncelleme tarihi: 2026-04-26
+Güncelleme tarihi: 2026-05-01
 
 Bu dosya artık kısa node index'idir. Ayrıntılı anlatımlar özellik bazlı dosyalara bölündü.
 
@@ -8,21 +8,21 @@ Bu dosya artık kısa node index'idir. Ayrıntılı anlatımlar özellik bazlı 
 
 | Node | Görev | Detay |
 |---|---|---|
-| `trigger.market_price` | Market fiyatını, auto-scope seçimini, entry timing profilini ve PTB trigger gate'i yönetir | [referans/trigger-market-price.md](./referans/trigger-market-price.md) |
-| `action.place_order` | Alım/satım builder order üretir, guard'ları çalıştırır, TP/SL/pair lock kurar | [referans/action-place-order.md](./referans/action-place-order.md) |
+| `trigger.market_price` | Market fiyatını, auto-scope seçimini, entry timing profilini, firing mode'u ve binding modlarını yönetir | [referans/trigger-market-price.md](./referans/trigger-market-price.md) |
+| `action.place_order` | Alım/satım builder order üretir, guard'ları çalıştırır, TP/SL/pair lock/DCA live kurar | [referans/action-place-order.md](./referans/action-place-order.md) |
 
 ## Uçtan Uca Akış
 
 ```text
 trigger.market_price
   -> market slug ve token çözümü
-  -> fiyat koşulu / binding / entry timing
+  -> fiyat koşulu / binding / entry timing / firing mode
   -> context output
 
 action.place_order
   -> stale market ve risk kontrolleri
   -> PTB / max price / execution floor guard
-  -> builder order veya pair lock kararı
+  -> builder order, pair lock veya DCA live kararı
   -> TP/SL/re-entry/telemetry kurulumu
 ```
 
@@ -40,6 +40,10 @@ action.place_order
 | Guard block, retry, stale market, risk | [senaryolar/08-risk-guardlari-ve-hata-durumlari.md](./senaryolar/08-risk-guardlari-ve-hata-durumlari.md) |
 | Telegram, event, analytics | [senaryolar/09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) |
 | Volatility capture strateji değerlendirmesi | [senaryolar/10-volatility-capture-stratejileri.md](./senaryolar/10-volatility-capture-stratejileri.md) |
+| DCA live, generic slug/outcome DCA ve `dca_live_only` binding | [senaryolar/11-dca-live-ve-trigger-binding.md](./senaryolar/11-dca-live-ve-trigger-binding.md) |
+| Adaptive pair lock, manual adaptive risk ve biased hedge | [senaryolar/12-adaptive-pair-lock-stratejileri.md](./senaryolar/12-adaptive-pair-lock-stratejileri.md) |
+| Decision log, node snapshot ve official/activity cash PnL | [senaryolar/13-forensic-analiz-pnl-ve-decision-log.md](./senaryolar/13-forensic-analiz-pnl-ve-decision-log.md) |
+| Claim sweep, redeem ve funds activation | [senaryolar/14-claim-sweep-ve-funds-activation.md](./senaryolar/14-claim-sweep-ve-funds-activation.md) |
 
 ## Referans Dosyaları
 
@@ -57,14 +61,15 @@ action.place_order
 Yeni bir flow tasarlarken sırayla şu kararları ver:
 
 1. Market otomatik mi seçilecek, sabit slug mı kullanılacak?
-2. Trigger fiyat koşulu mu bekleyecek, sadece pair binding mi yapacak?
+2. Trigger fiyat koşulu mu bekleyecek, pair binding mi yoksa DCA binding mi yapacak?
 3. Giriş zamanı sabit mi, kalan süreye göre profile mı bağlanacak?
 4. Order market mi limit mi, immediate mı conditional mı?
 5. Buy tarafında PTB, max price, execution floor ve underlying guard açık mı?
 6. Çıkış hard TP/SL mi, staged ladder mı, PTB stop-loss mı?
 7. SL sonrası re-entry, bump veya max price relax kullanılacak mı?
-8. Pair lock gerekiyorsa legacy mi `edge_pairlock_v1` mi?
-9. Telegram ve analytics alanları operatörün ihtiyacına göre açık mı?
+8. Pair lock gerekiyorsa legacy, edge, adaptive, manual adaptive veya biased hedge mi?
+9. DCA live gerekiyorsa selected outcome, ladder ve budget guard hazır mı?
+10. Telegram, decision log ve analytics alanları operatörün ihtiyacına göre açık mı?
 
 ## Node'lar Arası Sorumluluk Ayrımı
 
@@ -77,6 +82,7 @@ Yeni bir flow tasarlarken sırayla şu kararları ver:
 - Fiyat koşulu geçti mi?
 - Kalan süreye göre hangi entry profile seçilecek?
 - Pair lock için YES/NO tokenları çözüldü mü?
+- DCA live için market/window binding'i downstream'e taşınacak mı?
 
 `action.place_order` kararları:
 
@@ -85,6 +91,7 @@ Yeni bir flow tasarlarken sırayla şu kararları ver:
 - Büyüklük nereden hesaplanacak?
 - Fiyat, depth, PTB, risk ve re-entry guard'ları geçiyor mu?
 - TP/SL/time exit/pair lock çocuk emirleri nasıl kurulacak?
+- DCA live ise selected outcome, ladder, budget ve window guard nasıl uygulanacak?
 
 Bu ayrım canlı debug sırasında çok önemlidir. Trigger'ın başarılı olması "trade açıldı" anlamına gelmez. Trigger sadece downstream için bağlam ve izin üretir; action ise bu bağlamı order lifecycle'a dönüştürür.
 

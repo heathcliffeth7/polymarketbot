@@ -1,8 +1,8 @@
 # Botun Özellikleri
 
-Güncelleme tarihi: 2026-04-27
+Güncelleme tarihi: 2026-05-01
 
-Bu klasör Polymarket botunun trade flow, guard, pair lock, çıkış, analiz ve operasyon özelliklerini senaryo kitabı formatında anlatır. Amaç tek bir uzun dosyada kaybolmadan, her özelliği kendi bağlamında okumaktır.
+Bu klasör Polymarket botunun trade flow, guard, pair lock, DCA, analiz, claim ve operasyon özelliklerini senaryo kitabı formatında anlatır. Amaç tek bir uzun dosyada kaybolmadan, her özelliği kendi bağlamında okumaktır.
 
 ## Okuma Sırası
 
@@ -20,6 +20,10 @@ Bu klasör Polymarket botunun trade flow, guard, pair lock, çıkış, analiz ve
 12. [senaryolar/08-risk-guardlari-ve-hata-durumlari.md](./senaryolar/08-risk-guardlari-ve-hata-durumlari.md) - risk, retry ve block akışları.
 13. [senaryolar/09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) - bildirim, event ve analiz ekranları.
 14. [senaryolar/10-volatility-capture-stratejileri.md](./senaryolar/10-volatility-capture-stratejileri.md) - strateji riskleri ve EV senaryoları.
+15. [senaryolar/11-dca-live-ve-trigger-binding.md](./senaryolar/11-dca-live-ve-trigger-binding.md) - generic DCA live action ve trigger binding.
+16. [senaryolar/12-adaptive-pair-lock-stratejileri.md](./senaryolar/12-adaptive-pair-lock-stratejileri.md) - adaptive max price, manual adaptive risk ve biased hedge.
+17. [senaryolar/13-forensic-analiz-pnl-ve-decision-log.md](./senaryolar/13-forensic-analiz-pnl-ve-decision-log.md) - decision logs, node snapshots ve cash PnL.
+18. [senaryolar/14-claim-sweep-ve-funds-activation.md](./senaryolar/14-claim-sweep-ve-funds-activation.md) - claim sweep, relayer ve funds activation.
 
 ## Klasörler
 
@@ -36,6 +40,10 @@ Bu klasör Polymarket botunun trade flow, guard, pair lock, çıkış, analiz ve
 | PTB iyi mi, pahalı mı, IV edge ne diyor? | [04-ptb-guard-ve-iv-mismatch.md](./senaryolar/04-ptb-guard-ve-iv-mismatch.md) |
 | Çok SL sonrası bot niye daha seçici oldu? | [05-ptb-bump-ve-max-price-relax.md](./senaryolar/05-ptb-bump-ve-max-price-relax.md) |
 | Pair lock neden tek bacak açtı veya hiç açmadı? | [07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) |
+| DCA live action neden çalışmadı? | [11-dca-live-ve-trigger-binding.md](./senaryolar/11-dca-live-ve-trigger-binding.md) |
+| Adaptive pair lock neden gevşemedi veya sıkılaştı? | [12-adaptive-pair-lock-stratejileri.md](./senaryolar/12-adaptive-pair-lock-stratejileri.md) |
+| Geçmiş kararın hangi config ile alındığı lazım | [13-forensic-analiz-pnl-ve-decision-log.md](./senaryolar/13-forensic-analiz-pnl-ve-decision-log.md) |
+| Claim, redeem veya funds activation hatası var | [14-claim-sweep-ve-funds-activation.md](./senaryolar/14-claim-sweep-ve-funds-activation.md) |
 | Botun eski işlemlerden kanıtı lazım | [gecmis-islem-kanitlari.md](./gecmis-islem-kanitlari.md) |
 | Bot neden başarısız oluyor? | [olympusx-dersleri-bot-neden-basarisiz.md](./olympusx-dersleri-bot-neden-basarisiz.md) |
 | Telegram mesajında hangi alan ne demek? | [09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) |
@@ -63,7 +71,8 @@ Bu rota botun "neden önce market seçiyor, sonra trigger çalışıyor, sonra o
 1. Canlı sorunu önce [troubleshooting-checklist.md](./ornekler/troubleshooting-checklist.md) ile sınıflandır.
 2. Sorun hangi kategoriye düşüyorsa ilgili `senaryolar/` dosyasına geç.
 3. Telegram mesajı varsa [09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) ile event/notification farkını oku.
-4. Config'i değiştirmeden önce [config-receteleri.md](./ornekler/config-receteleri.md) içindeki güvenli örneğe bak.
+4. Decision log veya node snapshot gerekiyorsa [13-forensic-analiz-pnl-ve-decision-log.md](./senaryolar/13-forensic-analiz-pnl-ve-decision-log.md) ile geçmiş config'i sabitle.
+5. Config'i değiştirmeden önce [config-receteleri.md](./ornekler/config-receteleri.md) içindeki güvenli örneğe bak.
 
 Operatör için amaç teori değil, doğru teşhistir. "Order yok" demeden önce trigger, action, guard, submit ve fill aşamaları ayrı ayrı kontrol edilmelidir.
 
@@ -75,6 +84,7 @@ Operatör için amaç teori değil, doğru teşhistir. "Order yok" demeden önce
 4. Entry kalitesi için [02-giris-trigger-ve-zamanlama.md](./senaryolar/02-giris-trigger-ve-zamanlama.md) ve [04-ptb-guard-ve-iv-mismatch.md](./senaryolar/04-ptb-guard-ve-iv-mismatch.md) dosyalarını birlikte değerlendir.
 5. Exit kalitesi için [06-tp-sl-time-exit-ve-reentry.md](./senaryolar/06-tp-sl-time-exit-ve-reentry.md) dosyasını kullan.
 6. Çift taraflı strateji için [07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) dosyasındaki tek bacak ve lock risklerini kontrol et.
+7. Adaptive pair veya biased hedge kullanıyorsan [12-adaptive-pair-lock-stratejileri.md](./senaryolar/12-adaptive-pair-lock-stratejileri.md) dosyasındaki strateji/guard uyumunu kontrol et.
 
 Strateji tasarımında en sık hata tek bir guard'ı "kâr makinesi" gibi görmektir. Guard'lar sadece kötü girişleri azaltır; fill kalitesi, fee, depth ve exit davranışı hâlâ sonucu belirler.
 
@@ -83,6 +93,7 @@ Strateji tasarımında en sık hata tek bir guard'ı "kâr makinesi" gibi görme
 1. [kaynak-haritasi.md](./kaynak-haritasi.md) ile hangi dokümanın hangi kod alanına dayandığını bul.
 2. [referans/trigger-market-price.md](./referans/trigger-market-price.md) ve [referans/action-place-order.md](./referans/action-place-order.md) dosyalarıyla config/output alanlarını eşleştir.
 3. [referans/terimler-eventler-ve-telemetri.md](./referans/terimler-eventler-ve-telemetri.md) ile event payload okuma sırasını izle.
+4. Forensic/debug için decision log ve node snapshot akışını [13-forensic-analiz-pnl-ve-decision-log.md](./senaryolar/13-forensic-analiz-pnl-ve-decision-log.md) ile eşleştir.
 
 Geliştirici için kritik ayrım şudur: trigger'ın `pass=true` üretmesi, action'ın order oluşturacağı anlamına gelmez. Runtime davranışı trigger output, action guard payload ve builder order lifecycle birlikte okunarak anlaşılır.
 

@@ -1,5 +1,7 @@
 # Config Reçeteleri
 
+Güncelleme tarihi: 2026-05-01
+
 Bu dosya yaygın trade flow kurulumları için kopyalanabilir JSON parçaları içerir. Alanları kendi flow builder şemanıza göre ilgili node config'ine yerleştirin.
 
 ## 1. Auto-Scope Trigger + Entry Timing
@@ -355,3 +357,133 @@ Ne zaman kullanılır:
 - Önce küçük notional ile pair lock davranışı doğrulanırken.
 - Orphan riskini azaltmak istenirken.
 - Locked pair sonrası normal SL'nin pair yapısını bozması istenmiyorsa.
+
+## 13. DCA Live Trigger Binding
+
+Trigger:
+
+```json
+{
+  "nodeType": "trigger.market_price",
+  "config": {
+    "marketMode": "auto_scope",
+    "marketScope": "btc_5m_updown",
+    "bindingMode": "dca_live_only",
+    "repeatMode": "once",
+    "onceScope": "market",
+    "cycleWindowMode": "custom_range",
+    "cycleWindowStartSec": 15,
+    "cycleWindowEndSec": 240
+  }
+}
+```
+
+Action:
+
+```json
+{
+  "nodeType": "action.place_order",
+  "config": {
+    "mode": "dca_live_v1",
+    "side": "buy",
+    "executionMode": "limit",
+    "marketSelectionMode": "auto_scope",
+    "sideMode": "one_sided",
+    "selectedOutcomes": [{ "outcomeLabel": "Up" }],
+    "initialOrderShares": 5,
+    "dcaEntryMinPriceCent": 35,
+    "dcaEntryMaxPriceCent": 62,
+    "dcaLevels": 3,
+    "dcaLevelSpacingCent": 2,
+    "dcaOrderSizeMultiplier": 1,
+    "maxTotalCostPerSlugUsdc": 25,
+    "maxTotalCostAllSlugsUsdc": 50,
+    "noNewOrdersBeforeEndSec": 30,
+    "cancelOpenOrdersBeforeEndSec": 10
+  }
+}
+```
+
+## 14. Adaptive Max Price Pair Lock
+
+```json
+{
+  "mode": "pair_lock",
+  "pairLockStrategy": "adaptive_max_price_v1",
+  "side": "buy",
+  "executionMode": "market",
+  "sizeUsdc": 5,
+  "pairMaxTotalCent": 96,
+  "priceToBeatGuardEnabled": true,
+  "priceToBeatMode": "iv_mismatch_edge",
+  "adaptiveMaxPriceMissCount": 3,
+  "adaptiveMaxPriceRequiredGoodMissCount": 2,
+  "adaptiveMaxPriceRelaxCreditCent": 2,
+  "adaptiveMaxPriceMaxRelaxCreditCent": 5,
+  "adaptiveMaxPriceHardCapCent": 76,
+  "adaptiveMaxPriceSizeMultiplier": 0.5,
+  "adaptiveMaxPriceWindowStartSec": 120,
+  "adaptiveMaxPriceWindowEndSec": 290,
+  "adaptiveMaxPriceLateRiskEnabled": true,
+  "adaptiveMaxPriceLateRiskAfterSec": 210,
+  "adaptiveMaxPriceSlCooldownMarkets": 3,
+  "notifyOnAdaptiveMaxPriceRelax": true,
+  "notifyOnAdaptiveMaxPriceSummary": true
+}
+```
+
+## 15. Manual Adaptive Risk Pair Lock
+
+```json
+{
+  "mode": "pair_lock",
+  "pairLockStrategy": "manual_adaptive_risk_v1",
+  "side": "buy",
+  "executionMode": "market",
+  "sizeUsdc": 5,
+  "pairMaxTotalCent": 96,
+  "priceToBeatGuardEnabled": true,
+  "priceToBeatMode": "manual",
+  "manualAdaptiveWindowStartSec": 90,
+  "manualAdaptiveWindowEndSec": 270,
+  "manualAdaptiveTrendDeltaUsd": 5,
+  "manualAdaptiveHighMaxPriceCent": 58,
+  "manualAdaptiveHighSizeMultiplier": 0.3,
+  "manualAdaptiveHighPtbGapAddCent": 25,
+  "manualAdaptiveSelfTuneEnabled": true,
+  "manualAdaptiveMissRelaxEnabled": true,
+  "manualAdaptiveMissRelaxAfterNoOrderMarkets": 3,
+  "manualAdaptivePtbRelaxStepCent": 5,
+  "manualAdaptiveMaxPriceRelaxHardCapCent": 90,
+  "manualAdaptiveSlTightenEnabled": true,
+  "manualAdaptivePtbSlBumpMaxCent": 45,
+  "manualAdaptiveLockdownMaxMarkets": 5,
+  "notifyOnManualAdaptiveRiskBlock": true,
+  "notifyOnManualAdaptiveRiskSummary": true,
+  "notifyOnManualAdaptiveCounterCap": true
+}
+```
+
+## 16. Claim Sweep Funds Activation
+
+`config/claim.toml` örneği:
+
+```toml
+enabled = true
+execution_mode = "relayer_api_key"
+collateral_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+auto_activate_funds = true
+activate_min_usdc = 0.01
+usdce_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+pusd_token_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+collateral_onramp_address = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
+min_claim_usdc = 0.0
+```
+
+Gerekli env:
+
+```text
+CLAIM_RELAYER_ADAPTER_TOKEN=...
+CLAIM_RELAYER_ADAPTER_URL=http://127.0.0.1:3000/api/internal/claim/redeem
+CLAIM_FUNDS_ACTIVATION_ADAPTER_URL=http://127.0.0.1:3000/api/internal/claim/activate-funds
+```

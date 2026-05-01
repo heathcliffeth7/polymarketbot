@@ -1,5 +1,7 @@
 # Referans - `action.place_order`
 
+Güncelleme tarihi: 2026-05-01
+
 Bu dosya `action.place_order` node'unun config gruplarını, guard alanlarını, output/event davranışını ve geçerli kombinasyonlarını özetler.
 
 ## Görev
@@ -15,6 +17,7 @@ Desteklenen ana davranışlar:
 - PTB, max price, execution floor ve underlying guard.
 - TP/SL/PTB SL/time exit/re-entry.
 - Pair lock ve counter leg.
+- DCA live generic slug/outcome buy ladder.
 - Telegram ve analytics telemetry.
 
 ## Temel Alanlar
@@ -24,7 +27,7 @@ Desteklenen ana davranışlar:
 | `side` | `buy` veya `sell` |
 | `executionMode` | `market` veya `limit` |
 | `kind` | `immediate` veya `conditional` |
-| `mode` | `single` veya `pair_lock` |
+| `mode` | `single`, `pair_lock` veya `dca_live_v1` |
 | `marketSlug` | Config veya upstream context |
 | `tokenId` | Config veya upstream context |
 | `outcomeLabel` | Config veya upstream context |
@@ -34,9 +37,10 @@ Desteklenen ana davranışlar:
 
 | Alan | Kullanım |
 |---|---|
-| `sizeMode` | `usdc` veya `pct` |
+| `sizeMode` | `usdc`, `shares` veya `pct` |
 | `sizeUsdc` | Buy notional |
 | `targetNotionalUsdc` | Alternatif buy notional hedefi |
+| `targetQty` | Share hedefi veya DCA initial size fallback'i |
 | `sizePct` / `sizePercent` | Sell veya kaynak pozisyon yüzdesi |
 | `triggerSizes` | Çoklu tetik başına farklı buy büyüklüğü |
 | `maxTriggers` | Maksimum tetik sayısı |
@@ -44,6 +48,29 @@ Desteklenen ana davranışlar:
 Entry timing fallback'i:
 
 - Action explicit size vermiyorsa trigger context'teki `selectedEntrySizeUsdc` kullanılabilir.
+
+## DCA Live Alanları
+
+`mode="dca_live_v1"` generic market/outcome DCA modudur.
+
+| Alan | Açıklama |
+|---|---|
+| `marketSelectionMode` | `manual_slug`, `manual_slug_list`, `auto_group_top_n`, `auto_scope` |
+| `manualSlug`, `manualSlugs` | Manual market kaynağı |
+| `marketGroup`, `candidateSlugLimit`, `maxActiveSlugs` | Group/top-n market seçimi |
+| `sideMode` | `one_sided`, `two_sided_pair`, `multi_outcome_basket` |
+| `selectedOutcomes` | Explicit outcome listesi |
+| `initialOrderShares`, `firstDcaShares` | İlk DCA size |
+| `dcaEntryMinPriceCent`, `dcaEntryMaxPriceCent` | Entry fiyat bandı |
+| `dcaLevels`, `dcaLevelSpacingCent`, `dcaLevelSpacingMultiplier` | Ladder yapısı |
+| `dcaOrderSizeMultiplier` | Kademe size çarpanı |
+| `targetPairCostCent`, `pairBufferCent` | Binary pair DCA cost hedefi |
+| `counterOnlyIfPairCostOk` | Counter bacak sadece pair cost uygunsa |
+| `maxTotalCostPerSlugUsdc`, `maxTotalCostAllSlugsUsdc` | Budget guard |
+| `maxUnmatchedCostUsdc`, `maxOpenOrdersAllSlugs` | Exposure/open order guard |
+| `noNewOrdersBeforeEndSec`, `cancelOpenOrdersBeforeEndSec` | Market sonu risk kontrolü |
+
+Geçerli kullanım için upstream trigger `bindingMode="dca_live_only"` olmalıdır. Ayrıntı: [11-dca-live-ve-trigger-binding.md](../senaryolar/11-dca-live-ve-trigger-binding.md).
 
 ## Buy Guard Alanları
 
@@ -124,6 +151,10 @@ Re-entry:
 - `reenterOnSlHit`
 - `reentryMaxAttempts`
 - `reentryCooldownSec`
+- `reentryMinPriceCent`
+- `reentryMaxPriceCent`
+- `reentryPriceToBeatMaxDiff`
+- `reentryPriceToBeatMaxDiffUnit`
 - `reentrySkipCurrentWindow`
 - `reentryThresholdDecay`
 - `reentryMaxPriceTightenBps`
@@ -133,7 +164,7 @@ Re-entry:
 | Alan | Açıklama |
 |---|---|
 | `mode="pair_lock"` | Pair lock behavior açar |
-| `pairLockStrategy` | `legacy` veya `edge_pairlock_v1` |
+| `pairLockStrategy` | `legacy`, `edge_pairlock_v1`, `adaptive_max_price_v1`, `manual_adaptive_risk_v1`, `biased_hedge_v1` |
 | `pairLockDecisionQty` | Edge hesabı qty |
 | `pairLockSingleEdgeThreshold` | Tek taraf edge eşiği |
 | `pairLockCostBuffer` | Cost buffer |
@@ -145,6 +176,15 @@ Re-entry:
 | `counterLegPtbStopLossEnabled` | Counter PTB SL |
 | `pairProtectiveUnwindEnabled` | Orphan/bozuk pair için unwind |
 | `pairIgnoreStopLossAfterLocked` | Lock sonrası SL etkisini sınırla |
+
+Adaptive pair lock alan aileleri:
+
+- `adaptiveMaxPrice*`: good-miss kanıtına göre max price relax.
+- `manualAdaptive*`: manual PTB, hacim/trend/SL risk rejimi ve self tuning.
+- `biasedHedge*`: dominant primary, sınırlı hedge, bias invalidation ve time exit.
+- `notifyOnAdaptiveMaxPrice*`, `notifyOnManualAdaptive*`: strategy notification ve summary throttle.
+
+Primary pair lock re-entry alanları child node'a taşınabilir. Counter re-entry ve counter staged exit desteklenmez.
 
 ## Bildirim Alanları
 
@@ -159,6 +199,11 @@ Re-entry:
 - `notifyOnSlHit`
 - `notifyOnPairLocked`
 - `notifyOnPairUnwind`
+- `notifyOnAdaptiveMaxPriceRelax`
+- `notifyOnAdaptiveMaxPriceSummary`
+- `notifyOnManualAdaptiveRiskBlock`
+- `notifyOnManualAdaptiveRiskSummary`
+- `notifyOnManualAdaptiveCounterCap`
 
 ## Output ve Event
 
@@ -188,12 +233,25 @@ Pair telemetry:
 - `pair_lock_strategy`
 - `pair_lock_edge_decision`
 - `counter_builder_order_id`
+- `adaptiveMaxPrice`
+- `manualAdaptiveRisk`
+- `biasedHedge`
+
+DCA telemetry:
+
+- `mode="dca_live_v1"`
+- selected outcome listesi
+- ladder level bilgisi
+- budget/window block nedeni
 
 ## Geçerli Kombinasyon Notları
 
 - `priceToBeatStopLossBumpEnabled=true`, `side="buy"` ve `priceToBeatGuardEnabled=true` ister.
 - Relax config'i PTB guard olmadan anlamlı değildir.
 - `edge_pairlock_v1`, `priceToBeatMode="iv_mismatch_edge"` ister.
+- `adaptive_max_price_v1`, `priceToBeatGuardEnabled=true` ve `priceToBeatMode="iv_mismatch_edge"` ister.
+- `manual_adaptive_risk_v1`, `priceToBeatGuardEnabled=true` ve `priceToBeatMode="manual"` ister.
+- `dca_live_v1`, `side="buy"` ve upstream `bindingMode="dca_live_only"` ister.
 - Pair lock `sizePct` desteklemez; USDC sizing gerekir.
 - `reentrySkipCurrentWindow=true`, `reenterOnSlHit=true` ister.
 - `ptbStopLossTimeDecayMode`, buy tarafında `ptbStopLossEnabled=true` gerektirir.
@@ -326,14 +384,39 @@ Action:
 
 Bu üç alan eksikse edge pairlock beklenmemelidir.
 
+Adaptive strategy eklenirse strategy/PTB uyumu ayrıca kontrol edilmelidir:
+
+```json
+{
+  "pairLockStrategy": "adaptive_max_price_v1",
+  "priceToBeatGuardEnabled": true,
+  "priceToBeatMode": "iv_mismatch_edge"
+}
+```
+
+```json
+{
+  "pairLockStrategy": "manual_adaptive_risk_v1",
+  "priceToBeatGuardEnabled": true,
+  "priceToBeatMode": "manual"
+}
+```
+
+`biased_hedge_v1` eşit pair yerine primary bias + sınırlı hedge akışı kurar; detaylı karar ağacı için [12-adaptive-pair-lock-stratejileri.md](../senaryolar/12-adaptive-pair-lock-stratejileri.md) okunmalıdır.
+
 ## Sık Config Çakışmaları
 
 | Çakışma | Sonuç |
 |---|---|
 | Pair lock + `sizePct` | Validation hatası veya unsupported davranış |
+| DCA live + `side="sell"` | Validation hatası |
+| DCA live + standard upstream trigger | `bindingMode="dca_live_only"` beklenir |
+| `adaptive_max_price_v1` + PTB guard kapalı | Validation/runtime block |
+| `manual_adaptive_risk_v1` + `priceToBeatMode!="manual"` | Strategy uyumsuz |
 | Bump açık + PTB guard kapalı | Bump anlamlı değildir |
 | Relax config + PTB guard kapalı | Relax çalışmaz |
 | `reentrySkipCurrentWindow=true` + re-entry kapalı | Validation hatası |
+| Counter re-entry | Pair lock'ta desteklenmez |
 | `ptbStopLossTimeDecayMode` + PTB SL kapalı | Geçersiz kombinasyon |
 | Notify flag kapalı | Event olabilir ama Telegram gelmez |
 

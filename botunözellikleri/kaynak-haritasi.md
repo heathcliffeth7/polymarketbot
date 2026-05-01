@@ -1,6 +1,6 @@
 # Kaynak Haritası
 
-Güncelleme tarihi: 2026-04-27
+Güncelleme tarihi: 2026-05-01
 
 Bu dosya `botunözellikleri/` altındaki yeni dokümantasyonun hangi repo içi notlardan ve kod alanlarından derlendiğini gösterir.
 
@@ -25,6 +25,9 @@ Bu dosya `botunözellikleri/` altındaki yeni dokümantasyonun hangi repo içi n
 | `trade_flow_auto_scope_analysis_rows` | TP/SL/open position satırları, row PnL ve exit reason ayrımı |
 | `trade_builder_order_events` | Guard, submit, fill, TP/SL child ve pair lock event kanıtları |
 | `trade_builder_orders` | Order status, side, kind ve lifecycle dağılımı |
+| `bot_decision_logs` | Forensic decision log ve geçmiş karar payload'ları |
+| `trade_builder_order_node_snapshots` | Order anındaki action/upstream node config snapshot'ı |
+| Polymarket activity/Data API | Official/activity cash PnL ve redeem settlement uyumu |
 
 ## Kod Referansları
 
@@ -32,6 +35,8 @@ Bu dosya `botunözellikleri/` altındaki yeni dokümantasyonun hangi repo içi n
 |---|---|
 | `trigger.market_price` | `crates/bot-runner/src/trade_flow/triggers/market_price.rs` |
 | Entry timing | `crates/bot-runner/src/trade_flow/triggers/market_price_entry_timing.rs` |
+| Trigger firing mode / once scope | `frontend/src/components/trade-builder/flow-canvas-inspector/trigger-market-firing-mode-section.tsx`, `frontend/src/lib/queries/trade-flow/publish-runtime.ts` |
+| DCA live action | `crates/bot-runner/src/trade_builder/dca_live.rs`, `frontend/src/lib/queries/trade-flow/validation-action-place-order-dca.ts` |
 | PTB guard | `crates/bot-runner/src/trade_flow/guards/price_to_beat.rs` |
 | `iv_mismatch_edge` runtime config | `crates/bot-runner/src/trade_flow/guards/price_to_beat/iv_mismatch_runtime_config.rs` |
 | `iv_mismatch_edge` edge/cost/threshold kararı | `crates/bot-runner/src/trade_flow/guards/price_to_beat/iv_mismatch_edge.rs` |
@@ -39,11 +44,18 @@ Bu dosya `botunözellikleri/` altındaki yeni dokümantasyonun hangi repo içi n
 | PTB stop-loss bump | `crates/bot-runner/src/trade_builder/ptb_stop_loss_bump.rs` |
 | PTB stop-loss | `crates/bot-runner/src/trade_builder/ptb_stop_loss.rs` |
 | `edge_pairlock_v1` karar sırası | `crates/bot-runner/src/trade_builder/pair_lock_edge_strategy.rs` |
+| `adaptive_max_price_v1` | `crates/bot-runner/src/trade_builder/pair_lock_adaptive_max_price.rs` |
+| `manual_adaptive_risk_v1` | `crates/bot-runner/src/trade_builder/pair_lock_manual_adaptive_risk.rs` |
+| `biased_hedge_v1` | `crates/bot-runner/src/trade_builder/pair_lock_biased_hedge.rs` |
 | Pair lock validation | `frontend/src/lib/queries/trade-flow/validation-action-place-order-pair.ts` |
+| Pair lock primary re-entry field copy | `crates/bot-runner/src/trade_builder/pair_lock_child_nodes.rs`, `frontend/src/lib/trade-flow-config-mappers/pair-lock.ts` |
 | PTB bump/relax validation | `frontend/src/lib/queries/trade-flow/validation-action-place-order-ptb-bump.ts` |
 | PTB V2 validation | `frontend/src/lib/queries/trade-flow/validation-action-place-order-ptb-v2.ts` |
 | Analytics extraction | `frontend/src/lib/queries/trade-flow/analytics.ts` |
+| Decision log ve node snapshot extraction | `frontend/src/lib/queries/trade-flow/auto-scope-analysis-extras.ts` |
 | Relax API | `frontend/src/app/api/relax/route.ts` |
+| Claim sweep | `crates/bot-infra/src/claim.rs`, `frontend/src/lib/claim-sweep.ts`, `frontend/src/lib/queries/claim-sweep.ts` |
+| Funds activation | `frontend/src/lib/claim-funds-activation.ts`, `frontend/src/lib/claim-relayer.ts`, `frontend/src/app/api/claim/activate-funds/route.ts` |
 
 ## Bakım Kuralları
 
@@ -70,7 +82,11 @@ Bu sıra dokümanın iki farklı probleme düşmesini engeller: sadece alan list
 | Yeni `priceToBeatIv*` alanı | `referans/action-place-order.md`, `senaryolar/04-ptb-guard-ve-iv-mismatch.md` |
 | Yeni `notifyOn*` alanı | `referans/action-place-order.md`, `senaryolar/09-telegram-telemetri-ve-analiz.md` |
 | Pair lock validation değişikliği | `senaryolar/07-pair-lock-ve-edge-pairlock.md`, `ornekler/troubleshooting-checklist.md` |
+| Yeni DCA live config alanı | `referans/action-place-order.md`, `senaryolar/11-dca-live-ve-trigger-binding.md` |
+| Yeni pair lock strategy alanı | `referans/action-place-order.md`, `senaryolar/12-adaptive-pair-lock-stratejileri.md` |
 | Yeni analytics column | `referans/terimler-eventler-ve-telemetri.md`, `senaryolar/09-telegram-telemetri-ve-analiz.md` |
+| Yeni decision log/node snapshot payload | `referans/terimler-eventler-ve-telemetri.md`, `senaryolar/13-forensic-analiz-pnl-ve-decision-log.md` |
+| Yeni claim/funds activation config | `senaryolar/14-claim-sweep-ve-funds-activation.md`, `ornekler/troubleshooting-checklist.md` |
 | Yeni risk guard | `senaryolar/08-risk-guardlari-ve-hata-durumlari.md`, `ornekler/config-receteleri.md` |
 
 ## Güncellik Kontrolü

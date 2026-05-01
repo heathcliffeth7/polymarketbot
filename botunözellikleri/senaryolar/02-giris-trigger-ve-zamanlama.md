@@ -206,7 +206,7 @@ Bu yüzden trigger debug ederken sadece `triggerPrice` değerine bakmak eksiktir
 `triggerCondition="level_above"`, `triggerPrice=0.55`:
 
 - 12:01:10 ve 12:01:15 anlarında koşul doğrudur.
-- `repeatMode="repeat"` ise çoklu tetik riski doğar.
+- `repeatMode="loop"` ise çoklu tetik riski doğar.
 - `repeatMode="once"` ise ilk geçişten sonra idempotency korur.
 
 ## Entry Timing Tasarım Örneği

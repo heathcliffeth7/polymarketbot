@@ -1,5 +1,7 @@
 # Referans - `trigger.market_price`
 
+Güncelleme tarihi: 2026-05-01
+
 Bu dosya `trigger.market_price` node'unun config, output ve operasyon davranışını özetler.
 
 ## Görev
@@ -12,6 +14,7 @@ Kullanım biçimleri:
 - Auto-scope ile aktif 5m marketi seçme.
 - Multi-outcome koşul izleme.
 - Pair lock için YES/NO token binding.
+- DCA live için market/window binding.
 - Entry timing profile seçme.
 - PTB trigger gate ile action'a geçmeden giriş kalitesi kontrolü.
 
@@ -22,7 +25,7 @@ Kullanım biçimleri:
 | Market seçimi | `marketMode`, `marketScope`, `marketSlug`, `tokenId`, `outcomeLabel` |
 | Binding | `bindingMode` |
 | Fiyat koşulu | `triggerCondition`, `triggerPrice`, `outcomeConditions` |
-| Tekrar | `repeatMode`, `minIntervalMs` |
+| Tekrar/firing | `repeatMode`, `onceScope`, `minIntervalMs` |
 | Cycle window | `cycleWindowMode`, eligible zaman alanları |
 | Entry timing | `entryTimingProfiles[]` |
 | PTB trigger | `priceToBeatTriggerEnabled`, `priceToBeatMode`, `priceToBeatTriggerMinGap`, `priceToBeatTriggerMaxGap` |
@@ -47,8 +50,10 @@ Auto-scope kullanılacaksa sabit slug'a güvenmek yerine scope ve outcome kullan
 |---|---|
 | `standard` veya boş | Fiyat koşulu değerlendirir |
 | `pair_lock_only` | Fiyat tetiklemeden YES/NO token binding yapar |
+| `dca_live_only` | Fiyat tetiklemeden DCA live action'a market/window binding yapar |
 
 `pair_lock_only`, `action.place_order mode="pair_lock"` için beklenen upstream davranıştır.
+`dca_live_only`, `action.place_order mode="dca_live_v1"` için beklenen upstream davranıştır.
 
 ## Trigger Condition
 
@@ -61,14 +66,19 @@ Auto-scope kullanılacaksa sabit slug'a güvenmek yerine scope ve outcome kullan
 
 `outcomeConditions[]` ile aynı markette birden fazla outcome koşulu izlenebilir.
 
-## Repeat Mode
+## Firing Mode
 
-| Değer | Açıklama |
+UI üç modu gösterir; config karşılığı `repeatMode` ve `onceScope` alanlarıdır.
+
+| UI modu | Config | Açıklama |
 |---|---|
-| `once` | Pass sonrası aynı idempotency bağlamında tekrar tetiklemez |
-| `repeat` | Koşul geçmezse interval ile tekrar dener |
+| Once per market | `repeatMode="once"`, `onceScope="market"` | Auto-scope her yeni markette bir kez tetikleyebilir |
+| Once per run | `repeatMode="once"`, `onceScope="run"` | Workflow run boyunca ilk başarılı tetikten sonra tekrar tetiklemez |
+| Loop | `repeatMode="loop"` | Koşul geçmezse interval ile tekrar dener |
 
-Alım flow'larında yanlış double-entry riskini azaltmak için `once` tercih edilir.
+Alım flow'larında yanlış double-entry riskini azaltmak için `once` tercih edilir. Auto-scope + once varsayılanı market scope'tur.
+
+`level_above` ve `level_below` sürekli true kalabileceği için `repeatMode="once"` ister. `cross_above` ve `cross_below` loop modda kullanılabilir.
 
 ## Entry Timing Profiles
 
@@ -126,6 +136,13 @@ Pair binding output:
 - YES/NO token bilgileri.
 - Binary outcome mapping.
 - Pair lock downstream context.
+
+DCA binding output:
+
+- `bindingMode="dca_live_only"` bilgisi.
+- Market slug/window context.
+- Custom range zamanları.
+- DCA action için route izni.
 
 ## Başarılı Akış Örneği
 
@@ -205,6 +222,12 @@ Pair lock flow'u:
 - Downstream tek action node olmalı.
 - Action `mode="pair_lock"` ile uyumlu olmalı.
 
+DCA live flow'u:
+
+- Trigger fiyat koşulu yerine `bindingMode="dca_live_only"` kullan.
+- Downstream tek reachable `action.place_order mode="dca_live_v1"` olmalı.
+- Outcome condition ve PTB trigger gate bu binding modunda kullanılmaz.
+
 Debug flow'u:
 
 - Önce basit trigger ile market ve token çözümünü doğrula.
@@ -241,6 +264,7 @@ Bu aktarımın çalışması için trigger ve action aynı flow context içinde 
 | Entry profile çakışması | Aynı kalan süre iki profile girer |
 | Entry profile boşluğu | Bazı kalan sürelerde hiçbir profil yoktur |
 | Pair lock upstream hatası | Trigger `bindingMode="pair_lock_only"` değildir |
+| DCA live upstream hatası | Trigger `bindingMode="dca_live_only"` değildir |
 | Repeat ile level trigger | Aynı koşul sürekli true olduğu için çoklu tetik riski |
 | Fixed market + auto-scope beklentisi | `marketMode` sabit olduğu için yeni window'a geçmez |
 

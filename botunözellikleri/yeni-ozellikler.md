@@ -1,8 +1,8 @@
 # Yeni Özellikler
 
-Güncelleme tarihi: 2026-04-26
+Güncelleme tarihi: 2026-05-01
 
-Bu dosya son eklenen trade flow, guard, pair lock ve analiz özelliklerinin kısa haritasıdır. Ayrıntılı senaryolar ilgili dosyalara taşındı.
+Bu dosya son eklenen trade flow, guard, pair lock, DCA, forensic analiz ve claim operasyon özelliklerinin kısa haritasıdır. Ayrıntılı senaryolar ilgili dosyalara taşındı.
 
 ## Hızlı Özet
 
@@ -11,6 +11,12 @@ Bu dosya son eklenen trade flow, guard, pair lock ve analiz özelliklerinin kıs
 - PTB stop-loss sonrası `priceToBeatStopLossBump*` alanları sonraki giriş threshold'unu artırabilir.
 - Art arda kaçan marketlerden sonra `priceToBeatMaxPriceRelax*` alanları max price/PTB şartını kontrollü gevşetebilir.
 - `pairLockStrategy="edge_pairlock_v1"` açık pozisyonu counter ile kilitleme, yeni eşit pair açma veya tek taraflı edge alma kararını verebilir.
+- `action.place_order mode="dca_live_v1"` generic slug/outcome DCA, `trigger.market_price bindingMode="dca_live_only"` ile çalışabilir.
+- Pair lock tarafında `adaptive_max_price_v1`, `manual_adaptive_risk_v1` ve `biased_hedge_v1` stratejileri eklidir.
+- `repeatMode=once` artık `onceScope=market/run` ile UI'da firing mode olarak ayrıştırılır.
+- Primary pair lock re-entry için `reentryMinPriceCent`, `reentryMaxPriceCent` ve advanced PTB/max price alanları child node'a taşınabilir.
+- Decision log, order node snapshot, missed-market timing diagnostics ve official/activity cash PnL analizleri eklidir.
+- Claim sweep tarafında `relayer_api_key`, USDC.e collateral, pUSD funds activation ve `/api/claim/activate-funds` akışı eklidir.
 - `buyFillLockEnabled` aynı market cycle içinde aynı gruptan ikinci buy girişini engelleyebilir.
 - `notifyOnOrderSubmitted`, no-order tanısı, auto-scope analiz zaman aralıkları ve `/api/relax` kontrolü eklidir.
 
@@ -24,6 +30,10 @@ Bu dosya son eklenen trade flow, guard, pair lock ve analiz özelliklerinin kıs
 | PTB bump ve max price relax | [senaryolar/05-ptb-bump-ve-max-price-relax.md](./senaryolar/05-ptb-bump-ve-max-price-relax.md) |
 | `edge_pairlock_v1` | [senaryolar/07-pair-lock-ve-edge-pairlock.md](./senaryolar/07-pair-lock-ve-edge-pairlock.md) |
 | Telegram, submit ve no-order analytics | [senaryolar/09-telegram-telemetri-ve-analiz.md](./senaryolar/09-telegram-telemetri-ve-analiz.md) |
+| DCA live ve trigger binding | [senaryolar/11-dca-live-ve-trigger-binding.md](./senaryolar/11-dca-live-ve-trigger-binding.md) |
+| Adaptive pair lock stratejileri | [senaryolar/12-adaptive-pair-lock-stratejileri.md](./senaryolar/12-adaptive-pair-lock-stratejileri.md) |
+| Forensic analiz ve PnL | [senaryolar/13-forensic-analiz-pnl-ve-decision-log.md](./senaryolar/13-forensic-analiz-pnl-ve-decision-log.md) |
+| Claim sweep ve funds activation | [senaryolar/14-claim-sweep-ve-funds-activation.md](./senaryolar/14-claim-sweep-ve-funds-activation.md) |
 | Kopyalanabilir örnekler | [ornekler/config-receteleri.md](./ornekler/config-receteleri.md) |
 
 ## Operatör İçin Kısa Karar Rehberi
@@ -36,8 +46,13 @@ Bu dosya son eklenen trade flow, guard, pair lock ve analiz özelliklerinin kıs
 | Bot çok uzun süre hiç trade alamıyorsa ama fırsatlar sonradan ucuzlamışsa | `priceToBeatMaxPriceRelaxEnabled=true` ve global `max_price_relax_enabled=true` |
 | Up/Down birlikte maliyet kilidi kurmak istiyorsan | `mode="pair_lock"` |
 | Pair lock maliyet/edge kararını otomatik yapsın istiyorsan | `pairLockStrategy="edge_pairlock_v1"` |
+| Pair lock max price iyi miss kanıtıyla kontrollü gevşesin istiyorsan | `pairLockStrategy="adaptive_max_price_v1"` |
+| Manual PTB pair lock hacim/trend/SL riskine göre ayarlansın istiyorsan | `pairLockStrategy="manual_adaptive_risk_v1"` |
+| Erken dominant taraf + sınırlı hedge istiyorsan | `pairLockStrategy="biased_hedge_v1"` |
+| Generic slug/outcome DCA istiyorsan | `mode="dca_live_v1"` ve `bindingMode="dca_live_only"` |
 | Aynı markette iki ayrı buy fill istemiyorsan | `buyFillLockEnabled=true` |
-| "Neden order yok?" sorusuna UI'dan cevap arıyorsan | no-order analytics ve [troubleshooting checklist](./ornekler/troubleshooting-checklist.md) |
+| "Neden order yok?" sorusuna UI'dan cevap arıyorsan | no-order analytics, decision log ve [troubleshooting checklist](./ornekler/troubleshooting-checklist.md) |
+| Claim sonrası USDC.e relayer'da kullanılamıyorsa | funds activation |
 
 ## Kaynak
 
@@ -49,6 +64,7 @@ Bu özet şu yerel kaynaklarla uyumludur:
 - [problemler/sl-ve-giris-kalite-analizi.md](../problemler/sl-ve-giris-kalite-analizi.md)
 - [problemler/vol-capture-sorunlar.md](../problemler/vol-capture-sorunlar.md)
 - [yapılcak/yapılacak.md](../yapılcak/yapılacak.md)
+- Güncel claim/funds activation ve pair-lock primary re-entry değişiklikleri.
 
 ## Özelliklerin Pratik Etkisi
 
@@ -148,3 +164,43 @@ Yanlış kullanım:
 
 - Zaman aralığını yanlış seçip farklı marketleri birlikte değerlendirmek.
 - Submit yok ile fill yok durumlarını aynı kategoriye koymak.
+
+### DCA Live
+
+`dca_live_v1`, tek crypto 5m buy node'u değil generic market/outcome DCA action'ıdır. Trigger tarafında `bindingMode="dca_live_only"` kullanılabilir; bu mod outcome condition veya PTB trigger gate değil, downstream DCA action'a market/window bağlamı taşır.
+
+Yanlış kullanım:
+
+- Standard trigger binding arkasına DCA live koymak.
+- `sideMode` ile `selectedOutcomes` sayısını uyumsuz bırakmak.
+- Budget guard vermeden çok slug üzerinde DCA çalıştırmak.
+
+### Adaptive Pair Lock
+
+Pair lock stratejileri artık farklı risk modelleri taşır. `adaptive_max_price_v1` IV edge ve good-miss kanıtı ister; `manual_adaptive_risk_v1` manual PTB üstüne hacim/trend/SL rejimi ekler; `biased_hedge_v1` eşit pair yerine dominant primary + sınırlı hedge kurar.
+
+Yanlış kullanım:
+
+- Her stratejiyi `edge_pairlock_v1` gibi yorumlamak.
+- Telegram sessizliğini karar yok sanmak; notification throttle açık olabilir.
+- Node snapshot okumadan geçmiş kararı bugünkü config ile açıklamak.
+
+### Forensic Analysis
+
+Decision log ve node snapshot, geçmiş order kararını o anki config ile birlikte saklar. Activity cash PnL ise Polymarket activity/redeem etkisini diagnostic PnL'den ayırır.
+
+Yanlış kullanım:
+
+- `cashStatus` pending iken PnL'i nihai sonuç saymak.
+- 48h aralığını uzun vadeli EV sonucu gibi yorumlamak.
+- No-order timeline varken sadece PTB threshold değiştirmek.
+
+### Claim Funds Activation
+
+Claim sweep resolved marketlerde redeemable pozisyonları işler. Builder/relayer modlarında Safe üzerinde USDC.e bekliyorsa funds activation USDC.e -> pUSD wrap işlemini gönderir.
+
+Yanlış kullanım:
+
+- `direct` execution mode'da relayer funds activation beklemek.
+- USDC.e ve pUSD adreslerini aynı collateral gibi yorumlamak.
+- `relayer_wallet_activation_required` hatasını CLOB order hatası sanmak.
