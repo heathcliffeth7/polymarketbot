@@ -35,6 +35,15 @@ function parseJsonArrayField(value: unknown): unknown[] | null {
   }
 }
 
+function hasLevelOutcomeCondition(cfg: Record<string, unknown>): boolean {
+  if (!Array.isArray(cfg.outcomeConditions)) return false;
+  return cfg.outcomeConditions.some((item) => {
+    if (!isRecord(item)) return false;
+    const triggerCondition = toStringValue(item.triggerCondition).trim().toLowerCase();
+    return triggerCondition === 'level_above' || triggerCondition === 'level_below';
+  });
+}
+
 export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeConfigFormState {
   const cfg = isRecord(config) ? config : {};
   const fields: Record<string, string> = {};
@@ -355,6 +364,9 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
 
     const repeatModeRaw = toStringValue(fields.repeatMode || cfg.repeatMode).trim().toLowerCase();
     fields.repeatMode = repeatModeRaw === 'once' ? 'once' : 'loop';
+    if (fields.repeatMode !== 'once' && hasLevelOutcomeCondition(cfg)) {
+      fields.repeatMode = 'once';
+    }
     fields.onceScope = resolveTriggerMarketOnceScope(cfg, marketMode, fields.repeatMode as 'once' | 'loop');
     const bindingModeRaw = toStringValue(cfg.bindingMode).trim().toLowerCase();
     fields.bindingMode =

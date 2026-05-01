@@ -27,6 +27,7 @@ import { updateEntryTimingProfileRowsFormState, updatePtbIvTimeRuleRowsFormState
 import { TimeExitRulesSection } from './time-exit-rules-section';
 import { PairLockSummarySection, TriggerDcaLiveHint, TriggerPairLockHint } from './pair-lock-binding-section';
 import { PairLockStaleConfigSection } from './pair-lock-stale-config-section';
+import { TriggerMarketFiringModeSection } from './trigger-market-firing-mode-section';
 import {
   isPairLockField,
   isPairLockIncompatibleField,
@@ -411,6 +412,9 @@ export function NodeInspectorPanel({
       if (field.key === 'baseUsdc') return dualDcaBaseSizing === 'usdc';
     }
     if (nodeTypeDraft === 'trigger.market_price') {
+      if (field.key === 'repeatMode' || field.key === 'onceScope') {
+        return false;
+      }
       if (field.key === 'marketScope' || field.key === 'marketSelection') {
         return triggerMarketMode === 'auto_scope';
       }
@@ -1318,6 +1322,13 @@ export function NodeInspectorPanel({
                 marketOutcomesLoading={marketOutcomesLoading}
                 actions={actions}
                 nodeType={nodeTypeDraft}
+              />
+            )}
+            {nodeTypeDraft === 'trigger.market_price' && (
+              <TriggerMarketFiringModeSection
+                fields={form.fields}
+                outcomeConditionRows={form.outcomeConditionRows}
+                onUpdateField={actions.onUpdateField}
               />
             )}
             {nodeTypeDraft === 'trigger.market_price' && triggerMarketMode === 'auto_scope' && triggerRepeatMode === 'once' && (

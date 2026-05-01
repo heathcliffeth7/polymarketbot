@@ -232,6 +232,17 @@ interface OutcomeConditionsSectionProps {
 
 export function OutcomeConditionsSection({ rows, marketOutcomes, marketOutcomesLoading, actions, nodeType }: OutcomeConditionsSectionProps) {
   const marketOutcomeByTokenId = new Map(marketOutcomes.map((outcome) => [outcome.token_id, outcome]));
+  const handleTriggerConditionChange = (rowId: string, value: string) => {
+    const triggerCondition = value === '__none__' ? '' : value;
+    actions.onUpdateOutcomeCondition(rowId, { triggerCondition });
+    if (
+      nodeType === 'trigger.market_price' &&
+      (triggerCondition === 'level_above' || triggerCondition === 'level_below')
+    ) {
+      actions.onUpdateField('repeatMode', 'once');
+      actions.onUpdateField('onceScope', 'market');
+    }
+  };
 
   return (
     <div className="space-y-2.5 rounded-lg border border-slate-200/80 bg-gradient-to-b from-slate-50/80 to-white p-3 shadow-sm">
@@ -292,7 +303,7 @@ export function OutcomeConditionsSection({ rows, marketOutcomes, marketOutcomesL
                   <Label className="text-[10px] font-medium text-slate-600">Tetik Kosulu</Label>
                   <Select
                     value={row.triggerCondition || '__none__'}
-                    onValueChange={(v) => actions.onUpdateOutcomeCondition(row.id, { triggerCondition: v === '__none__' ? '' : v })}
+                    onValueChange={(v) => handleTriggerConditionChange(row.id, v)}
                   >
                     <SelectTrigger className="h-8 border-slate-300 bg-white text-[11px] font-medium text-slate-900" size="sm">
                       <SelectValue />

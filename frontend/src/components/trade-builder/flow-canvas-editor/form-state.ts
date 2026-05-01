@@ -63,6 +63,11 @@ function normalizeStopLossTriggerPriceMode(value: string): string {
     : 'best_bid';
 }
 
+function isLevelTriggerCondition(value: unknown): boolean {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return normalized === 'level_above' || normalized === 'level_below';
+}
+
 export function updateNodeFieldState(
   prev: NodeConfigFormState | null,
   nodeType: string,
@@ -763,8 +768,12 @@ export function updateOutcomeConditionState(
   patch: Partial<OutcomeConditionRow>
 ): NodeConfigFormState | null {
   if (!prev) return prev;
+  const nextFields = isLevelTriggerCondition(patch.triggerCondition)
+    ? { ...prev.fields, repeatMode: 'once', onceScope: 'market' }
+    : prev.fields;
   return {
     ...prev,
+    fields: nextFields,
     outcomeConditionRows: prev.outcomeConditionRows.map((r) => (r.id === rowId ? { ...r, ...patch } : r)),
   };
 }
