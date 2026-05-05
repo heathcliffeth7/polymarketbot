@@ -26,7 +26,10 @@ fn tick_trigger_eval_price(
             return sl_trigger_eval_price_for_mode(mode, &runtime_price);
         }
     }
-    Some(trade_builder_trigger_eval_price_for_order(order, &runtime_price))
+    Some(trade_builder_trigger_eval_price_for_order(
+        order,
+        &runtime_price,
+    ))
 }
 
 fn evaluate_tick_triggers_for_token(
@@ -163,6 +166,7 @@ mod tick_trigger_eval_tests {
             ptb_reference_price: None,
             ptb_stop_loss_rules_json: Vec::new(),
             ptb_stop_loss_time_decay_mode: None,
+            ptb_current_price_source: "chainlink".to_string(),
             staged_sl_retry_only_dust: false,
             staged_sl_retry_dust_metric: None,
             staged_sl_retry_dust_value: None,
@@ -277,12 +281,51 @@ mod tick_trigger_eval_tests {
     }
 
     #[test]
+    fn evaluate_tick_triggers_uses_book_bid_for_composite_safe_stop_loss() {
+        let mut cache = ArmedBuilderOrderCache::default();
+
+        let mut order = test_builder_order("sell", Some(9));
+        order.trigger_condition = Some("cross_below".to_string());
+        order.trigger_price = Some(0.44);
+        order.sl_trigger_price_mode = Some("composite_safe".to_string());
+        cache
+            .price_by_token
+            .insert("tok-up".to_string(), vec![order.clone()]);
+
+        let stale_ws_snapshot = MarketDataSnapshot {
+            best_bid: Some(0.47),
+            best_ask: Some(0.49),
+            last_trade_price: Some(0.46),
+            updated_at_ms: 1,
+            last_source: "ws".to_string(),
+        };
+        assert!(
+            evaluate_tick_triggers_for_token("tok-up", &stale_ws_snapshot, &cache).is_empty()
+        );
+
+        let book_snapshot = MarketDataSnapshot {
+            best_bid: Some(0.43),
+            best_ask: Some(0.45),
+            last_trade_price: Some(0.46),
+            updated_at_ms: 2,
+            last_source: "orderbook_snapshot".to_string(),
+        };
+        let triggers = evaluate_tick_triggers_for_token("tok-up", &book_snapshot, &cache);
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].order_id, order.id);
+        assert_eq!(triggers[0].trigger_kind, "sl");
+        assert_eq!(triggers[0].tick_price, 0.43);
+    }
+
+    #[test]
     fn evaluate_tick_triggers_filters_non_child_exit_sells() {
         let mut cache = ArmedBuilderOrderCache::default();
         let mut order = test_builder_order("sell", None);
         order.trigger_condition = Some("cross_above".to_string());
         order.trigger_price = Some(0.80);
-        cache.price_by_token.insert("tok-up".to_string(), vec![order]);
+        cache
+            .price_by_token
+            .insert("tok-up".to_string(), vec![order]);
 
         let snapshot = MarketDataSnapshot {
             best_bid: Some(0.81),

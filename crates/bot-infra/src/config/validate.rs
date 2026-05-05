@@ -212,6 +212,22 @@ pub(crate) fn validate(
         is_hex_address(&claim.collateral_token_address),
         "claim.collateral_token_address must be a valid 0x address"
     );
+    anyhow::ensure!(
+        claim.activate_min_usdc >= 0.0,
+        "claim.activate_min_usdc must be >= 0"
+    );
+    anyhow::ensure!(
+        is_hex_address(&claim.usdce_token_address),
+        "claim.usdce_token_address must be a valid 0x address"
+    );
+    anyhow::ensure!(
+        is_hex_address(&claim.pusd_token_address),
+        "claim.pusd_token_address must be a valid 0x address"
+    );
+    anyhow::ensure!(
+        is_hex_address(&claim.collateral_onramp_address),
+        "claim.collateral_onramp_address must be a valid 0x address"
+    );
     if claim.enabled {
         anyhow::ensure!(
             !claim.rpc_url.trim().is_empty() || !claim.rpc_url_env.trim().is_empty(),

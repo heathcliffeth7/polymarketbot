@@ -31,6 +31,7 @@ export function isPairLockField(key: string): boolean {
     key === 'counterLegMaxPriceCent' ||
     key === 'counterLegPriceToBeatGuardEnabled' ||
     key === 'counterLegPriceToBeatMode' ||
+    key === 'counterLegPriceToBeatCurrentPriceSource' ||
     key === 'counterLegPriceToBeatMaxDiff' ||
     key === 'counterLegPriceToBeatMaxDiffUnit' ||
     key === 'counterLegExecutionFloorGuardEnabled' ||
@@ -41,7 +42,8 @@ export function isPairLockField(key: string): boolean {
     key === 'counterLegTpEnabled' ||
     key === 'counterLegTpPriceCent' ||
     key === 'counterLegNotifyOnTpHit' ||
-    key === 'counterLegPtbStopLossGapUnit'
+    key === 'counterLegPtbStopLossGapUnit' ||
+    key === 'counterLegPtbStopLossCurrentPriceSource'
   );
 }
 
@@ -51,13 +53,6 @@ export function isPairLockIncompatibleField(key: string): boolean {
   }
   return (
     key === 'stagedSlReentryOnlyAfterAllStages' ||
-    key === 'reentryMinPriceCent' ||
-    key === 'reentryMaxPriceCent' ||
-    key === 'reentrySkipCurrentWindow' ||
-    key === 'reentryPriceToBeatMaxDiff' ||
-    key === 'reentryPriceToBeatMaxDiffUnit' ||
-    key === 'reentryThresholdDecay' ||
-    key === 'reentryMaxPriceTightenBps' ||
     key === 'notifyOnTriggerPriceBlocked' ||
     key === 'notifyOnExecutionFloorBlocked'
   );
@@ -98,6 +93,9 @@ export function resolvePairLockStopLossFieldVisibility(
   if (!isPairLockSupportedStopLossField(key)) {
     return null;
   }
+  if (!pairLockEnabled) {
+    return key.startsWith('counterLeg') ? false : null;
+  }
 
   const slEnabled = (fields.slEnabled ?? '').trim().toLowerCase() === 'true';
   const ptbStopLossEnabled = (fields.ptbStopLossEnabled ?? '').trim().toLowerCase() === 'true';
@@ -125,6 +123,8 @@ export function resolvePairLockStopLossFieldVisibility(
       return pairLockEnabled && anyStopLossEnabled;
     case 'reentryMaxAttempts':
     case 'reentryCooldownSec':
+    case 'reentryMinPriceCent':
+    case 'reentryMaxPriceCent':
       return pairLockEnabled && anyStopLossEnabled && reenterOnSlHit;
     case 'counterLegSlEnabled':
     case 'counterLegPtbStopLossEnabled':
@@ -134,6 +134,7 @@ export function resolvePairLockStopLossFieldVisibility(
       return pairLockEnabled && counterLegEnabled && counterLegSlEnabled;
     case 'counterLegPtbStopLossGapUsd':
     case 'counterLegPtbStopLossGapUnit':
+    case 'counterLegPtbStopLossCurrentPriceSource':
     case 'counterLegPtbStopLossTimeDecayMode':
       return pairLockEnabled && counterLegEnabled && counterLegPtbStopLossEnabled;
     case 'counterLegNotifyOnSlHit':
@@ -419,6 +420,7 @@ export function resolvePairLockCounterPtbVisibility(
 ): boolean | null {
   if (
     key !== 'counterLegPriceToBeatMode' &&
+    key !== 'counterLegPriceToBeatCurrentPriceSource' &&
     key !== 'counterLegPriceToBeatMaxDiff' &&
     key !== 'counterLegPriceToBeatMaxDiffUnit'
   ) {
@@ -426,6 +428,11 @@ export function resolvePairLockCounterPtbVisibility(
   }
   const guardEnabled =
     (fields.counterLegPriceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true';
+  if (key === 'counterLegPriceToBeatCurrentPriceSource') {
+    const ptbStopLossEnabled =
+      (fields.counterLegPtbStopLossEnabled ?? '').trim().toLowerCase() === 'true';
+    return pairLockEnabled && (guardEnabled || ptbStopLossEnabled);
+  }
   if (key === 'counterLegPriceToBeatMode') {
     return pairLockEnabled && guardEnabled;
   }

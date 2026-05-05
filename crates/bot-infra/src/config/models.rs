@@ -131,6 +131,12 @@ pub struct ExchangeConfig {
     pub clob_base_url: String,
     #[serde(default = "default_exchange_clob_ws_url")]
     pub clob_ws_url: String,
+    #[serde(default = "default_clob_order_warmup_enabled")]
+    pub clob_order_warmup_enabled: bool,
+    #[serde(default = "default_clob_order_warmup_interval_ms")]
+    pub clob_order_warmup_interval_ms: u64,
+    #[serde(default = "default_clob_order_warmup_cooldown_ms")]
+    pub clob_order_warmup_cooldown_ms: u64,
     #[serde(default = "default_exchange_chain_id")]
     pub chain_id: u64,
     #[serde(default)]
@@ -181,6 +187,9 @@ impl Default for ExchangeConfig {
             gamma_base_url: default_exchange_gamma_base_url(),
             clob_base_url: default_exchange_clob_base_url(),
             clob_ws_url: default_exchange_clob_ws_url(),
+            clob_order_warmup_enabled: default_clob_order_warmup_enabled(),
+            clob_order_warmup_interval_ms: default_clob_order_warmup_interval_ms(),
+            clob_order_warmup_cooldown_ms: default_clob_order_warmup_cooldown_ms(),
             chain_id: default_exchange_chain_id(),
             api_address: String::new(),
             api_key: String::new(),
@@ -377,6 +386,16 @@ pub struct ClaimConfig {
     pub ctf_contract_address: String,
     #[serde(default = "default_claim_collateral_token_address")]
     pub collateral_token_address: String,
+    #[serde(default = "default_claim_auto_activate_funds")]
+    pub auto_activate_funds: bool,
+    #[serde(default = "default_claim_activate_min_usdc")]
+    pub activate_min_usdc: f64,
+    #[serde(default = "default_claim_usdce_token_address")]
+    pub usdce_token_address: String,
+    #[serde(default = "default_claim_pusd_token_address")]
+    pub pusd_token_address: String,
+    #[serde(default = "default_claim_collateral_onramp_address")]
+    pub collateral_onramp_address: String,
     #[serde(default = "default_claim_discovery_interval_sec")]
     pub discovery_interval_sec: u64,
     #[serde(default = "default_claim_positions_page_size")]
@@ -408,6 +427,11 @@ impl Default for ClaimConfig {
             chain_id: default_claim_chain_id(),
             ctf_contract_address: default_claim_ctf_contract_address(),
             collateral_token_address: default_claim_collateral_token_address(),
+            auto_activate_funds: default_claim_auto_activate_funds(),
+            activate_min_usdc: default_claim_activate_min_usdc(),
+            usdce_token_address: default_claim_usdce_token_address(),
+            pusd_token_address: default_claim_pusd_token_address(),
+            collateral_onramp_address: default_claim_collateral_onramp_address(),
             discovery_interval_sec: default_claim_discovery_interval_sec(),
             positions_page_size: default_claim_positions_page_size(),
             positions_max_pages: default_claim_positions_max_pages(),

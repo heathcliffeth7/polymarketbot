@@ -85,4 +85,76 @@ impl PostgresRepository {
             })
             .collect())
     }
+
+    pub async fn trade_builder_adverse_move_stats(
+        &self,
+        input: &TradeBuilderAdverseMoveStatsQuery,
+    ) -> Result<TradeBuilderAdverseMoveStats> {
+        let slope_bucket = input
+            .slope_bucket
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let row = sqlx::query(
+            "WITH raw AS ( \
+                SELECT market_slug, second_ts, window_end, \
+                       EXTRACT(EPOCH FROM (window_end - second_ts))::DOUBLE PRECISION AS remaining_sec, \
+                       CASE WHEN $2 = 'down' THEN ptb_ref_price - chainlink_price ELSE chainlink_price - ptb_ref_price END AS directional_gap, \
+                       CASE WHEN $2 = 'down' THEN no_best_ask ELSE yes_best_ask END AS entry_ask \
+                FROM market_price_second_snapshots \
+                WHERE LOWER(asset) = LOWER($1) \
+                  AND market_slug <> $3 \
+                  AND second_ts >= $4 \
+                  AND second_ts <= $5 \
+                  AND second_ts <= window_end \
+                  AND ptb_ref_price IS NOT NULL \
+                  AND chainlink_price IS NOT NULL \
+             ), scored AS ( \
+                SELECT market_slug, second_ts, remaining_sec, directional_gap, entry_ask, \
+                       MIN(directional_gap) OVER (PARTITION BY market_slug ORDER BY second_ts ASC ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS future_min_gap, \
+                       LAG(directional_gap, 3) OVER (PARTITION BY market_slug ORDER BY second_ts ASC) AS prior_gap_3s \
+                FROM raw \
+             ), candidates AS ( \
+                SELECT market_slug, GREATEST(0.0, directional_gap - future_min_gap) AS adverse_move \
+                FROM scored \
+                WHERE remaining_sec >= $6 \
+                  AND remaining_sec < $7 \
+                  AND entry_ask >= $8 \
+                  AND entry_ask < $9 \
+                  AND ($10::DOUBLE PRECISION IS NULL OR directional_gap >= $10) \
+                  AND ($11::DOUBLE PRECISION IS NULL OR directional_gap < $11) \
+                  AND ( \
+                    $12::TEXT IS NULL \
+                    OR ($12 = 'negative' AND prior_gap_3s IS NOT NULL AND directional_gap - prior_gap_3s < 0.0) \
+                    OR ($12 = 'non_negative' AND prior_gap_3s IS NOT NULL AND directional_gap - prior_gap_3s >= 0.0) \
+                    OR ($12 = 'unknown' AND prior_gap_3s IS NULL) \
+                  ) \
+             ) \
+             SELECT percentile_cont($13) WITHIN GROUP (ORDER BY adverse_move) AS adverse_quantile, \
+                    COUNT(*)::BIGINT AS sample_count, \
+                    COUNT(DISTINCT market_slug)::BIGINT AS market_count \
+             FROM candidates",
+        )
+        .bind(&input.asset)
+        .bind(input.direction.trim().to_ascii_lowercase())
+        .bind(&input.current_market_slug)
+        .bind(input.since)
+        .bind(input.until)
+        .bind(input.remaining_min_sec)
+        .bind(input.remaining_max_sec)
+        .bind(input.price_min)
+        .bind(input.price_max)
+        .bind(input.gap_min)
+        .bind(input.gap_max)
+        .bind(slope_bucket)
+        .bind(input.quantile.clamp(0.0, 1.0))
+        .fetch_one(self.pool())
+        .await?;
+
+        Ok(TradeBuilderAdverseMoveStats {
+            adverse_quantile: row.get("adverse_quantile"),
+            sample_count: row.get("sample_count"),
+            market_count: row.get("market_count"),
+        })
+    }
 }

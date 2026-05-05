@@ -291,9 +291,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
         log_trigger_ws_target_selected(run_id, run_spec.run_id, &fields);
     }
 
-    let mut run_specs = cache_snapshot.run_specs;
-    let token_targets = cache_snapshot.token_targets;
-    let market_targets = cache_snapshot.market_targets;
+    let TradeFlowWsFastPathCache { mut run_specs, token_targets, market_targets, live_gap_prewarm_targets } = cache_snapshot;
     let snapshot_token_ids = selected_targets
         .iter()
         .filter_map(|target| {
@@ -1019,6 +1017,7 @@ async fn enqueue_trade_flow_ws_open_position_price_steps_from_cache(
         cache.run_specs = run_specs;
         cache.token_targets = token_targets;
         cache.market_targets = market_targets;
+        cache.live_gap_prewarm_targets = live_gap_prewarm_targets;
     }
     Ok(touched)
 }
@@ -1033,6 +1032,7 @@ async fn build_trade_flow_ws_fast_path_cache(
     let mut run_specs: Vec<WsOpenPositionPriceRunSpec> = Vec::new();
     let mut token_targets: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     let mut market_targets: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    let mut live_gap_prewarm_targets: HashMap<String, Vec<LiveGapHistoryPrewarmTarget>> = HashMap::new();
     let mut warm_market_slugs: HashSet<String> = HashSet::new();
 
     for definition in definitions {
@@ -1372,7 +1372,7 @@ async fn build_trade_flow_ws_fast_path_cache(
             }
         }
 
-        run_specs.push(WsOpenPositionPriceRunSpec {
+        let run_spec = WsOpenPositionPriceRunSpec {
             run_id: run.id,
             definition_id: run.definition_id,
             version_id: run.version_id,
@@ -1380,7 +1380,9 @@ async fn build_trade_flow_ws_fast_path_cache(
             context,
             nodes,
             context_dirty: slug_changed || !rotations.is_empty() || cycle_window_snapshot_recorded,
-        });
+        };
+        append_live_gap_history_prewarm_targets(&mut live_gap_prewarm_targets, &run_spec, &graph);
+        run_specs.push(run_spec);
     }
 
     for warm_slug in warm_market_slugs {
@@ -1393,6 +1395,7 @@ async fn build_trade_flow_ws_fast_path_cache(
         run_specs,
         token_targets,
         market_targets,
+        live_gap_prewarm_targets,
     })
 }
 

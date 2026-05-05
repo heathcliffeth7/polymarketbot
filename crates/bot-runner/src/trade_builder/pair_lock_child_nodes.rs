@@ -19,7 +19,8 @@ fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Val
         "pairOrphanGraceMs", "pairProtectiveUnwindEnabled", "pairIgnoreStopLossAfterLocked", "notifyOnPairLocked", "notifyOnPairUnwind", "counterLegEnabled",
         "counterLegOutcomeLabel", "counterLegTriggerCondition", "counterLegTriggerPriceCent",
         "counterLegMaxPriceCent", "counterLegPriceToBeatGuardEnabled", "counterLegPriceToBeatMode",
-        "counterLegPriceToBeatMaxDiff", "counterLegPriceToBeatMaxDiffUnit",
+        "counterLegPriceToBeatCurrentPriceSource", "counterLegPriceToBeatMaxDiff",
+        "counterLegPriceToBeatMaxDiffUnit",
         "counterLegExecutionFloorGuardEnabled", "counterLegExecutionFloorPriceCent",
         "counterLegRetryOnPriceToBeatGuardBlock", "counterLegRetryOnExecutionFloorGuardBlock",
         "counterLegRetryOnMaxPriceBlock", "counterLegSizeUsdc", "counterLegTpEnabled",
@@ -27,7 +28,7 @@ fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Val
         "counterLegSlEnabled",
         "counterLegSlPriceCent", "counterLegSlTriggerPriceMode", "counterLegPtbStopLossEnabled",
         "counterLegPtbStopLossGapUsd", "counterLegPtbStopLossGapUnit",
-        "counterLegPtbStopLossTimeDecayMode",
+        "counterLegPtbStopLossCurrentPriceSource", "counterLegPtbStopLossTimeDecayMode",
         "counterLegNotifyOnSlHit", "tpEnabled", "tpPrice", "tpPriceCent", "tpRules",
         "notifyOnTpHit", "slPrice", "slRules", "ptbStopLossRules", "timeExitRules",
         "reentryTriggerNodeKey",
@@ -87,8 +88,56 @@ fn strip_action_place_order_pair_fields(config: &mut serde_json::Map<String, Val
     }
 }
 
+fn copy_pair_lock_primary_reentry_fields(
+    node: &TradeFlowNode,
+    config: &mut serde_json::Map<String, Value>,
+) {
+    for key in [
+        "reentryMinPriceCent",
+        "reentryMaxPriceCent",
+        "reentryPriceToBeatMaxDiff",
+        "reentryPriceToBeatMaxDiffUnit",
+        "reentrySkipCurrentWindow",
+        "reentryThresholdDecay",
+        "reentryMaxPriceTightenBps",
+    ] {
+        if let Some(value) = node.config.get(key) {
+            config.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
 fn pair_lock_child_price_cent(price: f64) -> f64 {
     ((price * 100.0) * 1000.0).round() / 1000.0
+}
+
+fn normalize_child_ptb_stop_loss_current_price_source(config: &mut serde_json::Map<String, Value>) {
+    let ptb_stop_loss_active =
+        config
+            .get("ptbStopLossEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || config
+                .get("ptbStopLossRules")
+                .and_then(Value::as_array)
+                .is_some_and(|rules| !rules.is_empty());
+    if !ptb_stop_loss_active {
+        config.remove("ptbStopLossCurrentPriceSource");
+        return;
+    }
+
+    let valid_source = |key: &str| {
+        config
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .filter(|value| matches!(value.as_str(), "chainlink" | "binance" | "coinbase"))
+    };
+    let source = valid_source("ptbStopLossCurrentPriceSource")
+        .or_else(|| valid_source("priceToBeatCurrentPriceSource"))
+        .unwrap_or_else(|| "chainlink".to_string());
+    config.insert("ptbStopLossCurrentPriceSource".to_string(), json!(source));
 }
 
 fn build_pair_lock_single_leg_node(
@@ -113,6 +162,7 @@ fn build_pair_lock_single_leg_node(
     config.insert("outcomeLabel".to_string(), json!(outcome_label));
     config.insert("reentryTriggerNodeKey".to_string(), json!(trigger_node_key));
     copy_pair_lock_primary_take_profit_fields(node, &mut config);
+    copy_pair_lock_primary_reentry_fields(node, &mut config);
     if let Some(value) = node.config.get("slRules") {
         config.insert("slRules".to_string(), value.clone());
     }
@@ -146,6 +196,7 @@ fn build_pair_lock_single_leg_node(
             manual.diagnostics.clone(),
         );
     }
+    normalize_child_ptb_stop_loss_current_price_source(&mut config);
 
     TradeFlowNode {
         key: node.key.clone(),
@@ -178,6 +229,14 @@ fn build_pair_lock_counter_leg_node(
     config.insert("tokenId".to_string(), json!(&counter.token_id));
     config.insert("outcomeLabel".to_string(), json!(&counter.outcome_label));
     config.insert("reentryTriggerNodeKey".to_string(), json!(trigger_node_key));
+    config.insert(
+        ACTION_PLACE_ORDER_INTERNAL_PAIR_LOCK_CHILD_ROLE_KEY.to_string(),
+        json!(TRADE_BUILDER_PAIR_ROLE_COUNTER_CANDIDATE),
+    );
+    config.insert(
+        ACTION_PLACE_ORDER_INTERNAL_INITIAL_STATUS_KEY.to_string(),
+        json!(ACTION_PLACE_ORDER_INTERNAL_BLOCKED_STATUS),
+    );
     copy_pair_lock_counter_take_profit_fields(node, &mut config);
 
     if let Some(counter_size) = pair_lock.counter_leg_size_usdc {
@@ -195,6 +254,7 @@ fn build_pair_lock_counter_leg_node(
         ("counterLegMaxPriceCent", "maxPriceCent"),
         ("counterLegPriceToBeatGuardEnabled", "priceToBeatGuardEnabled"),
         ("counterLegPriceToBeatMode", "priceToBeatMode"),
+        ("counterLegPriceToBeatCurrentPriceSource", "priceToBeatCurrentPriceSource"),
         ("counterLegPriceToBeatMaxDiff", "priceToBeatMaxDiff"),
         ("counterLegPriceToBeatMaxDiffUnit", "priceToBeatMaxDiffUnit"),
         ("counterLegExecutionFloorGuardEnabled", "executionFloorGuardEnabled"),
@@ -211,6 +271,7 @@ fn build_pair_lock_counter_leg_node(
         ("counterLegPtbStopLossEnabled", "ptbStopLossEnabled"),
         ("counterLegPtbStopLossGapUsd", "ptbStopLossGapUsd"),
         ("counterLegPtbStopLossGapUnit", "ptbStopLossGapUnit"),
+        ("counterLegPtbStopLossCurrentPriceSource", "ptbStopLossCurrentPriceSource"),
         ("counterLegPtbStopLossTimeDecayMode", "ptbStopLossTimeDecayMode"),
         ("counterLegNotifyOnSlHit", "notifyOnSlHit"),
     ] {
@@ -220,6 +281,7 @@ fn build_pair_lock_counter_leg_node(
             config.remove(target_key);
         }
     }
+    normalize_child_ptb_stop_loss_current_price_source(&mut config);
     if let Some(max_price) =
         manual_adaptive_risk_override.and_then(|manual| manual.counter_max_price)
     {
@@ -260,4 +322,29 @@ async fn cancel_pair_lock_order_if_created(
     let _ = repo
         .set_trade_builder_order_status(builder_order_id, "canceled", Some(reason))
         .await;
+}
+
+async fn hold_pair_lock_counter_after_session_attach(
+    repo: &PostgresRepository,
+    pair_session_id: i64,
+    primary_order_id: i64,
+    counter_order_id: i64,
+) -> Result<()> {
+    repo.set_trade_builder_order_status(
+        counter_order_id,
+        "inventory_pending",
+        Some("pair_counter_waiting_primary_fill"),
+    )
+    .await?;
+    repo.append_trade_builder_order_event(
+        counter_order_id,
+        "pair_lock_counter_waiting_primary_fill",
+        &json!({
+            "pair_session_id": pair_session_id,
+            "primary_order_id": primary_order_id,
+            "reason": "counter_session_attached_before_primary_fill",
+            "status_after": "inventory_pending",
+        }),
+    )
+    .await
 }

@@ -117,7 +117,10 @@ async fn maybe_handle_trade_builder_order_eligibility_window(
                     "eligible_before_at": order.eligible_before_at.as_ref().map(|value| value.to_rfc3339()),
                 }),
                 TradeBuilderDecisionLogOptions {
-                    idempotency_key: Some(format!("ORDER_EXPIRED:{}:outside_cycle_window", order.id)),
+                    idempotency_key: Some(format!(
+                        "ORDER_EXPIRED:{}:outside_cycle_window",
+                        order.id
+                    )),
                     ..TradeBuilderDecisionLogOptions::default()
                 },
             );
@@ -400,8 +403,15 @@ async fn process_trade_builder_order(
 
     let previous_price = order.last_seen_price;
     let runtime_price_fetch_started = Instant::now();
+    let exit_fast_submit_quote = get_exit_fast_submit_quote_for_order(&order, now);
     let fresh_runtime_snapshot = trade_builder_runtime_snapshot_from_order(&order)
         .filter(|snapshot| trade_builder_runtime_snapshot_is_fresh(snapshot, now));
+    let submit_fast_lane = trade_builder_submit_fast_lane_decision(
+        &order,
+        now,
+        fresh_runtime_snapshot.as_ref(),
+        exit_fast_submit_quote.as_ref(),
+    );
     let snapshot_age_ms = fresh_runtime_snapshot
         .as_ref()
         .map(|snapshot| trade_builder_runtime_snapshot_age_ms(snapshot, now));
@@ -410,12 +420,24 @@ async fn process_trade_builder_order(
         if let Some(runtime_price) = trade_builder_runtime_price_from_snapshot(snapshot) {
             TradeBuilderRuntimePriceFetch::Resolved(runtime_price)
         } else if use_book_aware_runtime_price {
-            resolve_trade_builder_fast_runtime_price(ws, client, &order).await?
+            resolve_trade_builder_fast_runtime_price(
+                ws,
+                client,
+                &order,
+                exit_fast_submit_quote.as_ref(),
+            )
+            .await?
         } else {
             resolve_trade_builder_runtime_price(ws, client, &order).await?
         }
     } else if use_book_aware_runtime_price {
-        resolve_trade_builder_fast_runtime_price(ws, client, &order).await?
+        resolve_trade_builder_fast_runtime_price(
+            ws,
+            client,
+            &order,
+            exit_fast_submit_quote.as_ref(),
+        )
+        .await?
     } else {
         resolve_trade_builder_runtime_price(ws, client, &order).await?
     };
@@ -467,17 +489,18 @@ async fn process_trade_builder_order(
     let persisted_last_seen_price =
         trade_builder_last_seen_price_for_order(&order, trigger_eval_price, execution_price);
     let ptb_stop_loss_evaluation = trade_builder_evaluate_ptb_stop_loss(&order);
-    if let Some(reference_price) = ptb_stop_loss_evaluation
-        .as_ref()
-        .and_then(|evaluation| trade_builder_ptb_reference_price_persist_candidate(&order, evaluation))
-    {
+    let live_gap_stop_loss_evaluation = trade_builder_evaluate_live_gap_stop_loss(repo, &order).await?;
+    if let Some(reference_price) = ptb_stop_loss_evaluation.as_ref().and_then(|evaluation| {
+        trade_builder_ptb_reference_price_persist_candidate(&order, evaluation)
+    }) {
         repo.set_trade_builder_order_ptb_reference_price(order.id, reference_price)
             .await?;
         order.ptb_reference_price = Some(reference_price);
     }
-    let effective_trigger_current_price = ptb_stop_loss_evaluation
+    let effective_trigger_current_price = live_gap_stop_loss_evaluation
         .as_ref()
-        .and_then(|evaluation| evaluation.current_chainlink_price)
+        .and_then(|evaluation| evaluation.current_price)
+        .or_else(|| ptb_stop_loss_evaluation.as_ref().and_then(|evaluation| evaluation.current_price))
         .unwrap_or(trigger_eval_price);
     if let Some(runtime_warning) = runtime_price.runtime_warning.as_deref() {
         repo.append_trade_builder_order_event(
@@ -498,9 +521,13 @@ async fn process_trade_builder_order(
         )
         .await?;
     }
-    let sl_preemption =
-        maybe_preempt_trade_builder_take_profit_for_stop_loss(repo, cfg, &mut order, &runtime_price)
-            .await?;
+    let sl_preemption = maybe_preempt_trade_builder_take_profit_for_stop_loss(
+        repo,
+        cfg,
+        &mut order,
+        &runtime_price,
+    )
+    .await?;
     if sl_preemption.tp_preempted {
         let mut ready_sl_futures = sl_preemption
             .ready_sl_order_ids
@@ -598,7 +625,12 @@ async fn process_trade_builder_order(
         }
     }
 
-    let trigger_evaluation = if let Some(evaluation) = ptb_stop_loss_evaluation.as_ref() {
+    let trigger_evaluation = if let Some(evaluation) = live_gap_stop_loss_evaluation.as_ref() {
+        TradeBuilderTriggerEvaluation {
+            should_trigger: evaluation.should_trigger,
+            first_tick_threshold_used: false,
+        }
+    } else if let Some(evaluation) = ptb_stop_loss_evaluation.as_ref() {
         TradeBuilderTriggerEvaluation {
             should_trigger: evaluation.should_trigger,
             first_tick_threshold_used: evaluation.should_trigger && previous_price.is_none(),
@@ -725,6 +757,12 @@ async fn process_trade_builder_order(
             ) {
                 append_trade_builder_ptb_stop_loss_payload(payload, evaluation);
             }
+            if let (Some(payload), Some(evaluation)) = (
+                trigger_not_met_payload.as_object_mut(),
+                live_gap_stop_loss_evaluation.as_ref(),
+            ) {
+                append_trade_builder_live_gap_stop_loss_payload(payload, evaluation);
+            }
             repo.set_trade_builder_order_status(order.id, "armed", None)
                 .await?;
             repo.append_trade_builder_order_event(
@@ -761,6 +799,13 @@ async fn process_trade_builder_order(
     repo.set_trade_builder_last_seen_price(order.id, persisted_last_seen_price)
         .await?;
     order.last_seen_price = Some(persisted_last_seen_price);
+    if let Some(evaluation) = live_gap_stop_loss_evaluation
+        .as_ref()
+        .filter(|evaluation| evaluation.should_trigger)
+    {
+        repo.append_trade_builder_order_event(order.id, "live_gap_stop_loss_triggered", &json!({"current_price": effective_trigger_current_price, "execution_price": execution_price})).await?;
+        trade_builder_spawn_decision_log(repo, &order, "LIVE_GAP_STOP_LOSS_TRIGGERED", json!({"live_gap_stop_loss": {"directional_gap": evaluation.directional_gap, "threshold_gap_usd": evaluation.threshold_gap_usd, "remaining_sec": evaluation.remaining_sec}}), TradeBuilderDecisionLogOptions::default());
+    }
     info!(
         run_id,
         builder_order_id = order.id,
@@ -840,18 +885,14 @@ async fn process_trade_builder_order(
         &mut order,
         effective_trigger_current_price,
         ptb_stop_loss_evaluation.as_ref(),
+        live_gap_stop_loss_evaluation.as_ref(),
     )
     .await?;
     if let Some(evaluation) = ptb_stop_loss_evaluation
         .as_ref()
         .filter(|evaluation| evaluation.should_trigger)
     {
-        trade_builder_spawn_ptb_stop_loss_triggered_log(
-            repo,
-            &order,
-            evaluation,
-            execution_price,
-        );
+        trade_builder_spawn_ptb_stop_loss_triggered_log(repo, &order, evaluation, execution_price);
     }
     if order.active_exchange_order_id.is_none() {
         let _ = maybe_dispatch_trade_builder_parallel_exit_batch(
@@ -864,7 +905,11 @@ async fn process_trade_builder_order(
         )
         .await?;
     }
-    let fee_rate_bps = resolve_trade_builder_order_fee_rate_bps(repo, client, &mut order).await?;
+    let fee_rate_bps = if submit_fast_lane.use_fast_lane {
+        submit_fast_lane.fee_rate_bps
+    } else {
+        resolve_trade_builder_order_fee_rate_bps(repo, client, &mut order).await?
+    };
 
     let size_basis = normalize_trade_builder_size_basis(&order.size_basis);
     let (
@@ -922,7 +967,10 @@ async fn process_trade_builder_order(
             submit_path,
             runtime_price_fetch_ms,
             snapshot_age_ms,
+            submit_fast_lane: submit_fast_lane.use_fast_lane,
+            submit_fast_lane_reason: submit_fast_lane.reason,
         },
+        exit_fast_submit_quote.as_ref(),
     )
     .await
 }
@@ -1015,6 +1063,7 @@ mod eligibility_window_tests {
             ptb_reference_price: None,
             ptb_stop_loss_rules_json: Vec::new(),
             ptb_stop_loss_time_decay_mode: None,
+            ptb_current_price_source: "chainlink".to_string(),
             staged_sl_retry_only_dust: false,
             staged_sl_retry_dust_metric: None,
             staged_sl_retry_dust_value: None,

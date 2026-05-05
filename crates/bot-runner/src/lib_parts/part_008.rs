@@ -47,6 +47,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
     tokio::spawn(run_market_second_snapshot_recorder(
         repo.clone(),
         client.clone(),
+        None,
         snapshot_rx,
     ));
     tokio::spawn(run_market_trade_volume_recorder(repo.clone(), volume_rx));

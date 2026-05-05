@@ -513,6 +513,7 @@ async fn create_trade_builder_price_exit_child_order(
             None,
             None,
             None,
+            None,
             false,
             None,
             None,
@@ -668,6 +669,7 @@ async fn create_trade_builder_ptb_stop_loss_child_order(
             ptb_reference_price,
             None,
             parent_order.ptb_stop_loss_time_decay_mode.as_deref(),
+            Some(parent_order.ptb_current_price_source.as_str()),
             false,
             None,
             None,
@@ -721,6 +723,7 @@ async fn create_trade_builder_ptb_stop_loss_child_order(
             "execution_price": execution_price,
             "ptb_stop_loss_gap_usd": ptb_stop_loss_gap_usd,
             "ptb_reference_price": ptb_reference_price,
+            "ptb_current_price_source": parent_order.ptb_current_price_source,
     });
     repo.append_trade_builder_order_event(parent_order.id, "sl_sell_created", &child_event_payload)
         .await?;
@@ -861,11 +864,14 @@ async fn finalize_builder_fill(
     } else {
         actual_fill_qty
     };
+    let live_gap_stop_loss_configured =
+        order.side == "buy" && trade_builder_order_has_live_gap_stop_loss_metadata(repo, order.id).await?;
     if order.side == "buy"
         && (order.tp_enabled
             || order.sl_enabled
             || order.ptb_stop_loss_gap_usd.is_some()
-            || !order.ptb_stop_loss_rules_json.is_empty())
+            || !order.ptb_stop_loss_rules_json.is_empty()
+            || live_gap_stop_loss_configured)
     {
         anyhow::ensure!(
             canonical_entry_qty > 0.0,
@@ -1030,10 +1036,7 @@ async fn finalize_builder_fill(
         TradeBuilderDecisionLogOptions {
             idempotency_key: Some(format!(
                 "ORDER_FILLED:{}:{}:{}:{}",
-                order.id,
-                exchange_order_id,
-                canonical_entry_qty,
-                next_trigger_count
+                order.id, exchange_order_id, canonical_entry_qty, next_trigger_count
             )),
             exchange_order_id: Some(exchange_order_id.to_string()),
             fill_event_id: Some(fill_event_id),
@@ -1312,13 +1315,19 @@ async fn finalize_builder_fill(
                         execution_price,
                         child_sizing,
                         ptb_stop_loss_gap_usd,
-                        order
-                            .ptb_reference_price
-                            .or_else(|| trade_builder_cached_ptb_reference_price(&order.market_slug)),
+                        order.ptb_reference_price.or_else(|| {
+                            trade_builder_cached_ptb_reference_price(&order.market_slug)
+                        }),
                         None,
                     )
                     .await?;
                 }
+            }
+        }
+
+        if stop_loss_surface_active && live_gap_stop_loss_configured {
+            if create_trade_builder_live_gap_stop_loss_child_if_configured(repo, ws, order, canonical_entry_qty, execution_price).await?.is_some() {
+                stream_union_needs_refresh = true;
             }
         }
 

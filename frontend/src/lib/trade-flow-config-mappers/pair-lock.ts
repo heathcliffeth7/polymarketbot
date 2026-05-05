@@ -1,6 +1,6 @@
 import { safeJsonStringify, toStringValue } from './utils';
 import { normalizePtbStopLossGapUnit } from './ptb-stop-loss';
-import { normalizePtbMode } from './ptb-modes';
+import { normalizeOptionalPtbCurrentPriceSourceConfig, normalizePtbCurrentPriceSource, normalizePtbMode } from './ptb-modes';
 
 const ADAPTIVE_MAX_PRICE_CONFIG_KEYS = [
   'adaptiveMaxPriceMissCount',
@@ -144,6 +144,7 @@ export const PAIR_LOCK_CONFIG_KEYS = [
   'counterLegMaxPriceCent',
   'counterLegPriceToBeatGuardEnabled',
   'counterLegPriceToBeatMode',
+  'counterLegPriceToBeatCurrentPriceSource',
   'counterLegPriceToBeatMaxDiff',
   'counterLegPriceToBeatMaxDiffUnit',
   'counterLegExecutionFloorGuardEnabled',
@@ -161,6 +162,7 @@ export const PAIR_LOCK_CONFIG_KEYS = [
   'counterLegPtbStopLossEnabled',
   'counterLegPtbStopLossGapUsd',
   'counterLegPtbStopLossGapUnit',
+  'counterLegPtbStopLossCurrentPriceSource',
   'counterLegPtbStopLossTimeDecayMode',
   'counterLegNotifyOnSlHit',
 ] as const;
@@ -177,12 +179,15 @@ export const PAIR_LOCK_SUPPORTED_STOP_LOSS_FIELD_KEYS = [
   'reenterOnSlHit',
   'reentryMaxAttempts',
   'reentryCooldownSec',
+  'reentryMinPriceCent',
+  'reentryMaxPriceCent',
   'counterLegSlEnabled',
   'counterLegSlPriceCent',
   'counterLegSlTriggerPriceMode',
   'counterLegPtbStopLossEnabled',
   'counterLegPtbStopLossGapUsd',
   'counterLegPtbStopLossGapUnit',
+  'counterLegPtbStopLossCurrentPriceSource',
   'counterLegPtbStopLossTimeDecayMode',
   'counterLegNotifyOnSlHit',
 ] as const;
@@ -190,18 +195,21 @@ export const PAIR_LOCK_SUPPORTED_STOP_LOSS_FIELD_KEYS = [
 export const PAIR_LOCK_UNSUPPORTED_EXIT_FIELD_KEYS = [
   'timeExitRules',
   'stagedSlReentryOnlyAfterAllStages',
-  'reentryMinPriceCent',
-  'reentryMaxPriceCent',
-  'reentrySkipCurrentWindow',
-  'reentryPriceToBeatMaxDiff',
-  'reentryPriceToBeatMaxDiffUnit',
-  'reentryThresholdDecay',
-  'reentryMaxPriceTightenBps',
   'counterLegSlRules',
   'counterLegPtbStopLossRules',
   'counterLegReenterOnSlHit',
   'counterLegReentryMaxAttempts',
   'counterLegReentryCooldownSec',
+] as const;
+
+const PAIR_LOCK_PRIMARY_ADVANCED_REENTRY_FIELD_KEYS = [
+  'reentrySkipCurrentWindow',
+  'reentryMinPriceCent',
+  'reentryMaxPriceCent',
+  'reentryPriceToBeatMaxDiff',
+  'reentryPriceToBeatMaxDiffUnit',
+  'reentryThresholdDecay',
+  'reentryMaxPriceTightenBps',
 ] as const;
 
 function applyExplicitCounterStopLossFormDefaults(fields: Record<string, string>): void {
@@ -375,7 +383,7 @@ export function applyPairLockFormDefaults(
   cfg: Record<string, unknown>
 ): void {
   const modeRaw = toStringValue(cfg.mode).trim().toLowerCase();
-  fields.mode = modeRaw === 'pair_lock' ? 'pair_lock' : 'single';
+  fields.mode = modeRaw === 'pair_lock' ? 'pair_lock' : modeRaw || 'single';
   if (fields.mode !== 'pair_lock') {
     return;
   }
@@ -533,6 +541,29 @@ function normalizeOptionalIntegerField(
   }
   const value = Number(raw);
   if (Number.isInteger(value) && value >= min && value <= max) {
+    config[key] = value;
+  } else {
+    delete config[key];
+  }
+}
+
+function deletePairLockPrimaryAdvancedReentryConfig(config: Record<string, unknown>): void {
+  for (const key of PAIR_LOCK_PRIMARY_ADVANCED_REENTRY_FIELD_KEYS) {
+    delete config[key];
+  }
+}
+
+function normalizeOptionalCentField(
+  config: Record<string, unknown>,
+  key: string
+): void {
+  const raw = toStringValue(config[key]).trim();
+  if (!raw) {
+    delete config[key];
+    return;
+  }
+  const value = Number(raw);
+  if (Number.isFinite(value) && value > 0 && value <= 100) {
     config[key] = value;
   } else {
     delete config[key];
@@ -830,6 +861,9 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
 
   if (config.counterLegPriceToBeatGuardEnabled === true) {
     config.counterLegPriceToBeatMode = normalizePtbMode(config.counterLegPriceToBeatMode);
+    config.counterLegPriceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(
+      config.counterLegPriceToBeatCurrentPriceSource
+    );
     if (config.counterLegPriceToBeatMode === 'manual') {
       const counterLegPriceToBeatUnitRaw = toStringValue(config.counterLegPriceToBeatMaxDiffUnit).trim().toLowerCase();
       config.counterLegPriceToBeatMaxDiffUnit = counterLegPriceToBeatUnitRaw === 'cent' ? 'cent' : 'usd';
@@ -839,6 +873,9 @@ export function normalizePairLockBuildConfig(config: Record<string, unknown>): v
     }
   } else {
     delete config.counterLegPriceToBeatMode;
+    if (config.counterLegPtbStopLossEnabled !== true) {
+      delete config.counterLegPriceToBeatCurrentPriceSource;
+    }
     delete config.counterLegPriceToBeatMaxDiff;
     delete config.counterLegPriceToBeatMaxDiffUnit;
   }
@@ -876,9 +913,17 @@ export function normalizePairLockStopLossBuildConfig(
     delete config.ptbStopLossEnabled;
     delete config.ptbStopLossGapUsd;
     delete config.ptbStopLossGapUnit;
+    delete config.ptbStopLossCurrentPriceSource;
     delete config.ptbStopLossRules;
     delete config.ptbStopLossTimeDecayMode;
+    if (config.priceToBeatGuardEnabled !== true) {
+      delete config.priceToBeatCurrentPriceSource;
+    }
   } else {
+    config.priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(
+      config.priceToBeatCurrentPriceSource
+    );
+    normalizeOptionalPtbCurrentPriceSourceConfig(config, 'ptbStopLossCurrentPriceSource', true);
     config.ptbStopLossGapUnit = normalizePtbStopLossGapUnit(config.ptbStopLossGapUnit);
     const ptbStopLossTimeDecayModeRaw = toStringValue(config.ptbStopLossTimeDecayMode)
       .trim()
@@ -908,8 +953,16 @@ export function normalizePairLockStopLossBuildConfig(
   if (!counterPtbStopLossEnabled) {
     delete config.counterLegPtbStopLossGapUsd;
     delete config.counterLegPtbStopLossGapUnit;
+    delete config.counterLegPtbStopLossCurrentPriceSource;
     delete config.counterLegPtbStopLossTimeDecayMode;
+    if (config.counterLegPriceToBeatGuardEnabled !== true) {
+      delete config.counterLegPriceToBeatCurrentPriceSource;
+    }
   } else {
+    config.counterLegPriceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(
+      config.counterLegPriceToBeatCurrentPriceSource
+    );
+    normalizeOptionalPtbCurrentPriceSourceConfig(config, 'counterLegPtbStopLossCurrentPriceSource', true);
     config.counterLegPtbStopLossGapUnit = normalizePtbStopLossGapUnit(
       config.counterLegPtbStopLossGapUnit,
       config.ptbStopLossGapUnit === 'cent' ? 'cent' : 'usd'
@@ -931,6 +984,7 @@ export function normalizePairLockStopLossBuildConfig(
     delete config.reenterOnSlHit;
     delete config.reentryMaxAttempts;
     delete config.reentryCooldownSec;
+    deletePairLockPrimaryAdvancedReentryConfig(config);
     return;
   }
 
@@ -941,6 +995,7 @@ export function normalizePairLockStopLossBuildConfig(
   if (config.reenterOnSlHit !== true) {
     delete config.reentryMaxAttempts;
     delete config.reentryCooldownSec;
+    deletePairLockPrimaryAdvancedReentryConfig(config);
     return;
   }
 
@@ -960,6 +1015,61 @@ export function normalizePairLockStopLossBuildConfig(
     config.reentryCooldownSec = reentryCooldownSec;
   } else {
     delete config.reentryCooldownSec;
+  }
+
+  normalizeOptionalCentField(config, 'reentryMinPriceCent');
+  normalizeOptionalCentField(config, 'reentryMaxPriceCent');
+
+  if (config.priceToBeatGuardEnabled === true) {
+    const reentryPriceToBeatMaxDiff = Number(
+      toStringValue(config.reentryPriceToBeatMaxDiff).trim()
+    );
+    if (Number.isFinite(reentryPriceToBeatMaxDiff) && reentryPriceToBeatMaxDiff > 0) {
+      config.reentryPriceToBeatMaxDiff = reentryPriceToBeatMaxDiff;
+      const unitRaw = toStringValue(config.reentryPriceToBeatMaxDiffUnit)
+        .trim()
+        .toLowerCase();
+      if (unitRaw === 'usd' || unitRaw === 'cent') {
+        config.reentryPriceToBeatMaxDiffUnit = unitRaw;
+      } else {
+        delete config.reentryPriceToBeatMaxDiffUnit;
+      }
+    } else {
+      delete config.reentryPriceToBeatMaxDiff;
+      delete config.reentryPriceToBeatMaxDiffUnit;
+    }
+
+    const reentryThresholdDecay = Number(toStringValue(config.reentryThresholdDecay).trim());
+    if (
+      Number.isFinite(reentryThresholdDecay) &&
+      reentryThresholdDecay > 0 &&
+      reentryThresholdDecay <= 1
+    ) {
+      config.reentryThresholdDecay = reentryThresholdDecay;
+    } else {
+      delete config.reentryThresholdDecay;
+    }
+  } else {
+    delete config.reentryPriceToBeatMaxDiff;
+    delete config.reentryPriceToBeatMaxDiffUnit;
+    delete config.reentryThresholdDecay;
+  }
+
+  if (config.reentrySkipCurrentWindow !== true) {
+    delete config.reentrySkipCurrentWindow;
+  }
+
+  const reentryMaxPriceTightenBps = Number(
+    toStringValue(config.reentryMaxPriceTightenBps).trim()
+  );
+  if (
+    Number.isInteger(reentryMaxPriceTightenBps) &&
+    reentryMaxPriceTightenBps >= 0 &&
+    reentryMaxPriceTightenBps <= 10_000
+  ) {
+    config.reentryMaxPriceTightenBps = reentryMaxPriceTightenBps;
+  } else {
+    delete config.reentryMaxPriceTightenBps;
   }
 }
 

@@ -10,7 +10,11 @@ use ethers::{
 use hmac::{Hmac, Mac as _};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{collections::HashMap, env, sync::LazyLock};
+use std::{
+    collections::HashMap,
+    env,
+    sync::{LazyLock, Mutex},
+};
 use tracing::debug;
 
 pub const POLY_ADDRESS: &str = "POLY_ADDRESS";
@@ -64,6 +68,9 @@ pub struct ClobHeaderSigner {
     pub creds: ApiCredentials,
 }
 
+static CLOB_API_SECRET_DECODE_CACHE: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 impl HeaderSigner for ClobHeaderSigner {
     fn signed_headers(
         &self,
@@ -77,7 +84,7 @@ impl HeaderSigner for ClobHeaderSigner {
         // signature = base64.urlsafe_b64encode(HMAC_SHA256(base64.urlsafe_b64decode(secret), message))
         // NOTE: Polymarket CLOB API expects only the path (no query string) in the HMAC message.
         let sign_path = request_path.split('?').next().unwrap_or(request_path);
-        let decoded_secret = decode_clob_api_secret(&self.creds.secret)?;
+        let decoded_secret = cached_decode_clob_api_secret(&self.creds.secret)?;
         let mut mac = Hmac::<Sha256>::new_from_slice(&decoded_secret)?;
         let mut message = format!("{timestamp}{method}{sign_path}");
         if let Some(raw) = body {
@@ -138,6 +145,24 @@ fn decode_clob_api_secret(raw: &str) -> Result<Vec<u8>> {
     URL_SAFE
         .decode(normalized.as_bytes())
         .context("decode POLY API secret as base64url")
+}
+
+fn cached_decode_clob_api_secret(raw: &str) -> Result<Vec<u8>> {
+    let key = raw.trim().to_string();
+    if let Ok(cache) = CLOB_API_SECRET_DECODE_CACHE.lock() {
+        if let Some(decoded) = cache.get(&key) {
+            return Ok(decoded.clone());
+        }
+    }
+
+    let decoded = decode_clob_api_secret(&key)?;
+    if let Ok(mut cache) = CLOB_API_SECRET_DECODE_CACHE.lock() {
+        if cache.len() > 16 {
+            cache.clear();
+        }
+        cache.insert(key, decoded.clone());
+    }
+    Ok(decoded)
 }
 
 fn masked_prefix(raw: &str, take: usize) -> String {

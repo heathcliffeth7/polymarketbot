@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { NodeConfigFormState } from '@/lib/trade-flow-config-mappers';
-import { updateOutcomeConditionState } from './form-state';
+import { updateNodeFieldState, updateOutcomeConditionState } from './form-state';
 
 function baseForm(): NodeConfigFormState {
   return {
@@ -53,4 +53,28 @@ test('updateOutcomeConditionState keeps repeat mode when switching to cross trig
   assert.equal(next?.fields.repeatMode, 'loop');
   assert.equal(next?.fields.onceScope, '');
   assert.equal(next?.outcomeConditionRows[0]?.triggerCondition, 'cross_below');
+});
+
+test('updateNodeFieldState applies live gap collector mode defaults', () => {
+  const form = baseForm();
+  form.fields.side = 'sell';
+  form.fields.executionMode = 'limit';
+  form.fields.maxPriceCent = '70';
+
+  const next = updateNodeFieldState(
+    form,
+    'action.place_order',
+    'mode',
+    'live_gap_collector_v1'
+  );
+
+  assert.equal(next?.fields.mode, 'live_gap_collector_v1');
+  assert.equal(next?.fields.side, 'buy');
+  assert.equal(next?.fields.executionMode, 'market');
+  assert.equal(next?.fields.tpEnabled, 'true');
+  assert.equal(next?.fields.tpPriceCent, '98');
+  assert.equal(next?.fields.maxPriceCent, '93');
+  assert.equal(next?.fields.liveGapCollectorEnabled, 'true');
+  assert.equal(next?.fields.notifyOnLiveGapCollectorDecision, 'true');
+  assert.equal(next?.fields.liveGapCollectorWindowStartSec, '220');
 });

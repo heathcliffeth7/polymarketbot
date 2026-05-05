@@ -58,6 +58,15 @@ export async function getDashboardData(
         claimed: 0,
       },
       lastError: null,
+      fundsActivation: {
+        autoActivate: false,
+        canActivate: false,
+        minUsdc: 0.01,
+        usdcEBalance: 0,
+        pUsdBalance: 0,
+        lastError: null,
+        refreshedAt: null,
+      },
       refreshedAt: null,
     },
   };

@@ -101,8 +101,11 @@ pub struct OrderAck {
     pub reject_reason: Option<String>,
     pub raw_status: Option<String>,
     pub exchange_ts: Option<i64>,
+    pub prepare_ms: Option<i64>,
     pub sign_ms: Option<i64>,
+    pub header_sign_ms: Option<i64>,
     pub http_ms: Option<i64>,
+    pub decode_ms: Option<i64>,
     pub total_ms: Option<i64>,
 }
 
@@ -188,6 +191,11 @@ pub trait ClobRestClient: Send + Sync {
     async fn list_open_orders(&self, market: Option<&str>) -> Result<Vec<OrderInfo>>;
     async fn list_fills(&self, next_cursor: Option<&str>) -> Result<Vec<FillInfo>>;
     async fn get_balance(&self) -> Result<f64>;
+
+    async fn warmup_order_connection(&self) -> Result<()> {
+        let _ = self.list_open_orders(None).await?;
+        Ok(())
+    }
 
     async fn get_token_inventory(&self, _token_id: &str) -> Result<Option<f64>> {
         Ok(None)

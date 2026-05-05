@@ -188,6 +188,105 @@ fn relayer_rate_limit_cooldown_uses_minimum_and_backoff() {
 }
 
 #[test]
+fn funds_activation_only_runs_for_enabled_safe_relayer_claims() {
+    let safe = "0x38562e48f0e8ce1c1c7931b482d6e2145937e452";
+    assert!(should_attempt_funds_activation(
+        true,
+        ClaimExecutionMode::RelayerApiKey,
+        Some(safe),
+        safe,
+    ));
+    assert!(should_attempt_funds_activation(
+        true,
+        ClaimExecutionMode::BuilderRelayer,
+        Some(safe),
+        &safe.to_ascii_uppercase(),
+    ));
+    assert!(!should_attempt_funds_activation(
+        false,
+        ClaimExecutionMode::RelayerApiKey,
+        Some(safe),
+        safe,
+    ));
+    assert!(!should_attempt_funds_activation(
+        true,
+        ClaimExecutionMode::Direct,
+        Some(safe),
+        safe,
+    ));
+    assert!(!should_attempt_funds_activation(
+        true,
+        ClaimExecutionMode::RelayerApiKey,
+        Some(safe),
+        "0x6dded85e1c0f6d7a65984e1572dc177dd1b58ec2",
+    ));
+}
+
+#[test]
+fn funds_activation_success_normalizes_hashes_and_events() {
+    let payload = ClaimFundsActivationAdapterSuccess {
+        status: "submitted".to_string(),
+        activated_amount_usdc: 1.25,
+        approve_tx_hash: Some(
+            "  0x1111111111111111111111111111111111111111111111111111111111111111  ".to_string(),
+        ),
+        wrap_tx_hash: Some(
+            "0x2222222222222222222222222222222222222222222222222222222222222222".to_string(),
+        ),
+        usdce_balance: 1.25,
+        pusd_balance: 4.0,
+        message: "submitted".to_string(),
+    };
+
+    let normalized = normalize_funds_activation_success(payload).unwrap();
+    assert_eq!(normalized.status, "submitted");
+    assert_eq!(
+        normalized.approve_tx_hash.as_deref(),
+        Some("0x1111111111111111111111111111111111111111111111111111111111111111")
+    );
+    assert_eq!(
+        funds_activation_event_type(&normalized.status),
+        "funds_activated"
+    );
+}
+
+#[test]
+fn funds_activation_skipped_can_return_without_hashes() {
+    let payload = ClaimFundsActivationAdapterSuccess {
+        status: "skipped".to_string(),
+        activated_amount_usdc: 0.0,
+        approve_tx_hash: None,
+        wrap_tx_hash: None,
+        usdce_balance: 0.0,
+        pusd_balance: 2.0,
+        message: "No USDC.e balance waiting for pUSD activation.".to_string(),
+    };
+
+    let normalized = normalize_funds_activation_success(payload).unwrap();
+    assert_eq!(normalized.status, "skipped");
+    assert_eq!(
+        funds_activation_event_type(&normalized.status),
+        "funds_activation_skipped"
+    );
+}
+
+#[test]
+fn funds_activation_submitted_requires_wrap_hash() {
+    let payload = ClaimFundsActivationAdapterSuccess {
+        status: "submitted".to_string(),
+        activated_amount_usdc: 1.0,
+        approve_tx_hash: None,
+        wrap_tx_hash: None,
+        usdce_balance: 1.0,
+        pusd_balance: 0.0,
+        message: "submitted".to_string(),
+    };
+
+    let err = normalize_funds_activation_success(payload).unwrap_err();
+    assert!(err.message.contains("without wrapTxHash"));
+}
+
+#[test]
 fn claim_relayer_adapter_error_details_compacts_html_body() {
     let (retryable, code, message) = claim_relayer_adapter_error_details(
         StatusCode::BAD_GATEWAY,

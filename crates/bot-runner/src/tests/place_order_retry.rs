@@ -1,5 +1,232 @@
 use super::support::*;
 use super::*;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+struct NoRestRuntimeExecutor {
+    order_book_calls: AtomicUsize,
+    available_qty_calls: AtomicUsize,
+    best_bid_ask_calls: AtomicUsize,
+    last_trade_calls: AtomicUsize,
+}
+
+struct FastSlRetryExecutor {
+    order_books: Mutex<VecDeque<OrderBookSnapshot>>,
+    place_calls: Mutex<Vec<PlaceOrderRequest>>,
+    place_errors_before_success: Mutex<usize>,
+    order_book_calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl OrderExecutor for NoRestRuntimeExecutor {
+    async fn midpoint(&self, _market: &str) -> Result<bot_infra::exchange::PriceSnapshot> {
+        anyhow::bail!("unused")
+    }
+
+    async fn best_bid_ask(&self, _token_id: &str) -> Result<(Option<f64>, Option<f64>)> {
+        self.best_bid_ask_calls.fetch_add(1, Ordering::SeqCst);
+        Ok((Some(0.50), Some(0.52)))
+    }
+
+    async fn order_book(&self, _token_id: &str) -> Result<Option<OrderBookSnapshot>> {
+        self.order_book_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(retry_test_order_book()))
+    }
+
+    async fn last_trade_price(&self, _token_id: &str) -> Result<Option<f64>> {
+        self.last_trade_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(0.51))
+    }
+
+    async fn fee_rate_bps(&self, _token_id: &str) -> Result<Option<u64>> {
+        Ok(Some(0))
+    }
+
+    async fn place(&self, _req: &PlaceOrderRequest) -> Result<bot_infra::exchange::OrderAck> {
+        anyhow::bail!("unused")
+    }
+
+    async fn cancel(&self, _exchange_order_id: &str) -> Result<()> {
+        anyhow::bail!("unused")
+    }
+
+    async fn status(&self, _exchange_order_id: &str) -> Result<OrderInfo> {
+        anyhow::bail!("unused")
+    }
+
+    async fn list_open(&self, _market: Option<&str>) -> Result<Vec<OrderInfo>> {
+        anyhow::bail!("unused")
+    }
+
+    async fn list_fills(&self, _next_cursor: Option<&str>) -> Result<Vec<FillInfo>> {
+        anyhow::bail!("unused")
+    }
+
+    async fn available_token_qty(&self, _token_id: &str) -> Result<Option<f64>> {
+        self.available_qty_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(10.0))
+    }
+}
+
+#[async_trait::async_trait]
+impl OrderExecutor for FastSlRetryExecutor {
+    async fn midpoint(&self, _market: &str) -> Result<bot_infra::exchange::PriceSnapshot> {
+        anyhow::bail!("unused")
+    }
+
+    async fn best_bid_ask(&self, _token_id: &str) -> Result<(Option<f64>, Option<f64>)> {
+        anyhow::bail!("unused")
+    }
+
+    async fn order_book(&self, _token_id: &str) -> Result<Option<OrderBookSnapshot>> {
+        self.order_book_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .order_books
+            .lock()
+            .expect("order books")
+            .pop_front()
+            .or_else(|| Some(retry_test_order_book())))
+    }
+
+    async fn last_trade_price(&self, _token_id: &str) -> Result<Option<f64>> {
+        anyhow::bail!("unused")
+    }
+
+    async fn fee_rate_bps(&self, _token_id: &str) -> Result<Option<u64>> {
+        Ok(Some(0))
+    }
+
+    async fn place(&self, req: &PlaceOrderRequest) -> Result<bot_infra::exchange::OrderAck> {
+        self.place_calls
+            .lock()
+            .expect("place calls")
+            .push(req.clone());
+        {
+            let mut errors_remaining = self
+                .place_errors_before_success
+                .lock()
+                .expect("place errors");
+            if *errors_remaining > 0 {
+                *errors_remaining -= 1;
+                anyhow::bail!("HTTP 400: no orders found to match with FAK order");
+            }
+        }
+
+        Ok(bot_infra::exchange::OrderAck {
+            client_order_id: req.client_order_id.clone(),
+            exchange_order_id: Some("retry-exchange-order".to_string()),
+            status: "matched".to_string(),
+            reject_reason: None,
+            raw_status: Some("matched".to_string()),
+            exchange_ts: Some(Utc::now().timestamp_millis()),
+            prepare_ms: None,
+            sign_ms: None,
+            header_sign_ms: None,
+            http_ms: None,
+            decode_ms: None,
+            total_ms: None,
+        })
+    }
+
+    async fn cancel(&self, _exchange_order_id: &str) -> Result<()> {
+        anyhow::bail!("unused")
+    }
+
+    async fn status(&self, _exchange_order_id: &str) -> Result<OrderInfo> {
+        anyhow::bail!("unused")
+    }
+
+    async fn list_open(&self, _market: Option<&str>) -> Result<Vec<OrderInfo>> {
+        anyhow::bail!("unused")
+    }
+
+    async fn list_fills(&self, _next_cursor: Option<&str>) -> Result<Vec<FillInfo>> {
+        anyhow::bail!("unused")
+    }
+
+    async fn available_token_qty(&self, _token_id: &str) -> Result<Option<f64>> {
+        Ok(Some(10.0))
+    }
+}
+
+fn retry_test_order_book() -> OrderBookSnapshot {
+    OrderBookSnapshot {
+        bids: vec![bot_infra::exchange::OrderBookLevel {
+            price: 0.43,
+            size: 10.0,
+        }],
+        asks: vec![bot_infra::exchange::OrderBookLevel {
+            price: 0.45,
+            size: 8.0,
+        }],
+    }
+}
+
+fn retry_test_fast_quote(order: &TradeBuilderOrder) -> ExitFastSubmitQuote {
+    ExitFastSubmitQuote {
+        token_id: order.token_id.clone(),
+        captured_at: Utc::now(),
+        market_updated_at_ms: 123,
+        order_book: retry_test_order_book(),
+        best_bid: Some(0.43),
+        best_ask: Some(0.45),
+        last_trade_price: Some(0.46),
+    }
+}
+
+fn fast_sl_retry_order() -> TradeBuilderOrder {
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(5.0);
+    order.remaining_qty = Some(5.0);
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.65);
+    order.trigger_latched = true;
+    order.trigger_latched_reason = Some("stop_loss".to_string());
+    order
+}
+
+fn fast_sl_retry_request(order: &TradeBuilderOrder, price: f64) -> PlaceOrderRequest {
+    PlaceOrderRequest {
+        market: order.market_slug.clone(),
+        token_id: Some(order.token_id.clone()),
+        side: order.side.clone(),
+        price,
+        size: 5.0,
+        intent: "exit".to_string(),
+        order_type: "FAK".to_string(),
+        client_order_id: "base-client-order".to_string(),
+        leg_side: None,
+        fee_rate_bps: 0,
+        neg_risk: false,
+    }
+}
+
+fn fast_sl_retry_order_book(best_bid: f64) -> OrderBookSnapshot {
+    OrderBookSnapshot {
+        bids: vec![bot_infra::exchange::OrderBookLevel {
+            price: best_bid,
+            size: 10.0,
+        }],
+        asks: vec![bot_infra::exchange::OrderBookLevel {
+            price: best_bid + 0.02,
+            size: 10.0,
+        }],
+    }
+}
+
+fn fast_sl_retry_executor(
+    order_books: Vec<OrderBookSnapshot>,
+    errors_before_success: usize,
+) -> FastSlRetryExecutor {
+    FastSlRetryExecutor {
+        order_books: Mutex::new(VecDeque::from(order_books)),
+        place_calls: Mutex::new(Vec::new()),
+        place_errors_before_success: Mutex::new(errors_before_success),
+        order_book_calls: AtomicUsize::new(0),
+    }
+}
 
 #[test]
 fn optimistic_exit_stage_defaults_to_dynamic_gross() {
@@ -356,6 +583,251 @@ fn fast_runtime_price_rest_partial_failure_uses_book_only() {
     assert_eq!(runtime_price.best_ask, Some(0.63));
     assert_eq!(runtime_price.last_trade_price, None);
     assert!(runtime_warning.unwrap().contains("last_trade_price"));
+}
+
+#[test]
+fn child_exit_sell_prefers_rest_fast_runtime_price_for_confirmation() {
+    let child_exit = test_builder_order("sell", Some(9));
+    assert!(trade_builder_prefers_rest_fast_runtime_price(&child_exit));
+
+    let standalone_sell = test_builder_order("sell", None);
+    assert!(!trade_builder_prefers_rest_fast_runtime_price(
+        &standalone_sell
+    ));
+
+    let child_buy = test_builder_order("buy", Some(9));
+    assert!(!trade_builder_prefers_rest_fast_runtime_price(&child_buy));
+}
+
+#[tokio::test]
+async fn fresh_exit_fast_quote_resolves_stop_loss_runtime_without_rest_calls() {
+    let executor = NoRestRuntimeExecutor {
+        order_book_calls: AtomicUsize::new(0),
+        available_qty_calls: AtomicUsize::new(0),
+        best_bid_ask_calls: AtomicUsize::new(0),
+        last_trade_calls: AtomicUsize::new(0),
+    };
+    let ws = ClobWsClient::new("ws://127.0.0.1:0".to_string());
+    let mut order = test_builder_order("sell", Some(9));
+    order.trigger_condition = Some("cross_below".to_string());
+    order.trigger_price = Some(0.44);
+    order.sl_trigger_price_mode = Some("composite_safe".to_string());
+    let quote = retry_test_fast_quote(&order);
+
+    let fetch = resolve_trade_builder_fast_runtime_price(&ws, &executor, &order, Some(&quote))
+        .await
+        .unwrap();
+    let TradeBuilderRuntimePriceFetch::Resolved(runtime_price) = fetch else {
+        panic!("expected resolved runtime price");
+    };
+
+    assert_eq!(runtime_price.source, "exit_fast_quote");
+    assert_eq!(runtime_price.best_bid, Some(0.43));
+    assert_eq!(executor.best_bid_ask_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(executor.last_trade_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn fast_quote_share_exit_skips_order_book_and_inventory_prefetch() {
+    let executor = NoRestRuntimeExecutor {
+        order_book_calls: AtomicUsize::new(0),
+        available_qty_calls: AtomicUsize::new(0),
+        best_bid_ask_calls: AtomicUsize::new(0),
+        last_trade_calls: AtomicUsize::new(0),
+    };
+    let mut order = test_builder_order("sell", Some(9));
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(5.0);
+    let quote = retry_test_fast_quote(&order);
+
+    let (price, available_qty) = prefetch_trade_builder_sell_submit_inputs(
+        &executor,
+        &order,
+        1,
+        0.43,
+        Some(0.42),
+        Some(0.43),
+        Some(5.0),
+        TRADE_BUILDER_SIZE_BASIS_SHARES,
+        Some(&quote),
+    )
+    .await;
+
+    assert_eq!(available_qty, None);
+    assert_eq!(price.unwrap().source, "orderbook_depth");
+    assert_eq!(executor.order_book_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(executor.available_qty_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn fast_stop_loss_retry_reprices_from_fresh_book_after_fak_miss() {
+    let executor = fast_sl_retry_executor(vec![fast_sl_retry_order_book(0.56)], 0);
+    let ws = ClobWsClient::new("ws://127.0.0.1:0".to_string());
+    let order = fast_sl_retry_order();
+    let base_req = fast_sl_retry_request(&order, 0.63);
+
+    let outcome = try_trade_builder_fast_stop_loss_retry(
+        &executor,
+        &ws,
+        &order,
+        &base_req,
+        "FAK",
+        TRADE_BUILDER_SIZE_BASIS_SHARES,
+        "HTTP 400: no orders found to match with FAK order",
+        0.63,
+        Some(0.63),
+        Some(0.63),
+        Some(5.0),
+    )
+    .await;
+
+    let TradeBuilderFastStopLossRetryOutcome::Success(success) = outcome else {
+        panic!("expected fast stop-loss retry success");
+    };
+    assert_eq!(success.attempt_payload["fast_sl_retry_attempt"], json!(1));
+    assert_eq!(success.attempt_payload["fresh_quote_age_ms"], json!(0));
+    assert_eq!(
+        success.attempt_payload["retry_reason"],
+        json!("HTTP 400: no orders found to match with FAK order")
+    );
+    assert!((success.desired_price - 0.55).abs() < 1e-9);
+    assert!((success.attempt_payload["retry_price"].as_f64().unwrap() - 0.55).abs() < 1e-9);
+
+    let calls = executor.place_calls.lock().expect("place calls");
+    assert_eq!(calls.len(), 1);
+    assert!((calls[0].price - 0.55).abs() < 1e-9);
+    assert!((calls[0].price - base_req.price).abs() > 1e-9);
+    assert_ne!(calls[0].client_order_id, base_req.client_order_id);
+    assert_eq!(executor.order_book_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn fast_stop_loss_retry_uses_second_fresh_book_when_first_retry_misses() {
+    let executor = fast_sl_retry_executor(
+        vec![
+            fast_sl_retry_order_book(0.61),
+            fast_sl_retry_order_book(0.57),
+        ],
+        1,
+    );
+    let ws = ClobWsClient::new("ws://127.0.0.1:0".to_string());
+    let order = fast_sl_retry_order();
+    let base_req = fast_sl_retry_request(&order, 0.63);
+
+    let outcome = try_trade_builder_fast_stop_loss_retry(
+        &executor,
+        &ws,
+        &order,
+        &base_req,
+        "FAK",
+        TRADE_BUILDER_SIZE_BASIS_SHARES,
+        "HTTP 400: no orders found to match with FAK order",
+        0.63,
+        Some(0.63),
+        Some(0.63),
+        Some(5.0),
+    )
+    .await;
+
+    let TradeBuilderFastStopLossRetryOutcome::Success(success) = outcome else {
+        panic!("expected fast stop-loss retry success");
+    };
+    assert_eq!(success.attempt_payload["fast_sl_retry_attempt"], json!(2));
+    assert_eq!(success.attempt_events.len(), 2);
+
+    let calls = executor.place_calls.lock().expect("place calls");
+    assert_eq!(calls.len(), 2);
+    assert!((calls[0].price - 0.60).abs() < 1e-9);
+    assert!((calls[1].price - 0.56).abs() < 1e-9);
+    assert_eq!(executor.order_book_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn fast_stop_loss_retry_skips_balance_allowance_rejects() {
+    let executor = fast_sl_retry_executor(vec![fast_sl_retry_order_book(0.56)], 0);
+    let ws = ClobWsClient::new("ws://127.0.0.1:0".to_string());
+    let order = fast_sl_retry_order();
+    let base_req = fast_sl_retry_request(&order, 0.63);
+
+    let outcome = try_trade_builder_fast_stop_loss_retry(
+        &executor,
+        &ws,
+        &order,
+        &base_req,
+        "FAK",
+        TRADE_BUILDER_SIZE_BASIS_SHARES,
+        "not enough balance / allowance",
+        0.63,
+        Some(0.63),
+        Some(0.63),
+        Some(5.0),
+    )
+    .await;
+
+    assert!(matches!(
+        outcome,
+        TradeBuilderFastStopLossRetryOutcome::NotEligible
+    ));
+    assert!(executor.place_calls.lock().expect("place calls").is_empty());
+    assert_eq!(executor.order_book_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn fast_stop_loss_retry_does_not_reuse_stale_loop_price_without_fresh_bid() {
+    let executor = fast_sl_retry_executor(
+        vec![OrderBookSnapshot {
+            bids: Vec::new(),
+            asks: Vec::new(),
+        }],
+        0,
+    );
+    let ws = ClobWsClient::new("ws://127.0.0.1:0".to_string());
+    let order = fast_sl_retry_order();
+    let base_req = fast_sl_retry_request(&order, 0.63);
+
+    let outcome = try_trade_builder_fast_stop_loss_retry(
+        &executor,
+        &ws,
+        &order,
+        &base_req,
+        "FAK",
+        TRADE_BUILDER_SIZE_BASIS_SHARES,
+        "HTTP 400: no orders found to match with FAK order",
+        0.63,
+        Some(0.63),
+        Some(0.63),
+        Some(5.0),
+    )
+    .await;
+
+    let TradeBuilderFastStopLossRetryOutcome::Exhausted(failure) = outcome else {
+        panic!("expected fast stop-loss retry quote exhaustion");
+    };
+    assert_eq!(failure.attempt_events.len(), 1);
+    assert_eq!(
+        failure.attempt_events[0]["result"],
+        json!("quote_unavailable")
+    );
+    assert!(executor.place_calls.lock().expect("place calls").is_empty());
+}
+
+#[test]
+fn balance_reject_retry_moves_optimistic_exit_to_visible_inventory_stage() {
+    let next_stage = trade_builder_next_optimistic_exit_stage_after_balance_reject(
+        TradeBuilderExitSubmitStage::DynamicGross,
+    );
+    let retry_error =
+        trade_builder_retry_error_text("not enough balance / allowance", Some(next_stage));
+
+    let mut child_exit = test_builder_order("sell", Some(9));
+    child_exit.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    child_exit.last_error = Some(retry_error);
+
+    assert_eq!(next_stage, TradeBuilderExitSubmitStage::VisibleInventory);
+    assert_eq!(
+        trade_builder_current_exit_submit_stage(&child_exit),
+        TradeBuilderExitSubmitStage::VisibleInventory
+    );
 }
 
 #[test]

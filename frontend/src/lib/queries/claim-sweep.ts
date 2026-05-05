@@ -59,6 +59,24 @@ export async function getLatestClaimSweepError(
     return null;
   }
 
+  const event = await pool.query<{ event_type: string; error: string | null }>(
+    `SELECT e.event_type, e.payload_json ->> 'error' AS error
+     FROM auto_claim_events e
+     JOIN auto_claim_jobs j ON j.id = e.job_id
+     WHERE LOWER(j.owner_address) = ANY($1::text[])
+       AND e.event_type IN ('claim_failed', 'retry_scheduled', 'submitted', 'receipt_confirmed')
+     ORDER BY e.created_at DESC
+     LIMIT 1`,
+    [ownerAddresses]
+  );
+  const latestEvent = event.rows[0];
+  if (latestEvent) {
+    if (latestEvent.event_type === 'claim_failed' || latestEvent.event_type === 'retry_scheduled') {
+      return latestEvent.error?.trim() || null;
+    }
+    return null;
+  }
+
   const res = await pool.query<{ last_error: string | null }>(
     `SELECT last_error
      FROM auto_claim_jobs
@@ -70,6 +88,31 @@ export async function getLatestClaimSweepError(
   );
 
   return res.rows[0]?.last_error?.trim() || null;
+}
+
+export async function getLatestClaimFundsActivationError(
+  ownerAddresses: string[]
+): Promise<string | null> {
+  if (ownerAddresses.length === 0) {
+    return null;
+  }
+
+  const res = await pool.query<{ event_type: string; error: string | null }>(
+    `SELECT e.event_type, e.payload_json ->> 'error' AS error
+     FROM auto_claim_events e
+     JOIN auto_claim_jobs j ON j.id = e.job_id
+     WHERE LOWER(j.owner_address) = ANY($1::text[])
+       AND e.event_type IN ('funds_activation_failed', 'funds_activated', 'funds_activation_skipped')
+     ORDER BY e.created_at DESC
+     LIMIT 1`,
+    [ownerAddresses]
+  );
+
+  const row = res.rows[0];
+  if (!row || row.event_type !== 'funds_activation_failed') {
+    return null;
+  }
+  return row.error?.trim() || null;
 }
 
 export async function queueClaimSweepJobs(

@@ -6,6 +6,7 @@ mod dual_runtime;
 mod flow_state_market_selection;
 mod place_order_core;
 mod place_order_entry_timing;
+mod place_order_fast_sl_submit;
 mod place_order_inventory;
 mod place_order_notifications;
 mod place_order_pair_lock;

@@ -1,6 +1,7 @@
 const ACTION_PLACE_ORDER_MODE_SINGLE: &str = "single";
 const ACTION_PLACE_ORDER_MODE_PAIR_LOCK: &str = "pair_lock";
 const ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1: &str = "dca_live_v1";
+const ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1: &str = "live_gap_collector_v1";
 const TRADE_BUILDER_PAIR_STATUS_WORKING: &str = "working";
 const TRADE_BUILDER_PAIR_STATUS_LOCKED: &str = "locked";
 const TRADE_BUILDER_PAIR_STATUS_UNWINDING: &str = "unwinding";
@@ -42,6 +43,7 @@ fn action_place_order_mode(node: &TradeFlowNode) -> &'static str {
     {
         ACTION_PLACE_ORDER_MODE_PAIR_LOCK => ACTION_PLACE_ORDER_MODE_PAIR_LOCK,
         ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1 => ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1,
+        ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1 => ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1,
         _ => ACTION_PLACE_ORDER_MODE_SINGLE,
     }
 }
@@ -52,6 +54,10 @@ fn action_place_order_uses_pair_lock(node: &TradeFlowNode) -> bool {
 
 fn action_place_order_uses_dca_live(node: &TradeFlowNode) -> bool {
     action_place_order_mode(node) == ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1
+}
+
+fn action_place_order_uses_live_gap_collector(node: &TradeFlowNode) -> bool {
+    action_place_order_mode(node) == ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1
 }
 
 fn trade_builder_order_uses_pair_lock(order: &TradeBuilderOrder) -> bool {
@@ -97,7 +103,11 @@ fn resolve_action_place_order_pair_lock_config(
     }
     let pair_max_total_cent = node_config_f64(node, "pairMaxTotalCent")
         .or_else(|| node_config_f64(node, "pairTargetTotalCent"))
-        .unwrap_or(if uses_biased_hedge_strategy { 99.0 } else { f64::NAN });
+        .unwrap_or(if uses_biased_hedge_strategy {
+            99.0
+        } else {
+            f64::NAN
+        });
     anyhow::ensure!(
         pair_max_total_cent.is_finite(),
         "action.place_order pair_lock requires pairMaxTotalCent"
@@ -117,8 +127,9 @@ fn resolve_action_place_order_pair_lock_config(
         ActionPlaceOrderPairLockSizingMode::Manual => {
             let counter_leg_size_usdc = node_config_f64(node, "counterLegSizeUsdc");
             if !uses_edge_strategy && !uses_biased_hedge_strategy {
-                let counter_leg_size_usdc = counter_leg_size_usdc
-                    .ok_or_else(|| anyhow::anyhow!("action.place_order pair_lock requires counterLegSizeUsdc > 0"))?;
+                let counter_leg_size_usdc = counter_leg_size_usdc.ok_or_else(|| {
+                    anyhow::anyhow!("action.place_order pair_lock requires counterLegSizeUsdc > 0")
+                })?;
                 anyhow::ensure!(
                     counter_leg_size_usdc > 0.0,
                     "action.place_order counterLegSizeUsdc must be > 0"
@@ -133,15 +144,20 @@ fn resolve_action_place_order_pair_lock_config(
             }
         }
         ActionPlaceOrderPairLockSizingMode::AutoRemainingBudget => {
-            let total_budget_usdc = node_config_f64(node, "pairTotalBudgetUsdc")
-                .ok_or_else(|| anyhow::anyhow!("action.place_order pair_lock requires pairTotalBudgetUsdc > 0"))?;
+            let total_budget_usdc =
+                node_config_f64(node, "pairTotalBudgetUsdc").ok_or_else(|| {
+                    anyhow::anyhow!("action.place_order pair_lock requires pairTotalBudgetUsdc > 0")
+                })?;
             anyhow::ensure!(
                 total_budget_usdc > primary_leg_size_usdc,
                 "action.place_order pairTotalBudgetUsdc must be greater than sizeUsdc"
             );
             (
                 Some(total_budget_usdc),
-                trade_builder_pair_lock_initial_counter_budget(total_budget_usdc, primary_leg_size_usdc),
+                trade_builder_pair_lock_initial_counter_budget(
+                    total_budget_usdc,
+                    primary_leg_size_usdc,
+                ),
             )
         }
     };
@@ -149,8 +165,10 @@ fn resolve_action_place_order_pair_lock_config(
     Ok(Some(ActionPlaceOrderPairLockConfig {
         max_total_price: clamp_probability(pair_max_total_cent / 100.0),
         orphan_grace_ms,
-        protective_unwind_enabled: node_config_bool(node, "pairProtectiveUnwindEnabled").unwrap_or(true),
-        ignore_stop_loss_after_locked: node_config_bool(node, "pairIgnoreStopLossAfterLocked").unwrap_or(false),
+        protective_unwind_enabled: node_config_bool(node, "pairProtectiveUnwindEnabled")
+            .unwrap_or(true),
+        ignore_stop_loss_after_locked: node_config_bool(node, "pairIgnoreStopLossAfterLocked")
+            .unwrap_or(false),
         notify_on_pair_locked: node_config_bool(node, "notifyOnPairLocked").unwrap_or(false),
         notify_on_pair_unwind: node_config_bool(node, "notifyOnPairUnwind").unwrap_or(false),
         sizing_mode,
@@ -210,7 +228,9 @@ async fn resolve_action_place_order_pair_lock_counter_leg(
         configured_outcome
     };
     let normalized_counter_outcome = normalize_pair_lock_binary_outcome(&outcome_label)
-        .ok_or_else(|| anyhow::anyhow!("pair_lock counter outcome must resolve to yes/up or no/down"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("pair_lock counter outcome must resolve to yes/up or no/down")
+        })?;
     let token_id = match normalized_counter_outcome {
         "yes" => Some(resolved_tokens.yes_token_id.clone()),
         "no" => Some(resolved_tokens.no_token_id.clone()),
@@ -292,15 +312,39 @@ async fn execute_action_place_order_pair_lock(
     let trigger_node_key = resolve_pair_lock_direct_trigger_node_key(&node.key, graph)?;
     if action_place_order_uses_edge_pairlock_strategy(node) {
         return execute_action_place_order_pair_lock_edge_strategy(
-            repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
-            &pair_lock, &trigger_node_key,
+            repo,
+            run_id,
+            cfg,
+            limits,
+            policy,
+            client,
+            ws,
+            run,
+            step,
+            node,
+            graph,
+            context,
+            &pair_lock,
+            &trigger_node_key,
         )
         .await;
     }
     if action_place_order_uses_biased_hedge_strategy(node) {
         return execute_action_place_order_pair_lock_biased_hedge_strategy(
-            repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
-            &pair_lock, &trigger_node_key,
+            repo,
+            run_id,
+            cfg,
+            limits,
+            policy,
+            client,
+            ws,
+            run,
+            step,
+            node,
+            graph,
+            context,
+            &pair_lock,
+            &trigger_node_key,
         )
         .await;
     }
@@ -330,9 +374,13 @@ async fn execute_action_place_order_pair_lock(
         "outcomeLabel",
         &["triggered_outcome_label", "outcomeLabel"],
     );
-    let resolved_tokens =
-        resolve_trade_builder_pair_lock_yes_no_tokens(cfg, &market_slug, &trigger_node_key, context)
-            .await?;
+    let resolved_tokens = resolve_trade_builder_pair_lock_yes_no_tokens(
+        cfg,
+        &market_slug,
+        &trigger_node_key,
+        context,
+    )
+    .await?;
     let effective_market_slug = resolved_tokens
         .trigger_node_market_slug
         .as_deref()
@@ -355,35 +403,47 @@ async fn execute_action_place_order_pair_lock(
         selected_candidate_quotes,
         adaptive_max_price_override,
         manual_adaptive_risk_override,
-    ) =
-        if let Some(primary_token_id) = explicit_primary_token_id {
-            let primary_outcome_label = explicit_primary_outcome_label
-                .unwrap_or_else(|| primary_token_id.clone());
-            maybe_send_pair_lock_primary_guard_recovered_notification(
-                repo,
-                run,
-                &node.key,
-                &market_slug,
-                context,
-            )
-            .await;
-            let mut diagnostics = json!({ "selection_mode": "explicit" });
-            append_json_object_fields(&mut diagnostics, &token_resolution_payload);
-            maybe_emit_pair_lock_primary_recovered_event(repo, run, &node.key, &market_slug, "explicit", &primary_token_id, &primary_outcome_label, "explicit", &diagnostics, &token_resolution_payload, context).await?;
-            clear_pair_lock_primary_waiting_state(context, &node.key);
-            clear_pair_lock_primary_notification_state(context, &node.key);
-            (
-                primary_token_id,
-                primary_outcome_label,
-                "explicit".to_string(),
-                "explicit".to_string(),
-                diagnostics,
-                None,
-                None,
-                None,
-            )
-        } else {
-            let selection_attempt = resolve_action_place_order_pair_lock_primary_selection(
+    ) = if let Some(primary_token_id) = explicit_primary_token_id {
+        let primary_outcome_label =
+            explicit_primary_outcome_label.unwrap_or_else(|| primary_token_id.clone());
+        maybe_send_pair_lock_primary_guard_recovered_notification(
+            repo,
+            run,
+            &node.key,
+            &market_slug,
+            context,
+        )
+        .await;
+        let mut diagnostics = json!({ "selection_mode": "explicit" });
+        append_json_object_fields(&mut diagnostics, &token_resolution_payload);
+        maybe_emit_pair_lock_primary_recovered_event(
+            repo,
+            run,
+            &node.key,
+            &market_slug,
+            "explicit",
+            &primary_token_id,
+            &primary_outcome_label,
+            "explicit",
+            &diagnostics,
+            &token_resolution_payload,
+            context,
+        )
+        .await?;
+        clear_pair_lock_primary_waiting_state(context, &node.key);
+        clear_pair_lock_primary_notification_state(context, &node.key);
+        (
+            primary_token_id,
+            primary_outcome_label,
+            "explicit".to_string(),
+            "explicit".to_string(),
+            diagnostics,
+            None,
+            None,
+            None,
+        )
+    } else {
+        let selection_attempt = resolve_action_place_order_pair_lock_primary_selection(
                 Some(
                     crate::trade_flow::guards::price_to_beat::PriceToBeatGuardRuntimeContext::pair_lock_auto_primary(
                         repo,
@@ -404,85 +464,112 @@ async fn execute_action_place_order_pair_lock(
                 no_token_id.clone(),
             )
             .await?;
-            let mut selection_diagnostics = selection_attempt.diagnostics.clone();
-            append_json_object_fields(&mut selection_diagnostics, &token_resolution_payload);
-            if selection_attempt.waiting {
-                maybe_send_pair_lock_primary_guard_notification(
-                    repo,
-                    run,
-                    node,
-                    &market_slug,
-                    &selection_diagnostics,
-                    context,
-                )
-                .await?;
-                maybe_emit_pair_lock_primary_waiting_event(repo, run, &node.key, &market_slug, &selection_diagnostics, &token_resolution_payload, context).await?;
-                set_pair_lock_primary_waiting_state(context, &node.key, &market_slug, &selection_diagnostics);
-                return Ok(build_pair_lock_primary_waiting_execution(
-                    &node.key,
-                    &market_slug,
-                    &selection_diagnostics,
-                ));
-            }
-            let Some(selection) = selection_attempt.selection else {
-                let failure_reason = selection_attempt
-                    .failure_reason
-                    .unwrap_or("pair_lock_primary_leg_selection_failed");
-                clear_pair_lock_primary_waiting_state(context, &node.key);
-                maybe_send_pair_lock_primary_guard_notification(
-                    repo,
-                    run,
-                    node,
-                    &market_slug,
-                    &selection_diagnostics,
-                    context,
-                )
-                .await?;
-                repo.append_trade_flow_event(
-                    Some(run.id),
-                    run.definition_id,
-                    Some(run.version_id),
-                    "pair_lock_primary_leg_selection_failed",
-                    &json!({
-                        "node_key": node.key,
-                        "market_slug": market_slug,
-                        "reason": failure_reason,
-                        "selection_mode": "auto_guarded",
-                        "selection": selection_diagnostics,
-                        "resolved_yes_token_id": resolved_tokens.yes_token_id,
-                        "resolved_no_token_id": resolved_tokens.no_token_id,
-                        "token_resolution_source": resolved_tokens.token_resolution_source,
-                        "trigger_node_market_slug": resolved_tokens.trigger_node_market_slug,
-                    }),
-                )
-                .await?;
-                anyhow::bail!("{failure_reason}");
-            };
-            maybe_send_pair_lock_primary_guard_recovered_notification(
+        let mut selection_diagnostics = selection_attempt.diagnostics.clone();
+        append_json_object_fields(&mut selection_diagnostics, &token_resolution_payload);
+        if selection_attempt.waiting {
+            maybe_send_pair_lock_primary_guard_notification(
+                repo,
+                run,
+                node,
+                &market_slug,
+                &selection_diagnostics,
+                context,
+            )
+            .await?;
+            maybe_emit_pair_lock_primary_waiting_event(
                 repo,
                 run,
                 &node.key,
                 &market_slug,
+                &selection_diagnostics,
+                &token_resolution_payload,
                 context,
             )
-            .await;
-            maybe_emit_pair_lock_primary_recovered_event(repo, run, &node.key, &market_slug, selection.selection_mode, &selection.token_id, &selection.outcome_label, &selection.guard_reason, &selection_diagnostics, &token_resolution_payload, context).await?;
+            .await?;
+            set_pair_lock_primary_waiting_state(
+                context,
+                &node.key,
+                &market_slug,
+                &selection_diagnostics,
+            );
+            return Ok(build_pair_lock_primary_waiting_execution(
+                &node.key,
+                &market_slug,
+                &selection_diagnostics,
+            ));
+        }
+        let Some(selection) = selection_attempt.selection else {
+            let failure_reason = selection_attempt
+                .failure_reason
+                .unwrap_or("pair_lock_primary_leg_selection_failed");
             clear_pair_lock_primary_waiting_state(context, &node.key);
-            clear_pair_lock_primary_notification_state(context, &node.key);
-            (
-                selection.token_id,
-                selection.outcome_label,
-                selection.selection_mode.to_string(),
-                selection.guard_reason,
-                selection_diagnostics,
-                Some((
-                    selection_attempt.yes_candidate.quote.clone(),
-                    selection_attempt.no_candidate.quote.clone(),
-                )),
-                selection.adaptive_max_price_override,
-                selection.manual_adaptive_risk_override,
+            maybe_send_pair_lock_primary_guard_notification(
+                repo,
+                run,
+                node,
+                &market_slug,
+                &selection_diagnostics,
+                context,
             )
+            .await?;
+            repo.append_trade_flow_event(
+                Some(run.id),
+                run.definition_id,
+                Some(run.version_id),
+                "pair_lock_primary_leg_selection_failed",
+                &json!({
+                    "node_key": node.key,
+                    "market_slug": market_slug,
+                    "reason": failure_reason,
+                    "selection_mode": "auto_guarded",
+                    "selection": selection_diagnostics,
+                    "resolved_yes_token_id": resolved_tokens.yes_token_id,
+                    "resolved_no_token_id": resolved_tokens.no_token_id,
+                    "token_resolution_source": resolved_tokens.token_resolution_source,
+                    "trigger_node_market_slug": resolved_tokens.trigger_node_market_slug,
+                }),
+            )
+            .await?;
+            anyhow::bail!("{failure_reason}");
         };
+        maybe_send_pair_lock_primary_guard_recovered_notification(
+            repo,
+            run,
+            &node.key,
+            &market_slug,
+            context,
+        )
+        .await;
+        maybe_emit_pair_lock_primary_recovered_event(
+            repo,
+            run,
+            &node.key,
+            &market_slug,
+            selection.selection_mode,
+            &selection.token_id,
+            &selection.outcome_label,
+            &selection.guard_reason,
+            &selection_diagnostics,
+            &token_resolution_payload,
+            context,
+        )
+        .await?;
+        clear_pair_lock_primary_waiting_state(context, &node.key);
+        clear_pair_lock_primary_notification_state(context, &node.key);
+        (
+            selection.token_id,
+            selection.outcome_label,
+            selection.selection_mode.to_string(),
+            selection.guard_reason,
+            selection_diagnostics,
+            Some((
+                selection_attempt.yes_candidate.quote.clone(),
+                selection_attempt.no_candidate.quote.clone(),
+            )),
+            selection.adaptive_max_price_override,
+            selection.manual_adaptive_risk_override,
+        )
+    };
     let counter = resolve_action_place_order_pair_lock_counter_leg(
         node,
         &resolved_tokens,
@@ -609,7 +696,12 @@ async fn execute_action_place_order_pair_lock(
     {
         Ok(execution) => execution,
         Err(err) => {
-            cancel_pair_lock_order_if_created(repo, Some(primary_order_id), "pair_lock_counter_create_failed").await;
+            cancel_pair_lock_order_if_created(
+                repo,
+                Some(primary_order_id),
+                "pair_lock_counter_create_failed",
+            )
+            .await;
             return Err(err);
         }
     };
@@ -633,8 +725,12 @@ async fn execute_action_place_order_pair_lock(
             false,
         )
         .await?;
-    repo.attach_trade_builder_pair_session_orders(pair_session_id, primary_order_id, counter_order_id)
-        .await?;
+    repo.attach_trade_builder_pair_session_orders(
+        pair_session_id,
+        primary_order_id,
+        counter_order_id,
+    )
+    .await?;
     repo.set_trade_builder_order_pair_session(
         primary_order_id,
         Some(pair_session_id),
@@ -645,6 +741,13 @@ async fn execute_action_place_order_pair_lock(
         counter_order_id,
         Some(pair_session_id),
         Some(TRADE_BUILDER_PAIR_ROLE_COUNTER_CANDIDATE),
+    )
+    .await?;
+    hold_pair_lock_counter_after_session_attach(
+        repo,
+        pair_session_id,
+        primary_order_id,
+        counter_order_id,
     )
     .await?;
 
@@ -817,9 +920,7 @@ async fn execute_action_place_order_dispatch(
     .await
 }
 
-fn trade_builder_pair_lock_effective_counter_cap(
-    session: &TradeBuilderPairSession,
-) -> Option<f64> {
+fn trade_builder_pair_lock_effective_counter_cap(session: &TradeBuilderPairSession) -> Option<f64> {
     let lead_price = if session.lead_order_id == session.primary_order_id {
         session.primary_avg_fill_price
     } else if session.lead_order_id == session.counter_order_id {
@@ -873,7 +974,12 @@ async fn maybe_apply_trade_builder_pair_lock_runtime(
         return Ok(false);
     };
 
-    if matches!(session.status.as_str(), TRADE_BUILDER_PAIR_STATUS_COMPLETED | TRADE_BUILDER_PAIR_STATUS_EXPIRED | TRADE_BUILDER_PAIR_STATUS_ERROR) {
+    if matches!(
+        session.status.as_str(),
+        TRADE_BUILDER_PAIR_STATUS_COMPLETED
+            | TRADE_BUILDER_PAIR_STATUS_EXPIRED
+            | TRADE_BUILDER_PAIR_STATUS_ERROR
+    ) {
         if is_trade_builder_order_processable_status(&order.status) {
             repo.set_trade_builder_order_status(order.id, "canceled", Some("pair_session_closed"))
                 .await?;
@@ -892,14 +998,18 @@ async fn maybe_apply_trade_builder_pair_lock_runtime(
             }
         }
     }
-    if maybe_prepare_trade_builder_pair_lock_auto_counter(repo, order, &session, &pair_lock)
-        .await?
+    if maybe_hold_trade_builder_pair_lock_counter_until_lead(repo, order, &session).await? {
+        return Ok(true);
+    }
+    if maybe_prepare_trade_builder_pair_lock_auto_counter(repo, order, &session, &pair_lock).await?
     {
         return Ok(true);
     }
 
     if session.status == TRADE_BUILDER_PAIR_STATUS_WORKING {
-        if let (Some(lead_order_id), Some(lead_filled_at)) = (session.lead_order_id, session.lead_filled_at) {
+        if let (Some(lead_order_id), Some(lead_filled_at)) =
+            (session.lead_order_id, session.lead_filled_at)
+        {
             if lead_order_id != order.id {
                 if let Some(dynamic_cap) = trade_builder_pair_lock_effective_counter_cap(&session) {
                     order.max_price = Some(
@@ -939,7 +1049,11 @@ fn trade_builder_pair_lock_estimated_fee_qty(
     fill_price: f64,
     fee_rate_bps: i64,
 ) -> f64 {
-    estimate_trade_builder_buy_fee_shares(fill_price, fill_qty, trade_builder_fee_rate_bps_or_default(fee_rate_bps))
+    estimate_trade_builder_buy_fee_shares(
+        fill_price,
+        fill_qty,
+        trade_builder_fee_rate_bps_or_default(fee_rate_bps),
+    )
 }
 
 fn trade_builder_pair_lock_fill_net_qty(fill_qty: f64, fee_qty: f64) -> f64 {
@@ -973,46 +1087,15 @@ async fn append_trade_builder_pair_lock_event(
     event_type: &str,
     payload: Value,
 ) -> Result<()> {
-    if let Some(order_id) = session.lead_order_id.or(session.primary_order_id).or(session.counter_order_id) {
+    if let Some(order_id) = session
+        .lead_order_id
+        .or(session.primary_order_id)
+        .or(session.counter_order_id)
+    {
         repo.append_trade_builder_order_event(order_id, event_type, &payload)
             .await?;
     }
     Ok(())
-}
-
-async fn maybe_send_trade_builder_pair_notification(
-    repo: &PostgresRepository,
-    order: &TradeBuilderOrder,
-    notification_type: &str,
-    message: &str,
-    enabled: bool,
-) {
-    if enabled {
-        let _ = send_trade_builder_notification(repo, order, notification_type, message).await;
-    }
-}
-
-fn build_trade_builder_pair_locked_message(
-    session: &TradeBuilderPairSession,
-    projected_net_profit_usdc: f64,
-) -> String {
-    format!(
-        "Pair Lock Basarili\nMarket: {}\nLocked Qty: {:.2}\nProj. Net Kar: {:.4} USDC\nMax Total: {:.2}c",
-        session.market_slug,
-        session.locked_qty.unwrap_or_default(),
-        projected_net_profit_usdc,
-        session.pair_target_total_cent
-    )
-}
-
-fn build_trade_builder_pair_unwind_message(
-    session: &TradeBuilderPairSession,
-    reason: &str,
-) -> String {
-    format!(
-        "Pair Lock Unwind\nMarket: {}\nSebep: {}\nMax Total: {:.2}c",
-        session.market_slug, reason, session.pair_target_total_cent
-    )
 }
 
 async fn create_trade_builder_pair_unwind_order(
@@ -1028,7 +1111,12 @@ async fn create_trade_builder_pair_unwind_order(
     }
     let reference_price = parent_order
         .last_seen_price
-        .or_else(|| parent_order.target_qty.filter(|qty| *qty > 0.0).map(|qty| parent_order.size_usdc / qty))
+        .or_else(|| {
+            parent_order
+                .target_qty
+                .filter(|qty| *qty > 0.0)
+                .map(|qty| parent_order.size_usdc / qty)
+        })
         .unwrap_or(0.5);
     let unwind_order_id = repo
         .create_trade_builder_order_with_exit_ladders(
@@ -1063,6 +1151,7 @@ async fn create_trade_builder_pair_unwind_order(
             None,
             None,
             parent_order.fee_rate_bps,
+            None,
             None,
             None,
             None,
@@ -1125,7 +1214,10 @@ async fn schedule_trade_builder_pair_session_unwind(
     keep_visible_qty: Option<f64>,
 ) -> Result<()> {
     let keep_visible_qty = keep_visible_qty.unwrap_or(0.0).max(0.0);
-    for order in orders.iter().filter(|order| trade_builder_pair_lock_is_candidate_order(order)) {
+    for order in orders
+        .iter()
+        .filter(|order| trade_builder_pair_lock_is_candidate_order(order))
+    {
         if !trade_builder_is_terminal_status(&order.status) && order.filled_qty <= 0.0 {
             let next_order_status = if order.active_exchange_order_id.is_some() {
                 "canceled_requested"
@@ -1147,27 +1239,28 @@ async fn schedule_trade_builder_pair_session_unwind(
         }
     }
 
-    for order in orders.iter().filter(|order| trade_builder_pair_lock_is_candidate_order(order)) {
+    for order in orders
+        .iter()
+        .filter(|order| trade_builder_pair_lock_is_candidate_order(order))
+    {
         let position = repo.get_trade_builder_parent_position(order.id).await?;
         let current_qty = position
             .as_ref()
             .map(|value| value.current_qty)
             .or_else(|| {
                 if order.filled_qty > 0.0 {
-                    Some(
-                        trade_builder_pair_lock_fill_net_qty(
+                    Some(trade_builder_pair_lock_fill_net_qty(
+                        order.filled_qty,
+                        trade_builder_pair_lock_estimated_fee_qty(
                             order.filled_qty,
-                            trade_builder_pair_lock_estimated_fee_qty(
-                                order.filled_qty,
-                                if order.filled_qty > 0.0 {
-                                    order.size_usdc / order.filled_qty
-                                } else {
-                                    0.5
-                                },
-                                order.fee_rate_bps,
-                            ),
+                            if order.filled_qty > 0.0 {
+                                order.size_usdc / order.filled_qty
+                            } else {
+                                0.5
+                            },
+                            order.fee_rate_bps,
                         ),
-                    )
+                    ))
                 } else {
                     None
                 }
@@ -1340,7 +1433,10 @@ async fn maybe_finalize_trade_builder_pair_lock_after_unwind_fill(
         .list_trade_builder_orders_by_pair_session(pair_session_id)
         .await?;
     let mut has_live_position = false;
-    for candidate in orders.iter().filter(|candidate| trade_builder_pair_lock_is_candidate_order(candidate)) {
+    for candidate in orders
+        .iter()
+        .filter(|candidate| trade_builder_pair_lock_is_candidate_order(candidate))
+    {
         if let Some(position) = repo.get_trade_builder_parent_position(candidate.id).await? {
             if position.current_qty > TRADE_BUILDER_PAIR_QTY_TOLERANCE {
                 has_live_position = true;
@@ -1374,79 +1470,5 @@ async fn maybe_finalize_trade_builder_pair_lock_after_unwind_fill(
 }
 
 #[cfg(test)]
-mod pair_lock_binding_tests {
-    use super::*;
-
-    fn test_graph(trigger_binding_mode: &str, extra_incoming: bool) -> TradeFlowGraphRuntime {
-        let mut edges = vec![TradeFlowEdge {
-            source: "trigger_pair".to_string(),
-            target: "pair_buy".to_string(),
-            edge_type: "default".to_string(),
-            condition: None,
-        }];
-        let mut nodes = vec![
-            TradeFlowNode {
-                key: "trigger_pair".to_string(),
-                node_type: "trigger.market_price".to_string(),
-                config: json!({
-                    "bindingMode": trigger_binding_mode,
-                }),
-            },
-            TradeFlowNode {
-                key: "pair_buy".to_string(),
-                node_type: "action.place_order".to_string(),
-                config: json!({
-                    "mode": "pair_lock",
-                }),
-            },
-        ];
-        if extra_incoming {
-            nodes.push(TradeFlowNode {
-                key: "trigger_extra".to_string(),
-                node_type: "trigger.market_price".to_string(),
-                config: json!({
-                    "bindingMode": trigger_binding_mode,
-                }),
-            });
-            edges.push(TradeFlowEdge {
-                source: "trigger_extra".to_string(),
-                target: "pair_buy".to_string(),
-                edge_type: "default".to_string(),
-                condition: None,
-            });
-        }
-        TradeFlowGraphRuntime {
-            context: json!({}),
-            nodes,
-            edges,
-        }
-    }
-
-    #[test]
-    fn resolve_pair_lock_direct_trigger_node_key_accepts_pair_lock_only_parent() {
-        let graph = test_graph("pair_lock_only", false);
-        let trigger_key =
-            resolve_pair_lock_direct_trigger_node_key("pair_buy", &graph).expect("pair lock trigger");
-        assert_eq!(trigger_key, "trigger_pair");
-    }
-
-    #[test]
-    fn resolve_pair_lock_direct_trigger_node_key_rejects_standard_parent() {
-        let graph = test_graph("standard", false);
-        let err = resolve_pair_lock_direct_trigger_node_key("pair_buy", &graph)
-            .expect_err("standard binding should fail");
-        assert!(err
-            .to_string()
-            .contains("bindingMode=pair_lock_only"));
-    }
-
-    #[test]
-    fn resolve_pair_lock_direct_trigger_node_key_rejects_multiple_direct_parents() {
-        let graph = test_graph("pair_lock_only", true);
-        let err = resolve_pair_lock_direct_trigger_node_key("pair_buy", &graph)
-            .expect_err("multiple direct parents should fail");
-        assert!(err
-            .to_string()
-            .contains("exactly one direct upstream trigger.market_price"));
-    }
-}
+#[path = "pair_lock/binding_tests.rs"]
+mod pair_lock_binding_tests;

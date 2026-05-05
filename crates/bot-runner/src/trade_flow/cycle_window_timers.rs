@@ -748,9 +748,7 @@ async fn process_trade_flow_trigger_market_price_timers(
         return Ok(false);
     }
 
-    let mut run_specs = cache_snapshot.run_specs;
-    let token_targets = cache_snapshot.token_targets;
-    let market_targets = cache_snapshot.market_targets;
+    let TradeFlowWsFastPathCache { mut run_specs, token_targets, market_targets, live_gap_prewarm_targets } = cache_snapshot;
     let boundary_token_ids: Vec<String> = due_boundaries
         .iter()
         .filter_map(|target| {
@@ -1348,6 +1346,7 @@ async fn process_trade_flow_trigger_market_price_timers(
         cache.run_specs = run_specs;
         cache.token_targets = token_targets;
         cache.market_targets = market_targets;
+        cache.live_gap_prewarm_targets = live_gap_prewarm_targets;
     }
 
     if !due_confirmation_token_ids.is_empty() {

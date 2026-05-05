@@ -29,8 +29,12 @@ fn trade_builder_market_spec_slug_candidates(market_slug: &str) -> Vec<String> {
     let mut candidates = vec![normalized.clone()];
     let mut current = normalized.as_str();
     for _ in 0..4 {
-        let Some((parent, _)) = current.rsplit_once('-') else { break };
-        if parent.len() < 3 { break }
+        let Some((parent, _)) = current.rsplit_once('-') else {
+            break;
+        };
+        if parent.len() < 3 {
+            break;
+        }
         if !candidates.iter().any(|c| c == parent) {
             candidates.push(parent.to_string());
         }
@@ -54,7 +58,28 @@ fn trade_builder_market_spec_cache_put(market_slug: &str, spec: TradeBuilderMark
     }
 }
 
-fn trade_builder_market_spec_from_clob_info(info: &bot_infra::exchange::ClobMarketInfo) -> TradeBuilderMarketSpec {
+fn trade_builder_cached_market_spec_for_order(
+    order: &TradeBuilderOrder,
+    now: DateTime<Utc>,
+) -> Option<TradeBuilderMarketSpec> {
+    if let Some(spec) = trade_builder_runtime_snapshot_from_order(order)
+        .filter(|snapshot| trade_builder_runtime_snapshot_is_fresh(snapshot, now))
+        .and_then(|snapshot| trade_builder_market_spec_from_runtime_snapshot(&snapshot))
+    {
+        return Some(spec);
+    }
+
+    for candidate in trade_builder_market_spec_slug_candidates(&order.market_slug) {
+        if let Some(spec) = trade_builder_market_spec_cache_get(&candidate) {
+            return Some(spec);
+        }
+    }
+    None
+}
+
+fn trade_builder_market_spec_from_clob_info(
+    info: &bot_infra::exchange::ClobMarketInfo,
+) -> TradeBuilderMarketSpec {
     TradeBuilderMarketSpec {
         neg_risk: info.neg_risk,
         order_price_min_tick_size: normalize_trade_builder_market_spec_number(info.min_tick_size),
@@ -194,9 +219,10 @@ fn trade_builder_next_min_size_retry_stage(
     attempt_stage: Option<TradeBuilderExitSubmitStage>,
 ) -> Option<TradeBuilderExitSubmitStage> {
     match attempt_stage {
-        Some(TradeBuilderExitSubmitStage::DynamicGross | TradeBuilderExitSubmitStage::EstimatedVisible) => {
-            Some(TradeBuilderExitSubmitStage::VisibleInventory)
-        }
+        Some(
+            TradeBuilderExitSubmitStage::DynamicGross
+            | TradeBuilderExitSubmitStage::EstimatedVisible,
+        ) => Some(TradeBuilderExitSubmitStage::VisibleInventory),
         other => other,
     }
 }
@@ -236,9 +262,8 @@ async fn maybe_handle_trade_builder_share_submit_below_market_min(
         .or(order.target_qty)
         .and_then(|qty| normalize_trade_builder_visible_inventory_qty(Some(qty)))
         .or_else(|| normalize_trade_builder_visible_inventory_qty(Some(submit_qty)));
-    let reason = format!(
-        "{submit_kind} size ({submit_qty:.2}) below market minimum: {order_min_size:.2}"
-    );
+    let reason =
+        format!("{submit_kind} size ({submit_qty:.2}) below market minimum: {order_min_size:.2}");
 
     if decision == TradeBuilderShareSubmitMinSizeDecision::Block
         && trade_builder_should_allow_latched_stop_loss_below_market_min(order)

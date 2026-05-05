@@ -51,33 +51,10 @@ async fn execute_action_place_order(
         matches!(execution_mode.as_str(), "market" | "limit"),
         "action.place_order executionMode must be market or limit"
     );
-    let market_slug = resolve_action_place_order_string(
-        node,
-        context,
-        step,
-        "marketSlug",
-        "marketSlug",
-        &["market_slug", "marketSlug", "wsMarketSlug"],
-    )
-    .ok_or_else(|| anyhow::anyhow!("action.place_order requires marketSlug"))?;
-    let token_id = resolve_action_place_order_string(
-        node,
-        context,
-        step,
-        "tokenId",
-        "tokenId",
-        &["triggered_token_id", "tokenId"],
-    )
-    .ok_or_else(|| anyhow::anyhow!("action.place_order requires tokenId"))?;
-    let outcome_label = resolve_action_place_order_string(
-        node,
-        context,
-        step,
-        "outcomeLabel",
-        "outcomeLabel",
-        &["triggered_outcome_label", "outcomeLabel"],
-    )
-    .unwrap_or_else(|| token_id.clone());
+    let identity = resolve_action_place_order_identity(node, context, step, &side)?;
+    let market_slug = identity.market_slug;
+    let token_id = identity.token_id;
+    let outcome_label = identity.outcome_label;
     if let Some(stale_execution) = maybe_skip_stale_action_place_order_step(
         repo,
         run,
@@ -98,6 +75,7 @@ async fn execute_action_place_order(
     set_flow_context(context, "marketSlug", json!(market_slug.clone()));
     set_flow_context(context, "tokenId", json!(token_id.clone()));
     set_flow_context(context, "outcomeLabel", json!(outcome_label.clone()));
+    let live_gap_collector_config = resolve_action_place_order_live_gap_collector_config(node, &side)?;
     let mut protection_output = Value::Null;
     if side == "buy" {
         if let Some(raw_protection) =
@@ -264,6 +242,7 @@ async fn execute_action_place_order(
             best_bid: step_input_f64(step, &["wsBestBid", "ws_best_bid"]),
             best_ask: step_input_f64(step, &["wsBestAsk", "ws_best_ask"]),
     });
+    if live_gap_collector_config.is_none() {
     if let Some(blocked_execution) =
         trade_flow::guards::maybe_block_action_place_order_price_to_beat_guard(
             repo,
@@ -282,6 +261,7 @@ async fn execute_action_place_order(
         .await?
     {
         return Ok(blocked_execution);
+    }
     }
     let mut source_trade_id = resolve_flow_source_trade_id(node, context).or_else(|| {
         step_input_i64(step, &["sourceTradeId", "source_trade_id"]).filter(|value| *value > 0)
@@ -677,7 +657,8 @@ async fn execute_action_place_order(
         min_price_distance_cent > 0.0,
         "action.place_order minPriceDistanceCent must be > 0"
     );
-    let should_inline_submit = kind == "immediate";
+    let initial_status = resolve_action_place_order_initial_status(node, &side, &kind);
+    let should_inline_submit = action_place_order_should_inline_submit(&kind, initial_status);
     let base_max_price = resolve_action_place_order_max_price(node, step, context);
     let trigger_price_guard_enabled =
         node_config_bool(node, "triggerPriceGuardEnabled").unwrap_or(false);
@@ -696,7 +677,10 @@ async fn execute_action_place_order(
         base_guard_trigger_price,
         base_max_price,
     )?;
-    let max_price = reentry_guard_resolution.effective_max_price;
+    let max_price = live_gap_collector_effective_max_price(
+        reentry_guard_resolution.effective_max_price,
+        live_gap_collector_config.as_ref(),
+    );
     let guard_trigger_price = reentry_guard_resolution.effective_guard_trigger_price;
     let execution_floor_guard_enabled =
         node_config_bool(node, "executionFloorGuardEnabled").unwrap_or(false);
@@ -756,8 +740,8 @@ async fn execute_action_place_order(
         ptb_stop_loss.as_ref(),
         &ptb_stop_loss_rules,
     )?;
-    let tp_enabled = exit_config.tp_enabled;
-    let tp_price = exit_config.tp_price;
+    let tp_enabled = exit_config.tp_enabled || live_gap_collector_config.is_some();
+    let tp_price = exit_config.tp_price.or_else(|| live_gap_collector_config.as_ref().map(|_| 0.98));
     let sl_enabled = exit_config.sl_enabled;
     let sl_price = exit_config.sl_price;
     let sl_trigger_price_mode = exit_config.sl_trigger_price_mode.as_deref();
@@ -768,6 +752,7 @@ async fn execute_action_place_order(
     let ptb_stop_loss_gap_usd = exit_config.ptb_stop_loss_gap_usd;
     let ptb_reference_price = exit_config.ptb_reference_price;
     let ptb_stop_loss_time_decay_mode = exit_config.ptb_stop_loss_time_decay_mode.as_deref();
+    let ptb_current_price_source = exit_config.ptb_current_price_source.as_deref();
     let sizing = if side == "sell" {
         if let Some(parent_builder_order_id) = window_end_parent_builder_order_id {
             let Some(sizing) = resolve_action_place_order_window_end_auto_sell_sizing(
@@ -838,6 +823,9 @@ async fn execute_action_place_order(
         )
         .await?
     };
+    if let Some(blocked_execution) = maybe_block_action_place_order_live_gap_collector(repo, client, run, node, context, &market_slug, &token_id, &outcome_label, &side, &execution_mode, &sizing, live_gap_collector_config.as_ref()).await? {
+        return Ok(blocked_execution);
+    }
     let persisted_trigger_price = if side == "buy"
         && kind == "immediate"
         && execution_mode == "market"
@@ -922,6 +910,7 @@ async fn execute_action_place_order(
             fresh_submit_lease_until,
         )
         .await?;
+        persist_action_place_order_live_gap_metadata(repo, existing_order.id, context).await?;
         repo.set_trade_builder_order_notification_flags(
             existing_order.id,
             flags.notify_on_order_submitted,
@@ -952,6 +941,7 @@ async fn execute_action_place_order(
             ptb_reference_price.or(existing_order.ptb_reference_price),
             (!ptb_stop_loss_rules.is_empty()).then_some(ptb_stop_loss_rules.as_slice()),
             ptb_stop_loss_time_decay_mode,
+            ptb_current_price_source,
         )
         .await?;
         let mut flow_rearmed_payload = json!({
@@ -981,6 +971,7 @@ async fn execute_action_place_order(
             "ptb_stop_loss_gap_usd": ptb_stop_loss_gap_usd,
             "ptb_reference_price": ptb_reference_price.or(existing_order.ptb_reference_price),
             "ptb_stop_loss_rules": serde_json::to_value(&ptb_stop_loss_rules)?,
+            "ptb_current_price_source": ptb_current_price_source,
             "last_guard_notification_reason": price_to_beat_guard_notification_seed.clone(),
             "price_to_beat_guard": price_to_beat_guard_snapshot.clone(),
         });
@@ -1041,6 +1032,7 @@ async fn execute_action_place_order(
             "notify_on_sl_hit": flags.notify_on_sl_hit,
             "ptb_stop_loss_gap_usd": ptb_stop_loss_gap_usd,
             "ptb_reference_price": ptb_reference_price.or(existing_order.ptb_reference_price),
+            "ptb_current_price_source": ptb_current_price_source,
             "last_guard_notification_reason": price_to_beat_guard_notification_seed.clone(),
             "price_to_beat_guard": price_to_beat_guard_snapshot.clone(),
             "should_inline_submit": should_inline_submit,
@@ -1094,11 +1086,7 @@ async fn execute_action_place_order(
         .create_trade_builder_order_with_exit_ladders(
             source_trade_id,
             &kind,
-            if side == "sell" && kind == "immediate" {
-                "triggered"
-            } else {
-                "pending"
-            },
+            initial_status,
             &market_slug,
             &token_id,
             &outcome_label,
@@ -1134,6 +1122,7 @@ async fn execute_action_place_order(
             ptb_reference_price,
             (!ptb_stop_loss_rules.is_empty()).then_some(ptb_stop_loss_rules.as_slice()),
             ptb_stop_loss_time_decay_mode,
+            ptb_current_price_source,
             false,
             None,
             None,
@@ -1168,11 +1157,7 @@ async fn execute_action_place_order(
         fresh_submit_lease_until,
     )
     .await?;
-    let initial_status = if side == "sell" && kind == "immediate" {
-        "triggered"
-    } else {
-        "pending"
-    };
+    persist_action_place_order_live_gap_metadata(repo, builder_order_id, context).await?;
     let buy_fill_lock = (!is_special_internal_sell)
         .then(|| resolve_action_place_order_buy_fill_lock_config(node, &side))
         .transpose()?
@@ -1187,7 +1172,7 @@ async fn execute_action_place_order(
     flow_created_payload.insert("execution_mode".to_string(), json!(execution_mode));
     flow_created_payload.insert(
         "order_type".to_string(),
-        json!(clob_order_type_for_execution_mode(&execution_mode)),
+        json!(action_place_order_clob_order_type(node, &execution_mode)),
     );
     flow_created_payload.insert("initial_status".to_string(), json!(initial_status));
     flow_created_payload.insert("size_basis".to_string(), json!(sizing.size_basis));
@@ -1297,6 +1282,10 @@ async fn execute_action_place_order(
         json!(ptb_stop_loss_time_decay_mode),
     );
     flow_created_payload.insert(
+        "ptb_current_price_source".to_string(),
+        json!(ptb_current_price_source),
+    );
+    flow_created_payload.insert(
         "staged_sl_reentry_only_after_all_stages".to_string(),
         json!(staged_sl_behavior.reentry_only_after_all_stages),
     );
@@ -1381,7 +1370,7 @@ async fn execute_action_place_order(
     output.insert("execution_mode".to_string(), json!(execution_mode));
     output.insert(
         "order_type".to_string(),
-        json!(clob_order_type_for_execution_mode(&execution_mode)),
+        json!(action_place_order_clob_order_type(node, &execution_mode)),
     );
     output.insert("market_slug".to_string(), json!(market_slug));
     output.insert("token_id".to_string(), json!(token_id));
@@ -1461,6 +1450,10 @@ async fn execute_action_place_order(
     output.insert(
         "ptb_stop_loss_time_decay_mode".to_string(),
         json!(ptb_stop_loss_time_decay_mode),
+    );
+    output.insert(
+        "ptb_current_price_source".to_string(),
+        json!(ptb_current_price_source),
     );
     output.insert(
         "staged_sl_reentry_only_after_all_stages".to_string(),

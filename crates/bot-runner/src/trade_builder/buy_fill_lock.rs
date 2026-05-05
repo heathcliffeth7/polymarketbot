@@ -46,13 +46,15 @@ fn resolve_action_place_order_buy_fill_lock_config(
     if side != "buy" {
         return Ok(None);
     }
-    if !node_config_bool(node, "buyFillLockEnabled").unwrap_or(false) {
+    let auto_scout_lock = action_place_order_early_stale_scout_lock_enabled(node, side);
+    if !node_config_bool(node, "buyFillLockEnabled").unwrap_or(false) && !auto_scout_lock {
         return Ok(None);
     }
 
     let group = node_config_string(node, "buyFillLockGroup")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+        .or_else(|| auto_scout_lock.then(|| action_place_order_early_stale_scout_lock_group(node)))
         .ok_or_else(|| anyhow::anyhow!("action.place_order buyFillLockGroup is required"))?;
     let release_on_stop_loss =
         node_config_bool(node, "releaseBuyFillLockOnStopLoss").unwrap_or(false);

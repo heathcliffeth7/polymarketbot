@@ -12,6 +12,10 @@ import {
   type OutcomeConditionRow,
   type PrimitiveValueType,
 } from '@/lib/trade-flow-config-mappers';
+import {
+  applyLiveGapCollectorFormDefaults,
+  LIVE_GAP_COLLECTOR_MODE,
+} from '@/lib/trade-flow-config-mappers/live-gap-collector';
 import { normalizePairLockStrategy } from '@/lib/trade-flow-config-mappers/pair-lock';
 import type {
   UpstreamFixedMarketResolution,
@@ -126,6 +130,27 @@ export function updateNodeFieldState(
         counterLegOutcomeLabel:
           (next.fields.counterLegOutcomeLabel ?? '').trim() || 'opposite',
       };
+      return { ...next, fields: nextFields };
+    }
+    if (
+      nodeType === 'action.place_order' &&
+      key === 'mode' &&
+      value === LIVE_GAP_COLLECTOR_MODE
+    ) {
+      const nextFields = {
+        ...next.fields,
+        mode: LIVE_GAP_COLLECTOR_MODE,
+        side: 'buy',
+        executionMode: 'market',
+        kind: 'immediate',
+        sizeMode: 'usdc',
+        tpEnabled: 'true',
+        tpPriceCent: '98',
+        maxPriceCent: '93',
+        liveGapCollectorEnabled: 'true',
+        notifyOnLiveGapCollectorDecision: 'true',
+      };
+      applyLiveGapCollectorFormDefaults(nextFields);
       return { ...next, fields: nextFields };
     }
     if (nodeType === 'action.place_order' && key === 'pairLockStrategy') {

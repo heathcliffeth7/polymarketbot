@@ -7,9 +7,14 @@ import {
 } from '@/lib/config';
 import {
   getClaimSweepQueueStatus,
+  getLatestClaimFundsActivationError,
   getLatestClaimSweepError,
   queueClaimSweepJobs,
 } from '@/lib/queries/claim-sweep';
+import {
+  buildEmptyClaimFundsActivationStatus,
+  getClaimFundsActivationStatus,
+} from '@/lib/claim-funds-activation';
 import type { ClaimSweepQueueStatus, ClaimSweepRunResult, ClaimSweepStatus } from '@/lib/types';
 
 const CLAIM_SWEEP_THRESHOLD_USDC = 0;
@@ -96,6 +101,7 @@ export function buildEmptyClaimSweepStatus(
     eligibleTotalUsdc: 0,
     queue: emptyQueue(),
     lastError: null,
+    fundsActivation: buildEmptyClaimFundsActivationStatus(),
     refreshedAt: null,
     ...overrides,
   };
@@ -134,12 +140,20 @@ export async function getClaimSweepStatus(
 
   let effectiveQueue = queue;
   let effectiveLastError = lastError;
+  let effectiveActivationLastError: string | null = null;
   if (ownerAddresses.join('|') !== configuredOwnerAddresses.join('|')) {
-    [effectiveQueue, effectiveLastError] = await Promise.all([
+    [effectiveQueue, effectiveLastError, effectiveActivationLastError] = await Promise.all([
       getClaimSweepQueueStatus(ownerAddresses),
       getLatestClaimSweepError(ownerAddresses),
+      getLatestClaimFundsActivationError(ownerAddresses),
     ]);
+  } else {
+    effectiveActivationLastError = await getLatestClaimFundsActivationError(ownerAddresses);
   }
+  const fundsActivation = await getClaimFundsActivationStatus(
+    context,
+    effectiveActivationLastError
+  );
 
   const disabledReason = resolveDisabledReason({
     claimState,
@@ -160,6 +174,7 @@ export async function getClaimSweepStatus(
     eligibleTotalUsdc: snapshot?.eligibleTotalUsdc ?? 0,
     queue: effectiveQueue,
     lastError: effectiveLastError,
+    fundsActivation,
     refreshedAt: snapshot?.refreshedAt ?? null,
   });
 }

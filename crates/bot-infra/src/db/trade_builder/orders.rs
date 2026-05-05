@@ -14,6 +14,7 @@ const TRADE_BUILDER_ORDER_SELECT_COLUMNS: &str =
      runtime_snapshot_json, fresh_submit_lease_until, retry_on_trigger_guard_block, \
      retry_on_execution_floor_guard_block, retry_on_max_price_block, \
      ptb_stop_loss_gap_usd, ptb_reference_price, ptb_stop_loss_rules_json, ptb_stop_loss_time_decay_mode, \
+     ptb_current_price_source, \
      staged_sl_retry_only_dust, staged_sl_retry_dust_metric, staged_sl_retry_dust_value, \
      staged_sl_reentry_use_sold_notional, staged_sl_reentry_only_after_all_stages, \
      sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, \
@@ -37,7 +38,7 @@ const TRADE_BUILDER_ORDER_SELECT_COLUMNS_O_ALIAS: &str =
      o.retry_on_trigger_guard_block, \
      o.retry_on_execution_floor_guard_block, o.retry_on_max_price_block, \
      o.ptb_stop_loss_gap_usd, o.ptb_reference_price, o.ptb_stop_loss_rules_json, \
-     o.ptb_stop_loss_time_decay_mode, \
+     o.ptb_stop_loss_time_decay_mode, o.ptb_current_price_source, \
      o.staged_sl_retry_only_dust, o.staged_sl_retry_dust_metric, \
      o.staged_sl_retry_dust_value, o.staged_sl_reentry_use_sold_notional, \
      o.staged_sl_reentry_only_after_all_stages, \
@@ -179,6 +180,7 @@ fn map_trade_builder_order_row(row: sqlx::postgres::PgRow) -> TradeBuilderOrder 
         ptb_reference_price: row.get("ptb_reference_price"),
         ptb_stop_loss_rules_json: trade_builder_parse_rules(row.get("ptb_stop_loss_rules_json")),
         ptb_stop_loss_time_decay_mode: row.get("ptb_stop_loss_time_decay_mode"),
+        ptb_current_price_source: row.get("ptb_current_price_source"),
         staged_sl_retry_only_dust: row.get("staged_sl_retry_only_dust"),
         staged_sl_retry_dust_metric: row.get("staged_sl_retry_dust_metric"),
         staged_sl_retry_dust_value: row.get("staged_sl_retry_dust_value"),
@@ -245,6 +247,7 @@ impl PostgresRepository {
         ptb_reference_price: Option<f64>,
         ptb_stop_loss_rules_json: Option<&[TradeBuilderPtbStopLossRule]>,
         ptb_stop_loss_time_decay_mode: Option<&str>,
+        ptb_current_price_source: Option<&str>,
         staged_sl_retry_only_dust: bool,
         staged_sl_retry_dust_metric: Option<&str>,
         staged_sl_retry_dust_value: Option<f64>,
@@ -277,14 +280,14 @@ impl PostgresRepository {
             trade_builder_ptb_stop_loss_rules_to_json(ptb_stop_loss_rules_json);
         let id: i64 = sqlx::query_scalar(
             "INSERT INTO trade_builder_orders \
-              (trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, remaining_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, parent_order_id, tp_enabled, tp_price, tp_rules_json, sl_enabled, sl_price, sl_rules_json, time_exit_rules_json, fee_rate_bps, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, ptb_stop_loss_gap_usd, ptb_reference_price, ptb_stop_loss_rules_json, ptb_stop_loss_time_decay_mode, staged_sl_retry_only_dust, staged_sl_retry_dust_metric, staged_sl_retry_dust_value, staged_sl_reentry_use_sold_notional, staged_sl_reentry_only_after_all_stages, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_order_submitted, notify_on_fill, notify_on_order_not_filled, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked, last_guard_notification_reason, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, exit_ladder_kind, exit_ladder_index, exit_ladder_size_pct, created_at, updated_at) \
+              (trade_id, user_id, kind, status, market_slug, token_id, outcome_label, side, execution_mode, trigger_condition, trigger_price, max_price, guard_trigger_price, best_ask_floor_price, size_basis, size_usdc, target_qty, remaining_qty, min_price_distance_cent, expires_at, eligible_after_at, eligible_before_at, max_triggers, triggers_fired, parent_order_id, tp_enabled, tp_price, tp_rules_json, sl_enabled, sl_price, sl_rules_json, time_exit_rules_json, fee_rate_bps, origin_flow_definition_id, origin_flow_run_id, origin_flow_node_key, ptb_stop_loss_gap_usd, ptb_reference_price, ptb_stop_loss_rules_json, ptb_stop_loss_time_decay_mode, ptb_current_price_source, staged_sl_retry_only_dust, staged_sl_retry_dust_metric, staged_sl_retry_dust_value, staged_sl_reentry_use_sold_notional, staged_sl_reentry_only_after_all_stages, sl_trigger_price_mode, reenter_on_sl_hit, reentry_max_attempts, reentry_trigger_node_key, notify_on_order_submitted, notify_on_fill, notify_on_order_not_filled, notify_on_trigger_guard_blocked, notify_on_execution_floor_blocked, notify_on_tp_hit, notify_on_sl_hit, notify_on_max_price_blocked, last_guard_notification_reason, retry_on_trigger_guard_block, retry_on_execution_floor_guard_block, retry_on_max_price_block, exit_ladder_kind, exit_ladder_index, exit_ladder_size_pct, created_at, updated_at) \
              VALUES \
               ($1, (SELECT user_id FROM trades WHERE id = $1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 0, $23, $24, $25, $26, $27, $28, $29, $30, \
                $31, \
                COALESCE($32, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_definition_id FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
                COALESCE($33, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_run_id FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
                COALESCE($34, CASE WHEN $23 IS NOT NULL THEN (SELECT origin_flow_node_key FROM trade_builder_orders WHERE id = $23) ELSE NULL END), \
-               $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, \
+               $35, $36, $37, $38, COALESCE($39, 'chainlink'), $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, \
                NOW(), NOW()) \
              RETURNING id",
         )
@@ -326,6 +329,7 @@ impl PostgresRepository {
         .bind(ptb_reference_price)
         .bind(ptb_stop_loss_rules_json)
         .bind(ptb_stop_loss_time_decay_mode)
+        .bind(ptb_current_price_source)
         .bind(staged_sl_retry_only_dust)
         .bind(staged_sl_retry_dust_metric)
         .bind(staged_sl_retry_dust_value)
@@ -446,6 +450,7 @@ impl PostgresRepository {
             None,
             None,
             ptb_stop_loss_time_decay_mode,
+            None,
             false,
             None,
             None,
@@ -591,6 +596,36 @@ impl PostgresRepository {
         .execute(self.pool())
         .await?;
         Ok(())
+    }
+
+    pub async fn set_trade_builder_order_live_gap_metadata(
+        &self,
+        builder_order_id: i64,
+        metadata: Option<&Value>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE trade_builder_orders \
+             SET live_gap_metadata_json = $2, updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .bind(metadata)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn load_trade_builder_order_live_gap_metadata(
+        &self,
+        builder_order_id: i64,
+    ) -> Result<Option<Value>> {
+        let metadata = sqlx::query_scalar::<_, Option<Value>>(
+            "SELECT live_gap_metadata_json FROM trade_builder_orders WHERE id = $1",
+        )
+        .bind(builder_order_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(metadata.flatten().filter(|value| !value.is_null()))
     }
 
     pub async fn load_trade_builder_order_trigger_plan(
@@ -865,6 +900,7 @@ impl PostgresRepository {
         ptb_reference_price: Option<f64>,
         ptb_stop_loss_rules_json: Option<&[TradeBuilderPtbStopLossRule]>,
         ptb_stop_loss_time_decay_mode: Option<&str>,
+        ptb_current_price_source: Option<&str>,
     ) -> Result<()> {
         let ptb_stop_loss_rules_json =
             trade_builder_ptb_stop_loss_rules_to_json(ptb_stop_loss_rules_json);
@@ -874,6 +910,7 @@ impl PostgresRepository {
                  ptb_reference_price = $3, \
                  ptb_stop_loss_rules_json = $4, \
                  ptb_stop_loss_time_decay_mode = $5, \
+                 ptb_current_price_source = COALESCE($6, 'chainlink'), \
                  updated_at = NOW() \
              WHERE id = $1",
         )
@@ -882,6 +919,7 @@ impl PostgresRepository {
         .bind(ptb_reference_price)
         .bind(ptb_stop_loss_rules_json)
         .bind(ptb_stop_loss_time_decay_mode)
+        .bind(ptb_current_price_source)
         .execute(self.pool())
         .await?;
         Ok(())
@@ -1292,6 +1330,7 @@ mod tests {
             ptb_reference_price: None,
             ptb_stop_loss_rules_json: Vec::new(),
             ptb_stop_loss_time_decay_mode: None,
+            ptb_current_price_source: "chainlink".to_string(),
             staged_sl_retry_only_dust: false,
             staged_sl_retry_dust_metric: None,
             staged_sl_retry_dust_value: None,

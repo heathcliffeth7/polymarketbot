@@ -352,8 +352,8 @@ async fn reconcile_trade_builder_open_order(
     } else {
         None
     };
-    let immediate_buy_execution_price =
-        trade_builder_immediate_buy_notional_execution_price(&order, current_price, best_ask);
+    let market_buy_execution_price =
+        trade_builder_market_buy_execution_price(&order, current_price, best_ask);
     let sell_submit_price = if order.side == "sell" {
         Some(
             resolve_trade_builder_sell_submit_price(
@@ -371,15 +371,15 @@ async fn reconcile_trade_builder_open_order(
     };
     let desired_price = sell_submit_price
         .map(|resolution| resolution.desired_price)
-        .or_else(|| immediate_buy_execution_price.map(|resolution| resolution.price))
+        .or_else(|| market_buy_execution_price.map(|resolution| resolution.price))
         .unwrap_or_else(|| trade_builder_submit_desired_price(&order, current_price));
     let uncapped_desired_price = sell_submit_price
         .map(|resolution| resolution.uncapped_desired_price)
-        .or_else(|| immediate_buy_execution_price.map(|resolution| resolution.price))
+        .or_else(|| market_buy_execution_price.map(|resolution| resolution.price))
         .unwrap_or_else(|| {
             aggressive_price_for_side(&order.side, current_price, order.min_price_distance_cent)
         });
-    if immediate_buy_execution_price.is_none()
+    if market_buy_execution_price.is_none()
         && (desired_price - uncapped_desired_price).abs() >= 0.000001
     {
         repo.append_trade_builder_order_event(
@@ -1126,10 +1126,10 @@ async fn reconcile_trade_builder_open_order(
         "execution_mode": normalize_trade_builder_execution_mode(&order.execution_mode),
         "order_type": clob_order_type_for_execution_mode(normalize_trade_builder_execution_mode(&order.execution_mode)),
         "target_price": desired_price,
-        "execution_price_source": immediate_buy_execution_price
+        "execution_price_source": market_buy_execution_price
             .map(|resolution| resolution.source)
             .unwrap_or_else(|| sell_submit_price.map(|resolution| resolution.source).unwrap_or("runtime_price")),
-        "trigger_reference_price": immediate_buy_execution_price
+        "trigger_reference_price": market_buy_execution_price
             .and_then(|resolution| resolution.trigger_reference_price),
         "submit_price_source": sell_submit_price.map(|resolution| resolution.source),
         "submit_price_depth_levels_used": sell_submit_price.and_then(|resolution| resolution.depth_levels_used),

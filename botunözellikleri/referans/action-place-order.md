@@ -79,7 +79,7 @@ Geçerli kullanım için upstream trigger `bindingMode="dca_live_only"` olmalıd
 | Max price | `maxPrice`, `maxPriceCent`, `retryOnMaxPriceBlock`, `notifyOnMaxPriceBlocked` |
 | Trigger price | `triggerCondition`, `triggerPrice`, `retryOnTriggerPriceGuardBlock`, `notifyOnTriggerPriceBlocked` |
 | Execution floor | execution floor config, `retryOnExecutionFloorGuardBlock`, `notifyOnExecutionFloorBlocked` |
-| PTB | `priceToBeatGuardEnabled`, `priceToBeatMode`, `retryOnPriceToBeatGuardBlock`, `notifyOnPriceToBeatGapBlocked` |
+| PTB | `priceToBeatGuardEnabled`, `priceToBeatMode`, `priceToBeatCurrentPriceSource`, `retryOnPriceToBeatGuardBlock`, `notifyOnPriceToBeatGapBlocked` |
 | Underlying | underlying protection config |
 | Fill lock | `buyFillLockEnabled`, `releaseBuyFillLockOnStopLoss` |
 
@@ -89,8 +89,11 @@ Temel:
 
 - `priceToBeatGuardEnabled`
 - `priceToBeatMode`
+- `priceToBeatCurrentPriceSource`: `chainlink` (varsayılan), `binance` veya `coinbase`
 - manual threshold alanları
 - `priceToBeatIvTimeRules`
+
+`priceToBeatCurrentPriceSource`, PTB referans fiyatını değiştirmez; yalnızca PTB'ye karşı kıyaslanan current underlying fiyat kaynağını seçer. Eski config'lerde alan yoksa `chainlink` kabul edilir. `binance` veya `coinbase` seçiliyken ilgili CEX book/ticker snapshot'ı eksik ya da stale ise Chainlink'e sessiz fallback yapılmaz; mevcut retry/block akışı bekler veya node'u bloklar.
 
 `iv_mismatch_edge` grupları:
 
@@ -140,6 +143,8 @@ PTB SL:
 - `ptbStopLossEnabled`
 - `ptbStopLossGapUsd`
 - `ptbStopLossTimeDecayMode`
+- `priceToBeatCurrentPriceSource`: fill sonrası üretilen PTB SL child order varsayılan olarak entry PTB current kaynağını miras alır.
+- `ptbStopLossCurrentPriceSource`: opsiyonel SL özel override. Boşsa `priceToBeatCurrentPriceSource`, o da boşsa `chainlink` kullanılır. `binance` veya `coinbase` seçiliyken eksik/stale CEX verisinde Chainlink'e sessiz fallback yapılmaz.
 
 Time/window exit:
 
@@ -174,6 +179,7 @@ Re-entry:
 | `counterLegTpEnabled` | Counter TP |
 | `counterLegSlEnabled` | Counter SL |
 | `counterLegPtbStopLossEnabled` | Counter PTB SL |
+| `counterLegPtbStopLossCurrentPriceSource` | Counter PTB SL current source override; boşsa `counterLegPriceToBeatCurrentPriceSource` miras alınır |
 | `pairProtectiveUnwindEnabled` | Orphan/bozuk pair için unwind |
 | `pairIgnoreStopLossAfterLocked` | Lock sonrası SL etkisini sınırla |
 

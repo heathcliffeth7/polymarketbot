@@ -76,6 +76,7 @@ fn select_ws_fast_path_targets_expands_market_price_siblings_for_dirty_token() {
             ("tok-down".to_string(), vec![(0, 1)]),
         ]),
         market_targets: HashMap::from([("eth-updown-5m-1".to_string(), vec![(0, 0), (0, 1)])]),
+        live_gap_prewarm_targets: HashMap::new(),
     };
 
     let selected = select_ws_fast_path_targets(1, &cache, Some(&["tok-down".to_string()]));
@@ -124,6 +125,7 @@ fn select_ws_fast_path_targets_full_refresh_returns_all_nodes() {
             ("tok-open".to_string(), vec![(0, 1)]),
         ]),
         market_targets: HashMap::from([("eth-updown-5m-1".to_string(), vec![(0, 0)])]),
+        live_gap_prewarm_targets: HashMap::new(),
     };
 
     let selected = select_ws_fast_path_targets(1, &cache, None);

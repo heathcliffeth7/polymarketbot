@@ -3,7 +3,10 @@ import { getSessionCookieName, verifySession } from '@/lib/auth';
 
 const LOGIN_PATH = '/login';
 const AUTH_API_PATH = '/api/auth';
-const INTERNAL_CLAIM_REDEEM_PATH = '/api/internal/claim/redeem';
+const INTERNAL_CLAIM_ADAPTER_PATHS = new Set([
+  '/api/internal/claim/redeem',
+  '/api/internal/claim/activate-funds',
+]);
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -15,7 +18,7 @@ export async function middleware(req: NextRequest) {
   if (isAuthApiPath(pathname)) {
     return NextResponse.next();
   }
-  if (pathname === INTERNAL_CLAIM_REDEEM_PATH) {
+  if (INTERNAL_CLAIM_ADAPTER_PATHS.has(pathname)) {
     return NextResponse.next();
   }
 

@@ -1,6 +1,7 @@
 use crate::claim_relayer::{
-    ClaimRelayerAdapter, ClaimRelayerAdapterErrorBody, ClaimRelayerAdapterRequest,
-    ClaimRelayerAdapterSuccess, ClaimSubmitFailure, SubmittedRedeemTx,
+    ClaimFundsActivationAdapterRequest, ClaimFundsActivationAdapterSuccess, ClaimRelayerAdapter,
+    ClaimRelayerAdapterErrorBody, ClaimRelayerAdapterRequest, ClaimRelayerAdapterSuccess,
+    ClaimSubmitFailure, SubmittedRedeemTx,
 };
 use crate::config::{AppConfig, ClaimExecutionMode};
 use crate::db::{AutoClaimJob, PostgresRepository};
@@ -80,6 +81,7 @@ pub struct AutoClaimService {
     max_attempts: i32,
     retry_backoff_ms: u64,
     min_claim_usdc: f64,
+    auto_activate_funds: bool,
     discovery_interval_sec: u64,
     next_discovery_at: DateTime<Utc>,
     next_submission_at: DateTime<Utc>,
@@ -160,6 +162,7 @@ impl AutoClaimService {
             max_attempts: cfg.claim.max_attempts.max(1),
             retry_backoff_ms: cfg.claim.retry_backoff_ms.max(1000),
             min_claim_usdc: cfg.claim.min_claim_usdc.max(0.0),
+            auto_activate_funds: cfg.claim.auto_activate_funds,
             discovery_interval_sec: cfg.claim.discovery_interval_sec.max(5),
             next_discovery_at: Utc::now(),
             next_submission_at: Utc::now(),
@@ -418,6 +421,7 @@ impl AutoClaimService {
                         "receipt_confirmed",
                         &json!({
                             "job_id": job.id,
+                            "owner_address": job.owner_address,
                             "condition_id": job.condition_id,
                             "tx_hash": tx_hash_raw,
                             "receipt_status": receipt_status,
@@ -425,6 +429,7 @@ impl AutoClaimService {
                         }),
                     )
                     .await?;
+                    self.maybe_activate_funds_after_claim(repo, job).await?;
                     confirmed += 1;
                 } else {
                     let error_chain = compact_error(anyhow::anyhow!(
@@ -700,7 +705,7 @@ impl AutoClaimService {
 
         let response = self
             .http
-            .post(&adapter.url)
+            .post(&adapter.redeem_url)
             .bearer_auth(&adapter.token)
             .json(&request)
             .send()
@@ -748,6 +753,143 @@ impl AutoClaimService {
                 "builder_relayer"
             },
         })
+    }
+
+    async fn maybe_activate_funds_after_claim(
+        &self,
+        repo: &PostgresRepository,
+        job: &AutoClaimJob,
+    ) -> Result<()> {
+        if !should_attempt_funds_activation(
+            self.auto_activate_funds,
+            self.execution_mode,
+            self.safe_address.as_deref(),
+            &job.owner_address,
+        ) {
+            return Ok(());
+        }
+
+        match self
+            .submit_funds_activation_via_relayer(&job.owner_address)
+            .await
+        {
+            Ok(result) => {
+                let event_type = funds_activation_event_type(&result.status);
+                repo.append_auto_claim_event(
+                    job.id,
+                    event_type,
+                    &json!({
+                        "job_id": job.id,
+                        "owner_address": job.owner_address,
+                        "condition_id": job.condition_id,
+                        "status": result.status,
+                        "activated_amount_usdc": result.activated_amount_usdc,
+                        "approve_tx_hash": result.approve_tx_hash,
+                        "wrap_tx_hash": result.wrap_tx_hash,
+                        "usdce_balance": result.usdce_balance,
+                        "pusd_balance": result.pusd_balance,
+                        "message": result.message
+                    }),
+                )
+                .await?;
+                info!(
+                    user = %self.signer_address,
+                    job_id = job.id,
+                    condition_id = %job.condition_id,
+                    status = %result.status,
+                    activated_amount_usdc = result.activated_amount_usdc,
+                    "AUTO_CLAIM_FUNDS_ACTIVATION_FINISHED"
+                );
+            }
+            Err(err) => {
+                let compact = compact_submit_failure(&err);
+                repo.append_auto_claim_event(
+                    job.id,
+                    "funds_activation_failed",
+                    &json!({
+                        "job_id": job.id,
+                        "owner_address": job.owner_address,
+                        "condition_id": job.condition_id,
+                        "retryable": err.retryable,
+                        "error": compact,
+                        "error_chain": compact
+                    }),
+                )
+                .await?;
+                warn!(
+                    user = %self.signer_address,
+                    job_id = job.id,
+                    condition_id = %job.condition_id,
+                    error = %compact,
+                    "AUTO_CLAIM_FUNDS_ACTIVATION_FAILED"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn submit_funds_activation_via_relayer(
+        &self,
+        owner_address: &str,
+    ) -> std::result::Result<ClaimFundsActivationAdapterSuccess, ClaimSubmitFailure> {
+        let safe_address = self.safe_address.as_deref().ok_or_else(|| {
+            ClaimSubmitFailure::non_retryable(
+                "funds activation requires exchange.gnosis_safe_address",
+            )
+        })?;
+        if !safe_address.eq_ignore_ascii_case(owner_address) {
+            return Err(ClaimSubmitFailure::non_retryable(format!(
+                "funds activation only supports the configured safe owner address ({safe_address}), got {owner_address}"
+            )));
+        }
+        let adapter = self.relayer_adapter.as_ref().ok_or_else(|| {
+            ClaimSubmitFailure::non_retryable(
+                "claim relayer adapter not configured for funds activation",
+            )
+        })?;
+
+        let response = self
+            .http
+            .post(&adapter.activate_funds_url)
+            .bearer_auth(&adapter.token)
+            .json(&ClaimFundsActivationAdapterRequest {
+                user_id: self.user_id,
+                owner_address: safe_address.to_string(),
+            })
+            .send()
+            .await
+            .map_err(|err| {
+                ClaimSubmitFailure::retryable(format!(
+                    "claim funds activation adapter request failed: {err:#}"
+                ))
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|err| {
+            ClaimSubmitFailure::retryable(format!(
+                "failed reading claim funds activation adapter response: {err:#}"
+            ))
+        })?;
+
+        if !status.is_success() {
+            let parsed = serde_json::from_str::<ClaimRelayerAdapterErrorBody>(&body).ok();
+            let (retryable, code, message) =
+                claim_relayer_adapter_error_details(status, parsed.as_ref(), &body);
+            return Err(if retryable {
+                ClaimSubmitFailure::retryable(format!("{code}: {message}"))
+            } else {
+                ClaimSubmitFailure::non_retryable(format!("{code}: {message}"))
+            });
+        }
+
+        let payload =
+            serde_json::from_str::<ClaimFundsActivationAdapterSuccess>(&body).map_err(|err| {
+                ClaimSubmitFailure::retryable(format!(
+                    "failed to parse claim funds activation adapter success response: {err:#}"
+                ))
+            })?;
+
+        normalize_funds_activation_success(payload)
     }
 
     fn discovery_addresses(&self) -> Vec<String> {
@@ -805,6 +947,71 @@ fn parse_tx_hash(raw: &str) -> Result<H256> {
 
 fn normalize_tx_hash(raw: &str) -> Result<String> {
     Ok(format!("{:#x}", parse_tx_hash(raw)?))
+}
+
+fn should_attempt_funds_activation(
+    auto_activate_funds: bool,
+    execution_mode: ClaimExecutionMode,
+    safe_address: Option<&str>,
+    owner_address: &str,
+) -> bool {
+    auto_activate_funds
+        && matches!(
+            execution_mode,
+            ClaimExecutionMode::BuilderRelayer | ClaimExecutionMode::RelayerApiKey
+        )
+        && safe_address
+            .map(|safe| safe.eq_ignore_ascii_case(owner_address))
+            .unwrap_or(false)
+}
+
+fn funds_activation_event_type(status: &str) -> &'static str {
+    if status.trim().eq_ignore_ascii_case("skipped") {
+        "funds_activation_skipped"
+    } else {
+        "funds_activated"
+    }
+}
+
+fn normalize_funds_activation_success(
+    payload: ClaimFundsActivationAdapterSuccess,
+) -> std::result::Result<ClaimFundsActivationAdapterSuccess, ClaimSubmitFailure> {
+    let status = payload.status.trim().to_ascii_lowercase();
+    if status != "submitted" && status != "skipped" {
+        return Err(ClaimSubmitFailure::retryable(format!(
+            "claim funds activation adapter returned unsupported status {}",
+            payload.status
+        )));
+    }
+
+    let approve_tx_hash =
+        normalize_optional_tx_hash(payload.approve_tx_hash.as_deref()).map_err(|err| {
+            ClaimSubmitFailure::retryable(format!("invalid approve tx hash: {err:#}"))
+        })?;
+    let wrap_tx_hash = normalize_optional_tx_hash(payload.wrap_tx_hash.as_deref())
+        .map_err(|err| ClaimSubmitFailure::retryable(format!("invalid wrap tx hash: {err:#}")))?;
+    if status == "submitted" && wrap_tx_hash.is_none() {
+        return Err(ClaimSubmitFailure::retryable(
+            "claim funds activation adapter returned submitted without wrapTxHash",
+        ));
+    }
+
+    Ok(ClaimFundsActivationAdapterSuccess {
+        status,
+        activated_amount_usdc: payload.activated_amount_usdc,
+        approve_tx_hash,
+        wrap_tx_hash,
+        usdce_balance: payload.usdce_balance,
+        pusd_balance: payload.pusd_balance,
+        message: payload.message,
+    })
+}
+
+fn normalize_optional_tx_hash(raw: Option<&str>) -> Result<Option<String>> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_tx_hash)
+        .transpose()
 }
 
 fn claim_relayer_adapter_error_details(

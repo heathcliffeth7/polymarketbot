@@ -200,7 +200,12 @@ async fn armed_builder_order_cache_token_ids() -> Vec<String> {
 async fn ensure_fast_path_market_stream_union(ws: &ClobWsClient) -> Result<()> {
     let flow_token_ids = {
         let cache = TRADE_FLOW_WS_FAST_PATH_CACHE.read().await;
-        cache.token_targets.keys().cloned().collect::<Vec<_>>()
+        cache
+            .token_targets
+            .keys()
+            .chain(cache.live_gap_prewarm_targets.keys())
+            .cloned()
+            .collect::<Vec<_>>()
     };
     let builder_token_ids = armed_builder_order_cache_token_ids().await;
     let guarded_buy_token_ids = guarded_buy_order_cache_token_ids().await;
@@ -703,6 +708,7 @@ mod armed_ws_eval_tests {
             ptb_reference_price: None,
             ptb_stop_loss_rules_json: Vec::new(),
             ptb_stop_loss_time_decay_mode: None,
+            ptb_current_price_source: "chainlink".to_string(),
             staged_sl_retry_only_dust: false,
             staged_sl_retry_dust_metric: None,
             staged_sl_retry_dust_value: None,
@@ -790,6 +796,7 @@ mod armed_ws_eval_tests {
             ptb_reference_price: None,
             ptb_stop_loss_rules_json: Vec::new(),
             ptb_stop_loss_time_decay_mode: Some("tighten".to_string()),
+            ptb_current_price_source: "chainlink".to_string(),
             staged_sl_retry_only_dust: false,
             staged_sl_retry_dust_metric: None,
             staged_sl_retry_dust_value: None,

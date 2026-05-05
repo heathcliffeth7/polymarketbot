@@ -4,7 +4,7 @@ import type {
   PtbStopLossBumpLossRuleRow,
   PtbStopLossBumpMode,
 } from './types';
-import { normalizePtbMode } from './ptb-modes';
+import { normalizePtbCurrentPriceSource, normalizePtbMode } from './ptb-modes';
 import { isRecord, toStringValue } from './utils';
 
 interface SerializedPtbStopLossBumpLossRule {
@@ -251,6 +251,9 @@ export function normalizePrimaryPriceToBeatGuardBuildConfig(
   }
 
   config.priceToBeatMode = normalizePtbMode(config.priceToBeatMode);
+  config.priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(
+    config.priceToBeatCurrentPriceSource
+  );
   if (config.priceToBeatMode === 'manual') {
     const priceToBeatUnitRaw = toStringValue(config.priceToBeatMaxDiffUnit).trim().toLowerCase();
     config.priceToBeatMaxDiffUnit = priceToBeatUnitRaw === 'cent' ? 'cent' : 'usd';

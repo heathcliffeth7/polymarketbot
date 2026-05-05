@@ -163,6 +163,12 @@ pub(crate) async fn load_user_order_executor_cached(
 
     let cfg = load_user_app_config_cached(repo, user_id, user_cfg_cache).await?;
     let client: SharedOrderExecutor = Arc::new(build_order_executor_from_app_config(&cfg)?);
+    spawn_clob_order_warmup_if_enabled(
+        0,
+        &cfg,
+        Arc::clone(&client),
+        format!("user:{user_id}:{}", cfg.exchange.clob_base_url),
+    );
     executor_cache.insert(user_id, Arc::clone(&client));
     Ok(client)
 }

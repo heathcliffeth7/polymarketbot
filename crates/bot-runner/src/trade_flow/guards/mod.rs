@@ -1,4 +1,5 @@
 pub(crate) mod binance_price;
+pub(crate) mod cex_microstructure;
 pub(crate) mod chainlink_price;
 pub(crate) mod polymarket_price_to_beat;
 pub(crate) mod price_to_beat;

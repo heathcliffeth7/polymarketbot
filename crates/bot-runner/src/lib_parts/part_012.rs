@@ -211,19 +211,18 @@ fn select_trade_flow_initial_seed_nodes<'a>(
         return Ok((TradeFlowSeedMode::Trigger, trigger_nodes));
     }
 
-    let has_dca_live_root = graph
-        .nodes
-        .iter()
-        .any(|node| node.node_type == "action.place_order" && action_place_order_uses_dca_live(node));
+    let has_dca_live_root = graph.nodes.iter().any(|node| {
+        node.node_type == "action.place_order" && action_place_order_uses_dca_live(node)
+    });
     if !has_dca_live_root {
         return Err("flow_missing_trigger");
     }
 
     let root_nodes = collect_trade_flow_root_nodes(graph);
     if !root_nodes.is_empty()
-        && root_nodes
-            .iter()
-            .all(|node| node.node_type == "action.place_order" && action_place_order_uses_dca_live(node))
+        && root_nodes.iter().all(|node| {
+            node.node_type == "action.place_order" && action_place_order_uses_dca_live(node)
+        })
     {
         return Ok((TradeFlowSeedMode::DcaLiveRoot, root_nodes));
     }
@@ -246,10 +245,9 @@ async fn seed_trade_flow_trigger_steps(
     let (seed_mode, nodes_to_seed) = match select_trade_flow_initial_seed_nodes(graph) {
         Ok(selection) => selection,
         Err(reason) => {
-            let has_dca_live_root = graph
-                .nodes
-                .iter()
-                .any(|node| node.node_type == "action.place_order" && action_place_order_uses_dca_live(node));
+            let has_dca_live_root = graph.nodes.iter().any(|node| {
+                node.node_type == "action.place_order" && action_place_order_uses_dca_live(node)
+            });
             let root_nodes_payload: Vec<Value> = collect_trade_flow_root_nodes(graph)
                 .iter()
                 .map(|node| {
@@ -438,8 +436,6 @@ async fn process_trade_flow_step(
             }
 
             repo.update_trade_flow_run_context(run.id, &context).await?;
-            repo.mark_trade_flow_step_completed(step.id, Some(&execution.output))
-                .await?;
             spawn_trade_flow_immediate_submit_if_needed(
                 repo,
                 run_id,
@@ -448,6 +444,8 @@ async fn process_trade_flow_step(
                 client.clone(),
                 &execution.output,
             );
+            repo.mark_trade_flow_step_completed(step.id, Some(&execution.output))
+                .await?;
             repo.append_trade_flow_event(
                 Some(run.id),
                 run.definition_id,

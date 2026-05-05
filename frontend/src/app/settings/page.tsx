@@ -137,7 +137,7 @@ export default function SettingsPage() {
             title="Claim Config"
             fields={[
               { key: 'enabled', label: 'Auto Claim Enabled', type: 'boolean' },
-              { key: 'execution_mode', label: 'Execution Mode', type: 'select', options: ['direct', 'builder_relayer'] },
+              { key: 'execution_mode', label: 'Execution Mode', type: 'select', options: ['direct', 'builder_relayer', 'relayer_api_key'] },
               { key: 'rpc_url', label: 'RPC URL', type: 'text' },
               { key: 'data_api_base_url', label: 'Data API Base URL', type: 'text' },
               { key: 'user_address', label: 'Claim Wallet Address', type: 'text' },
@@ -145,6 +145,11 @@ export default function SettingsPage() {
               { key: 'chain_id', label: 'Chain ID', type: 'number', min: 1 },
               { key: 'ctf_contract_address', label: 'CTF Contract Address', type: 'text' },
               { key: 'collateral_token_address', label: 'Collateral Token Address', type: 'text' },
+              { key: 'auto_activate_funds', label: 'Auto Activate Funds', type: 'boolean' },
+              { key: 'activate_min_usdc', label: 'Activate Min USDC.e', type: 'number', min: 0, step: 0.01 },
+              { key: 'usdce_token_address', label: 'USDC.e Token Address', type: 'text' },
+              { key: 'pusd_token_address', label: 'pUSD Token Address', type: 'text' },
+              { key: 'collateral_onramp_address', label: 'Collateral Onramp Address', type: 'text' },
               { key: 'discovery_interval_sec', label: 'Discovery Interval (sec)', type: 'number', min: 5 },
               { key: 'positions_page_size', label: 'Positions Page Size', type: 'number', min: 1 },
               { key: 'positions_max_pages', label: 'Positions Max Pages', type: 'number', min: 1 },

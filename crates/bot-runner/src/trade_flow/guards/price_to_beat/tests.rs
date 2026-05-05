@@ -86,6 +86,7 @@ fn default_guard_evaluation() -> PriceToBeatGuardEvaluation {
         threshold_was_clamped: None,
         signal_formula: None,
         iv_mismatch_edge: None,
+        early_stale_side: None,
     }
 }
 fn test_action_place_order_node(config: Value) -> crate::TradeFlowNode {
@@ -1103,6 +1104,7 @@ fn current_price_unavailable_with_provisional_price_to_beat_stays_strict() {
 #[test]
 fn chainlink_rtds_start_tick_stale_current_price_maps_to_pending() {
     let (reason_code, reason_detail) = map_current_price_error(
+        PriceToBeatCurrentPriceSource::Chainlink,
         PriceToBeatSource::ChainlinkRtdsStartTick,
         BTC_MARKET_5M,
         "btc",
@@ -1123,6 +1125,7 @@ fn chainlink_rtds_start_tick_stale_current_price_maps_to_pending() {
 #[test]
 fn authoritative_price_to_beat_keeps_current_price_unavailable_reason() {
     let (reason_code, reason_detail) = map_current_price_error(
+        PriceToBeatCurrentPriceSource::Chainlink,
         PriceToBeatSource::Polymarket,
         BTC_MARKET_5M,
         "btc",
@@ -1131,7 +1134,7 @@ fn authoritative_price_to_beat_keeps_current_price_unavailable_reason() {
     );
     assert_eq!(reason_code, "current_price_unavailable");
     assert!(reason_detail.contains("primary_source=chainlink_live_data_ws"));
-    assert!(reason_detail.contains("chainlink_error=stale price for btc/usd"));
+    assert!(reason_detail.contains("current_price_error=stale price for btc/usd"));
 }
 
 #[test]
@@ -1173,6 +1176,7 @@ fn pending_reason_can_describe_authoritative_snapshot_wait() {
 #[test]
 fn chainlink_rtds_start_tick_no_cached_current_price_uses_unknown_age_placeholders() {
     let (reason_code, reason_detail) = map_current_price_error(
+        PriceToBeatCurrentPriceSource::Chainlink,
         PriceToBeatSource::ChainlinkRtdsStartTick,
         BTC_MARKET_5M,
         "btc",

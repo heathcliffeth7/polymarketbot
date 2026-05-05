@@ -5,10 +5,11 @@ import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { NODE_FIELD_SCHEMAS, PTB_MODE_OPTIONS, createEmptyEntryTimingProfileRow, createEmptyExitLadderRuleRow, createEmptyTimeExitRuleRow, type EntryTimingProfileRow, type ExitLadderRuleRow, isPresetBuySellPlaceOrderMarker, isPresetPlaceOrderMarker, normalizePtbMode, type PtbGapUnit, type PtbIvTimeRuleRow, type PtbStopLossBumpLossRuleRow, type PtbStopLossRuleRow, type TimeExitRuleRow } from '@/lib/trade-flow-config-mappers';
+import { NODE_FIELD_SCHEMAS, createEmptyEntryTimingProfileRow, createEmptyExitLadderRuleRow, createEmptyTimeExitRuleRow, type EntryTimingProfileRow, type ExitLadderRuleRow, isPresetBuySellPlaceOrderMarker, isPresetPlaceOrderMarker, normalizePtbCurrentPriceSource, normalizePtbMode, type PtbGapUnit, type PtbIvTimeRuleRow, type PtbStopLossBumpLossRuleRow, type PtbStopLossRuleRow, type TimeExitRuleRow } from '@/lib/trade-flow-config-mappers';
 import { NODE_FIELD_HELP_CONTENT, NODE_TYPE_OPTIONS } from '../flow-canvas-constants';
 import { normalizeDateTimeInput } from '../flow-canvas-utils';
 import { Settings2, Trash2, Plus, Zap } from 'lucide-react';
+import { LIVE_GAP_COLLECTOR_MODE } from '@/lib/trade-flow-config-mappers/live-gap-collector';
 import { EntryTimingProfilesSection } from './entry-timing-profiles-section';
 import { EMPTY_SELECT_SENTINEL } from './shared';
 import { ExitLadderSection } from './exit-sections';
@@ -17,10 +18,8 @@ import { appendPrimaryTakeProfitRuleRow } from './exit-ladder-state';
 import { isHiddenNodeFieldKey } from './hidden-node-field';
 import { MaxPriceProtectionSection } from './max-price-protection-section';
 import { PairLockAutoPreviewSection } from './pair-lock-auto-preview-section';
-import { PriceToBeatMaxPriceRelaxSection } from './price-to-beat-max-price-relax-section';
-import { PriceToBeatIvTimeRulesSection } from './price-to-beat-iv-time-rules-section';
+import { PriceToBeatGuardSection } from './price-to-beat-guard-section';
 import { resolvePriceToBeatStopLossBumpUiState, updatePtbStopLossBumpLossRuleRowsFormState } from './price-to-beat-stop-loss-bump-state';
-import { PriceToBeatStopLossBumpSection } from './price-to-beat-stop-loss-bump-section';
 import { PtbStopLossSection } from './ptb-stop-loss-section';
 import { ReentryAdvancedSection } from './reentry-advanced-section';
 import { updateEntryTimingProfileRowsFormState, updatePtbIvTimeRuleRowsFormState, updatePtbStopLossRuleRowsFormState, updateTimeExitRuleRowsFormState } from './rule-row-state';
@@ -63,6 +62,13 @@ export function NodeInspectorPanel({
   const [openFieldHelpState, setOpenFieldHelpState] = useState<{ nodeType: string; key: string } | null>(null);
   const nodeSchema = NODE_FIELD_SCHEMAS[nodeTypeDraft] || [];
   const nodeFieldHelp = NODE_FIELD_HELP_CONTENT[nodeTypeDraft] || {};
+  const placeOrderModeField = nodeSchema.find((field) => field.key === 'mode');
+  const placeOrderModeValue =
+    nodeTypeDraft === 'action.place_order'
+      ? (form.fields.mode ?? 'single').trim() || 'single'
+      : '';
+  const placeOrderLiveGapCollectorEnabled =
+    nodeTypeDraft === 'action.place_order' && placeOrderModeValue === LIVE_GAP_COLLECTOR_MODE;
   const placeOrderSizeMode = (form.fields.sizeMode ?? '').trim().toLowerCase();
   const dualDcaBaseSizing = (form.fields.baseSizing ?? '').trim().toLowerCase();
   const triggerMarketMode = (form.fields.marketMode ?? '').trim().toLowerCase();
@@ -195,6 +201,11 @@ export function NodeInspectorPanel({
   const priceToBeatRetryChecked =
     (form.fields.retryOnPriceToBeatGuardBlock ?? '').toString().trim().toLowerCase() === 'true';
   const priceToBeatGuardMode = normalizePtbMode(form.fields.priceToBeatMode);
+  const priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(
+    form.fields.priceToBeatCurrentPriceSource
+  );
+  const priceToBeatCurrentSourceVisible =
+    priceToBeatGuardChecked || ptbStopLossChecked || placeOrderPtbStopLossRuleRows.length > 0;
   const priceToBeatGuardUnit =
     (form.fields.priceToBeatMaxDiffUnit ?? '').toString().trim().toLowerCase() === 'cent'
       ? 'cent'
@@ -295,6 +306,20 @@ export function NodeInspectorPanel({
     actions.onFormChange((prev) => updateTimeExitRuleRowsFormState(prev, updater));
   const visibleNodeSchema = nodeSchema.filter((field) => {
     if (nodeTypeDraft === 'action.place_order') {
+      if (field.key === 'mode') {
+        return false;
+      }
+      if (isHiddenNodeFieldKey(field.key)) {
+        return false;
+      }
+      if (
+        field.key.startsWith('liveGapCollector') ||
+        field.key.startsWith('liveGapStopLoss') ||
+        field.key.startsWith('noReversal') ||
+        field.key === 'notifyOnLiveGapCollectorDecision'
+      ) {
+        return placeOrderLiveGapCollectorEnabled;
+      }
       if (field.key === 'sizeMode') return !placeOrderPairLockEnabled;
       if (field.key === 'sizePct') return !placeOrderPairLockEnabled && placeOrderSizeMode === 'pct';
       if (field.key === 'targetQty') return !placeOrderPairLockEnabled && placeOrderSizeMode === 'shares';
@@ -402,9 +427,6 @@ export function NodeInspectorPanel({
       }
       if (field.key === 'notifyOnSlHit') {
         return placeOrderHasAnyStopLossProtection;
-      }
-      if (isHiddenNodeFieldKey(field.key)) {
-        return false;
       }
     }
     if (nodeTypeDraft === 'action.dual_dca') {
@@ -566,6 +588,32 @@ export function NodeInspectorPanel({
                     : telegramUserDefaultChatId
                       ? 'Node Chat ID bos. Runtime bu kullanicinin varsayilan Chat ID degerini kullanir.'
                       : 'Varsayilan Chat ID opsiyoneldir. Burasi da bossa node icinde Chat ID doldurman gerekir.'}
+                </p>
+              </div>
+            )}
+
+            {nodeTypeDraft === 'action.place_order' && placeOrderModeField && (
+              <div className="space-y-1 rounded-md border border-sky-200 bg-sky-50/70 p-2">
+                <Label className="text-[11px] font-semibold text-slate-700">
+                  {placeOrderModeField.label}
+                </Label>
+                <Select
+                  value={placeOrderModeValue}
+                  onValueChange={(v) => actions.onUpdateField('mode', v)}
+                >
+                  <SelectTrigger className="h-8 w-full border-sky-200 bg-white text-xs text-slate-900" size="sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(placeOrderModeField.options || []).map((option) => (
+                      <SelectItem key={option.value || 'single'} value={option.value || 'single'}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-[10px] leading-relaxed text-slate-500">
+                  Live Gap Collector icin buradan `Live Gap Collector` sec.
                 </p>
               </div>
             )}
@@ -813,6 +861,40 @@ export function NodeInspectorPanel({
                   marketOutcomes={marketOutcomes}
                   marketOutcomesLoading={marketOutcomesLoading}
                 />
+                {field.key === 'executionMode' && showDedicatedTriggerGuard && (
+                  <>
+                    <PriceToBeatGuardSection
+                      checked={priceToBeatGuardChecked}
+                      retryChecked={priceToBeatRetryChecked}
+                      mode={priceToBeatGuardMode}
+                      unit={priceToBeatGuardUnit}
+                      currentSource={priceToBeatCurrentPriceSource}
+                      currentSourceVisible={priceToBeatCurrentSourceVisible}
+                      fields={form.fields}
+                      stopLossBumpUi={priceToBeatStopLossBumpUi}
+                      stopLossBumpLossRuleRows={placeOrderPtbStopLossBumpLossRuleRows}
+                      ivTimeRuleRows={placeOrderPtbIvTimeRuleRows}
+                      maxPriceRelaxMinUnit={priceToBeatMaxPriceRelaxMinUnit}
+                      maxPriceRelaxStepMode={priceToBeatMaxPriceRelaxStepMode}
+                      maxPriceRelaxStepUnit={priceToBeatMaxPriceRelaxStepUnit}
+                      onUpdateField={actions.onUpdateField}
+                      onUpdateStopLossBumpLossRuleRows={updatePtbStopLossBumpLossRuleRows}
+                      onUpdateIvTimeRuleRows={updatePtbIvTimeRuleRows}
+                    />
+                    {showPtbStopLossSection && (
+                      <PtbStopLossSection
+                        enabled={ptbStopLossChecked}
+                        unit={ptbStopLossGapUnit}
+                        timeDecayMode={ptbStopLossTimeDecayMode}
+                        currentSourceOverride={form.fields.ptbStopLossCurrentPriceSource ?? ''}
+                        inheritedCurrentSource={priceToBeatCurrentPriceSource}
+                        rows={placeOrderPtbStopLossRuleRows}
+                        onUpdateField={actions.onUpdateField}
+                        onUpdateRows={updatePtbStopLossRuleRows}
+                      />
+                    )}
+                  </>
+                )}
                 {field.key === 'marketSlug' && placeOrderMarketSeedUi?.isInheritedMarketSlug && <p className="text-[10px] leading-relaxed text-sky-600">Bagli upstream `trigger.market_price` bilgisinden otomatik dolduruldu. Config&apos;e yazmak icin `Node Guncelle` kullan.</p>}
                 {field.key === 'marketSlug' && placeOrderMarketSeedUi?.upstreamKind === 'multiple' && <p className="text-[10px] leading-relaxed text-amber-600">Birden fazla bagli upstream fixed market bulundu{placeOrderMarketSeedUi.distinctUpstreamMarketSlugs.length > 0 ? ` (${placeOrderMarketSeedUi.distinctUpstreamMarketSlugs.join(', ')})` : ''}. Bu yuzden otomatik doldurma yapilmadi.</p>}
                 {field.key === 'tokenId' && placeOrderMarketSeedUi?.upstreamKind === 'single' && placeOrderMarketSeedUi.upstreamOutcomeKind === 'multiple' && <p className="text-[10px] leading-relaxed text-amber-600">Bagli upstream market bulundu ama outcome belirsiz{placeOrderMarketSeedUi.distinctUpstreamOutcomeLabels.length > 0 ? ` (${placeOrderMarketSeedUi.distinctUpstreamOutcomeLabels.join(', ')})` : ''}. Bu yuzden sadece market slug dolduruldu.</p>}
@@ -931,205 +1013,6 @@ export function NodeInspectorPanel({
                       floorPriceCent={placeOrderExecutionFloorPriceCentValue}
                       onUpdateField={actions.onUpdateField}
                     />
-                    <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-200 pt-2">
-                      <Label className="text-[11px] font-medium text-slate-600">
-                        Price to Beat Korumasi
-                      </Label>
-                      <input
-                        type="checkbox"
-                        checked={priceToBeatGuardChecked}
-                        onChange={(e) =>
-                          {
-                            actions.onUpdateField(
-                              'priceToBeatGuardEnabled',
-                              e.target.checked ? 'true' : 'false'
-                            );
-                            if (e.target.checked) {
-                              actions.onUpdateField('priceToBeatMode', normalizePtbMode(form.fields.priceToBeatMode));
-                            }
-                            if (
-                              e.target.checked &&
-                              !['usd', 'cent'].includes(
-                                (form.fields.priceToBeatMaxDiffUnit ?? '')
-                                  .toString()
-                                  .trim()
-                                  .toLowerCase()
-                              )
-                            ) {
-                              actions.onUpdateField('priceToBeatMaxDiffUnit', 'usd');
-                            }
-                            if (
-                              e.target.checked &&
-                              !(form.fields.notifyOnPriceToBeatGapBlocked ?? '')
-                                .toString()
-                                .trim()
-                            ) {
-                              actions.onUpdateField('notifyOnPriceToBeatGapBlocked', 'true');
-                            }
-                          }
-                        }
-                        className="h-4 w-4 rounded border-slate-300"
-                      />
-                    </div>
-                    <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                      Price to Beat ile ayni Polymarket/Chainlink current price feedi kullanilir.
-                      Fark belirlenen minimum seviyenin altindaysa buy emrini engelle. 5m ve 15m
-                      updown marketlerde calisir.
-                    </p>
-                    {priceToBeatGuardChecked && (
-                      <div className="mt-2 space-y-2 border-t border-slate-200 pt-2">
-                        <div className="space-y-1">
-                          <Label className="text-[11px] font-medium text-slate-600">
-                            PTB Modu
-                          </Label>
-                          <Select
-                            value={priceToBeatGuardMode}
-                            onValueChange={(value) =>
-                              actions.onUpdateField('priceToBeatMode', value)
-                            }
-                          >
-                            <SelectTrigger
-                              className="h-8 w-full border-slate-200 bg-white text-xs text-slate-900"
-                              size="sm"
-                            >
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {PTB_MODE_OPTIONS.map((option) => (
-                                <SelectItem key={option.value} value={option.value}>
-                                  {option.label}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        {priceToBeatGuardMode === 'manual' ? (
-                          <>
-                            <div className="space-y-1">
-                              <Label className="text-[11px] font-medium text-slate-600">
-                                Minimum Fark
-                              </Label>
-                              <Input
-                                type="number"
-                                step="any"
-                                value={form.fields.priceToBeatMaxDiff ?? ''}
-                                onChange={(event) =>
-                                  actions.onUpdateField('priceToBeatMaxDiff', event.target.value)
-                                }
-                                placeholder={priceToBeatGuardUnit === 'cent' ? '1' : '5'}
-                                className="h-8 border-slate-200 bg-white text-xs text-slate-900 focus-visible:ring-sky-300"
-                              />
-                            </div>
-                            <div className="space-y-1">
-                              <Label className="text-[11px] font-medium text-slate-600">
-                                Birim
-                              </Label>
-                              <Select
-                                value={priceToBeatGuardUnit}
-                                onValueChange={(value) =>
-                                  actions.onUpdateField('priceToBeatMaxDiffUnit', value)
-                                }
-                              >
-                                <SelectTrigger
-                                  className="h-8 w-full border-slate-200 bg-white text-xs text-slate-900"
-                                  size="sm"
-                                >
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="usd">USD</SelectItem>
-                                  <SelectItem value="cent">Cent</SelectItem>
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                              {priceToBeatGuardUnit === 'cent'
-                                ? 'Cent modu: 1 = $0.01. Fark bu minimum degerin altinda kalirsa bloklanir.'
-                                : 'USD modu: 5 = $5.00. Fark bu minimum degerin altinda kalirsa bloklanir.'}
-                            </p>
-                          </>
-                        ) : (
-                          <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                            Dinamik modda esik elle girilmez. Ayni asset/timeframe icin son 3
-                            tamamlanmis marketin yonlu excursion ortalamasi otomatik kullanilir.
-                            Asagidaki relax ayariyla miss esigi gecildikten sonra maxPrice altinda
-                            gorulen uygun gap seviyesine kademeli olarak gevseyebilir.
-                          </p>
-                        )}
-                        {priceToBeatGuardMode === 'iv_mismatch_edge' && (
-                          <PriceToBeatIvTimeRulesSection
-                            rows={placeOrderPtbIvTimeRuleRows}
-                            fields={form.fields}
-                            onUpdateField={actions.onUpdateField}
-                            onUpdateRows={updatePtbIvTimeRuleRows}
-                          />
-                        )}
-                        <PriceToBeatStopLossBumpSection
-                          enabled={priceToBeatStopLossBumpUi.checked}
-                          mode={priceToBeatStopLossBumpUi.mode}
-                          amount={form.fields.priceToBeatStopLossBumpAmount ?? ''}
-                          maxValue={form.fields.priceToBeatStopLossBumpMaxValue ?? ''}
-                          decayWindows={form.fields.priceToBeatStopLossBumpDecayWindows ?? ''}
-                          scopeMode={priceToBeatStopLossBumpUi.scope}
-                          unit={priceToBeatStopLossBumpUi.unit}
-                          defaultUnit={priceToBeatGuardMode === 'manual' ? priceToBeatGuardUnit : 'usd'}
-                          lossRuleRows={placeOrderPtbStopLossBumpLossRuleRows}
-                          onUpdateField={actions.onUpdateField}
-                          onUpdateLossRuleRows={updatePtbStopLossBumpLossRuleRows}
-                        />
-                        <PriceToBeatMaxPriceRelaxSection
-                          enabled={form.fields.priceToBeatMaxPriceRelaxEnabled ?? ''}
-                          missCount={form.fields.priceToBeatMaxPriceRelaxMissCount ?? ''}
-                          historyCount={form.fields.priceToBeatMaxPriceRelaxHistoryCount ?? ''}
-                          minValue={form.fields.priceToBeatMaxPriceRelaxMinValue ?? ''}
-                          minDepthUsd={form.fields.priceToBeatMaxPriceRelaxMinDepthUsd ?? ''}
-                          minUnit={priceToBeatMaxPriceRelaxMinUnit} stepMode={priceToBeatMaxPriceRelaxStepMode}
-                          stepValue={form.fields.priceToBeatMaxPriceRelaxStepValue ?? ''}
-                          stepUnit={priceToBeatMaxPriceRelaxStepUnit} onUpdateField={actions.onUpdateField}
-                        />
-                        <div className="flex items-center justify-between gap-2">
-                          <Label className="text-[11px] font-medium text-slate-600">
-                            Price to Beat Engel Bildirimi
-                          </Label>
-                          <input
-                            type="checkbox"
-                            checked={
-                              (form.fields.notifyOnPriceToBeatGapBlocked ?? '')
-                                .toString()
-                                .trim()
-                                .toLowerCase() === 'true'
-                            }
-                            onChange={(e) =>
-                              actions.onUpdateField(
-                                'notifyOnPriceToBeatGapBlocked',
-                                e.target.checked ? 'true' : 'false'
-                              )
-                            }
-                            className="h-4 w-4 rounded border-slate-300"
-                          />
-                        </div>
-                        <div className="flex items-center justify-between gap-2">
-                          <Label className="text-[11px] font-medium text-slate-600">
-                            Iyilesince Tekrar Dene
-                          </Label>
-                          <input
-                            type="checkbox"
-                            checked={priceToBeatRetryChecked}
-                            onChange={(e) =>
-                              actions.onUpdateField(
-                                'retryOnPriceToBeatGuardBlock',
-                                e.target.checked ? 'true' : 'false'
-                              )
-                            }
-                            className="h-4 w-4 rounded border-slate-300"
-                          />
-                        </div>
-                        <p className="text-[10px] leading-relaxed text-slate-400 italic">
-                          Guard fail olursa node hata verir ama bekleme modunda yeniden denenir;
-                          kosullar duzelince order akisina devam eder.
-                        </p>
-                      </div>
-                    )}
                   </div>
                 )}
                 {field.key === 'maxPriceCent' && showDedicatedTriggerGuard && (
@@ -1282,17 +1165,6 @@ export function NodeInspectorPanel({
                 onRemove={(rowId) =>
                   updateSlRuleRows((rows) => rows.filter((row) => row.id !== rowId))
                 }
-              />
-            )}
-
-            {showPtbStopLossSection && (
-              <PtbStopLossSection
-                enabled={ptbStopLossChecked}
-                unit={ptbStopLossGapUnit}
-                timeDecayMode={ptbStopLossTimeDecayMode}
-                rows={placeOrderPtbStopLossRuleRows}
-                onUpdateField={actions.onUpdateField}
-                onUpdateRows={updatePtbStopLossRuleRows}
               />
             )}
 

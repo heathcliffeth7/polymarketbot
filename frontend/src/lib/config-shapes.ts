@@ -1,4 +1,9 @@
-import { normalizeClaimExecutionMode } from '@/lib/claim-relayer-config';
+import {
+  DEFAULT_COLLATERAL_ONRAMP_ADDRESS,
+  DEFAULT_PUSD_TOKEN_ADDRESS,
+  DEFAULT_USDCE_TOKEN_ADDRESS,
+  normalizeClaimExecutionMode,
+} from '@/lib/claim-relayer-config';
 import { isEncryptedConfigValue } from '@/lib/crypto-config';
 
 const MASKED_SECRET = '********';
@@ -82,6 +87,7 @@ export function normalizeClaimShape(
   const processBatchSize = Number(source.process_batch_size);
   const maxAttempts = Number(source.max_attempts);
   const retryBackoffMs = Number(source.retry_backoff_ms);
+  const activateMinUsdc = Number(source.activate_min_usdc);
   return {
     enabled: Boolean(source.enabled),
     execution_mode: String(source.execution_mode ?? 'direct'),
@@ -94,7 +100,25 @@ export function normalizeClaimShape(
     private_key_env: String(source.private_key_env ?? ''),
     chain_id: Number.isFinite(chainId) ? chainId : 137,
     ctf_contract_address: String(source.ctf_contract_address ?? ''),
-    collateral_token_address: String(source.collateral_token_address ?? ''),
+    collateral_token_address: String(
+      source.collateral_token_address ?? DEFAULT_USDCE_TOKEN_ADDRESS
+    ),
+    auto_activate_funds:
+      source.auto_activate_funds === undefined
+        ? true
+        : Boolean(source.auto_activate_funds),
+    activate_min_usdc: Number.isFinite(activateMinUsdc)
+      ? activateMinUsdc
+      : 0.01,
+    usdce_token_address: String(
+      source.usdce_token_address ?? DEFAULT_USDCE_TOKEN_ADDRESS
+    ),
+    pusd_token_address: String(
+      source.pusd_token_address ?? DEFAULT_PUSD_TOKEN_ADDRESS
+    ),
+    collateral_onramp_address: String(
+      source.collateral_onramp_address ?? DEFAULT_COLLATERAL_ONRAMP_ADDRESS
+    ),
     discovery_interval_sec: Number.isFinite(discoveryIntervalSec)
       ? discoveryIntervalSec
       : 30,
@@ -345,11 +369,28 @@ export function validateConfigShape(
     const collateralTokenAddress = String(
       data.collateral_token_address ?? ''
     ).trim();
+    const usdceTokenAddress = String(data.usdce_token_address ?? '').trim();
+    const pusdTokenAddress = String(data.pusd_token_address ?? '').trim();
+    const collateralOnrampAddress = String(
+      data.collateral_onramp_address ?? ''
+    ).trim();
     if (!isHexAddress(ctfContractAddress)) {
       errors.push('ctf_contract_address must be a valid 0x address');
     }
     if (!isHexAddress(collateralTokenAddress)) {
       errors.push('collateral_token_address must be a valid 0x address');
+    }
+    if (!isHexAddress(usdceTokenAddress)) {
+      errors.push('usdce_token_address must be a valid 0x address');
+    }
+    if (!isHexAddress(pusdTokenAddress)) {
+      errors.push('pusd_token_address must be a valid 0x address');
+    }
+    if (!isHexAddress(collateralOnrampAddress)) {
+      errors.push('collateral_onramp_address must be a valid 0x address');
+    }
+    if (requiredNumber('activate_min_usdc') < 0) {
+      errors.push('activate_min_usdc must be >= 0');
     }
     if (userAddress && !isHexAddress(userAddress)) {
       errors.push('user_address must be a valid 0x address');

@@ -211,7 +211,7 @@ fn evaluate_trade_builder_preempted_stop_loss(
     let ptb_stop_loss_evaluation = trade_builder_evaluate_ptb_stop_loss(sibling);
     let current_price = ptb_stop_loss_evaluation
         .as_ref()
-        .and_then(|evaluation| evaluation.current_chainlink_price)
+        .and_then(|evaluation| evaluation.current_price)
         .unwrap_or_else(|| trade_builder_trigger_eval_price_for_order(sibling, runtime_price));
     let evaluation = if let Some(ptb_evaluation) = ptb_stop_loss_evaluation.as_ref() {
         TradeBuilderTriggerEvaluation {
@@ -476,6 +476,7 @@ async fn maybe_latch_trade_builder_stop_loss(
     order: &mut TradeBuilderOrder,
     current_price: f64,
     ptb_stop_loss_evaluation: Option<&TradeBuilderPtbStopLossEvaluation>,
+    live_gap_stop_loss_evaluation: Option<&TradeBuilderLiveGapStopLossEvaluation>,
 ) -> Result<()> {
     if !trade_builder_is_stop_loss_child(order) || trade_builder_stop_loss_latched(order) {
         return Ok(());
@@ -496,10 +497,16 @@ async fn maybe_latch_trade_builder_stop_loss(
     {
         append_trade_builder_ptb_stop_loss_payload(payload, evaluation);
     }
+    if let (Some(payload), Some(evaluation)) =
+        (sl_latched_payload.as_object_mut(), live_gap_stop_loss_evaluation)
+    {
+        append_trade_builder_live_gap_stop_loss_payload(payload, evaluation);
+    }
     repo.set_trade_builder_order_trigger_latched(order.id, true, Some("stop_loss"))
         .await?;
     order.trigger_latched = true;
     order.trigger_latched_reason = Some("stop_loss".to_string());
+    order.trigger_latched_at = Some(Utc::now());
     repo.append_trade_builder_order_event(
         order.id,
         "sl_latched",

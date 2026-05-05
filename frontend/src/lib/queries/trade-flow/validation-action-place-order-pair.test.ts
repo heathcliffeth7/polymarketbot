@@ -111,6 +111,65 @@ function buildBiasedHedgeConfig(
   return result;
 }
 
+test('validateActionPlaceOrderConfig accepts live_gap_collector_v1 mode', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [{
+      key: 'live_gap_buy',
+      type: 'action.place_order',
+      positionX: 0,
+      positionY: 0,
+      config: {
+        mode: 'live_gap_collector_v1',
+        side: 'buy',
+        executionMode: 'market',
+        sizeMode: 'usdc',
+        sizeUsdc: 5,
+        marketSlug: 'btc-updown-5m-1773319200',
+        tokenId: 'tok-up',
+        outcomeLabel: 'Up',
+        liveGapCollectorHardMaxPriceCent: 93,
+        liveGapCollectorWindowStartSec: 220,
+        liveGapCollectorWindowEndSec: 285,
+        notifyOnLiveGapCollectorDecision: true,
+      },
+    }],
+    edges: [],
+  });
+
+  const issues = collectActionIssues(graph, 'live_gap_buy');
+  assert.equal(issues.some((issue) => issue.code === 'invalid_place_order_mode'), false);
+  assert.equal(issues.some((issue) => issue.code.startsWith('live_gap_collector_')), false);
+  assert.equal(issues.some((issue) => issue.code === 'invalid_notify_on_live_gap_collector_decision'), false);
+});
+
+test('validateActionPlaceOrderConfig rejects invalid live gap decision notification flag', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [{
+      key: 'live_gap_buy_invalid_notify',
+      type: 'action.place_order',
+      positionX: 0,
+      positionY: 0,
+      config: {
+        mode: 'live_gap_collector_v1',
+        side: 'buy',
+        executionMode: 'market',
+        sizeMode: 'usdc',
+        sizeUsdc: 5,
+        marketSlug: 'btc-updown-5m-1773319200',
+        tokenId: 'tok-up',
+        outcomeLabel: 'Up',
+        notifyOnLiveGapCollectorDecision: 'maybe',
+      },
+    }],
+    edges: [],
+  });
+
+  const issues = collectActionIssues(graph, 'live_gap_buy_invalid_notify');
+  assert.ok(issues.some((issue) => issue.code === 'invalid_notify_on_live_gap_collector_decision'));
+});
+
 function buildBiasedHedgeGraph(
   actionOverrides: Record<string, unknown> = {},
   triggerOverrides: Record<string, unknown> = {}
@@ -794,6 +853,7 @@ test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard, staged, an
           ptbStopLossEnabled: true,
           ptbStopLossGapUsd: 0,
           ptbStopLossGapUnit: 'usd',
+          ptbStopLossCurrentPriceSource: 'coinbase',
           ptbStopLossTimeDecayMode: 'relax',
           ptbStopLossRules: [
             { gapUsd: 7, sizePct: 60 },
@@ -806,6 +866,7 @@ test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard, staged, an
           counterLegPtbStopLossEnabled: true,
           counterLegPtbStopLossGapUsd: -2,
           counterLegPtbStopLossGapUnit: 'cent',
+          counterLegPtbStopLossCurrentPriceSource: 'binance',
           counterLegPtbStopLossTimeDecayMode: 'relax',
           counterLegNotifyOnSlHit: true,
           reenterOnSlHit: true,
@@ -819,6 +880,41 @@ test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard, staged, an
 
   const issues = collectActionIssues(graph, 'pair_buy_sl');
   assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig rejects counter ptb stop-loss source override when inactive', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_pair_counter_source_inactive'),
+      {
+        key: 'pair_buy_counter_source_inactive',
+        type: 'action.place_order',
+        positionX: 240,
+        positionY: 0,
+        config: {
+          mode: 'pair_lock',
+          side: 'buy',
+          kind: 'immediate',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 5,
+          pairMaxTotalCent: 90,
+          pairSizingMode: 'manual',
+          counterLegEnabled: true,
+          counterLegSizeUsdc: 5,
+          counterLegOutcomeLabel: 'opposite',
+          counterLegPtbStopLossCurrentPriceSource: 'binance',
+        },
+      },
+    ],
+    edges: [{ key: 'edge_pair_counter_source_inactive', source: 'trigger_pair_counter_source_inactive', target: 'pair_buy_counter_source_inactive', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'pair_buy_counter_source_inactive');
+  assert.ok(
+    issues.some((issue) => issue.code === 'counter_leg_ptb_stop_loss_current_price_source_requires_ptb_stop_loss')
+  );
 });
 
 test('validateActionPlaceOrderConfig rejects invalid counter leg ptb stop-loss gap unit', () => {
@@ -1301,7 +1397,7 @@ test('validateActionPlaceOrderConfig ignores zero-value reentry knobs in pair_lo
   );
 });
 
-test('validateActionPlaceOrderConfig still rejects non-zero reentry knobs in pair_lock mode', () => {
+test('validateActionPlaceOrderConfig accepts primary advanced reentry knobs in pair_lock mode', () => {
   const graph = normalizeTradeFlowGraph({
     context: {},
     nodes: [
@@ -1322,7 +1418,19 @@ test('validateActionPlaceOrderConfig still rejects non-zero reentry knobs in pai
           pairTotalBudgetUsdc: 10,
           counterLegEnabled: true,
           counterLegOutcomeLabel: 'opposite',
+          slEnabled: true,
+          slPriceCent: 45,
+          priceToBeatGuardEnabled: true,
+          priceToBeatMode: 'auto_vol_pct',
+          reenterOnSlHit: true,
+          reentryMaxAttempts: 2,
           reentryCooldownSec: 1,
+          reentryMinPriceCent: 35,
+          reentryMaxPriceCent: 88,
+          reentryPriceToBeatMaxDiff: 3,
+          reentryPriceToBeatMaxDiffUnit: 'usd',
+          reentrySkipCurrentWindow: true,
+          reentryThresholdDecay: 0.8,
           reentryMaxPriceTightenBps: 500,
         },
       },
@@ -1333,15 +1441,15 @@ test('validateActionPlaceOrderConfig still rejects non-zero reentry knobs in pai
   const issues = collectActionIssues(graph, 'pair_buy_nonzero_reentry');
   assert.equal(
     issues.some((issue) => issue.code === 'pair_lock_disallows_exit_features'),
-    true
+    false
   );
   assert.equal(
     issues.some((issue) => issue.code === 'reentry_max_price_tighten_bps_requires_reentry'),
-    true
+    false
   );
 });
 
-test('validateActionPlaceOrderConfig rejects counter staged and advanced stop-loss extensions in pair_lock mode', () => {
+test('validateActionPlaceOrderConfig rejects counter staged stop-loss extensions in pair_lock mode', () => {
   const graph = normalizeTradeFlowGraph({
     context: {},
     nodes: [

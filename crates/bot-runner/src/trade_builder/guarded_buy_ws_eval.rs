@@ -79,7 +79,7 @@ fn trade_builder_guard_blocked_buy_ready_from_snapshot(
         return false;
     }
     let current_price = trade_builder_execution_price_for_order(order, runtime_price);
-    let desired_price = trade_builder_immediate_buy_notional_execution_price(
+    let desired_price = trade_builder_market_buy_execution_price(
         order,
         current_price,
         runtime_price.best_ask,

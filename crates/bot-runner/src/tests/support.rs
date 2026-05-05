@@ -141,6 +141,7 @@ pub(super) fn test_builder_order(side: &str, parent_order_id: Option<i64>) -> Tr
         ptb_reference_price: None,
         ptb_stop_loss_rules_json: Vec::new(),
         ptb_stop_loss_time_decay_mode: None,
+        ptb_current_price_source: "chainlink".to_string(),
         staged_sl_retry_only_dust: false,
         staged_sl_retry_dust_metric: None,
         staged_sl_retry_dust_value: None,

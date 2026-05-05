@@ -3,6 +3,8 @@ struct TradeBuilderSubmitAttemptContext {
     submit_path: &'static str,
     runtime_price_fetch_ms: i64,
     snapshot_age_ms: Option<i64>,
+    submit_fast_lane: bool,
+    submit_fast_lane_reason: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -32,13 +34,36 @@ fn append_trade_builder_submit_telemetry(
     );
     payload.insert("guard_eval_ms".to_string(), json!(timing.guard_eval_ms));
     payload.insert("submit_path".to_string(), json!(context.submit_path));
-    payload.insert("snapshot_age_ms".to_string(), json!(context.snapshot_age_ms));
+    payload.insert(
+        "snapshot_age_ms".to_string(),
+        json!(context.snapshot_age_ms),
+    );
+    payload.insert(
+        "submit_fast_lane".to_string(),
+        json!(context.submit_fast_lane),
+    );
+    payload.insert(
+        "submit_fast_lane_reason".to_string(),
+        json!(context.submit_fast_lane_reason),
+    );
     payload.insert(
         "place_sign_ms".to_string(),
         json!(ack.and_then(|value| value.sign_ms)),
     );
     payload.insert(
+        "place_prepare_ms".to_string(),
+        json!(ack.and_then(|value| value.prepare_ms)),
+    );
+    payload.insert(
+        "place_header_sign_ms".to_string(),
+        json!(ack.and_then(|value| value.header_sign_ms)),
+    );
+    payload.insert(
         "place_http_ms".to_string(),
         json!(ack.and_then(|value| value.http_ms)),
+    );
+    payload.insert(
+        "place_decode_ms".to_string(),
+        json!(ack.and_then(|value| value.decode_ms)),
     );
 }

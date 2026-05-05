@@ -1,4 +1,3 @@
-
 pub(crate) fn normalize_exchange_status(status: &str) -> &'static str {
     let normalized = status.to_lowercase();
     if normalized.contains("partial") {
@@ -93,16 +92,36 @@ pub(crate) async fn risk_gate_manual_order(
         },
     );
 
-    StateRepository::record_risk_event(
-        repo,
-        Some(trade_id),
-        "risk_check_manual_order",
-        &format!("{:?}", risk.decision).to_lowercase(),
-        risk.reason,
-    )
-    .await?;
-
-    if !matches!(risk.decision, RiskDecision::Allow) {
+    let decision_text = format!("{:?}", risk.decision).to_lowercase();
+    if matches!(risk.decision, RiskDecision::Allow) {
+        let repo = repo.clone();
+        let reason = risk.reason.to_string();
+        tokio::spawn(async move {
+            if let Err(err) = repo
+                .record_risk_event(
+                    Some(trade_id),
+                    "risk_check_manual_order",
+                    &decision_text,
+                    &reason,
+                )
+                .await
+            {
+                warn!(
+                    trade_id,
+                    error = %err,
+                    "RISK_MANUAL_ORDER_ALLOW_EVENT_DEFERRED_WRITE_FAILED"
+                );
+            }
+        });
+    } else {
+        StateRepository::record_risk_event(
+            repo,
+            Some(trade_id),
+            "risk_check_manual_order",
+            &decision_text,
+            risk.reason,
+        )
+        .await?;
         warn!(
             run_id,
             trade_id,
@@ -744,4 +763,3 @@ async fn transition(
     trade.state = to;
     Ok(())
 }
-

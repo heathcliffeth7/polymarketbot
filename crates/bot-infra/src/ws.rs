@@ -502,7 +502,8 @@ fn subscribe_message(channel: WsChannel, ids: &[String]) -> Value {
         WsChannel::Market => json!({
             "type": "market",
             "assets_ids": ids,
-            "initial_dump": true
+            "initial_dump": true,
+            "custom_feature_enabled": true
         }),
         WsChannel::User => json!({
             "type": "user",
@@ -737,6 +738,18 @@ mod tests {
         assert_eq!(snapshot.last_trade_price, Some(0.79));
         assert_eq!(snapshot.updated_at_ms, 12346);
         assert_eq!(snapshot.last_source, "last_trade_price");
+    }
+
+    #[test]
+    fn market_subscription_enables_custom_feature_payloads() {
+        let message = subscribe_message(WsChannel::Market, &["tok-yes".to_string()]);
+
+        assert_eq!(
+            message
+                .get("custom_feature_enabled")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
     }
 
     #[tokio::test]

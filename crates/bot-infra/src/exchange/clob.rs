@@ -17,8 +17,14 @@ pub struct ClobHttpClient {
     address: String,
     api_key: String,
     gnosis_safe: Option<Address>,
+    maker_address: Option<Address>,
+    signer_address: Option<Address>,
+    maker_checksum: String,
+    signer_checksum: String,
+    signature_type: u64,
     builder_code: [u8; 32],
     builder_code_hex: String,
+    metadata_hex: String,
     market_info_by_condition: Arc<Mutex<HashMap<String, ClobMarketInfo>>>,
     market_condition_by_token: Arc<Mutex<HashMap<String, String>>>,
 }
@@ -45,6 +51,17 @@ impl ClobHttpClient {
         let builder_code =
             parse_bytes32_hex(builder_code.as_deref().unwrap_or_default()).unwrap_or([0u8; 32]);
         let builder_code_hex = bytes32_to_hex(builder_code);
+        let eoa_address = address.parse::<Address>().ok();
+        let signature_type = if gnosis_safe.is_some() { 2 } else { 0 };
+        let maker_address = gnosis_safe.or(eoa_address);
+        let signer_address = eoa_address;
+        let maker_checksum = maker_address
+            .map(|address| ethers::utils::to_checksum(&address, None))
+            .unwrap_or_default();
+        let signer_checksum = signer_address
+            .map(|address| ethers::utils::to_checksum(&address, None))
+            .unwrap_or_default();
+        let metadata_hex = bytes32_to_hex([0u8; 32]);
         Self {
             base_url,
             positions_base_url,
@@ -61,8 +78,14 @@ impl ClobHttpClient {
             address,
             api_key,
             gnosis_safe,
+            maker_address,
+            signer_address,
+            maker_checksum,
+            signer_checksum,
+            signature_type,
             builder_code,
             builder_code_hex,
+            metadata_hex,
             market_info_by_condition: Arc::new(Mutex::new(HashMap::new())),
             market_condition_by_token: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -73,12 +96,13 @@ impl ClobHttpClient {
         method: Method,
         request_path: &str,
         body: Option<serde_json::Value>,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<(reqwest::Response, i64)> {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), request_path);
         let method_name = method.as_str().to_string();
         let body_str = body.as_ref().map(|v| v.to_string());
         let timestamp = unix_now_secs()?;
 
+        let header_sign_started = std::time::Instant::now();
         let headers = self
             .signer
             .signed_headers(
@@ -88,6 +112,7 @@ impl ClobHttpClient {
                 body_str.as_deref(),
             )
             .map_err(|err| anyhow::anyhow!("build signed headers: {err:#}"))?;
+        let header_sign_ms = header_sign_started.elapsed().as_millis() as i64;
 
         let mut req = self.http.request(method, url);
         for (k, v) in headers {
@@ -106,7 +131,7 @@ impl ClobHttpClient {
         let response = req.send().await?;
         let status = response.status();
         if status.is_success() {
-            return Ok(response);
+            return Ok((response, header_sign_ms));
         }
 
         let error_text = response
@@ -695,6 +720,7 @@ impl ClobRestClient for ClobHttpClient {
 
     async fn place_order(&self, req: &PlaceOrderRequest) -> Result<OrderAck> {
         let order_started = std::time::Instant::now();
+        let prepare_started = std::time::Instant::now();
         let client_id = if req.client_order_id.is_empty() {
             Uuid::new_v4().to_string()
         } else {
@@ -716,18 +742,14 @@ impl ClobRestClient for ClobHttpClient {
 
         let salt_u32 = u32::from_be_bytes(Uuid::new_v4().as_bytes()[0..4].try_into().unwrap());
         let salt = U256::from(salt_u32);
+        let maker = self
+            .maker_address
+            .context("parse maker address for EIP-712")?;
+        let signer_addr = self
+            .signer_address
+            .context("parse signer address for EIP-712")?;
+        let sig_type = self.signature_type;
 
-        let eoa: Address = self
-            .address
-            .parse()
-            .context("parse EOA address for EIP-712")?;
-
-        let (maker, signer_addr, sig_type): (Address, Address, u64) = match self.gnosis_safe {
-            Some(safe) => (safe, eoa, 2),
-            None => (eoa, eoa, 0),
-        };
-
-        let effective_exchange_address = self.effective_exchange_address(req.neg_risk);
         let order_timestamp_ms = unix_now_millis()?;
         let metadata = [0u8; 32];
         let sign_started = std::time::Instant::now();
@@ -755,8 +777,11 @@ impl ClobRestClient for ClobHttpClient {
                     side = %req.side,
                     order_type = normalized_order_type,
                     neg_risk = req.neg_risk,
+                    prepare_ms = prepare_started.elapsed().as_millis() as i64,
                     sign_ms,
+                    header_sign_ms = tracing::field::Empty,
                     http_ms = 0,
+                    decode_ms = tracing::field::Empty,
                     total_ms = order_started.elapsed().as_millis() as i64,
                     status = "sign_error",
                     client_order_id = %client_id,
@@ -769,86 +794,94 @@ impl ClobRestClient for ClobHttpClient {
         };
         let sign_ms = sign_started.elapsed().as_millis() as i64;
 
-        let maker_str = ethers::utils::to_checksum(&maker, None);
-        let signer_str = ethers::utils::to_checksum(&signer_addr, None);
         let side_str = if is_buy { "BUY" } else { "SELL" };
         let salt_u64 = salt.low_u64();
-        let metadata_hex = bytes32_to_hex(metadata);
         let body = build_place_order_body(
             salt_u64,
-            &maker_str,
-            &signer_str,
+            &self.maker_checksum,
+            &self.signer_checksum,
             token_id,
             maker_amount,
             taker_amount,
             side_str,
             sig_type,
             order_timestamp_ms,
-            &metadata_hex,
+            &self.metadata_hex,
             &self.builder_code_hex,
             &signature,
             &self.api_key,
             normalized_order_type,
         );
+        let prepare_ms = (prepare_started.elapsed().as_millis() as i64 - sign_ms).max(0);
 
-        tracing::warn!(
-            side = side_u8,
-            side_str,
-            token_id = %token_id,
-            maker_amount = %maker_amount,
-            taker_amount = %taker_amount,
-            salt = %salt,
-            maker = %maker_str,
-            signer = %signer_str,
-            sig_type,
-            legacy_fee_rate_bps = req.fee_rate_bps,
-            timestamp_ms = order_timestamp_ms,
-            metadata = %metadata_hex,
-            builder = %self.builder_code_hex,
-            exchange = %effective_exchange_address,
-            chain_id = self.chain_id,
-            order_type = normalized_order_type,
-            neg_risk = req.neg_risk,
-            sig_prefix = &signature[..20],
-            body_json = %body,
-            "PLACE_ORDER_EIP712_DEBUG"
-        );
+        if std::env::var_os("DEXTRABOT_PLACE_ORDER_EIP712_DEBUG").is_some() {
+            let effective_exchange_address = self.effective_exchange_address(req.neg_risk);
+            tracing::debug!(
+                side = side_u8,
+                side_str,
+                token_id = %token_id,
+                maker_amount = %maker_amount,
+                taker_amount = %taker_amount,
+                salt = %salt,
+                maker = %self.maker_checksum,
+                signer = %self.signer_checksum,
+                sig_type,
+                legacy_fee_rate_bps = req.fee_rate_bps,
+                timestamp_ms = order_timestamp_ms,
+                metadata = %self.metadata_hex,
+                builder = %self.builder_code_hex,
+                exchange = %effective_exchange_address,
+                chain_id = self.chain_id,
+                order_type = normalized_order_type,
+                neg_risk = req.neg_risk,
+                "PLACE_ORDER_EIP712_DEBUG"
+            );
+        }
 
         let http_started = std::time::Instant::now();
-        let response = match self.signed_json(Method::POST, "/order", Some(body)).await {
-            Ok(response) => response,
-            Err(err) => {
-                let http_ms = http_started.elapsed().as_millis() as i64;
-                tracing::info!(
-                    market = %req.market,
-                    token_id = token_id_str,
-                    side = %req.side,
-                    order_type = normalized_order_type,
-                    neg_risk = req.neg_risk,
-                    sign_ms,
-                    http_ms,
-                    total_ms = order_started.elapsed().as_millis() as i64,
-                    status = "http_error",
-                    client_order_id = %client_id,
-                    exchange_order_id = tracing::field::Empty,
-                    error = %err,
-                    "ORDER_LATENCY_TRACE"
-                );
-                return Err(err);
-            }
-        };
+        let (response, header_sign_ms) =
+            match self.signed_json(Method::POST, "/order", Some(body)).await {
+                Ok(response) => response,
+                Err(err) => {
+                    let http_ms = http_started.elapsed().as_millis() as i64;
+                    tracing::info!(
+                        market = %req.market,
+                        token_id = token_id_str,
+                        side = %req.side,
+                        order_type = normalized_order_type,
+                        neg_risk = req.neg_risk,
+                        prepare_ms,
+                        sign_ms,
+                        header_sign_ms = tracing::field::Empty,
+                        http_ms,
+                        decode_ms = tracing::field::Empty,
+                        total_ms = order_started.elapsed().as_millis() as i64,
+                        status = "http_error",
+                        client_order_id = %client_id,
+                        exchange_order_id = tracing::field::Empty,
+                        error = %err,
+                        "ORDER_LATENCY_TRACE"
+                    );
+                    return Err(err);
+                }
+            };
+        let decode_started = std::time::Instant::now();
         let raw: serde_json::Value = match response.json().await {
             Ok(raw) => raw,
             Err(err) => {
                 let http_ms = http_started.elapsed().as_millis() as i64;
+                let decode_ms = decode_started.elapsed().as_millis() as i64;
                 tracing::info!(
                     market = %req.market,
                     token_id = token_id_str,
                     side = %req.side,
                     order_type = normalized_order_type,
                     neg_risk = req.neg_risk,
+                    prepare_ms,
                     sign_ms,
+                    header_sign_ms,
                     http_ms,
+                    decode_ms,
                     total_ms = order_started.elapsed().as_millis() as i64,
                     status = "decode_error",
                     client_order_id = %client_id,
@@ -859,6 +892,7 @@ impl ClobRestClient for ClobHttpClient {
                 return Err(err.into());
             }
         };
+        let decode_ms = decode_started.elapsed().as_millis() as i64;
         let http_ms = http_started.elapsed().as_millis() as i64;
 
         let ack = OrderAck {
@@ -883,8 +917,11 @@ impl ClobRestClient for ClobHttpClient {
                 .and_then(|v| v.as_str())
                 .map(ToString::to_string),
             exchange_ts: raw.get("timestamp").and_then(|v| v.as_i64()),
+            prepare_ms: Some(prepare_ms),
             sign_ms: Some(sign_ms),
+            header_sign_ms: Some(header_sign_ms),
             http_ms: Some(http_ms),
+            decode_ms: Some(decode_ms),
             total_ms: Some(order_started.elapsed().as_millis() as i64),
         };
 
@@ -894,8 +931,11 @@ impl ClobRestClient for ClobHttpClient {
             side = %req.side,
             order_type = normalized_order_type,
             neg_risk = req.neg_risk,
+            prepare_ms,
             sign_ms,
+            header_sign_ms,
             http_ms,
+            decode_ms,
             total_ms = order_started.elapsed().as_millis() as i64,
             status = %ack.status,
             client_order_id = %ack.client_order_id,
@@ -919,6 +959,7 @@ impl ClobRestClient for ClobHttpClient {
         let raw: serde_json::Value = self
             .signed_json(Method::GET, &path, None)
             .await?
+            .0
             .json()
             .await?;
 
@@ -956,6 +997,7 @@ impl ClobRestClient for ClobHttpClient {
         let raw: serde_json::Value = self
             .signed_json(Method::GET, &path, None)
             .await?
+            .0
             .json()
             .await?;
 
@@ -1000,6 +1042,7 @@ impl ClobRestClient for ClobHttpClient {
         let raw: serde_json::Value = self
             .signed_json(Method::GET, &path, None)
             .await?
+            .0
             .json()
             .await?;
 
@@ -1034,7 +1077,7 @@ impl ClobRestClient for ClobHttpClient {
 
     async fn get_balance(&self) -> Result<f64> {
         let request_path = format!("/data/balances?user_id={}", self.address);
-        let resp = self.signed_json(Method::GET, &request_path, None).await?;
+        let resp = self.signed_json(Method::GET, &request_path, None).await?.0;
         let raw: serde_json::Value = resp.json().await?;
         let balance = raw
             .as_array()

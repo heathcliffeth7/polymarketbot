@@ -402,6 +402,8 @@ fn trade_builder_spawn_ptb_stop_loss_triggered_log(
                 "direction": evaluation.direction.as_deref(),
                 "threshold_gap_usd": evaluation.threshold_gap_usd,
                 "ptb_reference_price": evaluation.ptb_reference_price,
+                "current_price": evaluation.current_price,
+                "current_price_source": evaluation.current_price_source,
                 "current_chainlink_price": evaluation.current_chainlink_price,
                 "directional_gap": evaluation.directional_gap,
                 "reason_code": evaluation.reason_code,

@@ -9,9 +9,10 @@ import { applyPtbStopLossBumpFormDefaults, normalizePrimaryPriceToBeatGuardBuild
 import { normalizePtbIvTimeRuleBuildConfig, parsePtbIvTimeRuleRows } from './ptb-iv-time-rules';
 import { applyPtbStopLossFormDefaults, buildPtbStopLossRules, normalizePtbStopLossGapUnit, parsePtbStopLossRuleRows, shouldEnablePtbStopLossFromConfig } from './ptb-stop-loss';
 import { normalizeTriggerMarketPriceCycleWindowConfig, readTriggerMarketPriceCycleWindowFields } from './cycle-window';
+import { applyLiveGapCollectorFormDefaults, normalizeLiveGapCollectorBuildConfig } from './live-gap-collector';
 import { applyAutoTuneFormDefaults, normalizeAutoTuneBuildConfig } from './auto-tune';
 import { TRIGGER_MARKET_ONCE_SCOPE_VERSION } from './constants';
-import { normalizePtbMode } from './ptb-modes';
+import { normalizeOptionalPtbCurrentPriceSource, normalizeOptionalPtbCurrentPriceSourceConfig, normalizePtbCurrentPriceSource, normalizePtbMode } from './ptb-modes';
 import type { DrawdownRuleRow, EntryTimingProfileRow, ExitLadderRuleRow, NodeConfigFormState, OutcomeConditionRow, PtbIvTimeRuleRow, PtbStopLossBumpLossRuleRow, PtbStopLossRuleRow, TimeExitRuleRow } from './types';
 import {
   createId,
@@ -95,6 +96,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
     if ((fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true') {
       fields.priceToBeatMode = normalizePtbMode(fields.priceToBeatMode);
+      fields.priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(fields.priceToBeatCurrentPriceSource);
     }
     if (
       (fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
@@ -111,6 +113,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     }
     if ((fields.counterLegPriceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true') {
       fields.counterLegPriceToBeatMode = normalizePtbMode(fields.counterLegPriceToBeatMode);
+      fields.counterLegPriceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(fields.counterLegPriceToBeatCurrentPriceSource);
     }
     if (
       (fields.counterLegPriceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
@@ -166,6 +169,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     ptbStopLossBumpLossRuleRows.push(...parsePtbStopLossBumpLossRuleRows(cfg));
     applyPtbStopLossBumpFormDefaults(fields, cfg, ptbStopLossBumpLossRuleRows);
     const pairLockMode = fields.mode === 'pair_lock';
+    applyLiveGapCollectorFormDefaults(fields);
     if (Array.isArray(cfg.tpRules)) {
       for (const item of cfg.tpRules as Record<string, unknown>[]) {
         if (!isRecord(item)) continue;
@@ -210,6 +214,12 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     ptbStopLossRuleRows.push(...parsePtbStopLossRuleRows(cfg, pairLockMode));
     if (shouldEnablePtbStopLossFromConfig(cfg, ptbStopLossRuleRows)) {
       fields.ptbStopLossEnabled = 'true';
+      fields.priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(fields.priceToBeatCurrentPriceSource);
+      fields.ptbStopLossCurrentPriceSource = normalizeOptionalPtbCurrentPriceSource(fields.ptbStopLossCurrentPriceSource);
+    }
+    if ((fields.counterLegPtbStopLossEnabled ?? '').trim().toLowerCase() === 'true') {
+      fields.counterLegPriceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(fields.counterLegPriceToBeatCurrentPriceSource);
+      fields.counterLegPtbStopLossCurrentPriceSource = normalizeOptionalPtbCurrentPriceSource(fields.counterLegPtbStopLossCurrentPriceSource);
     }
 
     if (Array.isArray(cfg.timeExitRules)) {
@@ -616,10 +626,12 @@ export function buildNodeConfigFromForm(
     }
     normalizeAutoTuneBuildConfig(config, form);
 
+    const modeRaw = toStringValue(config.mode).trim().toLowerCase();
+    const pairLockMode = modeRaw === 'pair_lock';
+    const dcaLiveMode = modeRaw === 'dca_live_v1';
+    const liveGapCollectorMode = normalizeLiveGapCollectorBuildConfig(config);
     const sideRaw = toStringValue(config.side).trim().toLowerCase();
     const isBuySide = sideRaw === 'buy';
-    const pairLockMode = toStringValue(config.mode).trim().toLowerCase() === 'pair_lock';
-    const dcaLiveMode = toStringValue(config.mode).trim().toLowerCase() === 'dca_live_v1';
     if (dcaLiveMode) {
       config.mode = 'dca_live_v1';
       const manualSlugs = parseJsonArrayField(config.manualSlugs)
@@ -710,7 +722,7 @@ export function buildNodeConfigFromForm(
       }
       normalizePairLockTakeProfitBuildConfig(config);
     } else {
-      delete config.mode;
+      if (!dcaLiveMode && !liveGapCollectorMode) delete config.mode;
       for (const key of PAIR_LOCK_CONFIG_KEYS) delete config[key];
     }
     if (!isBuySide) {
@@ -724,6 +736,7 @@ export function buildNodeConfigFromForm(
       delete config.ptbStopLossEnabled;
       delete config.ptbStopLossGapUsd;
       delete config.ptbStopLossGapUnit;
+      delete config.ptbStopLossCurrentPriceSource;
       delete config.ptbStopLossRules;
       delete config.slRules;
       delete config.slTriggerPriceMode;
@@ -737,6 +750,7 @@ export function buildNodeConfigFromForm(
       delete config.executionFloorPriceCent;
       delete config.retryOnPriceToBeatGuardBlock;
       delete config.priceToBeatGuardEnabled;
+      delete config.priceToBeatCurrentPriceSource;
       delete config.priceToBeatMaxDiff;
       delete config.priceToBeatMaxDiffUnit;
       delete config.priceToBeatStopLossBumpEnabled;
@@ -889,6 +903,12 @@ export function buildNodeConfigFromForm(
             ? ptbStopLossTimeDecayModeRaw
             : 'tighten';
       }
+      if (config.priceToBeatGuardEnabled === true || config.ptbStopLossEnabled === true) {
+        config.priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(config.priceToBeatCurrentPriceSource);
+      } else {
+        delete config.priceToBeatCurrentPriceSource;
+      }
+      normalizeOptionalPtbCurrentPriceSourceConfig(config, 'ptbStopLossCurrentPriceSource', config.ptbStopLossEnabled === true || (Array.isArray(config.ptbStopLossRules) && config.ptbStopLossRules.length > 0));
       if (!slEnabled) {
         delete config.slEnabled;
         delete config.slPriceCent;

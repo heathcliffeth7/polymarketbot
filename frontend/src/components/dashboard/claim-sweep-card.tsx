@@ -5,7 +5,12 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { requestJson, formatClientRequestError } from '@/lib/http-client';
-import type { ClaimSweepRunResult, DashboardData } from '@/lib/types';
+import { formatClaimErrorForDisplay } from '@/lib/claim-error-format';
+import type {
+  ClaimFundsActivationResult,
+  ClaimSweepRunResult,
+  DashboardData,
+} from '@/lib/types';
 import { Coins } from 'lucide-react';
 
 export function ClaimSweepCard({
@@ -16,6 +21,7 @@ export function ClaimSweepCard({
   onSweepComplete: () => void;
 }) {
   const [loading, setLoading] = useState(false);
+  const [activationLoading, setActivationLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,6 +48,30 @@ export function ClaimSweepCard({
       setError(formatClientRequestError(err, 'Claim sweep basarisiz.'));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleActivateFunds = async () => {
+    setActivationLoading(true);
+    setMessage(null);
+    setError(null);
+
+    try {
+      const result = await requestJson<ClaimFundsActivationResult>(
+        '/api/claim/activate-funds',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        },
+        { timeoutMs: 30_000, retries: 0 }
+      );
+      setMessage(result.message);
+      onSweepComplete();
+    } catch (err) {
+      setError(formatClientRequestError(err, 'Funds activation basarisiz.'));
+    } finally {
+      setActivationLoading(false);
     }
   };
 
@@ -102,8 +132,23 @@ export function ClaimSweepCard({
               </span>
             </p>
           )}
+          <p>
+            Activate:{' '}
+            <span className={data.fundsActivation.canActivate ? 'text-amber-300' : 'text-zinc-300'}>
+              {data.fundsActivation.usdcEBalance.toFixed(2)} USDC.e waiting,{' '}
+              {data.fundsActivation.pUsdBalance.toFixed(2)} pUSD active
+            </span>
+          </p>
           {data.lastError && (
-            <p className="text-amber-400">Last claim error: {data.lastError}</p>
+            <p className="text-amber-400">
+              Last claim error: {formatClaimErrorForDisplay(data.lastError)}
+            </p>
+          )}
+          {data.fundsActivation.lastError && (
+            <p className="text-amber-400">
+              Funds activation error:{' '}
+              {formatClaimErrorForDisplay(data.fundsActivation.lastError)}
+            </p>
           )}
           {data.disabledReason && (
             <p className="text-amber-400">{data.disabledReason}</p>
@@ -112,13 +157,23 @@ export function ClaimSweepCard({
           {message && <p className="text-emerald-400">{message}</p>}
         </div>
 
-        <Button
-          onClick={handleSweep}
-          disabled={loading || !data.canSweep}
-          className="bg-emerald-700 hover:bg-emerald-600"
-        >
-          {loading ? 'Queueing...' : 'Claim Dust to Cash'}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            onClick={handleSweep}
+            disabled={loading || !data.canSweep}
+            className="bg-emerald-700 hover:bg-emerald-600"
+          >
+            {loading ? 'Queueing...' : 'Claim Dust to Cash'}
+          </Button>
+          <Button
+            onClick={handleActivateFunds}
+            disabled={activationLoading || !data.fundsActivation.canActivate}
+            variant="outline"
+            className="border-amber-700 text-amber-300 hover:bg-amber-950"
+          >
+            {activationLoading ? 'Activating...' : 'Activate Funds'}
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

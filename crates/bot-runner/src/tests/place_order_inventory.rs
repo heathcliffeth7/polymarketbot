@@ -427,7 +427,7 @@ fn fast_runtime_helpers_split_trigger_and_execution_prices() {
 }
 
 #[test]
-fn immediate_buy_notional_execution_price_prefers_best_ask() {
+fn market_buy_notional_execution_price_prefers_best_ask() {
     let mut buy_order = test_builder_order("buy", None);
     buy_order.kind = "immediate".to_string();
     buy_order.trigger_condition = None;
@@ -435,9 +435,8 @@ fn immediate_buy_notional_execution_price_prefers_best_ask() {
     buy_order.size_usdc = 10.0;
     buy_order.min_price_distance_cent = 1.0;
 
-    let resolution =
-        trade_builder_immediate_buy_notional_execution_price(&buy_order, 0.81, Some(0.79))
-            .expect("live buy execution price");
+    let resolution = trade_builder_market_buy_execution_price(&buy_order, 0.81, Some(0.79))
+        .expect("live buy execution price");
     let qty = calc_level_size(buy_order.size_usdc, resolution.price);
 
     assert_eq!(resolution.price, 0.79);
@@ -461,7 +460,7 @@ fn conditional_buy_submit_price_keeps_runtime_bump_behavior() {
 }
 
 #[test]
-fn immediate_buy_notional_execution_price_falls_back_to_current_price() {
+fn market_buy_execution_price_falls_back_to_current_price() {
     let mut buy_order = test_builder_order("buy", None);
     buy_order.kind = "immediate".to_string();
     buy_order.trigger_condition = None;
@@ -470,7 +469,7 @@ fn immediate_buy_notional_execution_price_falls_back_to_current_price() {
     buy_order.remaining_size = Some(10.0);
     buy_order.working_price = Some(0.31);
 
-    let resolution = trade_builder_immediate_buy_notional_execution_price(&buy_order, 0.98, None)
+    let resolution = trade_builder_market_buy_execution_price(&buy_order, 0.98, None)
         .expect("live buy execution price");
     let qty = calc_level_size(
         buy_order.remaining_size.unwrap_or_default(),
@@ -484,18 +483,21 @@ fn immediate_buy_notional_execution_price_falls_back_to_current_price() {
 }
 
 #[test]
-fn immediate_buy_execution_price_resolution_ignores_share_basis_orders() {
+fn market_buy_share_execution_price_prefers_best_ask() {
     let mut buy_order = test_builder_order("buy", None);
     buy_order.kind = "immediate".to_string();
     buy_order.trigger_condition = None;
+    buy_order.trigger_price = Some(0.31);
     buy_order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
     buy_order.target_qty = Some(5.0);
     buy_order.remaining_qty = Some(5.0);
 
-    assert!(
-        trade_builder_immediate_buy_notional_execution_price(&buy_order, 0.81, Some(0.79))
-            .is_none()
-    );
+    let resolution = trade_builder_market_buy_execution_price(&buy_order, 0.39, Some(0.41))
+        .expect("share-basis market buy price");
+
+    assert_eq!(resolution.price, 0.41);
+    assert_eq!(resolution.source, "best_ask");
+    assert_eq!(resolution.trigger_reference_price, Some(0.31));
 }
 
 fn test_stop_loss_sell_order_for_submit() -> TradeBuilderOrder {

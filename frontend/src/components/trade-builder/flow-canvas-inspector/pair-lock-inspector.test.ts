@@ -156,6 +156,7 @@ test('isPairLockField includes locked pair stop-loss ignore toggle', () => {
   assert.equal(isPairLockField('pairLockStrategy'), true);
   assert.equal(isPairLockField('notifyOnAdaptiveMaxPriceRelax'), true);
   assert.equal(isPairLockField('notifyOnManualAdaptiveRiskBlock'), true);
+  assert.equal(isPairLockField('counterLegPtbStopLossCurrentPriceSource'), true);
 });
 
 test('resolvePairLockStopLossFieldVisibility allows supported lead-leg stop-loss fields', () => {
@@ -201,13 +202,27 @@ test('resolvePairLockStopLossFieldVisibility allows supported lead-leg stop-loss
     true
   );
   assert.equal(
+    resolvePairLockStopLossFieldVisibility('counterLegPtbStopLossCurrentPriceSource', true, fields),
+    true
+  );
+  assert.equal(
     resolvePairLockStopLossFieldVisibility('counterLegNotifyOnSlHit', true, fields),
     true
   );
   assert.equal(
     resolvePairLockStopLossFieldVisibility('reentryMinPriceCent', true, fields),
-    null
+    true
   );
+  assert.equal(
+    resolvePairLockStopLossFieldVisibility('reentryMaxPriceCent', true, fields),
+    true
+  );
+});
+
+test('resolvePairLockStopLossFieldVisibility leaves primary stop-loss fields to single-order visibility', () => {
+  assert.equal(resolvePairLockStopLossFieldVisibility('slEnabled', false, { side: 'buy' }), null);
+  assert.equal(resolvePairLockStopLossFieldVisibility('slPriceCent', false, { side: 'buy' }), null);
+  assert.equal(resolvePairLockStopLossFieldVisibility('counterLegSlEnabled', false, { side: 'buy' }), false);
 });
 
 test('resolvePairLockTakeProfitFieldVisibility gates counter TP fields behind counter leg and TP toggle', () => {

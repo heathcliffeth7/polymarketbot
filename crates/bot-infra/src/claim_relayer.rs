@@ -4,12 +4,16 @@ use serde::{Deserialize, Serialize};
 use std::env;
 
 const CLAIM_RELAYER_ADAPTER_URL_ENV: &str = "CLAIM_RELAYER_ADAPTER_URL";
+const CLAIM_FUNDS_ACTIVATION_ADAPTER_URL_ENV: &str = "CLAIM_FUNDS_ACTIVATION_ADAPTER_URL";
 const CLAIM_RELAYER_ADAPTER_TOKEN_ENV: &str = "CLAIM_RELAYER_ADAPTER_TOKEN";
 const DEFAULT_CLAIM_RELAYER_ADAPTER_URL: &str = "http://127.0.0.1:3000/api/internal/claim/redeem";
+const DEFAULT_CLAIM_FUNDS_ACTIVATION_ADAPTER_URL: &str =
+    "http://127.0.0.1:3000/api/internal/claim/activate-funds";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClaimRelayerAdapter {
-    pub(crate) url: String,
+    pub(crate) redeem_url: String,
+    pub(crate) activate_funds_url: String,
     pub(crate) token: String,
 }
 
@@ -57,10 +61,34 @@ pub(crate) struct ClaimRelayerAdapterRequest {
     pub(crate) index_sets: Vec<u64>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct ClaimFundsActivationAdapterRequest {
+    #[serde(rename = "userId")]
+    pub(crate) user_id: i64,
+    #[serde(rename = "ownerAddress")]
+    pub(crate) owner_address: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ClaimRelayerAdapterSuccess {
     #[serde(rename = "txHash")]
     pub(crate) tx_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ClaimFundsActivationAdapterSuccess {
+    pub(crate) status: String,
+    #[serde(rename = "activatedAmountUsdc")]
+    pub(crate) activated_amount_usdc: f64,
+    #[serde(rename = "approveTxHash")]
+    pub(crate) approve_tx_hash: Option<String>,
+    #[serde(rename = "wrapTxHash")]
+    pub(crate) wrap_tx_hash: Option<String>,
+    #[serde(rename = "usdcEBalance")]
+    pub(crate) usdce_balance: f64,
+    #[serde(rename = "pUsdBalance")]
+    pub(crate) pusd_balance: f64,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -82,15 +110,22 @@ impl ClaimRelayerAdapter {
             "{CLAIM_RELAYER_ADAPTER_TOKEN_ENV} cannot be empty"
         );
 
-        let url = env::var(CLAIM_RELAYER_ADAPTER_URL_ENV)
+        let redeem_url = env::var(CLAIM_RELAYER_ADAPTER_URL_ENV)
             .unwrap_or_else(|_| DEFAULT_CLAIM_RELAYER_ADAPTER_URL.to_string());
         anyhow::ensure!(
-            url.starts_with("http://") || url.starts_with("https://"),
+            redeem_url.starts_with("http://") || redeem_url.starts_with("https://"),
             "{CLAIM_RELAYER_ADAPTER_URL_ENV} must start with http:// or https://"
+        );
+        let activate_funds_url = env::var(CLAIM_FUNDS_ACTIVATION_ADAPTER_URL_ENV)
+            .unwrap_or_else(|_| DEFAULT_CLAIM_FUNDS_ACTIVATION_ADAPTER_URL.to_string());
+        anyhow::ensure!(
+            activate_funds_url.starts_with("http://") || activate_funds_url.starts_with("https://"),
+            "{CLAIM_FUNDS_ACTIVATION_ADAPTER_URL_ENV} must start with http:// or https://"
         );
 
         Ok(Self {
-            url,
+            redeem_url,
+            activate_funds_url,
             token: token.trim().to_string(),
         })
     }

@@ -1,6 +1,9 @@
 #![cfg(test)]
 
-use super::defaults::{default_claim_min_claim_usdc, CONFIG_ENC_NONCE_LEN, CONFIG_ENC_PREFIX};
+use super::defaults::{
+    default_claim_activate_min_usdc, default_claim_min_claim_usdc,
+    default_claim_usdce_token_address, CONFIG_ENC_NONCE_LEN, CONFIG_ENC_PREFIX,
+};
 use super::models::{AppConfig, ClaimConfig};
 use super::validate::validate_claim_private_key;
 use aes_gcm::aead::{Aead, KeyInit};
@@ -232,6 +235,12 @@ fn claim_private_key_validation_rejects_invalid_decrypted_value() {
 fn claim_config_default_sets_min_claim_usdc() {
     let claim = ClaimConfig::default();
     assert_eq!(claim.min_claim_usdc, default_claim_min_claim_usdc());
+    assert!(claim.auto_activate_funds);
+    assert_eq!(claim.activate_min_usdc, default_claim_activate_min_usdc());
+    assert_eq!(
+        claim.usdce_token_address,
+        default_claim_usdce_token_address()
+    );
 }
 
 #[test]

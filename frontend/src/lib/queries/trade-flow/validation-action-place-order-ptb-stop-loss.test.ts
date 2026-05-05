@@ -66,6 +66,60 @@ test('validateActionPlaceOrderConfig accepts cent-based ptb stop-loss on support
   assert.equal(issues.length, 0);
 });
 
+test('validateActionPlaceOrderConfig accepts ptb stop-loss current source override', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: { sourceTradeId: 42 },
+    nodes: [
+      buildAutoScopeTrigger('trigger_ptb_source'),
+      {
+        key: 'ptb_stop_buy_source',
+        type: 'action.place_order',
+        positionX: 200,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 10,
+          ptbStopLossEnabled: true,
+          ptbStopLossGapUsd: 0,
+          ptbStopLossCurrentPriceSource: 'coinbase',
+        },
+      },
+    ],
+    edges: [{ key: 'edge_1', source: 'trigger_ptb_source', target: 'ptb_stop_buy_source', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'ptb_stop_buy_source');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig rejects inactive ptb stop-loss current source override', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: { sourceTradeId: 42 },
+    nodes: [
+      buildAutoScopeTrigger('trigger_ptb_source_inactive'),
+      {
+        key: 'ptb_stop_buy_source_inactive',
+        type: 'action.place_order',
+        positionX: 200,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 10,
+          ptbStopLossCurrentPriceSource: 'binance',
+        },
+      },
+    ],
+    edges: [{ key: 'edge_1', source: 'trigger_ptb_source_inactive', target: 'ptb_stop_buy_source_inactive', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'ptb_stop_buy_source_inactive');
+  assert.ok(issues.some((issue) => issue.code === 'ptb_stop_loss_current_price_source_requires_ptb_stop_loss'));
+});
+
 test('validateActionPlaceOrderConfig accepts ptb-only stop-loss when slEnabled remains true', () => {
   const graph = normalizeTradeFlowGraph({
     context: { sourceTradeId: 42 },

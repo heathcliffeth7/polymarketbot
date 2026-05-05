@@ -12,6 +12,7 @@ struct ActionPlaceOrderExitConfig {
     ptb_stop_loss_gap_usd: Option<f64>,
     ptb_reference_price: Option<f64>,
     ptb_stop_loss_time_decay_mode: Option<String>,
+    ptb_current_price_source: Option<String>,
 }
 
 fn resolve_action_place_order_exit_config(
@@ -29,6 +30,8 @@ fn resolve_action_place_order_exit_config(
     let ptb_reference_price = ptb_stop_loss.and_then(|config| config.reference_price);
     let ptb_stop_loss_time_decay_mode =
         ptb_stop_loss.and_then(|config| config.time_decay_mode.clone());
+    let ptb_current_price_source =
+        ptb_stop_loss.map(|config| config.current_price_source.as_config_str().to_string());
 
     let hard_tp_price = if is_internal_time_exit {
         None
@@ -142,5 +145,6 @@ fn resolve_action_place_order_exit_config(
         ptb_stop_loss_gap_usd,
         ptb_reference_price,
         ptb_stop_loss_time_decay_mode,
+        ptb_current_price_source,
     })
 }

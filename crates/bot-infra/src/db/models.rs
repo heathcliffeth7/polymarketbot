@@ -85,6 +85,30 @@ pub struct TradeBuilderMarketSecondSnapshot {
 }
 
 #[derive(Debug, Clone)]
+pub struct TradeBuilderAdverseMoveStatsQuery {
+    pub asset: String,
+    pub direction: String,
+    pub current_market_slug: String,
+    pub since: DateTime<Utc>,
+    pub until: DateTime<Utc>,
+    pub remaining_min_sec: f64,
+    pub remaining_max_sec: f64,
+    pub price_min: f64,
+    pub price_max: f64,
+    pub gap_min: Option<f64>,
+    pub gap_max: Option<f64>,
+    pub slope_bucket: Option<String>,
+    pub quantile: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradeBuilderAdverseMoveStats {
+    pub adverse_quantile: Option<f64>,
+    pub sample_count: i64,
+    pub market_count: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct TradeBuilderMarketTradeTickInput {
     pub market_slug: String,
     pub asset: String,
@@ -270,6 +294,7 @@ pub struct TradeBuilderOrder {
     pub ptb_reference_price: Option<f64>,
     pub ptb_stop_loss_rules_json: Vec<TradeBuilderPtbStopLossRule>,
     pub ptb_stop_loss_time_decay_mode: Option<String>,
+    pub ptb_current_price_source: String,
     pub staged_sl_retry_only_dust: bool,
     pub staged_sl_retry_dust_metric: Option<String>,
     pub staged_sl_retry_dust_value: Option<f64>,

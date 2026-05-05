@@ -2,6 +2,10 @@ import { decryptConfigValue, isEncryptedConfigValue } from '@/lib/crypto-config'
 
 export type ClaimExecutionMode = 'direct' | 'builder_relayer' | 'relayer_api_key';
 
+export const DEFAULT_USDCE_TOKEN_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+export const DEFAULT_PUSD_TOKEN_ADDRESS = '0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB';
+export const DEFAULT_COLLATERAL_ONRAMP_ADDRESS = '0x93070a847efEf7F70739046A929D47a521F5B8ee';
+
 export interface ClaimRuntimeValidationState {
   enabled: boolean;
   executionMode: ClaimExecutionMode;
@@ -16,8 +20,14 @@ export interface ClaimRuntimeValidationState {
 export interface ClaimRelayerConfigForServer {
   executionMode: ClaimExecutionMode;
   chainId: number;
+  rpcUrl: string;
   ctfContractAddress: string;
   collateralTokenAddress: string;
+  autoActivateFunds: boolean;
+  activateMinUsdc: number;
+  usdceTokenAddress: string;
+  pusdTokenAddress: string;
+  collateralOnrampAddress: string;
   userAddress: string;
   privateKey: string;
   safeAddress: string;

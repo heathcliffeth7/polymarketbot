@@ -242,8 +242,14 @@ export async function readClaimRelayerConfigForServer(
   return {
     executionMode: normalizeClaimExecutionMode(claim.execution_mode),
     chainId: Number(claim.chain_id ?? 137),
+    rpcUrl: resolvePlaintextConfigValueForServer(claim.rpc_url, claim.rpc_url_env),
     ctfContractAddress: String(claim.ctf_contract_address ?? '').trim(),
     collateralTokenAddress: String(claim.collateral_token_address ?? '').trim(),
+    autoActivateFunds: claim.auto_activate_funds === true,
+    activateMinUsdc: Number(claim.activate_min_usdc ?? 0.01),
+    usdceTokenAddress: String(claim.usdce_token_address ?? '').trim(),
+    pusdTokenAddress: String(claim.pusd_token_address ?? '').trim(),
+    collateralOnrampAddress: String(claim.collateral_onramp_address ?? '').trim(),
     userAddress: resolvePlaintextConfigValueForServer(claim.user_address, claim.user_address_env),
     privateKey: resolveSensitiveConfigValueForServer(claim.private_key, claim.private_key_env),
     safeAddress: resolvePlaintextConfigValueForServer(

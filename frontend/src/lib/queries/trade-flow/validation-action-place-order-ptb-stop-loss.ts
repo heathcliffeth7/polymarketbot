@@ -1,4 +1,5 @@
 import type { TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
+import { isPtbCurrentPriceSource } from '@/lib/trade-flow-config-mappers/ptb-modes';
 import { isRecord, toFiniteNumber } from './shared';
 import { pushNodeError } from './validation-core';
 
@@ -85,6 +86,27 @@ export function validateActionPlaceOrderPtbStopLossConfig(
   const ptbStopLossGapConfigured = config.ptbStopLossGapUsd != null;
   const ptbStopLossRulesConfigured = config.ptbStopLossRules != null;
   const hasPtbStopLossRules = parsedPtbStopLossRules.validRules.length > 0;
+  const ptbStopLossActive = ptbStopLossEnabled === true || hasPtbStopLossRules;
+  const ptbStopLossCurrentSourceRaw = String(config.ptbStopLossCurrentPriceSource ?? '')
+    .trim()
+    .toLowerCase();
+
+  if (ptbStopLossCurrentSourceRaw && !isPtbCurrentPriceSource(ptbStopLossCurrentSourceRaw)) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_ptb_stop_loss_current_price_source',
+      'action.place_order ptbStopLossCurrentPriceSource must be chainlink, binance, or coinbase.'
+    );
+  }
+  if (ptbStopLossCurrentSourceRaw && !ptbStopLossActive) {
+    pushNodeError(
+      issues,
+      node,
+      'ptb_stop_loss_current_price_source_requires_ptb_stop_loss',
+      'action.place_order ptbStopLossCurrentPriceSource requires ptbStopLossEnabled=true or ptbStopLossRules.'
+    );
+  }
 
   if (ptbStopLossEnabled === true && side !== 'buy') {
     pushNodeError(
@@ -161,7 +183,7 @@ export function validateActionPlaceOrderPtbStopLossConfig(
   }
 
   const ptbStopLossGapUsd = toFiniteNumber(config.ptbStopLossGapUsd);
-  if (ptbStopLossEnabled === true || hasPtbStopLossRules) {
+  if (ptbStopLossActive) {
     if (ptbStopLossGapUsd == null && !hasPtbStopLossRules) {
       pushNodeError(
         issues,

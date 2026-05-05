@@ -1,5 +1,5 @@
 import { PAIR_LOCK_UNSUPPORTED_EXIT_FIELD_KEYS } from '@/lib/trade-flow-config-mappers/pair-lock';
-import { isPtbMode } from '@/lib/trade-flow-config-mappers/ptb-modes';
+import { isPtbCurrentPriceSource, isPtbMode } from '@/lib/trade-flow-config-mappers/ptb-modes';
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
 import { hasUpstreamAutoScopeMarketTrigger } from './graph';
 import {
@@ -229,12 +229,24 @@ export function validateActionPlaceOrderPairLockConfig(
     return;
   }
 
+  if (mode === 'live_gap_collector_v1') {
+    const hardMax = toFiniteNumber(config.liveGapCollectorHardMaxPriceCent ?? config.maxPriceCent);
+    const startSec = toFiniteNumber(config.liveGapCollectorWindowStartSec);
+    const endSec = toFiniteNumber(config.liveGapCollectorWindowEndSec);
+    if (side !== 'buy') pushNodeError(issues, node, 'live_gap_collector_requires_buy_side', 'action.place_order live_gap_collector_v1 only supports side=buy.');
+    if (executionMode !== 'market' && executionMode !== 'limit') pushNodeError(issues, node, 'live_gap_collector_requires_supported_execution', 'action.place_order live_gap_collector_v1 only supports executionMode=limit or market.');
+    if (toTrimmedString(config.kind).toLowerCase() && toTrimmedString(config.kind).toLowerCase() !== 'immediate') pushNodeError(issues, node, 'live_gap_collector_requires_immediate_kind', 'action.place_order live_gap_collector_v1 only supports kind=immediate.');
+    if (hardMax != null && (hardMax <= 0 || hardMax > 93)) pushNodeError(issues, node, 'invalid_live_gap_collector_hard_max', 'action.place_order live_gap_collector_v1 hard max entry price must be in (0, 93] cent.');
+    if (startSec != null && endSec != null && startSec >= endSec) pushNodeError(issues, node, 'invalid_live_gap_collector_window', 'action.place_order liveGapCollectorWindowStartSec must be lower than liveGapCollectorWindowEndSec.');
+    return;
+  }
+
   if (mode !== 'pair_lock') {
     pushNodeError(
       issues,
       node,
       'invalid_place_order_mode',
-      'action.place_order mode must be single, pair_lock, or dca_live_v1.'
+      'action.place_order mode must be single, pair_lock, dca_live_v1, or live_gap_collector_v1.'
     );
     return;
   }
@@ -1004,6 +1016,31 @@ export function validateActionPlaceOrderPairLockConfig(
       );
     }
   }
+  const counterLegPtbStopLossCurrentSourceRaw = toTrimmedString(
+    config.counterLegPtbStopLossCurrentPriceSource
+  ).toLowerCase();
+  if (
+    counterLegPtbStopLossCurrentSourceRaw &&
+    !isPtbCurrentPriceSource(counterLegPtbStopLossCurrentSourceRaw)
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_counter_leg_ptb_stop_loss_current_price_source',
+      'action.place_order counterLegPtbStopLossCurrentPriceSource must be chainlink, binance, or coinbase.'
+    );
+  }
+  if (
+    counterLegPtbStopLossCurrentSourceRaw &&
+    counterLegPtbStopLossEnabled !== true
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'counter_leg_ptb_stop_loss_current_price_source_requires_ptb_stop_loss',
+      'action.place_order counterLegPtbStopLossCurrentPriceSource requires counterLegPtbStopLossEnabled=true.'
+    );
+  }
 
   if (
     counterLegNotifyOnSlHit === true &&
@@ -1167,6 +1204,29 @@ export function validateActionPlaceOrderPairLockConfig(
       }
     }
   }
+  const counterLegPtbCurrentSourceRaw = toTrimmedString(
+    config.counterLegPriceToBeatCurrentPriceSource
+  ).toLowerCase();
+  if (counterLegPtbCurrentSourceRaw && !isPtbCurrentPriceSource(counterLegPtbCurrentSourceRaw)) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_counter_leg_price_to_beat_current_price_source',
+      'action.place_order counterLegPriceToBeatCurrentPriceSource must be chainlink, binance, or coinbase.'
+    );
+  }
+  if (
+    config.counterLegPriceToBeatCurrentPriceSource != null &&
+    counterLegPtbGuardEnabled !== true &&
+    counterLegPtbStopLossEnabled !== true
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'counter_leg_price_to_beat_current_price_source_requires_ptb',
+      'action.place_order counterLegPriceToBeatCurrentPriceSource requires counter leg PTB guard or PTB stop-loss.'
+    );
+  }
 
   const counterLegExecutionFloorPriceCent = toFiniteNumber(config.counterLegExecutionFloorPriceCent);
   if (
@@ -1193,7 +1253,7 @@ export function validateActionPlaceOrderPairLockConfig(
         issues,
         node,
         'pair_lock_disallows_exit_features',
-        'action.place_order pair_lock allows primary staged SL plus primary/counter take profit, hard SL/PTB stop-loss, and basic re-entry fields; counter staged exits, time exits, and advanced re-entry fields are not supported.'
+        'action.place_order pair_lock allows primary staged SL plus primary/counter take profit, hard SL/PTB stop-loss, and primary re-entry fields; counter staged exits, counter re-entry, and time exits are not supported.'
       );
       break;
     }

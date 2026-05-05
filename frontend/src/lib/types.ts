@@ -137,6 +137,16 @@ export interface ClaimSweepQueueStatus {
   claimed: number;
 }
 
+export interface ClaimFundsActivationStatus {
+  autoActivate: boolean;
+  canActivate: boolean;
+  minUsdc: number;
+  usdcEBalance: number;
+  pUsdBalance: number;
+  lastError: string | null;
+  refreshedAt: string | null;
+}
+
 export interface ClaimSweepStatus {
   thresholdUsdc: number;
   walletAddress: string | null;
@@ -149,7 +159,18 @@ export interface ClaimSweepStatus {
   eligibleTotalUsdc: number;
   queue: ClaimSweepQueueStatus;
   lastError: string | null;
+  fundsActivation: ClaimFundsActivationStatus;
   refreshedAt: string | null;
+}
+
+export interface ClaimFundsActivationResult {
+  status: 'skipped' | 'submitted';
+  activatedAmountUsdc: number;
+  approveTxHash: string | null;
+  wrapTxHash: string | null;
+  usdcEBalance: number;
+  pUsdBalance: number;
+  message: string;
 }
 
 export interface ClaimSweepRunResult {

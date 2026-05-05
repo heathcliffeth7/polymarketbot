@@ -128,6 +128,10 @@ fn trade_builder_requires_book_aware_runtime_price(order: &TradeBuilderOrder) ->
             ))
 }
 
+fn trade_builder_prefers_rest_fast_runtime_price(order: &TradeBuilderOrder) -> bool {
+    trade_builder_is_child_exit_sell(order)
+}
+
 fn trade_builder_runtime_warning(errors: Vec<String>) -> Option<String> {
     let errors: Vec<String> = errors
         .into_iter()
@@ -231,12 +235,54 @@ fn resolve_trade_builder_fast_runtime_price_from_rest_results(
     (runtime_price, runtime_warning)
 }
 
+fn attach_trade_builder_fast_runtime_warnings(
+    mut runtime_price: TradeBuilderRuntimePrice,
+    warnings: Vec<String>,
+) -> TradeBuilderRuntimePrice {
+    let Some(warning) = trade_builder_runtime_warning(warnings) else {
+        return runtime_price;
+    };
+    runtime_price.runtime_warning = match runtime_price.runtime_warning.take() {
+        Some(existing) => trade_builder_runtime_warning(vec![warning, existing]),
+        None => Some(warning),
+    };
+    runtime_price
+}
+
 async fn resolve_trade_builder_fast_runtime_price(
     ws: &ClobWsClient,
     client: &dyn OrderExecutor,
     order: &TradeBuilderOrder,
+    exit_fast_quote: Option<&ExitFastSubmitQuote>,
 ) -> Result<TradeBuilderRuntimePriceFetch> {
     let mut warnings = Vec::new();
+    let prefer_rest = trade_builder_prefers_rest_fast_runtime_price(order);
+
+    if let Some(runtime_price) = exit_fast_quote
+        .filter(|_| prefer_rest)
+        .and_then(trade_builder_runtime_price_from_exit_fast_quote)
+    {
+        return Ok(TradeBuilderRuntimePriceFetch::Resolved(runtime_price));
+    }
+
+    if prefer_rest {
+        let (best_bid_ask_result, last_trade_result) = tokio::join!(
+            client.best_bid_ask(&order.token_id),
+            client.last_trade_price(&order.token_id)
+        );
+        let (runtime_price, runtime_warning) =
+            resolve_trade_builder_fast_runtime_price_from_rest_results(
+                best_bid_ask_result,
+                last_trade_result,
+            );
+        if let Some(runtime_price) = runtime_price {
+            return Ok(TradeBuilderRuntimePriceFetch::Resolved(runtime_price));
+        }
+        if let Some(runtime_warning) = runtime_warning {
+            warnings.push(runtime_warning);
+        }
+    }
+
     match ws
         .subscribe_once(WsChannel::Market, &[order.token_id.clone()])
         .await
@@ -262,43 +308,34 @@ async fn resolve_trade_builder_fast_runtime_price(
         Err(err) => warnings.push(format!("ws_market: {err}")),
     }
 
-    let (best_bid_ask_result, last_trade_result) = tokio::join!(
-        client.best_bid_ask(&order.token_id),
-        client.last_trade_price(&order.token_id)
-    );
-    let (runtime_price, runtime_warning) = resolve_trade_builder_fast_runtime_price_from_rest_results(
-        best_bid_ask_result,
-        last_trade_result,
-    );
-    if let Some(mut runtime_price) = runtime_price {
-        if runtime_price.runtime_warning.is_none() {
-            runtime_price.runtime_warning = trade_builder_runtime_warning(warnings);
-        } else if let Some(ws_warning) = trade_builder_runtime_warning(warnings) {
-            if let Some(existing_warning) = runtime_price.runtime_warning.take() {
-                runtime_price.runtime_warning =
-                    trade_builder_runtime_warning(vec![ws_warning, existing_warning]);
-            } else {
-                runtime_price.runtime_warning = Some(ws_warning);
-            }
+    if !prefer_rest {
+        let (best_bid_ask_result, last_trade_result) = tokio::join!(
+            client.best_bid_ask(&order.token_id),
+            client.last_trade_price(&order.token_id)
+        );
+        let (runtime_price, runtime_warning) =
+            resolve_trade_builder_fast_runtime_price_from_rest_results(
+                best_bid_ask_result,
+                last_trade_result,
+            );
+        if let Some(runtime_price) = runtime_price {
+            return Ok(TradeBuilderRuntimePriceFetch::Resolved(
+                attach_trade_builder_fast_runtime_warnings(runtime_price, warnings),
+            ));
         }
-        return Ok(TradeBuilderRuntimePriceFetch::Resolved(runtime_price));
+        if let Some(runtime_warning) = runtime_warning {
+            warnings.push(runtime_warning);
+        }
     }
 
     if let Some(mut fallback) = trade_builder_runtime_price_fallback(order) {
-        let mut fallback_warnings = warnings;
-        if let Some(runtime_warning) = runtime_warning {
-            fallback_warnings.push(runtime_warning);
-        }
-        fallback.runtime_warning = trade_builder_runtime_warning(fallback_warnings);
+        fallback.runtime_warning = trade_builder_runtime_warning(warnings);
         return Ok(TradeBuilderRuntimePriceFetch::Resolved(fallback));
     }
 
-    let mut retry_errors = warnings;
-    if let Some(runtime_warning) = runtime_warning {
-        retry_errors.push(runtime_warning);
-    }
-    let error_text = trade_builder_runtime_warning(retry_errors)
-        .unwrap_or_else(|| "runtime price unavailable and no fallback price was present".to_string());
+    let error_text = trade_builder_runtime_warning(warnings).unwrap_or_else(|| {
+        "runtime price unavailable and no fallback price was present".to_string()
+    });
     Ok(TradeBuilderRuntimePriceFetch::Retry { error_text })
 }
 

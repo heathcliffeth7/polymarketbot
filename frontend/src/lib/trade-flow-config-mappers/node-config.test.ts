@@ -6,6 +6,37 @@ import {
   parseNodeConfigToForm,
 } from '@/lib/trade-flow-config-mappers';
 
+test('action.place_order live gap collector mode round-trips with defaults', () => {
+  const form = parseNodeConfigToForm('action.place_order', {
+    mode: 'live_gap_collector_v1',
+    sizeMode: 'usdc',
+    sizeUsdc: 5,
+    marketSlug: 'btc-updown-5m-1773319200',
+    tokenId: 'tok-up',
+    outcomeLabel: 'Up',
+  });
+
+  assert.equal(form.fields.mode, 'live_gap_collector_v1');
+  assert.equal(form.fields.liveGapCollectorWindowStartSec, '220');
+  assert.equal(form.fields.liveGapCollectorHardMaxPriceCent, '93');
+  assert.equal(form.fields.notifyOnLiveGapCollectorDecision, 'true');
+  assert.equal(form.fields.noReversalEntryGuardEnabled, 'false');
+  assert.equal(form.fields.noReversalLookbackMode, 'multi_window_adaptive');
+  assert.equal(form.fields.noReversalProfileQueryTimeoutMs, '500');
+  assert.equal(form.fields.noReversalSoftPassOnInsufficientData, 'true');
+  const rebuilt = buildNodeConfigFromForm('action.place_order', form);
+  assert.equal(rebuilt.mode, 'live_gap_collector_v1');
+  assert.equal(rebuilt.side, 'buy');
+  assert.equal(rebuilt.tpEnabled, true);
+  assert.equal(rebuilt.tpPriceCent, 98);
+  assert.equal(rebuilt.notifyOnLiveGapCollectorDecision, true);
+  assert.equal(rebuilt.liveGapStopLossEntryGapRatio, 0.33);
+  assert.equal(rebuilt.noReversalEntryGuardEnabled, false);
+  assert.equal(rebuilt.noReversalBaselineFloorPct, 0.8);
+  assert.equal(rebuilt.noReversalProfileQueryTimeoutMs, 500);
+  assert.equal(rebuilt.noReversalSoftPassOnInsufficientData, true);
+});
+
 test('action.place_order reentry price fields round-trip through mapper form state', () => {
   const form = parseNodeConfigToForm('action.place_order', {
     side: 'buy',
@@ -73,6 +104,24 @@ test('action.place_order shares sizing round-trips through mapper form state', (
   assert.equal(rebuilt.sizeMode, 'shares');
   assert.equal(rebuilt.targetQty, 5);
   assert.equal(rebuilt.sizeUsdc, undefined);
+});
+
+test('action.place_order removes PTB current source when PTB guard and PTB stop-loss are inactive', () => {
+  const form = parseNodeConfigToForm('action.place_order', {
+    side: 'buy',
+    executionMode: 'market',
+    sizeMode: 'usdc',
+    sizeUsdc: 10,
+    marketSlug: 'btc-updown-5m-1774013100',
+    tokenId: 'btc-up-token',
+    outcomeLabel: 'Up',
+    priceToBeatCurrentPriceSource: 'binance',
+  });
+
+  assert.equal(form.fields.priceToBeatCurrentPriceSource, 'binance');
+
+  const rebuilt = buildNodeConfigFromForm('action.place_order', form);
+  assert.equal('priceToBeatCurrentPriceSource' in rebuilt, false);
 });
 
 test('trigger.market_price entry timing profiles round-trip through mapper form state', () => {
@@ -648,6 +697,8 @@ test('action.place_order staged ptb stop-loss round-trips through mapper form st
     marketSlug: 'eth-updown-5m-1774013100',
     tokenId: 'eth-up-token',
     outcomeLabel: 'Up',
+    priceToBeatCurrentPriceSource: 'binance',
+    ptbStopLossCurrentPriceSource: 'coinbase',
     ptbStopLossRules: [
       { gapUsd: 12.5, sizePct: 25 },
       { gapUsd: 3, sizePct: 75 },
@@ -658,6 +709,8 @@ test('action.place_order staged ptb stop-loss round-trips through mapper form st
 
   assert.equal(form.fields.ptbStopLossEnabled, 'true');
   assert.equal(form.fields.ptbStopLossGapUnit, 'usd');
+  assert.equal(form.fields.priceToBeatCurrentPriceSource, 'binance');
+  assert.equal(form.fields.ptbStopLossCurrentPriceSource, 'coinbase');
   assert.equal(form.ptbStopLossRuleRows.length, 2);
   assert.equal(form.ptbStopLossRuleRows[0]?.gapUsd, '12.5');
   assert.equal(form.ptbStopLossRuleRows[1]?.sizePct, '75');
@@ -669,6 +722,8 @@ test('action.place_order staged ptb stop-loss round-trips through mapper form st
     { gapUsd: 3, sizePct: 75 },
   ]);
   assert.equal(rebuilt.ptbStopLossEnabled, true);
+  assert.equal(rebuilt.priceToBeatCurrentPriceSource, 'binance');
+  assert.equal(rebuilt.ptbStopLossCurrentPriceSource, 'coinbase');
   assert.equal(rebuilt.stagedSlReentryOnlyAfterAllStages, true);
 });
 
@@ -711,6 +766,7 @@ test('action.place_order disables ptb config when master toggle is off', () => {
     outcomeLabel: 'Up',
     ptbStopLossEnabled: true,
     ptbStopLossGapUsd: 0,
+    ptbStopLossCurrentPriceSource: 'coinbase',
     ptbStopLossRules: [{ gapUsd: 3, sizePct: 100 }],
   });
 
@@ -718,6 +774,7 @@ test('action.place_order disables ptb config when master toggle is off', () => {
 
   const rebuilt = buildNodeConfigFromForm('action.place_order', form);
   assert.equal('ptbStopLossGapUsd' in rebuilt, false);
+  assert.equal('ptbStopLossCurrentPriceSource' in rebuilt, false);
   assert.equal('ptbStopLossRules' in rebuilt, false);
 });
 
@@ -955,6 +1012,7 @@ test('action.place_order pair_lock fields round-trip through mapper form state',
     counterLegMaxPriceCent: 42,
     counterLegPriceToBeatGuardEnabled: true,
     counterLegPriceToBeatMode: 'manual',
+    counterLegPriceToBeatCurrentPriceSource: 'coinbase',
     counterLegPriceToBeatMaxDiff: 10,
     counterLegPriceToBeatMaxDiffUnit: 'usd',
     counterLegExecutionFloorGuardEnabled: true,
@@ -975,6 +1033,8 @@ test('action.place_order pair_lock fields round-trip through mapper form state',
     ptbStopLossGapUsd: 0,
     ptbStopLossGapUnit: 'usd',
     ptbStopLossTimeDecayMode: 'relax',
+    priceToBeatCurrentPriceSource: 'binance',
+    ptbStopLossCurrentPriceSource: 'coinbase',
     ptbStopLossRules: [
       { gapUsd: 7, sizePct: 60 },
       { gapUsd: 0, sizePct: 40 },
@@ -987,6 +1047,7 @@ test('action.place_order pair_lock fields round-trip through mapper form state',
     counterLegPtbStopLossGapUsd: -2,
     counterLegPtbStopLossGapUnit: 'cent',
     counterLegPtbStopLossTimeDecayMode: 'tighten',
+    counterLegPtbStopLossCurrentPriceSource: 'binance',
     counterLegNotifyOnSlHit: false,
     reenterOnSlHit: true,
     reentryMaxAttempts: 2,
@@ -1000,14 +1061,18 @@ test('action.place_order pair_lock fields round-trip through mapper form state',
   assert.equal(form.fields.pairProtectiveUnwindEnabled, 'false');
   assert.equal(form.fields.pairIgnoreStopLossAfterLocked, 'true');
   assert.equal(form.fields.counterLegPriceToBeatMaxDiffUnit, 'usd');
+  assert.equal(form.fields.counterLegPriceToBeatCurrentPriceSource, 'coinbase');
   assert.equal(form.fields.tpPriceCent, '95');
   assert.equal(form.fields.counterLegTpPriceCent, '82');
   assert.equal(form.fields.slPriceCent, '45');
   assert.equal(form.fields.ptbStopLossGapUsd, '0');
   assert.equal(form.fields.ptbStopLossGapUnit, 'usd');
+  assert.equal(form.fields.priceToBeatCurrentPriceSource, 'binance');
+  assert.equal(form.fields.ptbStopLossCurrentPriceSource, 'coinbase');
   assert.equal(form.fields.counterLegSlPriceCent, '38');
   assert.equal(form.fields.counterLegPtbStopLossGapUsd, '-2');
   assert.equal(form.fields.counterLegPtbStopLossGapUnit, 'cent');
+  assert.equal(form.fields.counterLegPtbStopLossCurrentPriceSource, 'binance');
   assert.equal(form.tpRuleRows.length, 1);
   assert.equal(form.counterLegTpRuleRows.length, 1);
   assert.equal(form.ptbStopLossRuleRows.length, 2);
@@ -1027,6 +1092,7 @@ test('action.place_order pair_lock fields round-trip through mapper form state',
   assert.equal(rebuilt.counterLegMaxPriceCent, 42);
   assert.equal(rebuilt.counterLegPriceToBeatGuardEnabled, true);
   assert.equal(rebuilt.counterLegPriceToBeatMode, 'manual');
+  assert.equal(rebuilt.counterLegPriceToBeatCurrentPriceSource, 'coinbase');
   assert.equal(rebuilt.counterLegPriceToBeatMaxDiff, 10);
   assert.equal(rebuilt.counterLegPriceToBeatMaxDiffUnit, 'usd');
   assert.equal(rebuilt.counterLegExecutionFloorGuardEnabled, true);
@@ -1055,6 +1121,8 @@ test('action.place_order pair_lock fields round-trip through mapper form state',
   assert.equal(rebuilt.ptbStopLossGapUsd, 0);
   assert.equal(rebuilt.ptbStopLossGapUnit, 'usd');
   assert.equal(rebuilt.ptbStopLossTimeDecayMode, 'relax');
+  assert.equal(rebuilt.priceToBeatCurrentPriceSource, 'binance');
+  assert.equal(rebuilt.ptbStopLossCurrentPriceSource, 'coinbase');
   assert.deepEqual(rebuilt.ptbStopLossRules, [
     { gapUsd: 7, sizePct: 60 },
     { gapUsd: 0, sizePct: 40 },
@@ -1063,6 +1131,7 @@ test('action.place_order pair_lock fields round-trip through mapper form state',
   assert.equal(rebuilt.reenterOnSlHit, true);
   assert.equal(rebuilt.reentryMaxAttempts, 2);
   assert.equal(rebuilt.reentryCooldownSec, 15);
+  assert.equal(rebuilt.counterLegPtbStopLossCurrentPriceSource, 'binance');
 });
 
 test('action.place_order pair_lock preserves primary PTB bump loss table and relax config through mapper form state', () => {
@@ -1193,6 +1262,7 @@ test('action.place_order pair_lock keeps counter stop-loss fields empty without 
   assert.equal(form.fields.counterLegPtbStopLossEnabled ?? '', '');
   assert.equal(form.fields.counterLegPtbStopLossGapUsd ?? '', '');
   assert.equal(form.fields.counterLegPtbStopLossGapUnit ?? '', '');
+  assert.equal(form.fields.counterLegPtbStopLossCurrentPriceSource ?? '', '');
   assert.equal(form.fields.counterLegPtbStopLossTimeDecayMode ?? '', '');
   assert.equal(form.fields.counterLegNotifyOnSlHit ?? '', '');
 
@@ -1208,6 +1278,7 @@ test('action.place_order pair_lock keeps counter stop-loss fields empty without 
   assert.equal('counterLegPtbStopLossEnabled' in rebuilt, false);
   assert.equal('counterLegPtbStopLossGapUsd' in rebuilt, false);
   assert.equal('counterLegPtbStopLossGapUnit' in rebuilt, false);
+  assert.equal('counterLegPtbStopLossCurrentPriceSource' in rebuilt, false);
   assert.equal('counterLegPtbStopLossTimeDecayMode' in rebuilt, false);
   assert.equal('counterLegNotifyOnSlHit' in rebuilt, false);
 });
@@ -1300,7 +1371,7 @@ test('action.place_order pair_lock drops counter PTB manual fields in auto mode'
   assert.equal('counterLegPriceToBeatMaxDiffUnit' in rebuilt, false);
 });
 
-test('action.place_order pair_lock preserves primary staged stop loss and take profit while dropping unsupported exit and advanced reentry fields', () => {
+test('action.place_order pair_lock preserves primary staged stop loss, take profit, and advanced reentry fields', () => {
   const rebuilt = buildNodeConfigFromForm('action.place_order', {
     fields: {
       mode: 'pair_lock',
@@ -1339,8 +1410,12 @@ test('action.place_order pair_lock preserves primary staged stop loss and take p
       counterLegTpEnabled: 'true',
       counterLegTpPriceCent: '82',
       reentryMinPriceCent: '40',
+      reentryMaxPriceCent: '88',
       reentryPriceToBeatMaxDiff: '3',
       reentryPriceToBeatMaxDiffUnit: 'usd',
+      reentrySkipCurrentWindow: 'true',
+      reentryThresholdDecay: '0.8',
+      reentryMaxPriceTightenBps: '500',
     },
     advancedJson: '',
     triggerSizeRows: [],
@@ -1400,9 +1475,11 @@ test('action.place_order pair_lock preserves primary staged stop loss and take p
   assert.deepEqual(rebuilt.slRules, [{ priceCent: 40, sizePct: 100 }]);
   assert.deepEqual(rebuilt.ptbStopLossRules, [{ gapUsd: 0, sizePct: 100 }]);
   assert.equal('timeExitRules' in rebuilt, false);
-  assert.equal('reentryMinPriceCent' in rebuilt, false);
-  assert.equal('reentryPriceToBeatMaxDiff' in rebuilt, false);
-  assert.equal('reentryPriceToBeatMaxDiffUnit' in rebuilt, false);
-  assert.equal('reentryThresholdDecay' in rebuilt, false);
-  assert.equal('reentryMaxPriceTightenBps' in rebuilt, false);
+  assert.equal(rebuilt.reentryMinPriceCent, 40);
+  assert.equal(rebuilt.reentryMaxPriceCent, 88);
+  assert.equal(rebuilt.reentryPriceToBeatMaxDiff, 3);
+  assert.equal(rebuilt.reentryPriceToBeatMaxDiffUnit, 'usd');
+  assert.equal(rebuilt.reentrySkipCurrentWindow, true);
+  assert.equal(rebuilt.reentryThresholdDecay, 0.8);
+  assert.equal(rebuilt.reentryMaxPriceTightenBps, 500);
 });

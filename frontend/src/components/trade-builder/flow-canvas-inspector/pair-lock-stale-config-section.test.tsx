@@ -28,7 +28,7 @@ function baseForm(): NodeConfigFormState {
   };
 }
 
-test('PairLockStaleConfigSection hides zero-value reentry stale entries', () => {
+test('PairLockStaleConfigSection ignores supported zero-value reentry entries', () => {
   const form = baseForm();
   form.fields.reentryCooldownSec = '0';
   form.fields.reentryMaxPriceTightenBps = '0';
@@ -44,9 +44,11 @@ test('PairLockStaleConfigSection hides zero-value reentry stale entries', () => 
   assert.doesNotMatch(html, /reentryMaxPriceTightenBps=0/);
 });
 
-test('PairLockStaleConfigSection still renders non-zero reentry stale entries', () => {
+test('PairLockStaleConfigSection ignores supported primary advanced reentry entries', () => {
   const form = baseForm();
   form.fields.reentryCooldownSec = '1';
+  form.fields.reentryMaxPriceCent = '88';
+  form.fields.reentryPriceToBeatMaxDiff = '3';
   form.fields.reentryMaxPriceTightenBps = '500';
   const html = renderToStaticMarkup(
     React.createElement(PairLockStaleConfigSection, {
@@ -56,8 +58,7 @@ test('PairLockStaleConfigSection still renders non-zero reentry stale entries', 
     })
   );
 
-  assert.match(html, /reentryMaxPriceTightenBps=500/);
-  assert.match(html, /Uyumsuz Alanlari Temizle/);
+  assert.equal(html, '');
 });
 
 test('PairLockStaleConfigSection ignores supported pair-lock stop-loss fields', () => {

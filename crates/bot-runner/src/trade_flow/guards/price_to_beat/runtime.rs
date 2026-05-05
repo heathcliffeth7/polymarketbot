@@ -13,6 +13,10 @@ use super::notification_state::{
     set_price_to_beat_guard_notification_seed, set_price_to_beat_guard_waiting_state,
     PriceToBeatGuardNotificationPhase,
 };
+use super::retry_policy::{
+    clear_early_stale_side_guard_retry_count, early_stale_side_guard_retry_limit_reached,
+    early_stale_side_retry_limit_execution, price_to_beat_guard_retry_delay_ms,
+};
 use super::*;
 use bot_infra::exchange::OrderBookSnapshot;
 use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
@@ -104,6 +108,7 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
 
     if side != "buy" {
         clear_price_to_beat_guard_waiting_context(context);
+        clear_early_stale_side_guard_retry_count(context, &node.key, market_slug);
         return Ok(None);
     }
 
@@ -216,6 +221,18 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
     let candidate_reason =
         crate::build_guard_notification_reason("price_to_beat", &evaluation.reason_code);
     if retry_on_guard_block {
+        let retry_delay_ms = price_to_beat_guard_retry_delay_ms(node);
+        if early_stale_side_guard_retry_limit_reached(context, node, market_slug) {
+            return Ok(Some(early_stale_side_retry_limit_execution(
+                node,
+                market_slug,
+                token_id,
+                outcome_label,
+                side,
+                execution_mode,
+                &evaluation_output,
+            )));
+        }
         let entered_waiting = match price_to_beat_guard_waiting_state(context) {
             Some(prev) => {
                 prev.market_slug != market_slug || prev.reason_code != evaluation.reason_code
@@ -252,8 +269,7 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
                 &evaluation.reason_code,
             );
         }
-        let repeat_at = crate::Utc::now()
-            + ChronoDuration::milliseconds(crate::PRICE_TO_BEAT_GUARD_RETRY_DELAY_MS);
+        let repeat_at = crate::Utc::now() + ChronoDuration::milliseconds(retry_delay_ms);
         return Ok(Some(crate::TradeFlowNodeExecution {
             output: json!({
                 "node_key": node.key,
@@ -265,7 +281,7 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
                 "side": side,
                 "execution_mode": execution_mode,
                 "retrying": true,
-                "retry_delay_ms": crate::PRICE_TO_BEAT_GUARD_RETRY_DELAY_MS,
+                "retry_delay_ms": retry_delay_ms,
                 "price_to_beat_guard": evaluation_output,
             }),
             routes: vec![],
@@ -1141,13 +1157,17 @@ pub(crate) async fn evaluate_action_place_order_price_to_beat_guard_state(
         .await;
         iv_mismatch_config = Some(config);
     }
-    let mut evaluation = evaluate_price_to_beat_guard_with_iv_mismatch_config(
+    let current_price_source = PriceToBeatCurrentPriceSource::parse(
+        crate::node_config_string(node, "priceToBeatCurrentPriceSource").as_deref(),
+    );
+    let mut evaluation = evaluate_price_to_beat_guard_with_current_source(
         market_slug,
         resolution.effective_mode,
         resolution.threshold_value,
         resolution.threshold_unit,
         outcome_label,
         signal_config,
+        current_price_source,
         iv_mismatch_config,
     )
     .await;
@@ -1159,6 +1179,12 @@ pub(crate) async fn evaluate_action_place_order_price_to_beat_guard_state(
     ) {
         apply_price_to_beat_risk_penalty(&mut evaluation, resolution.stop_loss_bump_usd);
     }
+    super::apply_action_place_order_early_stale_side_guard(
+        node,
+        market_slug,
+        outcome_label,
+        &mut evaluation,
+    );
     if let Some(runtime) = runtime {
         if !runtime.cfg.strategy.max_price_relax_enabled || !node_max_price_relax_enabled {
             let disabled_reason = if !runtime.cfg.strategy.max_price_relax_enabled {

@@ -81,6 +81,13 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
             builder_code,
         );
         run_clob_auth_preflight(run_id, repo, &client, &creds, credential_source).await;
+        let warmup_client: SharedOrderExecutor = Arc::new(client.clone());
+        spawn_clob_order_warmup_if_enabled(
+            run_id,
+            cfg,
+            warmup_client,
+            format!("startup:{}", cfg.exchange.clob_base_url),
+        );
         clob_client = Some(client);
         match ws
             .subscribe_once(WsChannel::User, &[cycle_slug.clone()])
@@ -657,6 +664,13 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         builder_code,
     );
     run_clob_auth_preflight(run_id, repo, &client, &creds, credential_source).await;
+    let warmup_client: SharedOrderExecutor = Arc::new(client.clone());
+    spawn_clob_order_warmup_if_enabled(
+        run_id,
+        cfg,
+        warmup_client,
+        format!("flow_only:{}", cfg.exchange.clob_base_url),
+    );
     run_daily_pnl_startup_check(run_id, repo, cfg.risk.max_daily_loss_usdc).await?;
     run_balance_preflight(run_id, repo, &client, cfg.risk.min_balance_usdc).await;
     let ws = ClobWsClient::new(cfg.exchange.clob_ws_url.clone());
@@ -664,16 +678,17 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         tokio::sync::mpsc::unbounded_channel::<TickTrigger>();
     let (snapshot_tx, snapshot_rx) =
         tokio::sync::mpsc::unbounded_channel::<MarketSecondSnapshotTick>();
-    let (volume_tx, volume_rx) =
-        tokio::sync::mpsc::unbounded_channel::<MarketTradeVolumeTick>();
+    let (volume_tx, volume_rx) = tokio::sync::mpsc::unbounded_channel::<MarketTradeVolumeTick>();
     tokio::spawn(run_market_second_snapshot_recorder(
         repo.clone(),
         client.clone(),
+        Some(tick_trigger_tx.clone()),
         snapshot_rx,
     ));
     tokio::spawn(run_market_trade_volume_recorder(repo.clone(), volume_rx));
     ws.set_tick_callback(build_combined_market_tick_callback(vec![
         build_tick_trigger_callback(tick_trigger_tx),
+        build_live_gap_history_prewarm_callback(),
         build_market_second_snapshot_callback(snapshot_tx),
     ]))
     .await;
@@ -1194,7 +1209,8 @@ async fn process_trade_builder_ptb_fast_path_dirty_context(
     let dirty_assets = crate::trade_flow::guards::chainlink_price::take_chainlink_dirty_assets();
     crate::trade_flow::guards::chainlink_price::clear_chainlink_dirty_assets(&dirty_assets);
     let dirty_market_slugs =
-        crate::trade_flow::guards::polymarket_price_to_beat::take_price_to_beat_dirty_market_slugs();
+        crate::trade_flow::guards::polymarket_price_to_beat::take_price_to_beat_dirty_market_slugs(
+        );
     crate::trade_flow::guards::polymarket_price_to_beat::clear_price_to_beat_dirty_market_slugs(
         &dirty_market_slugs,
     );

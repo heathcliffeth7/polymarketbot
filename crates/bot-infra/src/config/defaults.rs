@@ -57,6 +57,18 @@ pub(crate) fn default_exchange_clob_ws_url() -> String {
     "wss://ws-subscriptions-clob.polymarket.com/ws/".to_string()
 }
 
+pub(crate) fn default_clob_order_warmup_enabled() -> bool {
+    true
+}
+
+pub(crate) fn default_clob_order_warmup_interval_ms() -> u64 {
+    25_000
+}
+
+pub(crate) fn default_clob_order_warmup_cooldown_ms() -> u64 {
+    120_000
+}
+
 pub(crate) fn default_exchange_chain_id() -> u64 {
     137
 }
@@ -170,7 +182,27 @@ pub(crate) fn default_claim_ctf_contract_address() -> String {
 }
 
 pub(crate) fn default_claim_collateral_token_address() -> String {
+    "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".to_string()
+}
+
+pub(crate) fn default_claim_auto_activate_funds() -> bool {
+    true
+}
+
+pub(crate) fn default_claim_activate_min_usdc() -> f64 {
+    0.01
+}
+
+pub(crate) fn default_claim_usdce_token_address() -> String {
+    "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174".to_string()
+}
+
+pub(crate) fn default_claim_pusd_token_address() -> String {
     "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB".to_string()
+}
+
+pub(crate) fn default_claim_collateral_onramp_address() -> String {
+    "0x93070a847efEf7F70739046A929D47a521F5B8ee".to_string()
 }
 
 pub(crate) fn default_claim_discovery_interval_sec() -> u64 {

@@ -71,6 +71,7 @@ fn default_guard_evaluation() -> PriceToBeatGuardEvaluation {
         threshold_was_clamped: None,
         signal_formula: None,
         iv_mismatch_edge: None,
+        early_stale_side: None,
     }
 }
 

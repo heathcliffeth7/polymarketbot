@@ -1,5 +1,10 @@
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
-import { isPtbMode, normalizePtbMode, type PtbMode } from '@/lib/trade-flow-config-mappers/ptb-modes';
+import {
+  isPtbCurrentPriceSource,
+  isPtbMode,
+  normalizePtbMode,
+  type PtbMode,
+} from '@/lib/trade-flow-config-mappers/ptb-modes';
 import {
   findUniqueUpstreamMarketPriceTrigger,
   hasUpstreamAutoScopeMarketTrigger,
@@ -1048,6 +1053,27 @@ export function validateActionPlaceOrderConfig(
     priceToBeatGuardEnabled,
     normalizedPriceToBeatMode
   );
+  const ptbCurrentPriceSourceRaw = String(config.priceToBeatCurrentPriceSource ?? '')
+    .trim()
+    .toLowerCase();
+  const ptbCurrentPriceSourceActive =
+    priceToBeatGuardEnabled === true || ptbStopLossEnabled === true || hasPtbStopLossRules;
+  if (ptbCurrentPriceSourceRaw && !isPtbCurrentPriceSource(ptbCurrentPriceSourceRaw)) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_price_to_beat_current_price_source',
+      'action.place_order priceToBeatCurrentPriceSource must be chainlink, binance, or coinbase.'
+    );
+  }
+  if (config.priceToBeatCurrentPriceSource != null && !ptbCurrentPriceSourceActive) {
+    pushNodeError(
+      issues,
+      node,
+      'price_to_beat_current_price_source_requires_ptb',
+      'action.place_order priceToBeatCurrentPriceSource requires priceToBeatGuardEnabled=true, ptbStopLossEnabled=true, or ptbStopLossRules.'
+    );
+  }
   if (config.reentryPriceToBeatMaxDiff != null && priceToBeatGuardEnabled !== true) {
     pushNodeError(
       issues,
@@ -1143,6 +1169,18 @@ export function validateActionPlaceOrderConfig(
       node,
       'invalid_notify_on_order_not_filled',
       'action.place_order notifyOnOrderNotFilled must be boolean (true/false).'
+    );
+  }
+  const notifyOnLiveGapCollectorDecision = toBooleanish(config.notifyOnLiveGapCollectorDecision);
+  if (
+    config.notifyOnLiveGapCollectorDecision != null &&
+    notifyOnLiveGapCollectorDecision == null
+  ) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_notify_on_live_gap_collector_decision',
+      'action.place_order notifyOnLiveGapCollectorDecision must be boolean (true/false).'
     );
   }
 

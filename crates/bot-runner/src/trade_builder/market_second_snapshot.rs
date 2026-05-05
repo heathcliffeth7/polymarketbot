@@ -161,8 +161,12 @@ fn build_market_second_snapshot_input(
         second_ts,
         ptb_ref_price,
         chainlink_price,
-        yes_best_bid: (context.outcome_side == "yes").then_some(best_bid).flatten(),
-        yes_best_ask: (context.outcome_side == "yes").then_some(best_ask).flatten(),
+        yes_best_bid: (context.outcome_side == "yes")
+            .then_some(best_bid)
+            .flatten(),
+        yes_best_ask: (context.outcome_side == "yes")
+            .then_some(best_ask)
+            .flatten(),
         yes_ask_depth_usdc: (context.outcome_side == "yes")
             .then_some(ask_depth_usdc)
             .flatten(),
@@ -194,9 +198,47 @@ fn build_combined_market_tick_callback(callbacks: Vec<MarketTickCallback>) -> Ma
     })
 }
 
+fn emit_book_backed_tick_triggers(
+    token_id: &str,
+    tick_snapshot: &MarketDataSnapshot,
+    order_book: &OrderBookSnapshot,
+    best_bid: Option<f64>,
+    best_ask: Option<f64>,
+    trigger_tx: Option<&tokio::sync::mpsc::UnboundedSender<TickTrigger>>,
+) {
+    let Some(trigger_tx) = trigger_tx else {
+        return;
+    };
+    let Ok(cache) = ARMED_BUILDER_ORDER_CACHE.try_read() else {
+        return;
+    };
+    let snapshot = MarketDataSnapshot {
+        best_bid,
+        best_ask,
+        last_trade_price: tick_snapshot.last_trade_price,
+        updated_at_ms: tick_snapshot.updated_at_ms,
+        last_source: "orderbook_snapshot".to_string(),
+    };
+    let triggers = evaluate_tick_triggers_for_token(token_id, &snapshot, &cache);
+    drop(cache);
+    for trigger in triggers {
+        put_exit_fast_submit_quote(
+            trigger.order_id,
+            token_id,
+            tick_snapshot.updated_at_ms,
+            order_book,
+            best_bid,
+            best_ask,
+            tick_snapshot.last_trade_price,
+        );
+        let _ = trigger_tx.send(trigger);
+    }
+}
+
 async fn run_market_second_snapshot_recorder<C>(
     repo: PostgresRepository,
     client: C,
+    trigger_tx: Option<tokio::sync::mpsc::UnboundedSender<TickTrigger>>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<MarketSecondSnapshotTick>,
 ) where
     C: OrderExecutor + Clone + Send + Sync + 'static,
@@ -215,21 +257,30 @@ async fn run_market_second_snapshot_recorder<C>(
         let Some(second_ts) = DateTime::<Utc>::from_timestamp(second_bucket, 0) else {
             continue;
         };
-        let order_book = if let Some(cached) =
-            order_book_cache.get(&(tick.token_id.clone(), second_bucket))
-        {
-            cached.clone()
-        } else {
-            let fetched = client.order_book(&tick.token_id).await.ok().flatten();
-            order_book_cache.insert((tick.token_id.clone(), second_bucket), fetched.clone());
-            fetched
-        };
+        let order_book =
+            if let Some(cached) = order_book_cache.get(&(tick.token_id.clone(), second_bucket)) {
+                cached.clone()
+            } else {
+                let fetched = client.order_book(&tick.token_id).await.ok().flatten();
+                order_book_cache.insert((tick.token_id.clone(), second_bucket), fetched.clone());
+                fetched
+            };
 
         let book_best_bid = order_book.as_ref().and_then(order_book_best_bid);
         let book_best_ask = order_book.as_ref().and_then(order_book_best_ask);
         let book_best_ask_depth_usdc = order_book.as_ref().and_then(order_book_best_ask_depth_usdc);
         let best_bid = book_best_bid.or(tick.snapshot.best_bid);
         let best_ask = book_best_ask.or(tick.snapshot.best_ask);
+        if order_book.is_some() {
+            emit_book_backed_tick_triggers(
+                &tick.token_id,
+                &tick.snapshot,
+                order_book.as_ref().expect("checked order book"),
+                book_best_bid,
+                book_best_ask,
+                trigger_tx.as_ref(),
+            );
+        }
 
         for context in &contexts {
             let ptb_ref_price =
@@ -239,7 +290,8 @@ async fn run_market_second_snapshot_recorder<C>(
                 .map(|snapshot| snapshot.price_to_beat)
                 .filter(|value| value.is_finite() && *value > 0.0);
             let chainlink_price =
-                trade_flow::guards::chainlink_price::get_chainlink_price_cached(&context.asset).ok();
+                trade_flow::guards::chainlink_price::get_chainlink_price_cached(&context.asset)
+                    .ok();
             let Some(input) = build_market_second_snapshot_input(
                 context,
                 second_ts,

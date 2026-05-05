@@ -382,18 +382,20 @@ fn trade_builder_cap_exit_sell_price(order: &TradeBuilderOrder, desired_price: f
         .unwrap_or(desired_price)
 }
 
-fn trade_builder_is_immediate_notional_buy(order: &TradeBuilderOrder) -> bool {
+fn trade_builder_is_market_buy(order: &TradeBuilderOrder) -> bool {
     order.side == "buy"
-        && order.kind == "immediate"
         && normalize_trade_builder_execution_mode(&order.execution_mode) == "market"
+}
+
+fn trade_builder_is_immediate_notional_buy(order: &TradeBuilderOrder) -> bool {
+    trade_builder_is_market_buy(order)
+        && order.kind == "immediate"
         && normalize_trade_builder_size_basis(&order.size_basis)
             == TRADE_BUILDER_SIZE_BASIS_NOTIONAL_USDC
 }
 
-fn trade_builder_immediate_buy_notional_anchor_price(
-    order: &TradeBuilderOrder,
-) -> Option<f64> {
-    if !trade_builder_is_immediate_notional_buy(order) {
+fn trade_builder_market_buy_anchor_price(order: &TradeBuilderOrder) -> Option<f64> {
+    if !trade_builder_is_market_buy(order) {
         return None;
     }
 
@@ -401,34 +403,38 @@ fn trade_builder_immediate_buy_notional_anchor_price(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct TradeBuilderImmediateBuyExecutionPrice {
+struct TradeBuilderMarketBuyExecutionPrice {
     price: f64,
     source: &'static str,
     trigger_reference_price: Option<f64>,
 }
 
-fn trade_builder_immediate_buy_notional_execution_price(
+fn trade_builder_market_buy_execution_price(
     order: &TradeBuilderOrder,
     current_price: f64,
     best_ask: Option<f64>,
-) -> Option<TradeBuilderImmediateBuyExecutionPrice> {
-    if !trade_builder_is_immediate_notional_buy(order) {
+) -> Option<TradeBuilderMarketBuyExecutionPrice> {
+    if !trade_builder_is_market_buy(order) {
         return None;
     }
 
-    let trigger_reference_price = trade_builder_immediate_buy_notional_anchor_price(order);
+    let trigger_reference_price = trade_builder_market_buy_anchor_price(order);
     if let Some(best_ask) = best_ask
         .and_then(|value| normalize_trade_builder_reference_price(Some(value)))
         .map(clamp_probability)
     {
-        return Some(TradeBuilderImmediateBuyExecutionPrice {
+        return Some(TradeBuilderMarketBuyExecutionPrice {
             price: best_ask,
             source: "best_ask",
             trigger_reference_price,
         });
     }
 
-    Some(TradeBuilderImmediateBuyExecutionPrice {
+    if !trade_builder_is_immediate_notional_buy(order) {
+        return None;
+    }
+
+    Some(TradeBuilderMarketBuyExecutionPrice {
         price: normalize_trade_builder_reference_price(Some(current_price))
             .map(clamp_probability)
             .unwrap_or_else(|| clamp_probability(current_price)),

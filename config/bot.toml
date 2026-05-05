@@ -1,5 +1,5 @@
 mode = "live"
-market_scope = "btc_15m_updown"
+market_scope = "btc_5m_updown"
 market_scopes = []
 loop_interval_ms = 250
 market_discovery_retry_interval_ms = 5000

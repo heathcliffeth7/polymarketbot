@@ -15,6 +15,7 @@ fail() { echo "[FAIL] $*"; exit 1; }
 command -v sudo >/dev/null 2>&1 || fail "sudo is required"
 command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
 command -v cargo >/dev/null 2>&1 || fail "cargo is required"
+command -v setfacl >/dev/null 2>&1 || fail "setfacl is required"
 
 [[ -n "${DB_APP_PASSWORD:-}" ]] || fail "DB_APP_PASSWORD env var is required"
 
@@ -47,6 +48,12 @@ if ! id dextrabot >/dev/null 2>&1; then
   sudo useradd --system --create-home --shell /usr/sbin/nologin dextrabot
 fi
 ok "System user ready"
+
+step "Ensure dextrabot can execute release binary"
+release_binary="$ROOT_DIR/target/release/bot-runner"
+sudo setfacl -m u:dextrabot:--x "$(dirname "$ROOT_DIR")"
+sudo setfacl -m u:dextrabot:rx "$release_binary"
+ok "Release binary ACL ready"
 
 step "Install environment file"
 sudo mkdir -p "$ENV_DIR"

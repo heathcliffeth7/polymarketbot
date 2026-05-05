@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 mod auto_threshold;
 mod current_price;
+mod early_stale_side;
 mod iv_mismatch_adaptive;
 mod iv_mismatch_depth;
 mod iv_mismatch_edge;
@@ -21,6 +22,7 @@ mod notification_state;
 #[cfg(test)]
 mod notification_tests;
 mod resolution;
+mod retry_policy;
 mod runtime;
 mod signal_formula;
 #[cfg(test)]
@@ -30,9 +32,16 @@ use self::auto_threshold::{
     resolve_auto_price_to_beat_threshold, AutoPriceToBeatThresholdResolution,
     AutoPriceToBeatThresholdStrategy,
 };
+use self::current_price::resolve_price_to_beat_current_price;
 #[cfg(test)]
-use self::current_price::{map_current_price_error, resolve_current_price_result};
-use self::current_price::{resolve_price_to_beat_current_price, CURRENT_PRICE_SOURCE_CHAINLINK};
+use self::current_price::{
+    map_current_price_error, resolve_current_price_result, CURRENT_PRICE_SOURCE_CHAINLINK,
+};
+pub(crate) use self::current_price::{
+    resolve_price_to_beat_current_price_snapshot, PriceToBeatCurrentPriceSource,
+};
+use self::early_stale_side::apply_action_place_order_early_stale_side_guard;
+pub(crate) use self::iv_mismatch_depth::evaluate_price_to_beat_iv_depth;
 use self::iv_mismatch_edge::{
     evaluate_price_to_beat_iv_mismatch_edge, PriceToBeatIvMismatchEdgeConfig,
     PriceToBeatIvMismatchTimeRule,
@@ -183,6 +192,7 @@ pub(crate) struct PriceToBeatGuardEvaluation {
     pub(crate) threshold_was_clamped: Option<bool>,
     pub(crate) signal_formula: Option<Value>,
     pub(crate) iv_mismatch_edge: Option<Value>,
+    pub(crate) early_stale_side: Option<Value>,
 }
 
 impl PriceToBeatGuardEvaluation {
@@ -238,6 +248,7 @@ impl PriceToBeatGuardEvaluation {
             insert_value!("threshold_was_clamped", self.threshold_was_clamped);
             insert_value!("signal_formula", self.signal_formula);
             insert_value!("iv_mismatch_edge", self.iv_mismatch_edge);
+            insert_value!("early_stale_side", self.early_stale_side);
             obj.insert(
                 "base_threshold_value".to_string(),
                 json!(self.base_threshold_value),
@@ -671,6 +682,29 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
     signal_config: Option<PriceToBeatSignalFormulaConfig>,
     iv_mismatch_config: Option<PriceToBeatIvMismatchEdgeConfig>,
 ) -> PriceToBeatGuardEvaluation {
+    evaluate_price_to_beat_guard_with_current_source(
+        market_slug,
+        mode,
+        threshold_value,
+        threshold_unit,
+        outcome_label,
+        signal_config,
+        PriceToBeatCurrentPriceSource::Chainlink,
+        iv_mismatch_config,
+    )
+    .await
+}
+
+pub(crate) async fn evaluate_price_to_beat_guard_with_current_source(
+    market_slug: &str,
+    mode: PriceToBeatMode,
+    threshold_value: Option<f64>,
+    threshold_unit: PriceToBeatDiffUnit,
+    outcome_label: &str,
+    signal_config: Option<PriceToBeatSignalFormulaConfig>,
+    current_price_source: PriceToBeatCurrentPriceSource,
+    iv_mismatch_config: Option<PriceToBeatIvMismatchEdgeConfig>,
+) -> PriceToBeatGuardEvaluation {
     let mut resolved_threshold_value = threshold_value.unwrap_or_default();
     let mut resolved_threshold_unit = threshold_unit;
     let mut threshold_usd =
@@ -693,6 +727,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
     let mut auto_threshold_snapshot = None;
 
     let event_url = format!("https://polymarket.com/event/{market_slug}");
+    let current_price_source_label = current_price_source.current_price_source_label();
     match mode {
         PriceToBeatMode::Manual => {}
         PriceToBeatMode::SignalFormula | PriceToBeatMode::IvMismatchEdge => {}
@@ -765,6 +800,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
                         floor_usd,
                         ceiling_usd,
                         threshold_was_clamped,
+                        current_price_source_label,
                     );
                 }
                 AutoPriceToBeatThresholdResolution::Unsupported(detail) => {
@@ -799,6 +835,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
                         floor_usd,
                         ceiling_usd,
                         threshold_was_clamped,
+                        current_price_source_label,
                     );
                 }
             }
@@ -836,6 +873,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
             floor_usd,
             ceiling_usd,
             threshold_was_clamped,
+            current_price_source_label,
         );
     };
     if !matches!(scope.timeframe, "5m" | "15m") {
@@ -870,6 +908,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
             floor_usd,
             ceiling_usd,
             threshold_was_clamped,
+            current_price_source_label,
         );
     }
 
@@ -907,6 +946,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
                 floor_usd,
                 ceiling_usd,
                 threshold_was_clamped,
+                current_price_source_label,
             );
         }
         PriceToBeatLookup::Unavailable(detail) => {
@@ -941,6 +981,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
                 floor_usd,
                 ceiling_usd,
                 threshold_was_clamped,
+                current_price_source_label,
             );
         }
     };
@@ -959,6 +1000,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
     }
 
     let (current_price, current_price_source) = match resolve_price_to_beat_current_price(
+        current_price_source,
         snapshot.source,
         market_slug,
         &snapshot.asset,
@@ -999,6 +1041,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
                 floor_usd,
                 ceiling_usd,
                 threshold_was_clamped,
+                current_price_source_label,
             );
         }
     };
@@ -1045,6 +1088,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
                 floor_usd,
                 ceiling_usd,
                 threshold_was_clamped,
+                current_price_source_label,
             );
         }
     };
@@ -1220,6 +1264,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
         threshold_was_clamped,
         signal_formula: signal_evaluation.map(|evaluation| evaluation.to_value()),
         iv_mismatch_edge: iv_mismatch_evaluation.map(|evaluation| evaluation.to_value()),
+        early_stale_side: None,
     }
 }
 
@@ -1254,6 +1299,7 @@ fn blocked_price_to_beat_guard_evaluation(
     floor_usd: Option<f64>,
     ceiling_usd: Option<f64>,
     threshold_was_clamped: Option<bool>,
+    current_price_source: &'static str,
 ) -> PriceToBeatGuardEvaluation {
     PriceToBeatGuardEvaluation {
         passed: false,
@@ -1270,7 +1316,7 @@ fn blocked_price_to_beat_guard_evaluation(
         price_to_beat_source,
         price_to_beat_source_latency_ms,
         current_price,
-        current_price_source: CURRENT_PRICE_SOURCE_CHAINLINK,
+        current_price_source,
         directional_gap: None,
         gap_abs: None,
         threshold_mode: mode.as_str().to_string(),
@@ -1315,6 +1361,7 @@ fn blocked_price_to_beat_guard_evaluation(
         threshold_was_clamped,
         signal_formula: None,
         iv_mismatch_edge: None,
+        early_stale_side: None,
     }
 }
 

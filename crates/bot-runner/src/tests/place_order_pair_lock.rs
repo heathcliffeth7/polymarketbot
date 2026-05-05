@@ -30,6 +30,13 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
         "reenterOnSlHit": true,
         "reentryMaxAttempts": 2,
         "reentryCooldownSec": 15,
+        "reentryMinPriceCent": 40,
+        "reentryMaxPriceCent": 88,
+        "reentryPriceToBeatMaxDiff": 3,
+        "reentryPriceToBeatMaxDiffUnit": "usd",
+        "reentrySkipCurrentWindow": true,
+        "reentryThresholdDecay": 0.8,
+        "reentryMaxPriceTightenBps": 500,
     }));
     let pair_lock = resolve_action_place_order_pair_lock_config(&node)
         .expect("pair lock config parse")
@@ -158,6 +165,55 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
         primary.config.get("notifyOnSlHit").and_then(Value::as_bool),
         Some(true)
     );
+    assert_eq!(
+        primary
+            .config
+            .get("reentryMinPriceCent")
+            .and_then(Value::as_i64),
+        Some(40)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("reentryMaxPriceCent")
+            .and_then(Value::as_i64),
+        Some(88)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("reentryPriceToBeatMaxDiff")
+            .and_then(Value::as_i64),
+        Some(3)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("reentryPriceToBeatMaxDiffUnit")
+            .and_then(Value::as_str),
+        Some("usd")
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("reentrySkipCurrentWindow")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("reentryThresholdDecay")
+            .and_then(Value::as_f64),
+        Some(0.8)
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("reentryMaxPriceTightenBps")
+            .and_then(Value::as_i64),
+        Some(500)
+    );
 
     assert!(counter.config.get("tpEnabled").is_none());
     assert!(counter.config.get("tpPriceCent").is_none());
@@ -173,6 +229,16 @@ fn pair_lock_build_nodes_preserve_supported_stop_loss_fields() {
     assert!(counter.config.get("ptbStopLossTimeDecayMode").is_none());
     assert!(counter.config.get("ptbStopLossRules").is_none());
     assert!(counter.config.get("notifyOnSlHit").is_none());
+    assert!(counter.config.get("reentryMinPriceCent").is_none());
+    assert!(counter.config.get("reentryMaxPriceCent").is_none());
+    assert!(counter.config.get("reentryPriceToBeatMaxDiff").is_none());
+    assert!(counter
+        .config
+        .get("reentryPriceToBeatMaxDiffUnit")
+        .is_none());
+    assert!(counter.config.get("reentrySkipCurrentWindow").is_none());
+    assert!(counter.config.get("reentryThresholdDecay").is_none());
+    assert!(counter.config.get("reentryMaxPriceTightenBps").is_none());
 }
 
 #[test]
@@ -244,6 +310,20 @@ fn pair_lock_adaptive_max_price_override_only_changes_primary_child() {
     assert_eq!(
         counter.config.get("sizeUsdc").and_then(Value::as_f64),
         Some(5.0)
+    );
+    assert_eq!(
+        counter
+            .config
+            .get(ACTION_PLACE_ORDER_INTERNAL_PAIR_LOCK_CHILD_ROLE_KEY)
+            .and_then(Value::as_str),
+        Some(TRADE_BUILDER_PAIR_ROLE_COUNTER_CANDIDATE)
+    );
+    assert_eq!(
+        counter
+            .config
+            .get(ACTION_PLACE_ORDER_INTERNAL_INITIAL_STATUS_KEY)
+            .and_then(Value::as_str),
+        Some(ACTION_PLACE_ORDER_INTERNAL_BLOCKED_STATUS)
     );
     assert!(counter.config.get("adaptiveMaxPriceApplied").is_none());
     assert!(counter.config.get("adaptiveMaxPrice").is_none());
@@ -363,6 +443,8 @@ fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
         "ptbStopLossEnabled": true,
         "ptbStopLossGapUsd": 0.0,
         "ptbStopLossGapUnit": "usd",
+        "ptbStopLossCurrentPriceSource": "coinbase",
+        "priceToBeatCurrentPriceSource": "binance",
         "ptbStopLossTimeDecayMode": "tighten",
         "notifyOnSlHit": true,
         "counterLegSlEnabled": true,
@@ -371,6 +453,8 @@ fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
         "counterLegPtbStopLossEnabled": true,
         "counterLegPtbStopLossGapUsd": -2.0,
         "counterLegPtbStopLossGapUnit": "cent",
+        "counterLegPtbStopLossCurrentPriceSource": "binance",
+        "counterLegPriceToBeatCurrentPriceSource": "coinbase",
         "counterLegPtbStopLossTimeDecayMode": "relax",
         "counterLegTpEnabled": true,
         "counterLegTpPriceCent": 82,
@@ -440,6 +524,20 @@ fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
     assert_eq!(
         primary
             .config
+            .get("ptbStopLossCurrentPriceSource")
+            .and_then(Value::as_str),
+        Some("coinbase")
+    );
+    assert_eq!(
+        primary
+            .config
+            .get("priceToBeatCurrentPriceSource")
+            .and_then(Value::as_str),
+        Some("binance")
+    );
+    assert_eq!(
+        primary
+            .config
             .get("ptbStopLossTimeDecayMode")
             .and_then(Value::as_str),
         Some("tighten")
@@ -489,6 +587,20 @@ fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
             .get("ptbStopLossGapUnit")
             .and_then(Value::as_str),
         Some("cent")
+    );
+    assert_eq!(
+        counter
+            .config
+            .get("ptbStopLossCurrentPriceSource")
+            .and_then(Value::as_str),
+        Some("binance")
+    );
+    assert_eq!(
+        counter
+            .config
+            .get("priceToBeatCurrentPriceSource")
+            .and_then(Value::as_str),
+        Some("coinbase")
     );
     assert_eq!(
         counter
@@ -707,11 +819,11 @@ fn pair_lock_buy_guard_eval_marks_max_price_as_waiting_when_retry_enabled() {
     let evaluation = evaluate_trade_builder_buy_guards(
         "market",
         Some("lead_candidate"),
-        0.74,
-        Some(0.75),
-        0.75,
+        0.72,
+        Some(0.73),
+        0.73,
         None,
-        Some(0.70),
+        Some(0.53),
         None,
         false,
         false,
@@ -732,6 +844,61 @@ fn pair_lock_counter_buy_guard_waits_when_current_ask_is_above_dynamic_cap() {
         0.17,
         None,
         Some(0.11),
+        None,
+        false,
+        false,
+        true,
+    );
+
+    assert_eq!(evaluation.effective_decision, "waiting");
+    assert_eq!(evaluation.effective_reason_code, "above_max_price");
+}
+
+#[test]
+fn pair_lock_counter_market_buy_uses_best_ask_submit_price_under_dynamic_cap() {
+    let mut counter = test_builder_order("buy", None);
+    counter.kind = "immediate".to_string();
+    counter.trigger_condition = None;
+    counter.trigger_price = None;
+    counter.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    counter.size_usdc = 4.1985;
+    counter.target_qty = Some(9.33);
+    counter.remaining_qty = Some(9.33);
+    counter.max_price = Some(0.45);
+    counter.pair_leg_role = Some("counter_candidate".to_string());
+
+    let resolution = trade_builder_market_buy_execution_price(&counter, 0.39, Some(0.41))
+        .expect("counter market buy price");
+    let evaluation = evaluate_trade_builder_buy_guards(
+        "market",
+        counter.pair_leg_role.as_deref(),
+        0.39,
+        Some(0.41),
+        resolution.price,
+        None,
+        counter.max_price,
+        None,
+        false,
+        false,
+        true,
+    );
+
+    assert_eq!(resolution.price, 0.41);
+    assert_eq!(resolution.source, "best_ask");
+    assert_eq!(evaluation.effective_decision, "passed");
+    assert_eq!(evaluation.effective_reason_code, "guards_passed");
+}
+
+#[test]
+fn pair_lock_counter_market_buy_waits_when_best_ask_exceeds_dynamic_cap() {
+    let evaluation = evaluate_trade_builder_buy_guards(
+        "market",
+        Some("counter_candidate"),
+        0.39,
+        Some(0.46),
+        0.46,
+        None,
+        Some(0.45),
         None,
         false,
         false,

@@ -180,6 +180,86 @@ fn pair_lock_auto_counter_needs_rebase(
         && pair_lock_auto_counter_rebalance_changed(order, rebalance, counter_eligible_before_at)
 }
 
+fn pair_lock_counter_should_wait_for_lead(
+    order: &TradeBuilderOrder,
+    session: &TradeBuilderPairSession,
+) -> bool {
+    session.status == TRADE_BUILDER_PAIR_STATUS_WORKING
+        && session.counter_order_id == Some(order.id)
+        && session.lead_order_id.is_none()
+}
+
+fn pair_lock_primary_done_without_lead_fill(primary: &TradeBuilderOrder) -> bool {
+    primary.filled_qty <= TRADE_BUILDER_PAIR_QTY_TOLERANCE
+        && (primary.status == "error" || trade_builder_is_terminal_status(&primary.status))
+}
+
+async fn maybe_hold_trade_builder_pair_lock_counter_until_lead(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    session: &TradeBuilderPairSession,
+) -> Result<bool> {
+    if !pair_lock_counter_should_wait_for_lead(order, session) {
+        return Ok(false);
+    }
+
+    if let Some(primary_order_id) = session.primary_order_id {
+        if let Some(primary) = repo.get_trade_builder_order(primary_order_id).await? {
+            if pair_lock_primary_done_without_lead_fill(&primary) {
+                repo.set_trade_builder_order_status(
+                    order.id,
+                    "canceled",
+                    Some("pair_primary_failed_before_fill"),
+                )
+                .await?;
+                repo.update_trade_builder_pair_session_state(
+                    session.id,
+                    TRADE_BUILDER_PAIR_STATUS_ERROR,
+                    None,
+                    None,
+                    Some("pair_primary_failed_before_fill"),
+                )
+                .await?;
+                repo.append_trade_builder_order_event(
+                    order.id,
+                    "pair_lock_counter_canceled_before_lead",
+                    &json!({
+                        "pair_session_id": session.id,
+                        "primary_order_id": primary_order_id,
+                        "primary_status": primary.status,
+                        "primary_last_error": primary.last_error,
+                        "reason": "pair_primary_failed_before_fill",
+                    }),
+                )
+                .await?;
+                return Ok(true);
+            }
+        }
+    }
+
+    if order.status != "inventory_pending"
+        || order.last_error.as_deref() != Some("pair_counter_waiting_primary_fill")
+    {
+        repo.set_trade_builder_order_status(
+            order.id,
+            "inventory_pending",
+            Some("pair_counter_waiting_primary_fill"),
+        )
+        .await?;
+        repo.append_trade_builder_order_event(
+            order.id,
+            "pair_lock_counter_waiting_primary_fill",
+            &json!({
+                "pair_session_id": session.id,
+                "primary_order_id": session.primary_order_id,
+                "reason": "counter_before_primary_fill",
+            }),
+        )
+        .await?;
+    }
+    Ok(true)
+}
+
 async fn maybe_prepare_trade_builder_pair_lock_auto_counter(
     repo: &PostgresRepository,
     order: &TradeBuilderOrder,
@@ -209,8 +289,12 @@ async fn maybe_prepare_trade_builder_pair_lock_auto_counter(
         )
         .await?
         {
-            repo.set_trade_builder_order_status(order.id, "canceled", Some("pair_budget_exhausted"))
-                .await?;
+            repo.set_trade_builder_order_status(
+                order.id,
+                "canceled",
+                Some("pair_budget_exhausted"),
+            )
+            .await?;
             return Ok(true);
         }
         let orders = repo
@@ -452,6 +536,7 @@ mod pair_lock_market_tests {
             ptb_reference_price: None,
             ptb_stop_loss_rules_json: Vec::new(),
             ptb_stop_loss_time_decay_mode: None,
+            ptb_current_price_source: "chainlink".to_string(),
             staged_sl_retry_only_dust: false,
             staged_sl_retry_dust_metric: None,
             staged_sl_retry_dust_value: None,
@@ -583,6 +668,64 @@ mod pair_lock_market_tests {
             &pair_lock,
             "btc-updown-5m-1776522900"
         ));
+    }
+
+    #[test]
+    fn pair_lock_counter_waits_for_lead_even_in_manual_sizing() {
+        let mut counter = test_builder_order();
+        counter.id = 12;
+        counter.pair_leg_role = Some(TRADE_BUILDER_PAIR_ROLE_COUNTER_CANDIDATE.to_string());
+        let session = TradeBuilderPairSession {
+            id: 1,
+            user_id: 1,
+            flow_definition_id: None,
+            flow_run_id: None,
+            flow_node_key: None,
+            market_slug: "btc-updown-5m-1776522900".to_string(),
+            status: TRADE_BUILDER_PAIR_STATUS_WORKING.to_string(),
+            pair_target_total_cent: 90.0,
+            min_net_profit_usdc: 0.0,
+            profit_safety_buffer_usdc: 0.0,
+            orphan_grace_ms: 0,
+            ignore_stop_loss_after_locked: false,
+            notify_on_pair_locked: true,
+            notify_on_pair_unwind: true,
+            notify_on_pair_no_edge: false,
+            primary_order_id: Some(11),
+            counter_order_id: Some(12),
+            lead_order_id: None,
+            primary_fill_qty: None,
+            primary_fill_fee_qty: None,
+            primary_net_qty: None,
+            primary_avg_fill_price: None,
+            counter_fill_qty: None,
+            counter_fill_fee_qty: None,
+            counter_net_qty: None,
+            counter_avg_fill_price: None,
+            lead_filled_at: None,
+            locked_qty: None,
+            projected_net_profit_usdc: None,
+            last_error: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(pair_lock_counter_should_wait_for_lead(&counter, &session));
+    }
+
+    #[test]
+    fn pair_lock_primary_done_without_lead_fill_detects_error_or_terminal_no_fill() {
+        let mut primary = test_builder_order();
+        primary.status = "error".to_string();
+        primary.filled_qty = 0.0;
+        assert!(pair_lock_primary_done_without_lead_fill(&primary));
+
+        primary.status = "canceled".to_string();
+        assert!(pair_lock_primary_done_without_lead_fill(&primary));
+
+        primary.status = "completed".to_string();
+        primary.filled_qty = 1.0;
+        assert!(!pair_lock_primary_done_without_lead_fill(&primary));
     }
 
     #[test]

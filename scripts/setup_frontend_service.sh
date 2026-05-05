@@ -88,6 +88,17 @@ EOF
   rm -f "$tmp_file"
 }
 
+ensure_frontend_build_permissions() {
+  local build_dir="$FRONTEND_DIR/.next"
+  if [[ ! -d "$build_dir" ]]; then
+    fail "Frontend build output not found at $build_dir"
+  fi
+
+  sudo chgrp -R dextrabot "$build_dir"
+  sudo find "$build_dir" -type d -exec chmod 750 {} +
+  sudo find "$build_dir" -type f -exec chmod 640 {} +
+}
+
 command -v sudo >/dev/null 2>&1 || fail "sudo is required"
 command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
 command -v visudo >/dev/null 2>&1 || fail "visudo is required"
@@ -110,6 +121,10 @@ if ! id dextrabot >/dev/null 2>&1; then
   sudo useradd --system --create-home --shell /usr/sbin/nologin dextrabot
 fi
 ok "System user ready"
+
+step "Ensure frontend build permissions"
+ensure_frontend_build_permissions
+ok "Frontend build output readable by dextrabot"
 
 step "Install frontend env file"
 sudo mkdir -p "$ENV_DIR"

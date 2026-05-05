@@ -121,6 +121,7 @@ struct TradeFlowWsFastPathCache {
     run_specs: Vec<WsOpenPositionPriceRunSpec>,
     token_targets: HashMap<String, Vec<(usize, usize)>>,
     market_targets: HashMap<String, Vec<(usize, usize)>>,
+    live_gap_prewarm_targets: HashMap<String, Vec<LiveGapHistoryPrewarmTarget>>,
 }
 
 #[derive(Debug, Clone)]
