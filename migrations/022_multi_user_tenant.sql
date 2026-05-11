@@ -23,17 +23,17 @@ CREATE TABLE IF NOT EXISTS user_settings (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_user_settings_user_config
   ON user_settings (user_id, config_name);
 
-\set auth_secret `bash -lc 'if [[ -n "${AUTH_SECRET-}" ]]; then printf %s "$AUTH_SECRET"; elif [[ -f /home/heathcliff/polymarketbot/frontend/.env.local ]]; then grep -m1 "^AUTH_SECRET=" /home/heathcliff/polymarketbot/frontend/.env.local | cut -d= -f2- | tr -d "\r\n"; fi'`
-\set bot_json `cd /home/heathcliff/polymarketbot/frontend && node -e "const fs=require('fs');const TOML=require('@iarna/toml');const p='/home/heathcliff/polymarketbot/config/bot.toml';const value=fs.existsSync(p)?TOML.parse(fs.readFileSync(p,'utf8')):{};process.stdout.write(JSON.stringify(value));"`
-\set strategy_json `cd /home/heathcliff/polymarketbot/frontend && node -e "const fs=require('fs');const TOML=require('@iarna/toml');const p='/home/heathcliff/polymarketbot/config/strategy.toml';const value=fs.existsSync(p)?TOML.parse(fs.readFileSync(p,'utf8')):{};process.stdout.write(JSON.stringify(value));"`
-\set risk_json `cd /home/heathcliff/polymarketbot/frontend && node -e "const fs=require('fs');const TOML=require('@iarna/toml');const p='/home/heathcliff/polymarketbot/config/risk.toml';const value=fs.existsSync(p)?TOML.parse(fs.readFileSync(p,'utf8')):{};process.stdout.write(JSON.stringify(value));"`
-\set execution_json `cd /home/heathcliff/polymarketbot/frontend && node -e "const fs=require('fs');const TOML=require('@iarna/toml');const p='/home/heathcliff/polymarketbot/config/execution.toml';const value=fs.existsSync(p)?TOML.parse(fs.readFileSync(p,'utf8')):{};process.stdout.write(JSON.stringify(value));"`
-\set exchange_json `cd /home/heathcliff/polymarketbot/frontend && node -e "const fs=require('fs');const crypto=require('crypto');const TOML=require('@iarna/toml');const p='/home/heathcliff/polymarketbot/config/exchange.toml';const value=fs.existsSync(p)?TOML.parse(fs.readFileSync(p,'utf8')):{};const prefix='enc:v1:';const encoded=(process.env.CONFIG_ENCRYPTION_KEY||'').trim();let key=null;if(encoded){try{const decoded=Buffer.from(encoded,'base64');if(decoded.length===32)key=decoded;}catch{}}const encrypt=(raw)=>{const text=String(raw??'').trim();if(!text||text.startsWith(prefix)||!key)return text;if(!text)return '';const nonce=crypto.randomBytes(12);const cipher=crypto.createCipheriv('aes-256-gcm',key,nonce);const encrypted=Buffer.concat([cipher.update(Buffer.from(text,'utf8')),cipher.final()]);const tag=cipher.getAuthTag();return prefix+Buffer.concat([nonce,encrypted,tag]).toString('base64');};for(const field of ['api_address','api_key','api_secret','api_passphrase','signer_private_key','gnosis_safe_address']){if(Object.prototype.hasOwnProperty.call(value,field)){value[field]=encrypt(value[field]);}}process.stdout.write(JSON.stringify(value));"`
-\set telegram_json `cd /home/heathcliff/polymarketbot/frontend && node -e "const fs=require('fs');const crypto=require('crypto');const TOML=require('@iarna/toml');const p='/home/heathcliff/polymarketbot/config/telegram.toml';const value=fs.existsSync(p)?TOML.parse(fs.readFileSync(p,'utf8')):{};const prefix='enc:v1:';const encoded=(process.env.CONFIG_ENCRYPTION_KEY||'').trim();let key=null;if(encoded){try{const decoded=Buffer.from(encoded,'base64');if(decoded.length===32)key=decoded;}catch{}}const encrypt=(raw)=>{const text=String(raw??'').trim();if(!text||text.startsWith(prefix)||!key)return text;const nonce=crypto.randomBytes(12);const cipher=crypto.createCipheriv('aes-256-gcm',key,nonce);const encrypted=Buffer.concat([cipher.update(Buffer.from(text,'utf8')),cipher.final()]);const tag=cipher.getAuthTag();return prefix+Buffer.concat([nonce,encrypted,tag]).toString('base64');};if(Object.prototype.hasOwnProperty.call(value,'bot_token')){value.bot_token=encrypt(value.bot_token);}process.stdout.write(JSON.stringify(value));"`
+\set auth_secret `bash -lc 'repo="${DEXTRABOT_REPO_DIR:-$(pwd)}"; if [[ -n "${AUTH_SECRET-}" ]]; then printf %s "$AUTH_SECRET"; elif [[ -f "$repo/frontend/.env.local" ]]; then grep -m1 "^AUTH_SECRET=" "$repo/frontend/.env.local" | cut -d= -f2- | tr -d "\r\n"; fi'`
+\set bot_json `node "${DEXTRABOT_REPO_DIR:-.}/scripts/config_to_json.mjs" bot`
+\set strategy_json `node "${DEXTRABOT_REPO_DIR:-.}/scripts/config_to_json.mjs" strategy`
+\set risk_json `node "${DEXTRABOT_REPO_DIR:-.}/scripts/config_to_json.mjs" risk`
+\set execution_json `node "${DEXTRABOT_REPO_DIR:-.}/scripts/config_to_json.mjs" execution`
+\set exchange_json `node "${DEXTRABOT_REPO_DIR:-.}/scripts/config_to_json.mjs" exchange`
+\set telegram_json `node "${DEXTRABOT_REPO_DIR:-.}/scripts/config_to_json.mjs" telegram`
 
 INSERT INTO app_users (username, password_hash, created_at, updated_at)
 SELECT
-  'heathcliffeth',
+  'admin',
   CASE
     WHEN LENGTH(:'auth_secret') > 0 THEN crypt(:'auth_secret', gen_salt('bf', 10))
     ELSE ''
@@ -43,7 +43,7 @@ SELECT
 WHERE NOT EXISTS (
   SELECT 1
   FROM app_users
-  WHERE LOWER(username) = 'heathcliffeth'
+  WHERE LOWER(username) = 'admin'
 );
 
 UPDATE app_users
@@ -54,7 +54,7 @@ SET
     ELSE password_hash
   END,
   updated_at = NOW()
-WHERE LOWER(username) = 'heathcliffeth';
+WHERE LOWER(username) = 'admin';
 
 ALTER TABLE trade_flow_definitions
   ADD COLUMN IF NOT EXISTS user_id BIGINT;
@@ -133,11 +133,11 @@ BEGIN
   SELECT id
   INTO primary_user_id
   FROM app_users
-  WHERE LOWER(username) = 'heathcliffeth'
+  WHERE LOWER(username) = 'admin'
   LIMIT 1;
 
   IF primary_user_id IS NULL THEN
-    RAISE EXCEPTION 'Primary user heathcliffeth could not be created';
+    RAISE EXCEPTION 'Primary admin user could not be created';
   END IF;
 
   UPDATE trade_flow_definitions
@@ -177,7 +177,7 @@ CROSS JOIN (
     ('exchange', :'exchange_json'::jsonb),
     ('telegram', :'telegram_json'::jsonb)
 ) AS seed(config_name, payload_json)
-WHERE LOWER(u.username) = 'heathcliffeth'
+WHERE LOWER(u.username) = 'admin'
 ON CONFLICT (user_id, config_name) DO UPDATE
 SET
   payload_json = EXCLUDED.payload_json,

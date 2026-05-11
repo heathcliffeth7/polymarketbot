@@ -1,5 +1,5 @@
-# Telegram action node'lari tek bot token kullanir.
-# Bu deger Settings -> Telegram ekranindan kaydedildiginde otomatik sifreli yazilir.
+# Telegram action nodes use one bot token.
+# Values saved from Settings -> Telegram are encrypted automatically.
 bot_token = ""
-# Opsiyonel default hedef chat. Node icinde chatId varsa o kullanilir; bos ise bu fallback olur.
+# Optional default target chat. Node-level chatId takes priority.
 chat_id = ""

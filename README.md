@@ -1,140 +1,143 @@
-# Dextrabot Polymarket Bot (Phase-2 Paper Runtime)
+# Dextrabot
 
-Rust-based paper-trading runtime for BTC 5m Up/Down workflow.
+Dextrabot is a Rust and Next.js trading automation workspace for Polymarket BTC Up/Down markets. It includes a backend runtime, PostgreSQL persistence, Redis-backed coordination, a visual trade-flow builder, analytics screens, Telegram notifications, and optional claim/funds activation tooling.
 
-## Prerequisites (Local Server, No Docker)
-- Rust (cargo)
-- PostgreSQL + psql client
-- Redis server
-- systemd
+The default configuration is paper-oriented. Live trading requires explicit credentials and `LIVE_TRADING_ENABLED=true`.
 
-## Quick Start (No Docker)
+## Features
+
+- Rust runtime for market discovery, workflow execution, order lifecycle management, and risk gates.
+- Next.js dashboard for configuration, trade-flow editing, runtime control, order views, analytics, and settings.
+- Visual flow builder with market-price triggers, place-order actions, pair-lock strategies, DCA live flows, PTB guards, IV mismatch checks, stop-loss logic, re-entry controls, and Telegram actions.
+- PostgreSQL schema migrations for trades, builder orders, workflow runs, decision logs, analytics snapshots, and user settings.
+- Polymarket Gamma/CLOB integration, encrypted credential storage, EIP-712 signing support, and optional builder relayer configuration.
+- Operational scripts for local service setup, migrations, health checks, and go/no-go validation.
+
+## Architecture
+
+| Area | Path | Purpose |
+|---|---|---|
+| Core domain | `crates/bot-core` | Shared domain types, risk types, execution modes, and state-machine primitives. |
+| Infrastructure | `crates/bot-infra` | PostgreSQL repository, exchange clients, websocket support, config loading, signing, and claim helpers. |
+| Runtime | `crates/bot-runner` | Main orchestration loops, trade-flow execution, order handling, guards, notifications, and analytics refresh. |
+| Mock exchange | `crates/mock-exchange` | In-memory exchange fixture for tests. |
+| Frontend | `frontend` | Next.js dashboard, API routes, flow builder UI, settings, and analytics views. |
+| Database | `migrations` | Ordered PostgreSQL migrations. |
+
+## Requirements
+
+- Rust stable toolchain with `cargo`
+- Node.js 20+ and npm
+- PostgreSQL
+- Redis
+- `psql` client
+- Linux with systemd for service installation scripts
+
+## Configuration
+
+Runtime config files are local files and are not committed. Create them from the examples:
+
 ```bash
-cd /home/heathcliff/polymarketbot
-DB_APP_PASSWORD='strong-password' ./scripts/setup_server.sh
+cp config/bot.toml.example config/bot.toml
+cp config/strategy.toml.example config/strategy.toml
+cp config/risk.toml.example config/risk.toml
+cp config/execution.toml.example config/execution.toml
+cp config/exchange.toml.example config/exchange.toml
+cp config/claim.toml.example config/claim.toml
+cp config/telegram.toml.example config/telegram.toml
 ```
 
-## Manual Setup (Step-by-Step)
+Sensitive values can be stored encrypted with the `enc:v1:` prefix or supplied through the documented `*_env` fields. The frontend and backend must use the same `CONFIG_ENCRYPTION_KEY` when saving or reading encrypted credentials.
 
-### 1) Install Services (Ubuntu)
+Important environment variables:
+
 ```bash
-./scripts/bootstrap_server_services.sh
+DATABASE_URL=postgres://dextrabot_app:<password>@127.0.0.1:5432/dextrabot
+BOT_CONFIG_DIR=./config
+CONFIG_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
+AUTH_SECRET=<strong-dashboard-secret>
+LIVE_TRADING_ENABLED=false
 ```
 
-### 2) Bootstrap Database/User
-```bash
-DB_APP_PASSWORD='strong-password' ./scripts/bootstrap_db.sh
-```
+## Local Development
 
-### 3) Apply Migrations
+Apply database migrations:
+
 ```bash
-export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
+export DATABASE_URL=postgres://dextrabot_app:<password>@127.0.0.1:5432/dextrabot
 ./scripts/apply_migrations.sh
 ```
 
-### 4) Run (Paper or Live-Dry)
+Run the backend:
+
 ```bash
-export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
+export DATABASE_URL=postgres://dextrabot_app:<password>@127.0.0.1:5432/dextrabot
 export BOT_CONFIG_DIR=./config
 cargo run -p bot-runner
 ```
 
-### 5) Run as systemd service
+Run the frontend:
+
 ```bash
-cargo build --release -p bot-runner
-sudo useradd --system --create-home --shell /usr/sbin/nologin dextrabot || true
-sudo mkdir -p /etc/dextrabot
-sudo cp deploy/systemd/dextrabot.env.example /etc/dextrabot/dextrabot.env
-sudo cp deploy/systemd/dextrabot.service /etc/systemd/system/dextrabot.service
-sudo systemctl daemon-reload
-sudo systemctl enable dextrabot
-sudo systemctl restart dextrabot
-sudo systemctl status dextrabot --no-pager -l
+cd frontend
+npm install
+npm run dev
 ```
 
-Important: after every `cargo build --release -p bot-runner`, always run `sudo systemctl restart dextrabot` so runtime behavior matches the latest binary.
-If you see `trigger_ws_price_enqueued (cross_confirmed)` followed by `step_completed(triggered=false, evaluation_mode=no_cross)`, assume stale process/binary mismatch and restart service.
+Open `http://localhost:3000`.
 
-### 6) Frontend on Server IP (`http://<SERVER_IP>:3000`)
+## Server Setup
+
+The setup script installs PostgreSQL/Redis dependencies, bootstraps the database role, applies migrations, builds the runtime, installs a systemd unit, and prepares config directory permissions:
+
 ```bash
-cd /home/heathcliff/polymarketbot
+DB_APP_PASSWORD='<strong-password>' ./scripts/setup_server.sh
+```
+
+Install the dashboard as a systemd service:
+
+```bash
 ./scripts/setup_frontend_service.sh
 ```
 
-If build-time internet access is restricted:
+For HTTP-only server-IP deployments, set `AUTH_COOKIE_SECURE=false` in the frontend environment file.
+
+## Live Trading
+
+Live trading is disabled unless all of the following are true:
+
+- `config/bot.toml` uses a live-capable mode.
+- Exchange credentials are configured in `config/exchange.toml` or matching environment variables.
+- `CONFIG_ENCRYPTION_KEY` is set if encrypted values are used.
+- `LIVE_TRADING_ENABLED=true` is present in the backend environment.
+- `./scripts/go_no_go.sh` passes.
+
+Example:
+
 ```bash
-cd /home/heathcliff/polymarketbot
-SKIP_FRONTEND_BUILD=true ./scripts/setup_frontend_service.sh
+export DATABASE_URL=postgres://dextrabot_app:<password>@127.0.0.1:5432/dextrabot
+export BOT_CONFIG_DIR=./config
+export CONFIG_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
+export LIVE_TRADING_ENABLED=true
+./scripts/go_no_go.sh
+cargo run -p bot-runner
 ```
 
-Then:
+## Verification
+
 ```bash
-sudo systemctl status dextrabot-frontend --no-pager -l
+cargo check
+cargo build --release -p bot-runner
+cd frontend && npm run lint && npm run build
 ```
 
-If port `3000` is currently used by dev mode, stop it first:
-```bash
-pkill -f '/home/heathcliff/polymarketbot/frontend/node_modules/.bin/next dev --webpack' || true
-```
+Operational checks:
 
-Important: for HTTP-only server IP deployments keep `AUTH_COOKIE_SECURE=false` in `/etc/dextrabot/dextrabot-frontend.env`.
-Login is mandatory and uses `AUTH_SECRET` as password.
-
-## Health Check
 ```bash
-export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
 ./scripts/check_health.sh
-```
-
-## Notes
-- Runtime supports `paper` and `live` mode.
-- `live` mode defaults to safe behavior. Real order placement requires `LIVE_TRADING_ENABLED=true`.
-- `exchange.toml` is required for Gamma/CLOB URLs and encrypted credentials (`api_address`, `api_key`, `api_secret`, `api_passphrase` as `enc:v1:`).
-- `telegram.toml` stores the global Telegram `bot_token`; `chatId` remains workflow node-specific.
-- Runtime'da `CONFIG_ENCRYPTION_KEY` zorunludur; frontend ile aynı key kullanılmalıdır.
-- Published trade flows are processed by a single `bot-runner` process. Do not run `cargo run -p bot-runner` in parallel with the systemd service.
-- Architecture and rollout docs are under `mimari/`.
-- Docker compose file is kept for optional dev-only usage.
-
-## Live Mode
-```bash
-export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
-export BOT_CONFIG_DIR=./config
-export CONFIG_ENCRYPTION_KEY='BASE64_32_BYTE_KEY'
-export LIVE_TRADING_ENABLED=true
-# Optional auto-claim
-export POLYMARKET_ADDRESS='0xYOUR_POLYMARKET_ADDRESS'
-export CLAIMER_PRIVATE_KEY='0xYOUR_PRIVATE_KEY'
-export CLAIM_RPC_URL='https://polygon-rpc.com'
-cargo run -p bot-runner
-```
-
-If `LIVE_TRADING_ENABLED` is not set to `true`, bot works in live-data/dry-order flow.
-
-## Go/No-Go Gate
-```bash
-export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
 ./scripts/go_no_go.sh
 ```
 
-## First Live Run (Strict)
-1. Gate geç:
-```bash
-export DATABASE_URL='postgres://dextrabot_app:strong-password@127.0.0.1:5432/dextrabot'
-./scripts/go_no_go.sh
-```
-2. Env hazırla:
-```bash
-export BOT_CONFIG_DIR=./config
-export CONFIG_ENCRYPTION_KEY='BASE64_32_BYTE_KEY'
-export LIVE_TRADING_ENABLED=true
-```
-Credentials değerlerini UI'da `Settings -> Exchange` bölümünden gir; dosyada otomatik şifreli saklanır.
-Telegram action node için global bot tokeni UI'da `Settings -> Telegram` bölümünden gir; opsiyonel global `chat_id` de aynı ekrandan tanımlanabilir.
-Node icinde `chatId` varsa runtime onu kullanir; node bos ise global `chat_id` fallback olur.
-Telegram token/chat ayarlari settings autosave tamamlandıktan sonra bir sonraki Telegram action çalışmasında restart olmadan kullanılır.
-UI save akisi `dextrabot` kullanicisinin `BOT_CONFIG_DIR` altina yazabilmesine baglidir; `scripts/setup_frontend_service.sh` ve `scripts/setup_server.sh` bu ACL'i otomatik ayarlar.
-3. Çalıştır:
-```bash
-cargo run -p bot-runner
-```
+## Safety Notice
+
+This project automates prediction-market trading workflows. It is provided for engineering and research use. Live trading can lose funds, and configuration mistakes can create unintended orders. Start in paper mode, review every credential and limit, and use the go/no-go gate before enabling live execution.

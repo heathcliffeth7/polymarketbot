@@ -1,4 +1,6 @@
 # Secrets & credentials
+config/*.toml
+!config/*.toml.example
 config/exchange.toml
 config/claim.toml
 frontend/.env.local
@@ -24,10 +26,18 @@ dev.pid
 *.log
 frontend/dev.log
 
-# Claude Code local files
+# Local automation and assistant files
+AGENTS.md
+**/AGENTS.md
+AGENTS.override.md
+**/AGENTS.override.md
+CLAUDE.md
 CLAUDE.local.md
 .claude/settings.local.json
 .claude/
+.codex
+.codex/
+.deepsec/
 .planning/
 
 # IDE & OS

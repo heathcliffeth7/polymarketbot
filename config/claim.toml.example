@@ -1,13 +1,18 @@
 enabled = true
 execution_mode = "direct" # direct, builder_relayer, or relayer_api_key
 
-rpc_url = "https://polygon-rpc.com"
+relayer_api_key = ""
+relayer_api_key_env = "RELAYER_API_KEY"
+relayer_api_key_address = ""
+relayer_api_key_address_env = "RELAYER_API_KEY_ADDRESS"
+
+rpc_url = ""
 rpc_url_env = "CLAIM_RPC_URL"
 data_api_base_url = "https://data-api.polymarket.com"
 
-user_address = "0xYOUR_USER_ADDRESS"
+user_address = ""
 user_address_env = "POLYMARKET_ADDRESS"
-private_key = "0xYOUR_PRIVATE_KEY_HERE"
+private_key = ""
 private_key_env = "CLAIMER_PRIVATE_KEY"
 
 chain_id = 137

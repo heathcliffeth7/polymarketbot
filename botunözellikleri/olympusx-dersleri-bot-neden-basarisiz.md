@@ -2,7 +2,7 @@
 
 Güncelleme tarihi: 2026-04-27
 
-Bu dosya `/home/heathcliff/olympusx_analysis` altındaki JetFadil/OlympusX reverse-engineering çıktılarından çıkarılan dersleri, bu botun kendi işlem kanıtlarıyla yan yana koyar. Amaç trade talimatı vermek değil; botun neden negatif sonuç ürettiğini net teşhis etmektir.
+Bu dosya harici OlympusX/JetFadil analizlerinden çıkarılan dersleri, bu botun kendi işlem kanıtlarıyla yan yana koyar. Amaç trade talimatı vermek değil; botun neden negatif sonuç ürettiğini net teşhis etmektir.
 
 ## Kısa Cevap
 

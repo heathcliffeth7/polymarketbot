@@ -17,6 +17,14 @@ step() { echo "[STEP] $*"; }
 ok() { echo "[OK] $*"; }
 fail() { echo "[FAIL] $*"; exit 1; }
 
+install_unit_file() {
+  local tmp_file
+  tmp_file="$(mktemp)"
+  sed "s|__DEXTRABOT_ROOT__|$ROOT_DIR|g" "$UNIT_SRC" >"$tmp_file"
+  sudo cp "$tmp_file" "$UNIT_DST"
+  rm -f "$tmp_file"
+}
+
 sanitize_service_name() {
   local value="$1"
   if [[ "$value" =~ ^[a-zA-Z0-9_.@-]+$ ]]; then
@@ -130,6 +138,10 @@ step "Install frontend env file"
 sudo mkdir -p "$ENV_DIR"
 if [[ ! -f "$ENV_FILE" ]]; then
   sudo cp "$ENV_EXAMPLE" "$ENV_FILE"
+  sudo sed -i "s|^BOT_CONFIG_DIR=.*|BOT_CONFIG_DIR=${ROOT_DIR}/config|" "$ENV_FILE"
+fi
+if sudo grep -q "^BOT_CONFIG_DIR=__DEXTRABOT_ROOT__/config$" "$ENV_FILE"; then
+  sudo sed -i "s|^BOT_CONFIG_DIR=.*|BOT_CONFIG_DIR=${ROOT_DIR}/config|" "$ENV_FILE"
 fi
 
 if [[ -n "${DATABASE_URL:-}" ]]; then
@@ -206,7 +218,7 @@ if pgrep -f "$FRONTEND_DIR/node_modules/.bin/next dev --webpack" >/dev/null 2>&1
 fi
 
 step "Install and start frontend systemd service"
-sudo cp "$UNIT_SRC" "$UNIT_DST"
+install_unit_file
 sudo systemctl daemon-reload
 sudo systemctl enable --now dextrabot-frontend
 ok "dextrabot-frontend enabled and started"

@@ -26,7 +26,7 @@ import {
 
 export { isValidTelegramChatTarget } from '@/lib/config-shapes';
 
-const CONFIG_DIR = process.env.BOT_CONFIG_DIR || '/home/heathcliff/polymarketbot/config';
+const CONFIG_DIR = process.env.BOT_CONFIG_DIR || path.resolve(process.cwd(), '..', 'config');
 const MASKED_SECRET = '********';
 
 const EXCHANGE_SENSITIVE_FIELDS = [

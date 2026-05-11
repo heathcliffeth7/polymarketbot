@@ -12,6 +12,25 @@ step() { echo "[STEP] $*"; }
 ok() { echo "[OK] $*"; }
 fail() { echo "[FAIL] $*"; exit 1; }
 
+ensure_local_config_files() {
+  local name
+  for name in bot strategy risk execution exchange claim telegram; do
+    local file="$ROOT_DIR/config/${name}.toml"
+    local example="$ROOT_DIR/config/${name}.toml.example"
+    if [[ ! -f "$file" && -f "$example" ]]; then
+      cp "$example" "$file"
+    fi
+  done
+}
+
+install_unit_file() {
+  local tmp_file
+  tmp_file="$(mktemp)"
+  sed "s|__DEXTRABOT_ROOT__|$ROOT_DIR|g" "$UNIT_SRC" >"$tmp_file"
+  sudo cp "$tmp_file" "$UNIT_DST"
+  rm -f "$tmp_file"
+}
+
 command -v sudo >/dev/null 2>&1 || fail "sudo is required"
 command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
 command -v cargo >/dev/null 2>&1 || fail "cargo is required"
@@ -23,6 +42,10 @@ command -v setfacl >/dev/null 2>&1 || fail "setfacl is required"
 if [[ -z "${DATABASE_URL:-}" ]]; then
   export DATABASE_URL="postgres://dextrabot_app:${DB_APP_PASSWORD}@127.0.0.1:5432/dextrabot"
 fi
+
+step "Ensure local config files"
+ensure_local_config_files
+ok "Local config files ready"
 
 step "Install and start PostgreSQL + Redis"
 "$ROOT_DIR/scripts/bootstrap_server_services.sh"
@@ -62,6 +85,9 @@ if [[ ! -f "$ENV_FILE" ]]; then
   sudo sed -i "s|^DATABASE_URL=.*|DATABASE_URL=${DATABASE_URL}|" "$ENV_FILE"
   sudo sed -i "s|^BOT_CONFIG_DIR=.*|BOT_CONFIG_DIR=${ROOT_DIR}/config|" "$ENV_FILE"
 fi
+if sudo grep -q "^BOT_CONFIG_DIR=__DEXTRABOT_ROOT__/config$" "$ENV_FILE"; then
+  sudo sed -i "s|^BOT_CONFIG_DIR=.*|BOT_CONFIG_DIR=${ROOT_DIR}/config|" "$ENV_FILE"
+fi
 sudo chown root:dextrabot "$ENV_FILE"
 sudo chmod 0640 "$ENV_FILE"
 ok "Environment file installed at $ENV_FILE"
@@ -74,7 +100,7 @@ step "Ensure dextrabot can write config directory"
 ok "Config directory permissions ready at $configured_bot_config_dir"
 
 step "Install systemd service"
-sudo cp "$UNIT_SRC" "$UNIT_DST"
+install_unit_file
 sudo systemctl daemon-reload
 sudo systemctl enable dextrabot
 sudo systemctl restart dextrabot

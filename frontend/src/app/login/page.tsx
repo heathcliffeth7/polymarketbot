@@ -146,7 +146,7 @@ export default function LoginPage() {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="border-zinc-700 bg-zinc-800 text-zinc-200"
-                placeholder="orn: heathcliffeth"
+                placeholder="e.g. admin"
                 autoFocus
                 autoComplete={mode === 'login' ? 'username' : 'new-username'}
               />

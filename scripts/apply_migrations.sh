@@ -53,7 +53,7 @@ for f in "$ROOT_DIR"/migrations/*.sql; do
   fi
 
   echo "Applying $filename"
-  psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+  DEXTRABOT_REPO_DIR="$ROOT_DIR" psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
   psql -X "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
     "INSERT INTO schema_migrations (filename) VALUES ('$filename') ON CONFLICT DO NOTHING" >/dev/null
   applied=$((applied + 1))
