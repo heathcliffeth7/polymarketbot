@@ -1,0 +1,5 @@
+order_type = "limit"
+time_in_force = "GTC"
+retry_count = 3
+retry_backoff_ms = 400
+reconcile_interval_ms = 1500

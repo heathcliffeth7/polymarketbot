@@ -1,0 +1,33 @@
+enabled = true
+execution_mode = "direct" # direct, builder_relayer, or relayer_api_key
+
+relayer_api_key = ""
+relayer_api_key_env = "RELAYER_API_KEY"
+relayer_api_key_address = ""
+relayer_api_key_address_env = "RELAYER_API_KEY_ADDRESS"
+
+rpc_url = ""
+rpc_url_env = "CLAIM_RPC_URL"
+data_api_base_url = "https://data-api.polymarket.com"
+
+user_address = ""
+user_address_env = "POLYMARKET_ADDRESS"
+private_key = ""
+private_key_env = "CLAIMER_PRIVATE_KEY"
+
+chain_id = 137
+ctf_contract_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+collateral_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+auto_activate_funds = true
+activate_min_usdc = 0.01
+usdce_token_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+pusd_token_address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+collateral_onramp_address = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
+
+discovery_interval_sec = 30
+positions_page_size = 200
+positions_max_pages = 5
+process_batch_size = 10
+max_attempts = 5
+retry_backoff_ms = 10000
+min_claim_usdc = 0.0

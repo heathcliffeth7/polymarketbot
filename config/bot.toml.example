@@ -1,0 +1,7 @@
+mode = "paper"
+market_scope = "btc_5m_updown"
+market_scopes = []
+loop_interval_ms = 250
+market_discovery_retry_interval_ms = 5000
+market_discovery_timeout_sec = 0
+market_selection = "latest_by_slug"

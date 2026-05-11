@@ -1,0 +1,30 @@
+[Unit]
+Description=Dextrabot Frontend Dashboard
+After=network-online.target dextrabot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dextrabot
+Group=dextrabot
+WorkingDirectory=__DEXTRABOT_ROOT__/frontend
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/dextrabot/dextrabot-frontend.env
+ExecStart=/bin/bash -lc '${FRONTEND_NODE_BIN:-/usr/bin/node} ./node_modules/next/dist/bin/next start --hostname 0.0.0.0 --port 3000'
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+# Hardening
+# Frontend bot control uses `sudo -n systemctl`; keep privilege escalation available.
+NoNewPrivileges=false
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

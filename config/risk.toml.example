@@ -1,0 +1,8 @@
+max_daily_loss_usdc = 10.0
+max_consecutive_losses = 2
+max_notional_per_market_usdc = 5.0
+max_open_orders = 1
+max_stale_data_ms = 2000
+kill_switch_mode = "disabled"
+manual_kill_switch_active = false
+min_balance_usdc = 5.0

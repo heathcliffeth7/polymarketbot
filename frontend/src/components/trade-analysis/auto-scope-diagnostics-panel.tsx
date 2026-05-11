@@ -1,0 +1,573 @@
+'use client';
+
+import { Download, X } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { useTradeFlowAutoScopeTradeDiagnostic } from '@/hooks/use-trade-flow';
+import { cn } from '@/lib/utils';
+import type { AutoScopeTradeAnalysisRow } from '@/lib/types';
+import {
+  formatDuration,
+  formatDateTime,
+  formatPercent,
+  formatPnl,
+  formatPrice,
+  formatQty,
+  formatScore,
+  formatUsdc,
+  pnlClassName,
+} from './auto-scope-diagnostics-utils';
+
+interface AutoScopeDiagnosticsPanelProps {
+  rootOrderId: number | null;
+  onClose: () => void;
+  className?: string;
+  selectedRow?: AutoScopeTradeAnalysisRow;
+}
+
+function DetailMetric({
+  label,
+  value,
+  className = 'text-zinc-100',
+}: {
+  label: string;
+  value: string;
+  className?: string;
+}) {
+  return (
+    <div className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2">
+      <p className="text-[11px] uppercase tracking-normal text-zinc-500">{label}</p>
+      <p className={`mt-1 font-mono text-xs ${className}`}>{value}</p>
+    </div>
+  );
+}
+
+function compactMetricValue(value: unknown): string {
+  if (value == null) return '-';
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(4);
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return String(value);
+}
+
+function formatNullablePnl(value: number | null | undefined): string {
+  return value == null ? '-' : formatPnl(value);
+}
+
+function nullablePnlClassName(value: number | null | undefined): string {
+  return value == null ? 'text-zinc-300' : pnlClassName(value);
+}
+
+function formatFlagList(flags: string[] | undefined): string {
+  return flags && flags.length > 0 ? flags.join(', ') : 'none';
+}
+
+function formatPositionLeg(leg: {
+  upQty: number;
+  downQty: number;
+  costUsdc: number;
+  floorQty: number;
+  floorPnlUsdc: number;
+}): string {
+  return `U ${formatQty(leg.upQty)} / D ${formatQty(leg.downQty)} / Cost ${formatUsdc(leg.costUsdc)} / Floor ${formatQty(leg.floorQty)} / ${formatPnl(leg.floorPnlUsdc)}`;
+}
+
+function forensicValue(payload: Record<string, unknown> | null | undefined, path: string[]): unknown {
+  let current: unknown = payload;
+  for (const key of path) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) return null;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current ?? null;
+}
+
+function jsonPreview(value: unknown): string {
+  if (value == null) return '-';
+  return JSON.stringify(value, null, 2);
+}
+
+export function AutoScopeDiagnosticsPanel({
+  rootOrderId,
+  onClose,
+  className,
+  selectedRow,
+}: AutoScopeDiagnosticsPanelProps) {
+  const { data, error, isLoading } = useTradeFlowAutoScopeTradeDiagnostic(rootOrderId);
+  if (!rootOrderId) return null;
+
+  const diagnostic = data?.diagnostic ?? null;
+  const rows = data?.rows ?? [];
+  const blockedSignals = data?.blockedSignals ?? [];
+  const signalRunId = diagnostic?.runId ?? rows[0]?.runId ?? null;
+  const hasNoOrderSignals = blockedSignals.some((signal) => signal.noOrderTelemetry);
+  const activityCashPnlUsdc = selectedRow?.cashFillPnlUsdc ?? diagnostic?.cashFillPnlUsdc ?? null;
+
+  function exportNoOrderCsv() {
+    if (!signalRunId) return;
+    window.location.href = `/api/trade-flow/analytics/auto-scope/no-order/export?runId=${signalRunId}`;
+  }
+
+  return (
+    <div className={cn("rounded-md border border-zinc-800 bg-zinc-950 p-4", className)}>
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-medium text-zinc-100">
+            Trade #{rootOrderId} detayli teshis
+          </p>
+          <p className="mt-1 text-xs text-zinc-500">
+            {diagnostic?.marketSlug ?? rows[0]?.marketSlug ?? '-'}
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 text-zinc-400 hover:text-zinc-100"
+          onClick={onClose}
+        >
+          <X className="size-4" />
+        </Button>
+      </div>
+
+      {error && (
+        <div className="rounded-md border border-red-900 bg-red-950/30 p-3 text-sm text-red-300">
+          Teshis detayi yuklenemedi.
+        </div>
+      )}
+
+      {isLoading && !diagnostic ? (
+        <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-500">
+          Teshis yukleniyor...
+        </div>
+      ) : diagnostic ? (
+        <div className="space-y-4">
+          <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+            <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+              <div>
+                <p className="text-xs font-medium text-zinc-100">
+                  {diagnostic.diagnosisLabel}
+                </p>
+                <p className="mt-1 text-xs text-zinc-500">{diagnostic.diagnosisDetail}</p>
+              </div>
+              <div className={`font-mono text-sm ${pnlClassName(diagnostic.totalPnlUsdc)}`}>
+                {formatPnl(diagnostic.totalPnlUsdc)}
+              </div>
+            </div>
+            {diagnostic.secondaryDiagnosisCode && (
+              <p className="mt-2 text-[11px] text-zinc-500">
+                Ikincil sinyal: {diagnostic.secondaryDiagnosisCode}
+              </p>
+            )}
+          </div>
+
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+            <DetailMetric
+              label="Activity Cash PnL"
+              value={formatNullablePnl(activityCashPnlUsdc)}
+              className={nullablePnlClassName(activityCashPnlUsdc)}
+            />
+            <DetailMetric label="Maliyet" value={formatUsdc(diagnostic.costBasisUsdc)} />
+            <DetailMetric label="Net Deger" value={formatUsdc(diagnostic.netValueUsdc)} />
+            <DetailMetric label="Fee Drag" value={formatUsdc(diagnostic.feeDragUsdc)} />
+            <DetailMetric label="PnL %" value={formatPercent(diagnostic.pnlPct)} />
+          </div>
+
+          {diagnostic.signalQuality && (
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <DetailMetric
+                label="Required q"
+                value={compactMetricValue(diagnostic.signalQuality.requiredQ)}
+              />
+              <DetailMetric
+                label="q Margin"
+                value={compactMetricValue(diagnostic.signalQuality.qMargin)}
+                className={
+                  (diagnostic.signalQuality.qMargin ?? 0) >= 0
+                    ? 'text-emerald-300'
+                    : 'text-red-300'
+                }
+              />
+              <DetailMetric label="q" value={compactMetricValue(diagnostic.signalQuality.q)} />
+              <DetailMetric
+                label="Karar"
+                value={diagnostic.signalQuality.decisionReason ?? '-'}
+              />
+              <DetailMetric
+                label="Cost"
+                value={compactMetricValue(diagnostic.signalQuality.cost)}
+              />
+              <DetailMetric
+                label="Threshold"
+                value={compactMetricValue(diagnostic.signalQuality.dynamicThreshold)}
+              />
+              <DetailMetric
+                label="Edge"
+                value={compactMetricValue(
+                  diagnostic.signalQuality.edgeAdjusted ?? diagnostic.signalQuality.edge
+                )}
+              />
+              <DetailMetric
+                label="Risk Flags"
+                value={formatFlagList(diagnostic.riskFlags?.reasons)}
+              />
+            </div>
+          )}
+
+          {diagnostic.scenarioPnl && (
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <DetailMetric label="If Up" value={formatNullablePnl(diagnostic.scenarioPnl.ifUpUsdc)} />
+              <DetailMetric label="If Down" value={formatNullablePnl(diagnostic.scenarioPnl.ifDownUsdc)} />
+              <DetailMetric label="EV" value={formatNullablePnl(diagnostic.scenarioPnl.evUsdc)} />
+              <DetailMetric label="Worst" value={formatNullablePnl(diagnostic.scenarioPnl.worstUsdc)} className="text-red-300" />
+              <DetailMetric label="Realized PnL" value={formatPnl(diagnostic.scenarioPnl.realizedPnlUsdc)} />
+              <DetailMetric label="Mark PnL" value={formatPnl(diagnostic.scenarioPnl.markPnlUsdc)} />
+              <DetailMetric label="Open Cost" value={formatUsdc(diagnostic.scenarioPnl.openCostUsdc)} />
+              <DetailMetric
+                label="q Up / Down"
+                value={`${compactMetricValue(diagnostic.scenarioPnl.qUp)} / ${compactMetricValue(diagnostic.scenarioPnl.qDown)}`}
+              />
+            </div>
+          )}
+
+          {diagnostic.positionSnapshot && (
+            <div className="grid gap-2 xl:grid-cols-2">
+              <DetailMetric
+                label="Position Before"
+                value={formatPositionLeg(diagnostic.positionSnapshot.before)}
+              />
+              <DetailMetric
+                label="Position After"
+                value={formatPositionLeg(diagnostic.positionSnapshot.after)}
+              />
+            </div>
+          )}
+
+          {diagnostic.tpStatus && (
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <DetailMetric label="TP Status" value={diagnostic.tpStatus.status} />
+              <DetailMetric label="TP Orders" value={String(diagnostic.tpStatus.orderCount)} />
+              <DetailMetric label="TP Filled Qty" value={formatQty(diagnostic.tpStatus.filledQty)} />
+              <DetailMetric label="TP Realized" value={formatPnl(diagnostic.tpStatus.realizedPnlUsdc)} />
+            </div>
+          )}
+
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <DetailMetric label="Entry Ref" value={formatPrice(diagnostic.entryReferencePrice)} />
+            <DetailMetric label="Entry Fill" value={formatPrice(diagnostic.entryFillPrice)} />
+            <DetailMetric label="Entry Slippage" value={formatUsdc(diagnostic.entrySlippageUsdc)} />
+            <DetailMetric label="Entry Score" value={formatScore(diagnostic.entryQualityScore)} />
+            <DetailMetric label="Exit Price" value={formatPrice(diagnostic.exitPrice)} />
+            <DetailMetric label="Best Hold" value={formatPrice(diagnostic.bestPriceDuringHold)} />
+            <DetailMetric label="Worst Hold" value={formatPrice(diagnostic.worstPriceDuringHold)} />
+            <DetailMetric label="Exit Score" value={formatScore(diagnostic.exitQualityScore)} />
+          </div>
+
+          {diagnostic.forensic?.entryDecision && (
+            <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+              <p className="mb-2 text-xs font-medium text-zinc-200">Entry Decision</p>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <DetailMetric
+                  label="Decision"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, ['decision'])
+                  )}
+                />
+                <DetailMetric
+                  label="PTB Trend"
+                  value={`${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, ['ptb', 'trend'])
+                  )} / slope ${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, ['ptb', 'slope_5s'])
+                  )}`}
+                />
+                <DetailMetric
+                  label="Volume"
+                  value={`${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, [
+                      'volume',
+                      'polymarket',
+                      'regime',
+                    ])
+                  )} ${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, [
+                      'volume',
+                      'polymarket',
+                      'ratio',
+                    ])
+                  )}x`}
+                />
+                <DetailMetric
+                  label="Shadow Guard"
+                  value={`${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, [
+                      'guard_breakdown',
+                      'shadow_volume_guard',
+                      'would_block',
+                    ])
+                  )} / ${compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, [
+                      'guard_breakdown',
+                      'shadow_volume_guard',
+                      'reason',
+                    ])
+                  )}`}
+                />
+                <DetailMetric
+                  label="Risk Tags"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.entryDecision, ['risk_tags'])
+                  )}
+                />
+                <DetailMetric
+                  label="Entry SL Plan"
+                  value={compactMetricValue(diagnostic.forensic.entryStopLossPlan)}
+                />
+              </div>
+            </div>
+          )}
+
+          {diagnostic.forensic?.nodeSnapshot && (
+            <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+              <p className="mb-2 text-xs font-medium text-zinc-200">Node Snapshot</p>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <DetailMetric
+                  label="Action Node"
+                  value={`${compactMetricValue(diagnostic.forensic.entryNodeKey)} / ${compactMetricValue(
+                    diagnostic.forensic.entryNodeType
+                  )}`}
+                />
+                <DetailMetric
+                  label="Config Hash"
+                  value={compactMetricValue(diagnostic.forensic.entryNodeConfigHash)}
+                />
+                <DetailMetric
+                  label="Upstream Count"
+                  value={compactMetricValue(
+                    Array.isArray(
+                      forensicValue(diagnostic.forensic.nodeSnapshot, ['upstream_nodes'])
+                    )
+                      ? (
+                          forensicValue(diagnostic.forensic.nodeSnapshot, [
+                            'upstream_nodes',
+                          ]) as unknown[]
+                        ).length
+                      : null
+                  )}
+                />
+                <DetailMetric
+                  label="Capture Source"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.nodeSnapshot, ['capture_source'])
+                  )}
+                />
+              </div>
+              <div className="mt-3 grid gap-3 xl:grid-cols-3">
+                <div>
+                  <p className="mb-1 text-[11px] uppercase tracking-normal text-zinc-500">
+                    Action Node JSON
+                  </p>
+                  <pre className="max-h-72 overflow-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 text-[11px] text-zinc-300">
+                    {jsonPreview(
+                      forensicValue(diagnostic.forensic.nodeSnapshot, ['action_node'])
+                    )}
+                  </pre>
+                </div>
+                <div>
+                  <p className="mb-1 text-[11px] uppercase tracking-normal text-zinc-500">
+                    Upstream Nodes JSON
+                  </p>
+                  <pre className="max-h-72 overflow-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 text-[11px] text-zinc-300">
+                    {jsonPreview(
+                      forensicValue(diagnostic.forensic.nodeSnapshot, ['upstream_nodes'])
+                    )}
+                  </pre>
+                </div>
+                <div>
+                  <p className="mb-1 text-[11px] uppercase tracking-normal text-zinc-500">
+                    Resolved Order Input
+                  </p>
+                  <pre className="max-h-72 overflow-auto rounded-md border border-zinc-800 bg-zinc-950 p-3 text-[11px] text-zinc-300">
+                    {jsonPreview(
+                      forensicValue(diagnostic.forensic.nodeSnapshot, [
+                        'resolved_order_input',
+                      ])
+                    )}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {diagnostic.forensic && diagnostic.forensic.orderLifecycle.length > 0 && (
+            <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+              <p className="mb-2 text-xs font-medium text-zinc-200">Order Lifecycle</p>
+              <div className="space-y-2">
+                {diagnostic.forensic.orderLifecycle.slice(-6).map((event) => (
+                  <div
+                    key={event.eventId}
+                    className="grid gap-2 rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs md:grid-cols-4"
+                  >
+                    <span className="text-zinc-300">{event.eventType}</span>
+                    <span className="font-mono text-zinc-400">{formatDateTime(event.eventTs)}</span>
+                    <span className="font-mono text-zinc-400">order {event.orderId ?? '-'}</span>
+                    <span className="font-mono text-zinc-400">
+                      {compactMetricValue(
+                        forensicValue(event.payload, ['submit_status']) ??
+                          forensicValue(event.payload, ['reason']) ??
+                          forensicValue(event.payload, ['avg_fill_price'])
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(diagnostic.forensic?.stopLossTrigger || diagnostic.forensic?.postSlRecovery) && (
+            <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+              <p className="mb-2 text-xs font-medium text-zinc-200">Stop Loss / Recovery</p>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <DetailMetric
+                  label="SL Gap"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.stopLossTrigger, ['sl', 'ptb_gap_sl'])
+                  )}
+                />
+                <DetailMetric
+                  label="SL Fill"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.stopLossTrigger, ['sl', 'sl_fill_price'])
+                  )}
+                />
+                <DetailMetric
+                  label="Post-SL Check"
+                  value={`${compactMetricValue(
+                    forensicValue(diagnostic.forensic.postSlRecovery, ['check_after_s'])
+                  )}s / catch-up ${compactMetricValue(
+                    forensicValue(diagnostic.forensic.postSlRecovery, ['catch_up'])
+                  )}`}
+                />
+                <DetailMetric
+                  label="Classification"
+                  value={compactMetricValue(
+                    forensicValue(diagnostic.forensic.slClassification, ['sl_classification'])
+                  )}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+            <DetailMetric label="Open > Trigger" value={formatDuration(diagnostic.openToTriggerMs)} />
+            <DetailMetric label="Trigger > Submit" value={formatDuration(diagnostic.triggerToSubmitMs)} />
+            <DetailMetric label="Submit > Fill" value={formatDuration(diagnostic.submitToFillMs)} />
+            <DetailMetric label="Trigger > Fill" value={formatDuration(diagnostic.triggerToBuyFillMs)} />
+            <DetailMetric label="Hold" value={formatDuration(diagnostic.holdMs)} />
+          </div>
+
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <DetailMetric label="Max Favorable" value={formatUsdc(diagnostic.maxFavorableUsdc)} className="text-emerald-300" />
+            <DetailMetric label="Max Adverse" value={formatUsdc(diagnostic.maxAdverseUsdc)} className="text-red-300" />
+            <DetailMetric label="Gave Back" value={formatUsdc(diagnostic.gaveBackUsdc)} className="text-amber-300" />
+            <DetailMetric label="Snapshot Age" value={formatDuration(diagnostic.snapshotAgeMs)} />
+          </div>
+
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <DetailMetric label="Guard Eval" value={formatDuration(diagnostic.guardEvalMs)} />
+            <DetailMetric label="Runtime Price" value={formatDuration(diagnostic.runtimePriceFetchMs)} />
+            <DetailMetric label="Place HTTP" value={formatDuration(diagnostic.placeHttpMs)} />
+            <DetailMetric
+              label="Path Samples"
+              value={compactMetricValue(diagnostic.compactMetrics.path_sample_count)}
+            />
+          </div>
+
+          <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+            <p className="mb-2 text-xs font-medium text-zinc-200">Satirlar</p>
+            <div className="space-y-2">
+              {rows.map((row) => (
+                <div
+                  key={row.rowId}
+                  className="grid gap-2 rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs md:grid-cols-5"
+                >
+                  <span className="text-zinc-300">{row.rowType}</span>
+                  <span className="font-mono text-zinc-400">{formatQty(row.rowQty)}</span>
+                  <span className="font-mono text-zinc-400">{formatUsdc(row.costBasisUsdc)}</span>
+                  <span className="font-mono text-zinc-400">{formatUsdc(row.netValueUsdc)}</span>
+                  <span className={`font-mono ${pnlClassName(row.rowPnlUsdc)}`}>
+                    {formatPnl(row.rowPnlUsdc)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {diagnostic.dataQualityFlags.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {diagnostic.dataQualityFlags.map((flag) => (
+                <span
+                  key={flag}
+                  className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-400"
+                >
+                  {flag}
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-xs font-medium text-zinc-200">Blocked Signal Log</p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1 border-zinc-700 px-2 text-[11px]"
+                onClick={exportNoOrderCsv}
+                disabled={!signalRunId || !hasNoOrderSignals}
+              >
+                <Download className="size-3" />
+                No-Order CSV
+              </Button>
+            </div>
+            {blockedSignals.length === 0 ? (
+              <p className="text-xs text-zinc-500">Bu run icin blocked sinyal bulunamadi.</p>
+            ) : (
+              <div className="space-y-2">
+                {blockedSignals.map((signal, index) => (
+                  <div
+                    key={`${signal.eventType}-${signal.createdAt}-${index}`}
+                    className="grid gap-2 rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs md:grid-cols-6"
+                  >
+                    <span className="text-zinc-400">{formatDateTime(signal.createdAt)}</span>
+                    <span className="text-zinc-300">{signal.eventType}</span>
+                    <span className="text-zinc-400">{signal.nodeKey ?? '-'}</span>
+                    <span className="text-zinc-400">{signal.outcomeLabel ?? '-'}</span>
+                    <span className="text-amber-300">{signal.reasonCode ?? '-'}</span>
+                    <span className="font-mono text-zinc-400">
+                      q_margin {compactMetricValue(signal.signalQuality?.qMargin)} / flags{' '}
+                      {formatFlagList(signal.riskFlags.reasons)}
+                    </span>
+                    {signal.noOrderTelemetry && (
+                      <span className="font-mono text-zinc-400 md:col-span-6">
+                        status {signal.noOrderTelemetry.finalActionStatus ?? '-'} / floor{' '}
+                        {compactMetricValue(signal.noOrderTelemetry.bestAskAtWindowEnd)} {'<'}{' '}
+                        {compactMetricValue(signal.noOrderTelemetry.executionFloor)} / dist{' '}
+                        {compactMetricValue(signal.noOrderTelemetry.floorDistance)} / liquidity{' '}
+                        {signal.noOrderTelemetry.liquidityRegime ?? '-'} / ratio{' '}
+                        {compactMetricValue(signal.noOrderTelemetry.hourlyVolumeRatio)} / book{' '}
+                        {signal.noOrderTelemetry.bookSide ?? '-'}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-sm text-zinc-500">
+          Teshis kaydi bulunamadi.
+        </div>
+      )}
+    </div>
+  );
+}

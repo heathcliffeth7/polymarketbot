@@ -1,0 +1,49 @@
+# Secrets & credentials
+config/*.toml
+!config/*.toml.example
+config/exchange.toml
+config/claim.toml
+frontend/.env.local
+.env
+.env.local
+/deploy/systemd/dextrabot.env
+
+# Build artifacts
+/target/
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+frontend/out/
+
+# Runtime
+*.pid
+dev.pid
+
+# Backups
+*.bak.*
+
+# Logs
+*.log
+frontend/dev.log
+
+# Local automation and assistant files
+AGENTS.md
+**/AGENTS.md
+AGENTS.override.md
+**/AGENTS.override.md
+CLAUDE.md
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/
+.codex
+.codex/
+.deepsec/
+.planning/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+frontend/dev.log

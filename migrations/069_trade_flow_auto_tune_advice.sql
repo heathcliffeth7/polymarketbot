@@ -1,0 +1,106 @@
+CREATE TABLE IF NOT EXISTS trade_flow_auto_tune_market_summaries (
+  id BIGSERIAL PRIMARY KEY,
+  definition_id BIGINT NOT NULL REFERENCES trade_flow_definitions(id) ON DELETE CASCADE,
+  version_id BIGINT NOT NULL REFERENCES trade_flow_versions(id) ON DELETE CASCADE,
+  flow_run_id BIGINT REFERENCES trade_flow_runs(id) ON DELETE SET NULL,
+  node_key TEXT NOT NULL,
+  market_scope TEXT NOT NULL,
+  market_slug TEXT NOT NULL,
+  window_start TIMESTAMPTZ,
+  window_end TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  trigger_passed BOOLEAN NOT NULL DEFAULT FALSE,
+  action_started BOOLEAN NOT NULL DEFAULT FALSE,
+  builder_order_created BOOLEAN NOT NULL DEFAULT FALSE,
+  order_submitted BOOLEAN NOT NULL DEFAULT FALSE,
+  order_filled BOOLEAN NOT NULL DEFAULT FALSE,
+  first_terminal_guard_scope TEXT,
+  first_terminal_guard_code TEXT,
+  first_terminal_guard_node TEXT,
+  first_terminal_guard_at TIMESTAMPTZ,
+  last_guard_scope TEXT,
+  last_guard_code TEXT,
+  max_price_block BOOLEAN NOT NULL DEFAULT FALSE,
+  execution_floor_block BOOLEAN NOT NULL DEFAULT FALSE,
+  ptb_block BOOLEAN NOT NULL DEFAULT FALSE,
+  pair_total_block BOOLEAN NOT NULL DEFAULT FALSE,
+  counter_max_block BOOLEAN NOT NULL DEFAULT FALSE,
+  counter_floor_block BOOLEAN NOT NULL DEFAULT FALSE,
+  risk_block BOOLEAN NOT NULL DEFAULT FALSE,
+  data_problem_block BOOLEAN NOT NULL DEFAULT FALSE,
+  best_ask_at_block DOUBLE PRECISION,
+  max_price_effective DOUBLE PRECISION,
+  execution_floor_effective DOUBLE PRECISION,
+  pair_total_effective DOUBLE PRECISION,
+  counter_price_effective DOUBLE PRECISION,
+  iv_edge_margin DOUBLE PRECISION,
+  iv_dynamic_threshold DOUBLE PRECISION,
+  gap_strength DOUBLE PRECISION,
+  required_gap_strength DOUBLE PRECISION,
+  binance_stale_ms BIGINT,
+  binance_same_direction BOOLEAN,
+  depth_ok BOOLEAN,
+  floor_recovered_once BOOLEAN NOT NULL DEFAULT FALSE,
+  max_best_ask_after_block DOUBLE PRECISION,
+  tradable_seconds_count BIGINT,
+  depth_ok_seconds_count BIGINT,
+  pair_session_id BIGINT REFERENCES trade_builder_pair_sessions(id) ON DELETE SET NULL,
+  pair_locked BOOLEAN NOT NULL DEFAULT FALSE,
+  locked_qty DOUBLE PRECISION,
+  unpaired_qty DOUBLE PRECISION,
+  locked_profit_per_share DOUBLE PRECISION,
+  orphan_detected BOOLEAN NOT NULL DEFAULT FALSE,
+  protective_unwind_triggered BOOLEAN NOT NULL DEFAULT FALSE,
+  sl_hit BOOLEAN NOT NULL DEFAULT FALSE,
+  tp_hit BOOLEAN NOT NULL DEFAULT FALSE,
+  realized_pnl_usdc DOUBLE PRECISION,
+  metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_trade_flow_auto_tune_market_summary
+    UNIQUE (definition_id, version_id, node_key, market_slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trade_flow_auto_tune_summaries_window
+  ON trade_flow_auto_tune_market_summaries
+  (definition_id, version_id, node_key, market_scope, completed_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_trade_flow_auto_tune_summaries_guard
+  ON trade_flow_auto_tune_market_summaries
+  (first_terminal_guard_code, completed_at DESC);
+
+CREATE TABLE IF NOT EXISTS trade_flow_auto_tune_advice (
+  id BIGSERIAL PRIMARY KEY,
+  definition_id BIGINT NOT NULL REFERENCES trade_flow_definitions(id) ON DELETE CASCADE,
+  version_id BIGINT NOT NULL REFERENCES trade_flow_versions(id) ON DELETE CASCADE,
+  node_key TEXT NOT NULL,
+  market_scope TEXT NOT NULL,
+  sample_start_market_slug TEXT,
+  sample_end_market_slug TEXT,
+  markets_seen BIGINT NOT NULL DEFAULT 0,
+  eligible_markets BIGINT NOT NULL DEFAULT 0,
+  order_created_count BIGINT NOT NULL DEFAULT 0,
+  filled_count BIGINT NOT NULL DEFAULT 0,
+  pair_locked_count BIGINT NOT NULL DEFAULT 0,
+  orphan_count BIGINT NOT NULL DEFAULT 0,
+  sl_count BIGINT NOT NULL DEFAULT 0,
+  advice_kind TEXT NOT NULL,
+  advice_action TEXT NOT NULL,
+  target_key_path TEXT,
+  current_value_json JSONB,
+  suggested_value_json JSONB,
+  clamped BOOLEAN NOT NULL DEFAULT FALSE,
+  hard_cap_min_json JSONB,
+  hard_cap_max_json JSONB,
+  reason_code TEXT NOT NULL,
+  reason_text TEXT NOT NULL,
+  dominant_blocker TEXT,
+  metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  dedupe_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_trade_flow_auto_tune_advice_dedupe UNIQUE (dedupe_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trade_flow_auto_tune_advice_window
+  ON trade_flow_auto_tune_advice
+  (definition_id, version_id, node_key, market_scope, created_at DESC);
