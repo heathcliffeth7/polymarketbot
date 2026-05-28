@@ -30,7 +30,10 @@ export default function LoginPage() {
     let active = true;
     void (async () => {
       try {
-        const res = await fetch('/api/auth', { cache: 'no-store' });
+        const res = await fetch('/api/auth', {
+          cache: 'no-store',
+          credentials: 'same-origin',
+        });
         const payload = (await res.json()) as AuthStateResponse;
         if (!active) return;
         setState(payload);
@@ -68,12 +71,13 @@ export default function LoginPage() {
       const endpoint = mode === 'login' ? '/api/auth' : '/api/auth/register';
       const res = await fetch(endpoint, {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       });
 
       if (res.ok) {
-        router.push('/');
+        window.location.replace('/');
         return;
       }
 
