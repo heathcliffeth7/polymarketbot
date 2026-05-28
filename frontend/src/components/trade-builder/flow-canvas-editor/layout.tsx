@@ -248,8 +248,8 @@ export function FlowCanvasEditorLayout({
         </div>
       )}
 
-      <div className="mt-4 grid gap-3 xl:grid-cols-[220px_minmax(0,1fr)_380px]">
-        <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+      <div className="mt-4 grid min-w-0 gap-3 xl:grid-cols-[220px_minmax(0,1fr)_380px]">
+        <div className="min-w-0 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
           {leftPanelTopSlot}
           <p className="text-xs font-medium text-slate-700">Node Paleti</p>
           <Input value={nodePaletteSearch} onChange={(e) => setNodePaletteSearch(e.target.value)} placeholder="Node ara..." className="h-8 border-slate-300 bg-white text-xs text-slate-900" />
@@ -306,7 +306,7 @@ export function FlowCanvasEditorLayout({
 
         <div
           ref={canvasWrapperRef}
-          className="flow-canvas h-[calc(100vh-12rem)] min-h-[500px] rounded-xl border border-slate-200 bg-white"
+          className="flow-canvas h-[60svh] min-h-[420px] min-w-0 rounded-xl border border-slate-200 bg-white xl:h-[calc(100vh-12rem)] xl:min-h-[500px]"
           onMouseDown={(event) => onCanvasPointerMove(event.clientX, event.clientY)}
           onMouseMove={(event) => onCanvasPointerMove(event.clientX, event.clientY)}
         >
@@ -338,7 +338,7 @@ export function FlowCanvasEditorLayout({
           </ReactFlow>
         </div>
 
-        <div className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white/95 p-3 h-[calc(100vh-12rem)]">
+        <div className="flex min-h-[320px] min-w-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white/95 p-3 xl:h-[calc(100vh-12rem)]">
           {selectedNode && nodeForm ? (
             <NodeInspectorPanel
               form={nodeForm}

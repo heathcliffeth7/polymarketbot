@@ -31,22 +31,22 @@ export function FlowEnginePanel({
         : [];
 
   return (
-    <Card className="border-zinc-800 bg-zinc-900">
-      <CardHeader>
-        <CardTitle className="text-sm font-medium text-zinc-300">
+    <Card className="min-w-0 overflow-hidden border-zinc-800 bg-zinc-900">
+      <CardHeader className="px-4 md:px-6">
+        <CardTitle className="text-sm font-medium leading-5 text-zinc-300">
           Flow Engine Otomasyon (If / Else + Birlesik Satis/Alis)
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-5">
+      <CardContent className="min-w-0 space-y-5 px-4 md:px-6">
         <p className="text-xs text-zinc-500">
           Bu bolum n8n benzeri canvas akisiyla calisir: node surukleyin, edge baglayin, if/else
           mantigini tek akis icinde kurun.
         </p>
 
-        <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
+        <div className="min-w-0 rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
           <p className="mb-3 text-xs text-zinc-400">Flow Secimi ve Meta</p>
-          <div className="grid gap-3 md:grid-cols-3">
-            <div className="space-y-2">
+          <div className="grid gap-3 lg:grid-cols-3">
+            <div className="min-w-0 space-y-2">
               <p className="text-xs text-zinc-500">Flow Tanimi</p>
               <select
                 value={state.selectedDefinitionId ?? ''}
@@ -82,7 +82,7 @@ export function FlowEnginePanel({
                 </p>
               )}
             </div>
-            <div className="space-y-2">
+            <div className="min-w-0 space-y-2">
               <p className="text-xs text-zinc-500">Flow Adi (Draft)</p>
               <Input
                 value={state.draftName}
@@ -91,7 +91,7 @@ export function FlowEnginePanel({
                 className="border-zinc-700 bg-zinc-800 text-zinc-200"
               />
             </div>
-            <div className="space-y-2">
+            <div className="min-w-0 space-y-2">
               <p className="text-xs text-zinc-500">Aciklama (Draft)</p>
               <Input
                 value={state.draftDescription}

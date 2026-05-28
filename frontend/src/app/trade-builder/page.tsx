@@ -45,14 +45,14 @@ export default function TradeBuilderPage() {
 
   return (
     <PageShell title="Trade Builder">
-      <div className="space-y-6">
-        <Card className="border-zinc-800 bg-zinc-900">
-          <CardHeader>
+      <div className="min-w-0 space-y-4 md:space-y-6">
+        <Card className="overflow-hidden border-zinc-800 bg-zinc-900">
+          <CardHeader className="px-4 md:px-6">
             <CardTitle className="text-sm font-medium text-zinc-400">Piyasa ve Sonuc Secimi</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
+          <CardContent className="space-y-4 px-4 md:px-6">
             <div className="grid gap-3 md:grid-cols-3">
-              <div className="space-y-2">
+              <div className="min-w-0 space-y-2">
                 <p className="text-xs text-zinc-500">Piyasa Ara</p>
                 <Input
                   value={marketQuery}
@@ -61,7 +61,7 @@ export default function TradeBuilderPage() {
                   className="border-zinc-700 bg-zinc-800 text-zinc-200"
                 />
               </div>
-              <div className="space-y-2">
+              <div className="min-w-0 space-y-2">
                 <p className="text-xs text-zinc-500">Piyasa Slug</p>
                 <select
                   value={effectiveMarketSlug ?? ''}
@@ -76,7 +76,7 @@ export default function TradeBuilderPage() {
                   ))}
                 </select>
               </div>
-              <div className="space-y-2">
+              <div className="min-w-0 space-y-2">
                 <p className="text-xs text-zinc-500">Sonuc</p>
                 <select
                   value={effectiveSelectedOutcomeTokenId}

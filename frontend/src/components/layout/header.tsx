@@ -46,9 +46,9 @@ export function Header({ title }: { title: string }) {
         : 'border-red-700 bg-red-500/10 text-red-300';
 
   return (
-    <header className="flex h-14 items-center justify-between border-b border-zinc-800 px-6">
-      <h2 className="text-lg font-semibold text-zinc-100">{title}</h2>
-      <div className="flex items-center gap-3">
+    <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-zinc-800 px-3 md:px-6">
+      <h2 className="min-w-0 truncate text-base font-semibold text-zinc-100 md:text-lg">{title}</h2>
+      <div className="flex shrink-0 items-center gap-2 md:gap-3">
         <DropdownMenu onOpenChange={(open) => { if (open) markAllRead(); }}>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="relative h-8 w-8">
@@ -60,7 +60,7 @@ export function Header({ title }: { title: string }) {
               )}
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent className="w-80" align="end">
+          <DropdownMenuContent className="w-[calc(100vw-2rem)] sm:w-80" align="end">
             <DropdownMenuLabel>Bildirimler</DropdownMenuLabel>
             <DropdownMenuSeparator />
             <ScrollArea className="max-h-72">
@@ -104,16 +104,16 @@ export function Header({ title }: { title: string }) {
         </DropdownMenu>
 
         {auth?.user?.username && (
-          <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-300">
+          <span className="hidden rounded-full border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-zinc-300 sm:inline-flex">
             @{auth.user.username}
           </span>
         )}
-        <span className={`rounded-full border px-2 py-1 text-xs ${realtimeTone}`}>
+        <span className={`hidden rounded-full border px-2 py-1 text-xs sm:inline-flex ${realtimeTone}`}>
           {realtimeLabel}
         </span>
 
         {data && (
-          <>
+          <div className="hidden items-center gap-3 lg:flex">
             <Badge variant={data.serviceActive ? 'default' : 'destructive'} className={data.serviceActive ? 'bg-emerald-600' : ''}>
               {data.serviceActive ? 'Bot Active' : 'Bot Stopped'}
             </Badge>
@@ -122,7 +122,7 @@ export function Header({ title }: { title: string }) {
                 Mode: <span className="text-zinc-300">{data.lastRun.mode}</span>
               </span>
             )}
-          </>
+          </div>
         )}
       </div>
     </header>
