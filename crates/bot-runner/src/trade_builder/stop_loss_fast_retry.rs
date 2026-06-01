@@ -56,20 +56,25 @@ fn trade_builder_should_fast_retry_stop_loss_submit(
     size_basis: &str,
     error_text: &str,
 ) -> bool {
-    trade_builder_is_stop_loss_child(order)
-        && trade_builder_stop_loss_latched(order)
+    trade_builder_is_fast_stop_loss_sell(order)
         && order.side == "sell"
         && size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES
-        && matches!(order_type.trim().to_ascii_uppercase().as_str(), "FAK" | "IOC")
+        && matches!(
+            order_type.trim().to_ascii_uppercase().as_str(),
+            "FAK" | "IOC"
+        )
         && trade_builder_error_is_fak_no_match(error_text)
         && !trade_builder_error_indicates_balance_or_allowance(error_text)
         && !trade_builder_error_is_fatal_exchange_rejection(error_text)
 }
 
-fn trade_builder_fast_sl_retry_price(
-    order: &TradeBuilderOrder,
-    desired_price: f64,
-) -> f64 {
+fn trade_builder_is_fast_stop_loss_sell(order: &TradeBuilderOrder) -> bool {
+    trade_builder_stop_loss_latched(order)
+        && (trade_builder_is_stop_loss_child(order)
+            || trade_builder_order_is_revenge_flip_stop_loss_sell(order))
+}
+
+fn trade_builder_fast_sl_retry_price(order: &TradeBuilderOrder, desired_price: f64) -> f64 {
     aggressive_price_for_side(&order.side, desired_price, order.min_price_distance_cent)
 }
 
@@ -77,8 +82,7 @@ fn trade_builder_should_use_fast_stop_loss_submit_price(
     order: &TradeBuilderOrder,
     size_basis: &str,
 ) -> bool {
-    trade_builder_is_stop_loss_child(order)
-        && trade_builder_stop_loss_latched(order)
+    trade_builder_is_fast_stop_loss_sell(order)
         && order.side == "sell"
         && size_basis == TRADE_BUILDER_SIZE_BASIS_SHARES
 }
@@ -357,17 +361,16 @@ async fn try_trade_builder_fast_stop_loss_retry(
     let mut attempt_events = Vec::new();
     let mut last_error_text = Some(original_error_text.to_string());
     for attempt in 1..=TRADE_BUILDER_FAST_SL_RETRY_MAX_ATTEMPTS {
-        let Some(fast_submit_price) =
-            resolve_trade_builder_fast_sl_retry_submit_price(
-                client,
-                ws,
-                order,
-                current_price,
-                runtime_best_bid,
-                runtime_last_trade_price,
-                requested_qty,
-            )
-            .await
+        let Some(fast_submit_price) = resolve_trade_builder_fast_sl_retry_submit_price(
+            client,
+            ws,
+            order,
+            current_price,
+            runtime_best_bid,
+            runtime_last_trade_price,
+            requested_qty,
+        )
+        .await
         else {
             attempt_events.push(json!({
                 "fast_sl_retry_attempt": attempt,
@@ -410,7 +413,10 @@ async fn try_trade_builder_fast_stop_loss_retry(
                     payload.insert("result".to_string(), json!("submitted"));
                     payload.insert("status".to_string(), json!(ack.status.clone()));
                     payload.insert("raw_status".to_string(), json!(ack.raw_status.clone()));
-                    payload.insert("reject_reason".to_string(), json!(ack.reject_reason.clone()));
+                    payload.insert(
+                        "reject_reason".to_string(),
+                        json!(ack.reject_reason.clone()),
+                    );
                 }
                 attempt_events.push(attempt_payload.clone());
                 return TradeBuilderFastStopLossRetryOutcome::Success(

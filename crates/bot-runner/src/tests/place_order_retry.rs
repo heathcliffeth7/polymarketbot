@@ -290,6 +290,43 @@ fn latched_stop_loss_below_market_min_allows_submit_path() {
 }
 
 #[test]
+fn revenge_flip_stop_loss_sell_below_market_min_allows_submit_path() {
+    let mut order = test_builder_order("sell", None);
+    order.kind = "immediate".to_string();
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.target_qty = Some(3.39);
+    order.remaining_qty = Some(3.39);
+    order.runtime_snapshot_json = Some(json!({
+        "revenge_flip_intent": "stop_loss_sell"
+    }));
+
+    assert_eq!(
+        trade_builder_share_submit_min_size_decision(Some(3.39), 3.39, Some(5.0)),
+        Some(TradeBuilderShareSubmitMinSizeDecision::Block)
+    );
+    assert!(trade_builder_order_is_revenge_flip_stop_loss_sell(&order));
+    assert!(trade_builder_should_allow_stop_loss_below_market_min(
+        &order
+    ));
+}
+
+#[test]
+fn clob_min_size_rejection_is_retryable_for_revenge_flip_stop_loss_sell() {
+    let mut order = test_builder_order("sell", None);
+    order.kind = "immediate".to_string();
+    order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();
+    order.runtime_snapshot_json = Some(json!({
+        "revenge_flip_intent": "stop_loss_sell"
+    }));
+    order.last_error = Some(
+        "HTTP status 400 Bad Request for POST /order | body: {\"error\":\"invalid order: size below market minimum\"}"
+            .to_string(),
+    );
+
+    assert!(trade_builder_should_retry_after_processing_error(&order));
+}
+
+#[test]
 fn take_profit_below_market_min_still_blocks_submit_path() {
     let mut order = test_builder_order("sell", Some(9));
     order.size_basis = TRADE_BUILDER_SIZE_BASIS_SHARES.to_string();

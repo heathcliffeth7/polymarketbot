@@ -34,6 +34,7 @@ import { validateActionPlaceOrderPtbStopLossBumpConfig } from './validation-acti
 import { validateActionPlaceOrderPtbIvTimeRulesConfig } from './validation-action-place-order-ptb-iv-time-rules';
 import { parsePtbStopLossRules, validateActionPlaceOrderPtbStopLossConfig } from './validation-action-place-order-ptb-stop-loss';
 import { validateActionPlaceOrderPtbV2Config } from './validation-action-place-order-ptb-v2';
+import { validateActionPlaceOrderRevengeFlipConfig } from './validation-action-place-order-revenge-flip';
 import { pushNodeError } from './validation-core';
 
 interface ParsedExitLadderRule {
@@ -177,6 +178,13 @@ export function validateActionPlaceOrderConfig(
   const config = isRecord(node.config) ? node.config : {};
   const mode = toTrimmedString(config.mode).toLowerCase();
   const isDcaLiveMode = isDcaLivePlaceOrderConfig(config);
+  const isPositiveQuantityFlipGridMode =
+    mode === 'positive_quantity_flip_grid_v1' ||
+    mode === 'positive_flip_pairlock_compression_v1';
+  if (mode === 'revenge_flip_v1') {
+    validateActionPlaceOrderRevengeFlipConfig(issues, node, graph, config);
+    return;
+  }
   const pairLockStrategy = toTrimmedString(config.pairLockStrategy).toLowerCase();
   const allowsZeroReentryMaxAttempts =
     mode === 'pair_lock' && pairLockStrategy === 'biased_hedge_v1';
@@ -371,7 +379,7 @@ export function validateActionPlaceOrderConfig(
           'action.place_order targetQty must be > 0 when sizeMode is shares.'
         );
       }
-    } else if (!isDcaLiveMode && (sizeUsdc == null || sizeUsdc <= 0)) {
+    } else if (!isDcaLiveMode && !isPositiveQuantityFlipGridMode && (sizeUsdc == null || sizeUsdc <= 0)) {
       pushNodeError(
         issues,
         node,
@@ -1063,7 +1071,7 @@ export function validateActionPlaceOrderConfig(
       issues,
       node,
       'invalid_price_to_beat_current_price_source',
-      'action.place_order priceToBeatCurrentPriceSource must be chainlink, binance, or coinbase.'
+      'action.place_order priceToBeatCurrentPriceSource must be chainlink, binance, coinbase, or hyperliquid.'
     );
   }
   if (config.priceToBeatCurrentPriceSource != null && !ptbCurrentPriceSourceActive) {

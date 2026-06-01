@@ -45,6 +45,22 @@ function isDcaLiveDownstreamNode(node: TradeFlowNode): boolean {
   return node.type === 'action.place_order' && downstreamMode === 'dca_live_v1';
 }
 
+function isPositiveQuantityFlipGridDownstreamNode(node: TradeFlowNode): boolean {
+  const downstreamConfig = isRecord(node.config) ? node.config : {};
+  const downstreamMode = toTrimmedString(downstreamConfig.mode).toLowerCase() || 'single';
+  return (
+    node.type === 'action.place_order' &&
+    (downstreamMode === 'positive_quantity_flip_grid_v1' ||
+      downstreamMode === 'positive_flip_pairlock_compression_v1')
+  );
+}
+
+function isRevengeFlipDownstreamNode(node: TradeFlowNode): boolean {
+  const downstreamConfig = isRecord(node.config) ? node.config : {};
+  const downstreamMode = toTrimmedString(downstreamConfig.mode).toLowerCase() || 'single';
+  return node.type === 'action.place_order' && downstreamMode === 'revenge_flip_v1';
+}
+
 function isPairLockAllowedNotificationNode(node: TradeFlowNode): boolean {
   return PAIR_LOCK_ALLOWED_NOTIFICATION_ACTIONS.has(node.type);
 }
@@ -95,6 +111,98 @@ function collectReachableDcaLiveBindingNodes(
   };
 }
 
+function collectReachablePositiveQuantityFlipGridBindingNodes(
+  nodeKey: string,
+  graph: TradeFlowGraph
+): { positiveGridNodes: TradeFlowNode[]; invalidNodes: TradeFlowNode[] } {
+  const nodeMap = new Map(graph.nodes.map((candidate) => [candidate.key, candidate]));
+  const outgoingBySource = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const outgoing = outgoingBySource.get(edge.source) ?? [];
+    outgoing.push(edge.target);
+    outgoingBySource.set(edge.source, outgoing);
+  }
+
+  const visited = new Set<string>();
+  const positiveGridByKey = new Map<string, TradeFlowNode>();
+  const invalidByKey = new Map<string, TradeFlowNode>();
+  const queue = [...(outgoingBySource.get(nodeKey) ?? [])];
+
+  while (queue.length > 0) {
+    const currentKey = queue.shift() as string;
+    if (visited.has(currentKey)) continue;
+    visited.add(currentKey);
+
+    const currentNode = nodeMap.get(currentKey);
+    if (!currentNode) continue;
+
+    const isPositiveGrid = isPositiveQuantityFlipGridDownstreamNode(currentNode);
+    const isNotification = isPairLockAllowedNotificationNode(currentNode);
+    const isPassthrough = DCA_LIVE_ALLOWED_PASSTHROUGH_NODES.has(currentNode.type);
+
+    if (isPositiveGrid) {
+      positiveGridByKey.set(currentKey, currentNode);
+    } else if (!isNotification && !isPassthrough) {
+      invalidByKey.set(currentKey, currentNode);
+    }
+
+    if (!isPositiveGrid && (isPassthrough || isNotification)) {
+      queue.push(...(outgoingBySource.get(currentKey) ?? []));
+    }
+  }
+
+  return {
+    positiveGridNodes: [...positiveGridByKey.values()],
+    invalidNodes: [...invalidByKey.values()],
+  };
+}
+
+function collectReachableRevengeFlipBindingNodes(
+  nodeKey: string,
+  graph: TradeFlowGraph
+): { revengeFlipNodes: TradeFlowNode[]; invalidNodes: TradeFlowNode[] } {
+  const nodeMap = new Map(graph.nodes.map((candidate) => [candidate.key, candidate]));
+  const outgoingBySource = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const outgoing = outgoingBySource.get(edge.source) ?? [];
+    outgoing.push(edge.target);
+    outgoingBySource.set(edge.source, outgoing);
+  }
+
+  const visited = new Set<string>();
+  const revengeFlipByKey = new Map<string, TradeFlowNode>();
+  const invalidByKey = new Map<string, TradeFlowNode>();
+  const queue = [...(outgoingBySource.get(nodeKey) ?? [])];
+
+  while (queue.length > 0) {
+    const currentKey = queue.shift() as string;
+    if (visited.has(currentKey)) continue;
+    visited.add(currentKey);
+
+    const currentNode = nodeMap.get(currentKey);
+    if (!currentNode) continue;
+
+    const isRevengeFlip = isRevengeFlipDownstreamNode(currentNode);
+    const isNotification = isPairLockAllowedNotificationNode(currentNode);
+    const isPassthrough = DCA_LIVE_ALLOWED_PASSTHROUGH_NODES.has(currentNode.type);
+
+    if (isRevengeFlip) {
+      revengeFlipByKey.set(currentKey, currentNode);
+    } else if (!isNotification && !isPassthrough) {
+      invalidByKey.set(currentKey, currentNode);
+    }
+
+    if (!isRevengeFlip && (isPassthrough || isNotification)) {
+      queue.push(...(outgoingBySource.get(currentKey) ?? []));
+    }
+  }
+
+  return {
+    revengeFlipNodes: [...revengeFlipByKey.values()],
+    invalidNodes: [...invalidByKey.values()],
+  };
+}
+
 export function validateTriggerMarketPriceNodeConfig(
   issues: TradeFlowValidationIssue[],
   node: TradeFlowNode,
@@ -109,13 +217,21 @@ export function validateTriggerMarketPriceNodeConfig(
   const bindingMode = toTrimmedString(config.bindingMode).toLowerCase() || 'standard';
   const pairLockOnly = bindingMode === 'pair_lock_only';
   const dcaLiveOnly = bindingMode === 'dca_live_only';
-  const bindingOnly = pairLockOnly || dcaLiveOnly;
-  if (bindingMode !== 'standard' && bindingMode !== 'pair_lock_only' && bindingMode !== 'dca_live_only') {
+  const positiveGridOnly = bindingMode === 'positive_quantity_flip_grid_only';
+  const revengeFlipOnly = bindingMode === 'revenge_flip_only';
+  const bindingOnly = pairLockOnly || dcaLiveOnly || positiveGridOnly || revengeFlipOnly;
+  if (
+    bindingMode !== 'standard' &&
+    bindingMode !== 'pair_lock_only' &&
+    bindingMode !== 'dca_live_only' &&
+    bindingMode !== 'positive_quantity_flip_grid_only' &&
+    bindingMode !== 'revenge_flip_only'
+  ) {
     pushNodeError(
       issues,
       node,
       'invalid_binding_mode',
-      'trigger.market_price bindingMode must be standard, pair_lock_only, or dca_live_only.'
+      'trigger.market_price bindingMode must be standard, pair_lock_only, dca_live_only, positive_quantity_flip_grid_only, or revenge_flip_only.'
     );
   }
 
@@ -442,6 +558,84 @@ export function validateTriggerMarketPriceNodeConfig(
         node,
         'dca_live_only_disallows_non_notification_downstream',
         'trigger.market_price bindingMode=dca_live_only allows one action.place_order mode=dca_live_v1, optional logic/guard nodes, and optional notification nodes.'
+      );
+    }
+  }
+
+  if (bindingMode === 'positive_quantity_flip_grid_only') {
+    const hasOutcomeRows =
+      Array.isArray(config.outcomeConditions) && config.outcomeConditions.length > 0;
+    if (hasOutcomeRows) {
+      pushNodeError(
+        issues,
+        node,
+        'positive_quantity_flip_grid_only_disallows_outcome_conditions',
+        'trigger.market_price bindingMode=positive_quantity_flip_grid_only does not allow outcomeConditions.'
+      );
+    }
+    if (priceToBeatTriggerEnabled === true) {
+      pushNodeError(
+        issues,
+        node,
+        'positive_quantity_flip_grid_only_disallows_ptb_trigger',
+        'trigger.market_price bindingMode=positive_quantity_flip_grid_only does not allow priceToBeatTrigger* fields.'
+      );
+    }
+    const { positiveGridNodes, invalidNodes } =
+      collectReachablePositiveQuantityFlipGridBindingNodes(node.key, graph);
+    if (positiveGridNodes.length !== 1) {
+      pushNodeError(
+        issues,
+        node,
+        'positive_quantity_flip_grid_only_requires_single_downstream',
+        'trigger.market_price bindingMode=positive_quantity_flip_grid_only requires exactly one reachable action.place_order mode=positive_quantity_flip_grid_v1 or positive_flip_pairlock_compression_v1.'
+      );
+    }
+    if (invalidNodes.length > 0) {
+      pushNodeError(
+        issues,
+        node,
+        'positive_quantity_flip_grid_only_disallows_non_notification_downstream',
+        'trigger.market_price bindingMode=positive_quantity_flip_grid_only allows one action.place_order mode=positive_quantity_flip_grid_v1 or positive_flip_pairlock_compression_v1, optional logic/guard nodes, and optional notification nodes.'
+      );
+    }
+  }
+
+  if (bindingMode === 'revenge_flip_only') {
+    const hasOutcomeRows =
+      Array.isArray(config.outcomeConditions) && config.outcomeConditions.length > 0;
+    if (hasOutcomeRows) {
+      pushNodeError(
+        issues,
+        node,
+        'revenge_flip_only_disallows_outcome_conditions',
+        'trigger.market_price bindingMode=revenge_flip_only does not allow outcomeConditions.'
+      );
+    }
+    if (priceToBeatTriggerEnabled === true) {
+      pushNodeError(
+        issues,
+        node,
+        'revenge_flip_only_disallows_ptb_trigger',
+        'trigger.market_price bindingMode=revenge_flip_only does not allow priceToBeatTrigger* fields.'
+      );
+    }
+    const { revengeFlipNodes, invalidNodes } =
+      collectReachableRevengeFlipBindingNodes(node.key, graph);
+    if (revengeFlipNodes.length !== 1) {
+      pushNodeError(
+        issues,
+        node,
+        'revenge_flip_only_requires_single_downstream',
+        'trigger.market_price bindingMode=revenge_flip_only requires exactly one reachable action.place_order mode=revenge_flip_v1.'
+      );
+    }
+    if (invalidNodes.length > 0) {
+      pushNodeError(
+        issues,
+        node,
+        'revenge_flip_only_disallows_non_notification_downstream',
+        'trigger.market_price bindingMode=revenge_flip_only allows one action.place_order mode=revenge_flip_v1, optional logic/guard nodes, and optional notification nodes.'
       );
     }
   }

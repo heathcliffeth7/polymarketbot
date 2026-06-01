@@ -962,6 +962,8 @@ fn build_trigger_market_price_output(
     {
         "pair_lock_only" => "pair_lock_only",
         "dca_live_only" => "dca_live_only",
+        POSITIVE_QUANTITY_FLIP_GRID_BINDING_MODE => POSITIVE_QUANTITY_FLIP_GRID_BINDING_MODE,
+        REVENGE_FLIP_BINDING_MODE => REVENGE_FLIP_BINDING_MODE,
         _ => "standard",
     };
     let mut output = json!({

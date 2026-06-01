@@ -110,7 +110,10 @@ fn pair_lock_primary_notification_scope(reason_code: &str) -> Option<&'static st
     match reason_code {
         "price_to_beat_gap_below_threshold"
         | "price_to_beat_pending"
-        | "price_to_beat_unavailable" => Some("price_to_beat"),
+        | "price_to_beat_unavailable"
+        | "local_path_fresh_history_insufficient"
+        | "local_path_current_gap_below_floor"
+        | "local_path_fresh_retrace_too_high" => Some("price_to_beat"),
         "below_trigger_price_guard" => Some("trigger_price"),
         "below_best_ask_floor" | "best_ask_unavailable" | "pair_primary_best_ask_unavailable" => {
             Some("execution_floor")
@@ -651,6 +654,7 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
     );
 
     let mut ptb_guard = Value::Null;
+    let mut pair_lock_fresh_floor_gate = Value::Null;
     let mut decision = guard_eval.effective_decision;
     let mut reason_code = guard_eval.effective_reason_code.to_string();
     let adaptive_max_price_probe = action_place_order_uses_adaptive_max_price_strategy(node)
@@ -720,13 +724,67 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
             price_to_beat = ?ptb_log_snapshot.price_to_beat,
         );
         ptb_guard = evaluation.to_value();
+        let fresh_floor_gate = evaluate_pair_lock_fresh_floor_gate(
+            node,
+            market_slug,
+            token_id,
+            outcome_label,
+            evaluation.directional_gap,
+            evaluation.threshold_usd,
+        );
+        let mut effective_ptb_passed = evaluation.passed;
+        let mut effective_ptb_reason_code = evaluation.reason_code.clone();
+        if let Some(fresh_floor_gate) = fresh_floor_gate {
+            pair_lock_fresh_floor_gate = fresh_floor_gate.payload.clone();
+            if let Some(obj) = ptb_guard.as_object_mut() {
+                obj.insert(
+                    "raw_price_to_beat_passed".to_string(),
+                    json!(evaluation.passed),
+                );
+                obj.insert(
+                    "raw_price_to_beat_reason_code".to_string(),
+                    json!(evaluation.reason_code),
+                );
+                obj.insert(
+                    "local_path_gate".to_string(),
+                    pair_lock_fresh_floor_gate.clone(),
+                );
+                if !fresh_floor_gate.passed {
+                    obj.insert(
+                        "reason_code".to_string(),
+                        json!(fresh_floor_gate.reason_code),
+                    );
+                    obj.insert(
+                        "reason_detail".to_string(),
+                        fresh_floor_gate
+                            .payload
+                            .get("reason_detail")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    );
+                }
+            }
+            tracing::debug!(
+                message = "PAIR_LOCK_PRIMARY_FRESH_FLOOR_GATE_EVALUATED",
+                flow_run_id = run.id,
+                node_key = %node.key,
+                market_slug = %market_slug,
+                outcome_label = %outcome_label,
+                passed = fresh_floor_gate.passed,
+                reason_code = %fresh_floor_gate.reason_code,
+            );
+            effective_ptb_passed = evaluation.passed && fresh_floor_gate.passed;
+            if !fresh_floor_gate.passed {
+                effective_ptb_reason_code = fresh_floor_gate.reason_code.to_string();
+            }
+        }
         if !adaptive_max_price_probe && !manual_self_tune_probe {
             decision = pair_lock_primary_ptb_guard_decision(
-                evaluation.passed,
+                effective_ptb_passed,
                 node_config_bool(node, "retryOnPriceToBeatGuardBlock").unwrap_or(true),
             );
             if decision != "passed" {
-                reason_code = evaluation.reason_code.clone();
+                reason_code = effective_ptb_reason_code;
             }
         }
     }
@@ -767,6 +825,7 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
             "execution_floor_guard": guard_eval.execution_floor_payload,
             "max_price_guard": guard_eval.max_price_payload,
             "price_to_beat_guard": ptb_guard,
+            "pair_lock_fresh_floor_gate": pair_lock_fresh_floor_gate,
             "flow_run_id": run.id,
         }),
     })

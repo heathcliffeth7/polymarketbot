@@ -58,6 +58,14 @@ fn live_gap_collector_format_str(payload: &Value, key: &str) -> String {
         .unwrap_or_else(|| "N/A".to_string())
 }
 
+fn live_gap_collector_format_i64(payload: &Value, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(Value::as_i64)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "N/A".to_string())
+}
+
 fn live_gap_collector_ptb_notification_line(payload: &Value) -> String {
     let Some(ptb) = payload.get("ptb_telemetry").and_then(Value::as_object) else {
         return "PTB: telemetry only / N/A".to_string();
@@ -79,6 +87,154 @@ fn live_gap_collector_ptb_notification_line(payload: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     format!("PTB: telemetry only, Value: {price_to_beat}, Lag: {latency}, Source: {source}")
+}
+
+fn live_gap_collector_adaptive_low_gap_notification_line(payload: &Value) -> Option<String> {
+    payload.get("adaptive_low_gap")?;
+    Some(format!(
+        "Adaptive Low Gap:\nStatus: {}\nScope: {}\nMarket Near Miss Count: {}\nPre Required: {}\nAdaptive Required: {}\nRelax: {}\nShortfall: {} / {}\nSaved From Block: {}\nReason: {}",
+        live_gap_collector_format_str(payload, "adaptive_low_gap_status"),
+        live_gap_collector_format_str(payload, "adaptive_low_gap_scope"),
+        live_gap_collector_format_i64(payload, "adaptive_low_gap_market_near_miss_count"),
+        live_gap_collector_format_f64(payload, "pre_adaptive_required_gap_usd", 2, " USD"),
+        live_gap_collector_format_f64(payload, "adaptive_required_gap_usd", 2, " USD"),
+        live_gap_collector_format_f64(payload, "adaptive_low_gap_relax_pct", 3, ""),
+        live_gap_collector_format_f64(payload, "adaptive_low_gap_shortfall_usd", 2, " USD"),
+        live_gap_collector_format_f64(payload, "adaptive_low_gap_shortfall_pct", 3, ""),
+        payload
+            .get("adaptive_saved_from_block")
+            .and_then(Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "N/A".to_string()),
+        live_gap_collector_format_str(payload, "adaptive_low_gap_reason"),
+    ))
+}
+
+fn live_gap_collector_format_pct(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map(|value| format!("{:.1}%", value * 100.0))
+        .unwrap_or_else(|| "N/A".to_string())
+}
+
+fn build_live_gap_adaptive_low_gap_change_notification_message(
+    payload: &Value,
+    change: &LiveGapAdaptiveLowGapChangeNotification,
+) -> String {
+    format!(
+        "Adaptive Low Gap Changed\nMarket: {}\nOutcome: {}\nBand: {}\nPrice Bucket: {}\nPrevious Relax: {}\nNew Relax: {}\nPre Required Gap: {}\nAdaptive Required Gap: {}\nMarket Near Miss Count: {}\nShortfall: {} / {}\nSaved From Block: {}\nReason: {}",
+        live_gap_collector_format_str(payload, "market_slug"),
+        live_gap_collector_format_str(payload, "outcome_label"),
+        live_gap_collector_format_str(payload, "gap_band"),
+        payload
+            .get("adaptive_low_gap")
+            .and_then(|value| value.get("price_bucket"))
+            .and_then(Value::as_str)
+            .unwrap_or("N/A"),
+        live_gap_collector_format_pct(change.previous_relax_pct),
+        live_gap_collector_format_pct(Some(change.new_relax_pct)),
+        live_gap_collector_format_f64(payload, "pre_adaptive_required_gap_usd", 2, " USD"),
+        live_gap_collector_format_f64(payload, "adaptive_required_gap_usd", 2, " USD"),
+        live_gap_collector_format_i64(payload, "adaptive_low_gap_market_near_miss_count"),
+        live_gap_collector_format_f64(payload, "adaptive_low_gap_shortfall_usd", 2, " USD"),
+        live_gap_collector_format_pct(payload.get("adaptive_low_gap_shortfall_pct").and_then(value_as_f64)),
+        payload
+            .get("adaptive_saved_from_block")
+            .and_then(Value::as_bool)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "N/A".to_string()),
+        live_gap_collector_format_str(payload, "adaptive_low_gap_reason"),
+    )
+}
+
+fn live_gap_guard_text<'a>(guard: &'a Value, key: &str) -> Option<&'a str> {
+    guard.get(key).and_then(Value::as_str)
+}
+
+fn live_gap_guard_f64(guard: &Value, key: &str) -> Option<f64> {
+    guard.get(key).and_then(value_as_f64)
+}
+
+fn live_gap_guard_i64(guard: &Value, key: &str) -> Option<i64> {
+    guard.get(key).and_then(value_as_i64)
+}
+
+fn live_gap_guard_signed_usd(guard: &Value, key: &str) -> String {
+    live_gap_guard_f64(guard, key)
+        .map(|value| format!("{value:+.1} USD"))
+        .unwrap_or_else(|| "not_available".to_string())
+}
+
+fn live_gap_guard_unsigned_usd(guard: &Value, key: &str) -> String {
+    live_gap_guard_f64(guard, key)
+        .map(|value| format!("{value:.1} USD"))
+        .unwrap_or_else(|| "not_available".to_string())
+}
+
+fn live_gap_guard_slope(guard: &Value, key: &str) -> String {
+    live_gap_guard_f64(guard, key)
+        .map(|value| format!("{value:+.2} USD/s"))
+        .unwrap_or_else(|| "not_available".to_string())
+}
+
+fn live_gap_guard_history_secs(guard: &Value, key: &str) -> String {
+    live_gap_guard_i64(guard, key)
+        .map(|value| format!("{:.0}s", value as f64 / 1_000.0))
+        .unwrap_or_else(|| "insufficient_samples".to_string())
+}
+
+fn live_gap_guard_count(guard: &Value, key: &str) -> String {
+    live_gap_guard_i64(guard, key)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "not_available".to_string())
+}
+
+fn live_gap_guard_largest_gap(guard: &Value) -> String {
+    live_gap_guard_i64(guard, "largest_sample_gap_ms")
+        .map(|value| format!("{value}ms"))
+        .unwrap_or_else(|| "not_available".to_string())
+}
+
+fn live_gap_guard_display_value(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(value)) if !value.trim().is_empty() => value.clone(),
+        Some(Value::Number(value)) => value.to_string(),
+        Some(Value::Bool(value)) => value.to_string(),
+        _ => "not_available".to_string(),
+    }
+}
+
+fn live_gap_guard_hash_short(guard: &Value) -> String {
+    guard
+        .get("profile_lookup_key")
+        .and_then(|key| key.get("profile_config_hash"))
+        .and_then(Value::as_str)
+        .map(|value| value.chars().take(8).collect::<String>())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "not_available".to_string())
+}
+
+fn live_gap_guard_profile_lookup_key_line(guard: &Value) -> Option<String> {
+    let key = guard.get("profile_lookup_key")?;
+    let window_start = live_gap_guard_display_value(key.get("target_window_start"));
+    let node_key = live_gap_guard_display_value(key.get("node_key"));
+    let direction = live_gap_guard_display_value(key.get("direction"));
+    let remaining = live_gap_guard_display_value(key.get("remaining_bucket"));
+    let price = live_gap_guard_display_value(key.get("price_bucket"));
+    let gap = live_gap_guard_display_value(key.get("gap_bucket"));
+    let slope = live_gap_guard_display_value(key.get("slope_bucket"));
+    Some(format!(
+        "Profile Lookup Key: window_start={window_start}, node={node_key}, direction={direction}, hash={}, buckets={remaining}/{price}/{gap}/{slope}",
+        live_gap_guard_hash_short(guard),
+    ))
+}
+
+fn live_gap_guard_decision_label(guard: &Value) -> &'static str {
+    match live_gap_guard_text(guard, "decision") {
+        Some("pass") => "PASS",
+        Some("block_retry") | Some("block_terminal") => "BLOCK",
+        _ => "UNKNOWN",
+    }
 }
 
 fn live_gap_collector_no_reversal_notification_line(payload: &Value) -> Option<String> {
@@ -107,13 +263,71 @@ fn live_gap_collector_no_reversal_notification_line(payload: &Value) -> Option<S
         .get("fallback_level")
         .and_then(Value::as_str)
         .unwrap_or("N/A");
+    let profile = guard
+        .get("profile_source")
+        .and_then(Value::as_str)
+        .unwrap_or("N/A");
+    let profile_lookup_fallback =
+        live_gap_guard_text(guard, "profile_lookup_fallback_level").unwrap_or(fallback);
+    let profile_lookup_status =
+        live_gap_guard_text(guard, "profile_lookup_status").unwrap_or(profile);
+    let prewarmer_status_line = live_gap_guard_text(guard, "prewarmer_status")
+        .map(|status| format!("\nPrewarmer Status: {status}"))
+        .unwrap_or_default();
+    let prewarm_detail_line = {
+        let priority = live_gap_guard_text(guard, "prewarm_priority");
+        let slot_status = live_gap_guard_text(guard, "prewarm_slot_status");
+        let age_ms = guard.get("prewarm_age_ms").and_then(value_as_i64);
+        if priority.is_some() || slot_status.is_some() || age_ms.is_some() {
+            format!(
+                "\nPrewarm Detail: priority={}, slot={}, age={}",
+                priority.unwrap_or("not_available"),
+                slot_status.unwrap_or("not_available"),
+                age_ms
+                    .map(|value| format!("{value}ms"))
+                    .unwrap_or_else(|| "not_available".to_string())
+            )
+        } else {
+            String::new()
+        }
+    };
     let protection = guard
         .get("protection")
         .and_then(Value::as_str)
         .unwrap_or("N/A");
-    Some(format!(
-        "No-Reversal: selected={selected}, buffer={source_buffer}, worst={worst_gap}, floor={floor}, fallback={fallback}, protection={protection}"
-    ))
+    let reason = live_gap_guard_text(guard, "reason_code").unwrap_or("N/A");
+    let fallback_source = live_gap_guard_text(guard, "runtime_fallback_source")
+        .or_else(|| live_gap_guard_text(guard, "local_path_fallback_source"))
+        .unwrap_or(fallback);
+    let mut block = format!(
+        "No-Reversal:\nProfile: {profile}\nProfile Status: {profile_lookup_status}{prewarmer_status_line}{prewarm_detail_line}\nProfile Lookup Fallback: {profile_lookup_fallback}\nFallback: {fallback_source}\nProtection: {protection}\nFloor: {floor}\nSelected: {selected}\nBuffer: {source_buffer}\nWorst: {worst_gap}\nReason: {reason}"
+    );
+    if let Some(line) = live_gap_guard_profile_lookup_key_line(guard) {
+        block.push('\n');
+        block.push_str(&line);
+    }
+    if protection == "local_path_applied" || guard.get("local_path_fallback_source").is_some() {
+        let decision_reason =
+            live_gap_guard_text(guard, "local_path_decision_reason").unwrap_or(reason);
+        block.push_str(&format!(
+            "\nLocal Path:\nHistory: {}\nSamples: {}\nLargest Sample Gap: {}\nMin Gap 30s: {}\nMin Gap 60s: {}\nMin Gap 2m: {}\nDrop10/30/60: {} / {} / {}\nSlope 3s/10s/30s: {} / {} / {}\nDecision: {}\nReason: {}",
+            live_gap_guard_history_secs(guard, "local_path_history_ms"),
+            live_gap_guard_count(guard, "local_path_sample_count"),
+            live_gap_guard_largest_gap(guard),
+            live_gap_guard_signed_usd(guard, "local_path_min_gap_30s"),
+            live_gap_guard_signed_usd(guard, "local_path_min_gap_60s"),
+            live_gap_guard_signed_usd(guard, "local_path_min_gap_2m"),
+            live_gap_guard_unsigned_usd(guard, "local_path_drop_10s"),
+            live_gap_guard_unsigned_usd(guard, "local_path_drop_30s"),
+            live_gap_guard_unsigned_usd(guard, "local_path_drop_60s"),
+            live_gap_guard_slope(guard, "local_path_slope_3s"),
+            live_gap_guard_slope(guard, "local_path_slope_10s"),
+            live_gap_guard_slope(guard, "local_path_slope_30s"),
+            live_gap_guard_decision_label(guard),
+            decision_reason,
+        ));
+    }
+    Some(block)
 }
 
 fn build_live_gap_collector_decision_notification_message(
@@ -130,21 +344,44 @@ fn build_live_gap_collector_decision_notification_message(
     let outcome = live_gap_collector_format_str(payload, "outcome_label");
     let side = live_gap_collector_format_str(payload, "side");
     let regime = live_gap_collector_format_str(payload, "regime");
+    let gap_band = live_gap_collector_format_str(payload, "gap_band");
+    let old_regime = live_gap_collector_format_str(payload, "old_4_band_equivalent");
+    let band_reason = live_gap_collector_format_str(payload, "band_reason");
+    let local_path_decision = live_gap_collector_format_str(payload, "local_path_decision");
     let remaining = payload
         .get("remaining_sec")
         .and_then(Value::as_i64)
         .map(|value| format!("{value}s"))
         .unwrap_or_else(|| "N/A".to_string());
     let mut message = format!(
-        "{title}\nMarket: {market_slug}\nOutcome: {outcome}\nSide: {side}\nDecision: {decision_label}\nBest Ask: {}\nEffective Fill: {}\nLive Gap: {}\nRequired Gap: {}\nRegime: {regime}\nRemaining: {remaining}\nReason: {}\n{}",
+        "{title}\nMarket: {market_slug}\nOutcome: {outcome}\nSide: {side}\nDecision: {decision_label}\nBest Ask: {}\nEffective Fill: {}\nLive Gap: {}\nRequired Gap: {}\nGap Band: {gap_band}\nBase Required Gap: {}\nFinal Required Gap: {}\nOld 4-Band Equivalent: {old_regime}\nVolume: ratio={}, bucket={}, 10/30/60/90/120={}/{}/{}/{}/{}, trades10/30/60/90/120={}/{}/{}/{}/{}\nVolatility 15s: {}\nLocal Path Decision: {local_path_decision}\nBand Reason: {band_reason}\nRegime: {regime}\nRemaining: {remaining}\nReason: {}\n{}",
         live_gap_collector_format_f64(payload, "best_ask", 4, ""),
         live_gap_collector_format_f64(payload, "effective_fill_price", 4, ""),
         live_gap_collector_format_f64(payload, "live_gap_usd", 2, " USD"),
         live_gap_collector_format_f64(payload, "required_gap_usd", 2, " USD"),
+        live_gap_collector_format_f64(payload, "base_required_gap_usd", 2, " USD"),
+        live_gap_collector_format_f64(payload, "final_required_gap_usd", 2, " USD"),
+        live_gap_collector_format_f64(payload, "volume_ratio_30s", 3, ""),
+        live_gap_collector_format_str(payload, "volume_bucket"),
+        live_gap_collector_format_f64(payload, "volume_10s", 2, ""),
+        live_gap_collector_format_f64(payload, "volume_30s", 2, ""),
+        live_gap_collector_format_f64(payload, "volume_60s", 2, ""),
+        live_gap_collector_format_f64(payload, "volume_90s", 2, ""),
+        live_gap_collector_format_f64(payload, "volume_120s", 2, ""),
+        live_gap_collector_format_i64(payload, "trade_count_10s"),
+        live_gap_collector_format_i64(payload, "trade_count_30s"),
+        live_gap_collector_format_i64(payload, "trade_count_60s"),
+        live_gap_collector_format_i64(payload, "trade_count_90s"),
+        live_gap_collector_format_i64(payload, "trade_count_120s"),
+        live_gap_collector_format_f64(payload, "volatility_usd_15s", 4, " USD"),
         decision.reason_code,
         live_gap_collector_ptb_notification_line(payload),
     );
     if let Some(line) = live_gap_collector_no_reversal_notification_line(payload) {
+        message.push('\n');
+        message.push_str(&line);
+    }
+    if let Some(line) = live_gap_collector_adaptive_low_gap_notification_line(payload) {
         message.push('\n');
         message.push_str(&line);
     }
@@ -168,6 +405,58 @@ async fn maybe_send_live_gap_collector_decision_notification(
         run,
         &node.key,
         live_gap_collector_decision_notification_type(decision),
+        &message,
+    )
+    .await
+}
+
+async fn maybe_send_live_gap_adaptive_low_gap_change_notification(
+    repo: &PostgresRepository,
+    run: &TradeFlowRun,
+    node: &TradeFlowNode,
+    config: &ActionPlaceOrderLiveGapCollectorConfig,
+    payload: &Value,
+) -> bool {
+    if !config.notify_on_adaptive_low_gap_change {
+        return false;
+    }
+    let now_ms = Utc::now().timestamp_millis();
+    let Some(change) = live_gap_mark_adaptive_low_gap_change_notified(payload, now_ms) else {
+        return false;
+    };
+    let mut event_payload = payload.clone();
+    if let Some(obj) = event_payload.as_object_mut() {
+        obj.insert("notification_type".to_string(), json!("live_gap_adaptive_low_gap_changed"));
+        obj.insert("previous_relax_pct".to_string(), json!(change.previous_relax_pct));
+        obj.insert(
+            "previous_adaptive_required_gap_usd".to_string(),
+            json!(change.previous_adaptive_required_gap_usd),
+        );
+        obj.insert("new_relax_pct".to_string(), json!(change.new_relax_pct));
+        obj.insert(
+            "new_adaptive_required_gap_usd".to_string(),
+            json!(change.new_adaptive_required_gap_usd),
+        );
+        obj.insert("notified_at_ms".to_string(), json!(change.notified_at_ms));
+    }
+    if let Err(err) = repo
+        .append_trade_flow_event(
+            Some(run.id),
+            run.definition_id,
+            Some(run.version_id),
+            "live_gap_adaptive_low_gap_changed",
+            &event_payload,
+        )
+        .await
+    {
+        warn!(flow_run_id = run.id, node_key = node.key, error = ?err, "LIVE_GAP_ADAPTIVE_LOW_GAP_CHANGE_EVENT_FAILED");
+    }
+    let message = build_live_gap_adaptive_low_gap_change_notification_message(payload, &change);
+    send_trade_flow_notification(
+        repo,
+        run,
+        &node.key,
+        "live_gap_adaptive_low_gap_changed",
         &message,
     )
     .await
@@ -332,11 +621,7 @@ fn pre_buy_format_history_ms(value: Option<i64>) -> String {
 }
 
 fn pre_buy_metric_status(value: Option<bool>) -> &'static str {
-    if value.unwrap_or(false) {
-        "OK"
-    } else {
-        "N/A"
-    }
+    if value.unwrap_or(false) { "OK" } else { "N/A" }
 }
 
 fn pre_buy_collapse_guard_current_state(
@@ -778,6 +1063,16 @@ fn build_live_gap_submit_revalidation_notification_message_from_fields(
         pre_buy_collapse_payload_i64(payload, &["original_candidate_age_ms", "candidate_age_ms"])
             .map(|value| format!("{value}ms"))
             .unwrap_or_else(|| "N/A".to_string());
+    let candidate_created_at = pre_buy_collapse_payload_i64(payload, &["candidate_created_at_ms"])
+        .map(|value| format!("{value}ms"))
+        .unwrap_or_else(|| "N/A".to_string());
+    let fresh_snapshot_age = pre_buy_collapse_payload_i64(payload, &["fresh_snapshot_age_ms"])
+        .map(|value| format!("{value}ms"))
+        .unwrap_or_else(|| "N/A".to_string());
+    let fresh_revalidation_ts =
+        pre_buy_collapse_payload_i64(payload, &["fresh_revalidation_ts_ms"])
+            .map(|value| format!("{value}ms"))
+            .unwrap_or_else(|| "N/A".to_string());
     let max_age =
         pre_buy_collapse_payload_i64(payload, &["candidate_reuse_max_ms", "candidate_max_age_ms"])
             .map(|value| format!("{value}ms"))
@@ -786,7 +1081,8 @@ fn build_live_gap_submit_revalidation_notification_message_from_fields(
         pre_buy_format_remaining(pre_buy_collapse_payload_i64(payload, &["remaining_sec"]));
     let trigger = pre_buy_collapse_payload_str(payload, &["revalidation_trigger"])
         .unwrap_or_else(|| "N/A".to_string());
-    let candidate_reuse = pre_buy_collapse_payload_str(payload, &["candidate_reuse_decision"])
+    let candidate_reuse =
+        pre_buy_collapse_payload_str(payload, &["candidate_reuse", "candidate_reuse_decision"])
         .unwrap_or_else(|| "N/A".to_string());
     let decision_reason = pre_buy_collapse_payload_str(payload, &["decision_reason"])
         .unwrap_or_else(|| "N/A".to_string());
@@ -801,8 +1097,11 @@ fn build_live_gap_submit_revalidation_notification_message_from_fields(
         .filter(|mode| *mode == "notify_only")
         .map(|mode| format!("\nLate High Price: {mode}"))
         .unwrap_or_default();
+    let no_reversal = live_gap_collector_no_reversal_notification_line(payload)
+        .map(|block| format!("\n\n{block}"))
+        .unwrap_or_default();
     format!(
-        "{title}\nMarket: {market_slug}\nSide: {outcome_label}\nPrice: {price}\nRemaining: {remaining}\nLive Gap: {live_gap} / Required: {required_gap}\nTrigger: {trigger}\nOriginal Candidate Age: {age} / Reuse Max: {max_age}\nCandidate Reuse: {candidate_reuse}\nFresh Revalidation: {fresh_decision}\nDecision Reason: {decision_reason}{fresh_guard_reason}\nCLOB: {clob}{late_high_price}"
+        "{title}\nMarket: {market_slug}\nSide: {outcome_label}\nPrice: {price}\nRemaining: {remaining}\nLive Gap: {live_gap} / Required: {required_gap}\nTrigger: {trigger}\nOriginal Candidate Age: {age} / Reuse Max: {max_age}\nCandidate Created At: {candidate_created_at}\nFresh Snapshot Age: {fresh_snapshot_age}\nFresh Revalidation TS: {fresh_revalidation_ts}\nCandidate Reuse: {candidate_reuse}\nFresh Revalidation: {fresh_decision}\nDecision Reason: {decision_reason}{fresh_guard_reason}\nCLOB: {clob}{late_high_price}{no_reversal}"
     )
 }
 

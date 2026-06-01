@@ -83,6 +83,7 @@ include!("trade_builder/positive_quantity_flip_grid_config.rs");
 include!("trade_builder/positive_quantity_flip_grid_output.rs");
 include!("trade_builder/positive_quantity_flip_grid_in_flight.rs");
 include!("trade_builder/positive_quantity_flip_grid_timing.rs");
+include!("trade_builder/positive_quantity_flip_grid_depth.rs");
 include!("trade_builder/positive_quantity_flip_grid_guards.rs");
 include!("trade_builder/positive_quantity_flip_grid_nodes.rs");
 include!("trade_builder/positive_flip_pairlock_compression.rs");
@@ -91,7 +92,15 @@ include!("trade_builder/action_place_order_source_trade.rs");
 include!("trade_builder/revenge_flip_nodes.rs");
 include!("trade_builder/revenge_flip.rs");
 #[cfg(test)]
+include!("trade_builder/positive_quantity_flip_grid_test_helpers.rs");
+#[cfg(test)]
 include!("trade_builder/positive_quantity_flip_grid_tests.rs");
+#[cfg(test)]
+include!("trade_builder/positive_quantity_flip_grid_exit_depth_tests.rs");
+#[cfg(test)]
+include!("trade_builder/positive_quantity_flip_grid_guard_tests.rs");
+#[cfg(test)]
+include!("trade_builder/positive_quantity_flip_grid_pairlock_tests.rs");
 #[cfg(test)]
 include!("trade_builder/revenge_flip_tests.rs");
 #[cfg(test)]

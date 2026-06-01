@@ -26,6 +26,13 @@ import { updateEntryTimingProfileRowsFormState, updatePtbIvTimeRuleRowsFormState
 import { TimeExitRulesSection } from './time-exit-rules-section';
 import { PairLockSummarySection, TriggerDcaLiveHint, TriggerPairLockHint } from './pair-lock-binding-section';
 import { PairLockStaleConfigSection } from './pair-lock-stale-config-section';
+import { PositiveGridSection } from './positive-grid-section';
+import { RevengeFlipSection } from './revenge-flip-section';
+import {
+  POSITIVE_GRID_PTB_CURRENT_SOURCE_FIELD,
+  POSITIVE_GRID_QUANTITY_SIZING_MODE_FIELD,
+} from '@/lib/trade-flow-config-mappers/positive-quantity-flip-grid';
+import { REVENGE_FLIP_BINDING_MODE, REVENGE_FLIP_MODE } from '@/lib/trade-flow-config-mappers/revenge-flip';
 import { TriggerMarketFiringModeSection } from './trigger-market-firing-mode-section';
 import {
   isPairLockField,
@@ -69,12 +76,22 @@ export function NodeInspectorPanel({
       : '';
   const placeOrderLiveGapCollectorEnabled =
     nodeTypeDraft === 'action.place_order' && placeOrderModeValue === LIVE_GAP_COLLECTOR_MODE;
+  const placeOrderPositiveGridEnabled =
+    nodeTypeDraft === 'action.place_order' &&
+    (placeOrderModeValue === 'positive_quantity_flip_grid_v1' ||
+      placeOrderModeValue === 'positive_flip_pairlock_compression_v1');
+  const placeOrderRevengeFlipEnabled =
+    nodeTypeDraft === 'action.place_order' && placeOrderModeValue === REVENGE_FLIP_MODE;
   const placeOrderSizeMode = (form.fields.sizeMode ?? '').trim().toLowerCase();
   const dualDcaBaseSizing = (form.fields.baseSizing ?? '').trim().toLowerCase();
   const triggerMarketMode = (form.fields.marketMode ?? '').trim().toLowerCase();
   const { triggerBindingMode, placeOrderPairLockEnabled, placeOrderCounterOutcomePreview } =
     resolvePairLockUiState(nodeTypeDraft, form.fields);
-  const triggerBindingOnly = triggerBindingMode === 'pair_lock_only' || triggerBindingMode === 'dca_live_only';
+  const triggerBindingOnly =
+    triggerBindingMode === 'pair_lock_only' ||
+    triggerBindingMode === 'dca_live_only' ||
+    triggerBindingMode === 'positive_quantity_flip_grid_only' ||
+    triggerBindingMode === REVENGE_FLIP_BINDING_MODE;
   const triggerRepeatMode = (form.fields.repeatMode ?? '').trim().toLowerCase();
   const triggerCycleWindowMode = (form.fields.cycleWindowMode ?? '').trim().toLowerCase();
   const triggerPriceToBeatEnabled = (form.fields.priceToBeatTriggerEnabled ?? '').toString().trim().toLowerCase() === 'true';
@@ -141,7 +158,11 @@ export function NodeInspectorPanel({
     (placeOrderSlEnabled ||
       ptbStopLossChecked ||
       placeOrderPtbStopLossRuleRows.length > 0);
-  const showTpLadderSection = nodeTypeDraft === 'action.place_order' && placeOrderSide === 'buy' && (placeOrderTpEnabled || placeOrderTpRuleRows.length > 0);
+  const showTpLadderSection =
+    nodeTypeDraft === 'action.place_order' &&
+    placeOrderSide === 'buy' &&
+    !placeOrderPositiveGridEnabled &&
+    (placeOrderTpEnabled || placeOrderTpRuleRows.length > 0);
   const showCounterTpLadderSection =
     nodeTypeDraft === 'action.place_order' &&
     placeOrderPairLockEnabled &&
@@ -204,6 +225,9 @@ export function NodeInspectorPanel({
   const priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(
     form.fields.priceToBeatCurrentPriceSource
   );
+  const ptbStopLossInheritedCurrentSource = placeOrderPositiveGridEnabled
+    ? normalizePtbCurrentPriceSource(form.fields[POSITIVE_GRID_PTB_CURRENT_SOURCE_FIELD])
+    : priceToBeatCurrentPriceSource;
   const priceToBeatCurrentSourceVisible =
     priceToBeatGuardChecked || ptbStopLossChecked || placeOrderPtbStopLossRuleRows.length > 0;
   const priceToBeatGuardUnit =
@@ -309,6 +333,9 @@ export function NodeInspectorPanel({
       if (field.key === 'mode') {
         return false;
       }
+      if (field.key === 'positiveQuantityFlipGrid') {
+        return false;
+      }
       if (isHiddenNodeFieldKey(field.key)) {
         return false;
       }
@@ -324,6 +351,9 @@ export function NodeInspectorPanel({
       if (field.key === 'sizePct') return !placeOrderPairLockEnabled && placeOrderSizeMode === 'pct';
       if (field.key === 'targetQty') return !placeOrderPairLockEnabled && placeOrderSizeMode === 'shares';
       if (field.key === 'sizeUsdc') {
+        if (placeOrderPositiveGridEnabled) {
+          return false;
+        }
         return placeOrderPairLockEnabled || (placeOrderSizeMode !== 'pct' && placeOrderSizeMode !== 'shares');
       }
       if (field.key === 'buyFillLockEnabled') return placeOrderSide === 'buy';
@@ -376,11 +406,11 @@ export function NodeInspectorPanel({
         return false;
       }
       if (field.key === 'tpEnabled') {
-        return placeOrderSide === 'buy';
+        return placeOrderSide === 'buy' && !placeOrderPositiveGridEnabled;
       }
       if (field.key === 'tpPriceCent') {
         const tpEnabled = (form.fields.tpEnabled ?? '').toString().trim().toLowerCase();
-        return placeOrderSide === 'buy' && tpEnabled === 'true';
+        return placeOrderSide === 'buy' && !placeOrderPositiveGridEnabled && tpEnabled === 'true';
       }
       if (field.key === 'slEnabled') {
         return placeOrderSide === 'buy';
@@ -423,7 +453,7 @@ export function NodeInspectorPanel({
       }
       if (field.key === 'notifyOnTpHit') {
         const tpEnabled = (form.fields.tpEnabled ?? '').toString().trim().toLowerCase();
-        return placeOrderSide === 'buy' && tpEnabled === 'true';
+        return placeOrderSide === 'buy' && !placeOrderPositiveGridEnabled && tpEnabled === 'true';
       }
       if (field.key === 'notifyOnSlHit') {
         return placeOrderHasAnyStopLossProtection;
@@ -599,7 +629,19 @@ export function NodeInspectorPanel({
                 </Label>
                 <Select
                   value={placeOrderModeValue}
-                  onValueChange={(v) => actions.onUpdateField('mode', v)}
+                  onValueChange={(v) => {
+                    actions.onUpdateField('mode', v);
+                    if (
+                      v !== 'positive_flip_pairlock_compression_v1' &&
+                      form.fields[POSITIVE_GRID_QUANTITY_SIZING_MODE_FIELD] ===
+                        'fixed_usdc'
+                    ) {
+                      actions.onUpdateField(
+                        POSITIVE_GRID_QUANTITY_SIZING_MODE_FIELD,
+                        'profit_target',
+                      );
+                    }
+                  }}
                 >
                   <SelectTrigger className="h-8 w-full border-sky-200 bg-white text-xs text-slate-900" size="sm">
                     <SelectValue />
@@ -617,6 +659,20 @@ export function NodeInspectorPanel({
                 </p>
               </div>
             )}
+
+            <PositiveGridSection
+              visible={placeOrderPositiveGridEnabled}
+              pairlockCompressionMode={
+                placeOrderModeValue === 'positive_flip_pairlock_compression_v1'
+              }
+              fields={form.fields}
+              onUpdateField={actions.onUpdateField}
+            />
+            <RevengeFlipSection
+              visible={placeOrderRevengeFlipEnabled}
+              fields={form.fields}
+              onUpdateField={actions.onUpdateField}
+            />
 
             {visibleNodeSchema.map((field) => {
               const selectOptions = field.input === 'select'
@@ -863,31 +919,33 @@ export function NodeInspectorPanel({
                 />
                 {field.key === 'executionMode' && showDedicatedTriggerGuard && (
                   <>
-                    <PriceToBeatGuardSection
-                      checked={priceToBeatGuardChecked}
-                      retryChecked={priceToBeatRetryChecked}
-                      mode={priceToBeatGuardMode}
-                      unit={priceToBeatGuardUnit}
-                      currentSource={priceToBeatCurrentPriceSource}
-                      currentSourceVisible={priceToBeatCurrentSourceVisible}
-                      fields={form.fields}
-                      stopLossBumpUi={priceToBeatStopLossBumpUi}
-                      stopLossBumpLossRuleRows={placeOrderPtbStopLossBumpLossRuleRows}
-                      ivTimeRuleRows={placeOrderPtbIvTimeRuleRows}
-                      maxPriceRelaxMinUnit={priceToBeatMaxPriceRelaxMinUnit}
-                      maxPriceRelaxStepMode={priceToBeatMaxPriceRelaxStepMode}
-                      maxPriceRelaxStepUnit={priceToBeatMaxPriceRelaxStepUnit}
-                      onUpdateField={actions.onUpdateField}
-                      onUpdateStopLossBumpLossRuleRows={updatePtbStopLossBumpLossRuleRows}
-                      onUpdateIvTimeRuleRows={updatePtbIvTimeRuleRows}
-                    />
+                    {!placeOrderPositiveGridEnabled && (
+                      <PriceToBeatGuardSection
+                        checked={priceToBeatGuardChecked}
+                        retryChecked={priceToBeatRetryChecked}
+                        mode={priceToBeatGuardMode}
+                        unit={priceToBeatGuardUnit}
+                        currentSource={priceToBeatCurrentPriceSource}
+                        currentSourceVisible={priceToBeatCurrentSourceVisible}
+                        fields={form.fields}
+                        stopLossBumpUi={priceToBeatStopLossBumpUi}
+                        stopLossBumpLossRuleRows={placeOrderPtbStopLossBumpLossRuleRows}
+                        ivTimeRuleRows={placeOrderPtbIvTimeRuleRows}
+                        maxPriceRelaxMinUnit={priceToBeatMaxPriceRelaxMinUnit}
+                        maxPriceRelaxStepMode={priceToBeatMaxPriceRelaxStepMode}
+                        maxPriceRelaxStepUnit={priceToBeatMaxPriceRelaxStepUnit}
+                        onUpdateField={actions.onUpdateField}
+                        onUpdateStopLossBumpLossRuleRows={updatePtbStopLossBumpLossRuleRows}
+                        onUpdateIvTimeRuleRows={updatePtbIvTimeRuleRows}
+                      />
+                    )}
                     {showPtbStopLossSection && (
                       <PtbStopLossSection
                         enabled={ptbStopLossChecked}
                         unit={ptbStopLossGapUnit}
                         timeDecayMode={ptbStopLossTimeDecayMode}
                         currentSourceOverride={form.fields.ptbStopLossCurrentPriceSource ?? ''}
-                        inheritedCurrentSource={priceToBeatCurrentPriceSource}
+                        inheritedCurrentSource={ptbStopLossInheritedCurrentSource}
                         rows={placeOrderPtbStopLossRuleRows}
                         onUpdateField={actions.onUpdateField}
                         onUpdateRows={updatePtbStopLossRuleRows}
@@ -1219,6 +1277,11 @@ export function NodeInspectorPanel({
             {nodeTypeDraft === 'trigger.market_price' && triggerBindingMode === 'dca_live_only' && (
               <div className="rounded-lg border border-emerald-200/80 bg-emerald-50/80 p-3 text-[10px] leading-relaxed text-emerald-700">
                 Bu modda trigger outcome secmez; marketi DCA action node’una baglar. Ozel aralik aktifse DCA sadece o pencere icinde emir gonderir.
+              </div>
+            )}
+            {nodeTypeDraft === 'trigger.market_price' && triggerBindingMode === REVENGE_FLIP_BINDING_MODE && (
+              <div className="rounded-lg border border-rose-200/80 bg-rose-50/80 p-3 text-[10px] leading-relaxed text-rose-700">
+                Bu modda trigger outcome secmez; marketi RevengeFlip action node’una baglar. Entry/flip secimi ve PTB guard action node’unda uygulanir.
               </div>
             )}
 

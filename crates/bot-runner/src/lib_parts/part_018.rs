@@ -15,6 +15,8 @@ async fn execute_action_place_order(
     let internal_mode = step_input_string(step, &["internalMode", "internal_mode"])
         .map(|value| value.trim().to_ascii_lowercase());
     let is_internal_time_exit = internal_mode.as_deref() == Some("time_exit");
+    let is_positive_grid_sell = internal_mode.as_deref() == Some("positive_quantity_flip_grid_sell");
+    let is_revenge_flip_stop_loss_sell = action_place_order_is_revenge_flip_stop_loss_sell(node, internal_mode.as_deref());
     let is_window_end_auto_sell = step
         .input_json
         .as_ref()
@@ -24,7 +26,7 @@ async fn execute_action_place_order(
     let effective_internal_mode = internal_mode
         .clone()
         .or_else(|| is_window_end_auto_sell.then_some("window_end_auto_sell".to_string()));
-    let is_special_internal_sell = is_internal_time_exit || is_window_end_auto_sell;
+    let is_special_internal_sell = is_internal_time_exit || is_window_end_auto_sell || is_positive_grid_sell;
     let side = if is_special_internal_sell {
         "sell".to_string()
     } else {
@@ -263,9 +265,7 @@ async fn execute_action_place_order(
         return Ok(blocked_execution);
     }
     }
-    let mut source_trade_id = resolve_flow_source_trade_id(node, context).or_else(|| {
-        step_input_i64(step, &["sourceTradeId", "source_trade_id"]).filter(|value| *value > 0)
-    });
+    let mut source_trade_id = resolve_action_place_order_source_trade_id(node, context, step, &side);
     if let Some(resolved_source_trade_id) = source_trade_id {
         set_flow_context(context, "sourceTradeId", json!(resolved_source_trade_id));
     }
@@ -430,13 +430,11 @@ async fn execute_action_place_order(
             });
         }
     }
-    let window_end_parent_builder_order_id = if is_window_end_auto_sell {
+    let window_end_parent_builder_order_id = if is_window_end_auto_sell || is_positive_grid_sell {
         Some(
             step_input_i64(step, &["parentBuilderOrderId", "parent_builder_order_id"])
                 .filter(|value| *value > 0)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("windowEndAutoSell requires parentBuilderOrderId")
-                })?,
+                .ok_or_else(|| anyhow::anyhow!("internal sell requires parentBuilderOrderId"))?,
         )
     } else {
         None
@@ -680,6 +678,7 @@ async fn execute_action_place_order(
     let max_price = live_gap_collector_effective_max_price(
         reentry_guard_resolution.effective_max_price,
         live_gap_collector_config.as_ref(),
+        Some(context),
     );
     let guard_trigger_price = reentry_guard_resolution.effective_guard_trigger_price;
     let execution_floor_guard_enabled =
@@ -754,7 +753,14 @@ async fn execute_action_place_order(
     let ptb_stop_loss_time_decay_mode = exit_config.ptb_stop_loss_time_decay_mode.as_deref();
     let ptb_current_price_source = exit_config.ptb_current_price_source.as_deref();
     let sizing = if side == "sell" {
-        if let Some(parent_builder_order_id) = window_end_parent_builder_order_id {
+        if is_revenge_flip_stop_loss_sell {
+            resolve_action_place_order_revenge_flip_stop_loss_sell_sizing(
+                node,
+                step,
+                trigger_size_for_first_fire,
+                configured_target_qty,
+            )?
+        } else if let Some(parent_builder_order_id) = window_end_parent_builder_order_id {
             let Some(sizing) = resolve_action_place_order_window_end_auto_sell_sizing(
                 repo,
                 node,
@@ -805,7 +811,9 @@ async fn execute_action_place_order(
                 trigger_size_for_first_fire,
                 configured_size_usdc,
                 configured_size_pct,
+                configured_target_qty,
                 use_pct_size,
+                use_share_size,
             )
             .await?
         }
@@ -823,7 +831,7 @@ async fn execute_action_place_order(
         )
         .await?
     };
-    if let Some(blocked_execution) = maybe_block_action_place_order_live_gap_collector(repo, client, run, node, context, &market_slug, &token_id, &outcome_label, &side, &execution_mode, &sizing, live_gap_collector_config.as_ref()).await? {
+    if let Some(blocked_execution) = maybe_block_action_place_order_live_gap_collector(repo, client, run, node, context, &market_slug, &token_id, &outcome_label, &side, &execution_mode, &sizing, step, live_gap_collector_config.as_ref()).await? {
         return Ok(blocked_execution);
     }
     let persisted_trigger_price = if side == "buy"
@@ -982,6 +990,7 @@ async fn execute_action_place_order(
             runtime_snapshot.as_ref(),
             fresh_submit_lease_until,
         );
+        let config_version = get_active_config_version(repo).await;
         attach_action_place_order_node_snapshot(
             repo,
             existing_order.id,
@@ -992,6 +1001,7 @@ async fn execute_action_place_order(
             flow_rearmed_payload
                 .as_object_mut()
                 .expect("flow_rearmed payload"),
+            config_version,
         )
         .await?;
         repo.append_trade_builder_order_event(
@@ -1074,10 +1084,9 @@ async fn execute_action_place_order(
         );
     }
 
-    let parent_builder_order_id = if is_internal_time_exit || is_window_end_auto_sell {
+    let parent_builder_order_id = if is_internal_time_exit || is_window_end_auto_sell || is_positive_grid_sell || is_revenge_flip_stop_loss_sell {
         window_end_parent_builder_order_id.or_else(|| {
-            step_input_i64(step, &["parentBuilderOrderId", "parent_builder_order_id"])
-                .filter(|value| *value > 0)
+            resolve_action_place_order_revenge_flip_parent_builder_order_id(node, step).or_else(|| step_input_i64(step, &["parentBuilderOrderId", "parent_builder_order_id"]).filter(|value| *value > 0))
         })
     } else {
         None
@@ -1149,11 +1158,14 @@ async fn execute_action_place_order(
             None,
         )
         .await?;
+    maybe_mark_action_place_order_revenge_flip_stop_loss(repo, builder_order_id, is_revenge_flip_stop_loss_sell, parent_builder_order_id).await?;
+    let mut runtime_snapshot_for_persist = runtime_snapshot_json.clone().unwrap_or_else(|| json!({}));
+    augment_runtime_snapshot_with_revenge_flip_intent(&mut runtime_snapshot_for_persist, node);
     persist_trade_builder_runtime_snapshot_state(
         repo,
         builder_order_id,
         prefetched_fee_rate_bps,
-        runtime_snapshot_json.as_ref(),
+        Some(&runtime_snapshot_for_persist),
         fresh_submit_lease_until,
     )
     .await?;
@@ -1252,15 +1264,9 @@ async fn execute_action_place_order(
         "time_exit_rules".to_string(),
         serde_json::to_value(&time_exit_rules)?,
     );
-    flow_created_payload.insert(
-        "sl_trigger_price_mode".to_string(),
-        json!(sl_trigger_price_mode),
-    );
+    flow_created_payload.insert("sl_trigger_price_mode".to_string(), json!(sl_trigger_price_mode));
     flow_created_payload.insert("reenter_on_sl_hit".to_string(), json!(reenter_on_sl_hit));
-    flow_created_payload.insert(
-        "reentry_max_attempts".to_string(),
-        json!(reentry_max_attempts),
-    );
+    flow_created_payload.insert("reentry_max_attempts".to_string(), json!(reentry_max_attempts));
     flow_created_payload.insert(
         "reentry_trigger_node_key".to_string(),
         json!(reentry_trigger_node_key.as_deref()),
@@ -1303,6 +1309,16 @@ async fn execute_action_place_order(
         runtime_snapshot.as_ref(),
         fresh_submit_lease_until,
     );
+    if runtime_snapshot_for_persist.get(REVENGE_FLIP_RUNTIME_INTENT_KEY).is_some() {
+        flow_created_payload.insert(
+            REVENGE_FLIP_RUNTIME_INTENT_KEY.to_string(),
+            runtime_snapshot_for_persist
+                .get(REVENGE_FLIP_RUNTIME_INTENT_KEY)
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+    }
+    let config_version = get_active_config_version(repo).await;
     attach_action_place_order_node_snapshot(
         repo,
         builder_order_id,
@@ -1311,6 +1327,7 @@ async fn execute_action_place_order(
         node,
         graph,
         &mut flow_created_payload,
+        config_version,
     )
     .await?;
     repo.append_trade_builder_order_event(
@@ -1404,14 +1421,8 @@ async fn execute_action_place_order(
     output.insert("tp_price".to_string(), json!(tp_price));
     output.insert("sl_enabled".to_string(), json!(sl_enabled));
     output.insert("sl_price".to_string(), json!(sl_price));
-    output.insert(
-        "internal_mode".to_string(),
-        json!(effective_internal_mode.clone()),
-    );
-    output.insert(
-        "parent_builder_order_id".to_string(),
-        json!(parent_builder_order_id),
-    );
+    output.insert("internal_mode".to_string(), json!(effective_internal_mode.clone()));
+    output.insert("parent_builder_order_id".to_string(), json!(parent_builder_order_id));
     output.insert("tp_rules".to_string(), serde_json::to_value(&tp_rules)?);
     output.insert("sl_rules".to_string(), serde_json::to_value(&sl_rules)?);
     output.insert(

@@ -126,16 +126,39 @@ fn normalize_child_ptb_stop_loss_current_price_source(config: &mut serde_json::M
         return;
     }
 
-    let valid_source = |key: &str| {
+    let valid_stop_loss_source = |key: &str| {
         config
             .get(key)
             .and_then(Value::as_str)
             .map(str::trim)
             .map(str::to_ascii_lowercase)
-            .filter(|value| matches!(value.as_str(), "chainlink" | "binance" | "coinbase"))
+            .filter(|value| {
+                matches!(
+                    value.as_str(),
+                    "chainlink"
+                        | "binance"
+                        | "coinbase"
+                        | "hyperliquid"
+                        | "binance_hyperliquid"
+                        | "cex_consensus"
+                )
+            })
     };
-    let source = valid_source("ptbStopLossCurrentPriceSource")
-        .or_else(|| valid_source("priceToBeatCurrentPriceSource"))
+    let valid_entry_source = |key: &str| {
+        config
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .filter(|value| {
+                matches!(
+                    value.as_str(),
+                    "chainlink" | "binance" | "coinbase" | "hyperliquid"
+                )
+            })
+    };
+    let source = valid_stop_loss_source("ptbStopLossCurrentPriceSource")
+        .or_else(|| valid_entry_source("priceToBeatCurrentPriceSource"))
         .unwrap_or_else(|| "chainlink".to_string());
     config.insert("ptbStopLossCurrentPriceSource".to_string(), json!(source));
 }

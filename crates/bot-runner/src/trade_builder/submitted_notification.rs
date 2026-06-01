@@ -117,6 +117,47 @@ fn trade_builder_notify_fmt_bool(value: Option<bool>) -> String {
         .unwrap_or_else(|| "N/A".to_string())
 }
 
+fn trade_builder_notify_fmt_signed_usd(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map(|value| format!("{value:+.1} USD"))
+        .unwrap_or_else(|| "not_available".to_string())
+}
+
+fn trade_builder_notify_fmt_seconds(value: Option<i64>) -> String {
+    value
+        .map(|value| format!("{value}s"))
+        .unwrap_or_else(|| "not_available".to_string())
+}
+
+fn trade_builder_notify_upper_text(value: Option<&str>) -> String {
+    value
+        .map(|value| value.to_ascii_uppercase())
+        .unwrap_or_else(|| "N/A".to_string())
+}
+
+fn trade_builder_live_gap_metadata_mode(metadata: Option<&serde_json::Value>) -> bool {
+    metadata
+        .and_then(|metadata| metadata.get("mode"))
+        .and_then(serde_json::Value::as_str)
+        == Some(ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1)
+}
+
+fn trade_builder_is_primary_buy_entry(order: &TradeBuilderOrder) -> bool {
+    order.parent_order_id.is_none() && order.side == "buy"
+}
+
+fn trade_builder_should_use_live_gap_submitted_template(
+    order: &TradeBuilderOrder,
+    live_gap_metadata: Option<&serde_json::Value>,
+) -> bool {
+    trade_builder_is_primary_buy_entry(order) && trade_builder_live_gap_metadata_mode(live_gap_metadata)
+}
+
+fn trade_builder_should_use_exit_child_submitted_template(order: &TradeBuilderOrder) -> bool {
+    order.parent_order_id.is_some() && order.side == "sell"
+}
+
 fn trade_builder_submitted_target_qty(
     order: &TradeBuilderOrder,
     submitted_payload: &serde_json::Value,
@@ -318,11 +359,191 @@ fn trade_builder_append_submitted_telemetry(
     );
 }
 
+fn trade_builder_submitted_live_gap_no_reversal_block(
+    live_gap_metadata: &serde_json::Value,
+) -> String {
+    let Some(guard) = live_gap_metadata.get("no_reversal_entry_guard") else {
+        return "No-Reversal:\nnot_available".to_string();
+    };
+    let profile = trade_builder_notify_text(guard, "profile_source").unwrap_or("not_available");
+    let profile_status =
+        trade_builder_notify_text(guard, "profile_lookup_status").unwrap_or(profile);
+    let prewarmer_status = trade_builder_notify_text(guard, "prewarmer_status")
+        .map(|status| format!("\nPrewarmer Status: {status}"))
+        .unwrap_or_default();
+    let prewarm_detail = {
+        let priority = trade_builder_notify_text(guard, "prewarm_priority");
+        let slot_status = trade_builder_notify_text(guard, "prewarm_slot_status");
+        let age_ms = guard.get("prewarm_age_ms").and_then(value_as_i64);
+        if priority.is_some() || slot_status.is_some() || age_ms.is_some() {
+            format!(
+                "\nPrewarm Detail: priority={}, slot={}, age={}",
+                priority.unwrap_or("not_available"),
+                slot_status.unwrap_or("not_available"),
+                age_ms
+                    .map(|value| format!("{value}ms"))
+                    .unwrap_or_else(|| "not_available".to_string())
+            )
+        } else {
+            String::new()
+        }
+    };
+    let profile_lookup_fallback = trade_builder_notify_text(guard, "profile_lookup_fallback_level")
+        .or_else(|| trade_builder_notify_text(guard, "fallback_level"))
+        .unwrap_or("not_available");
+    let fallback = trade_builder_notify_text(guard, "local_path_fallback_source")
+        .or_else(|| trade_builder_notify_text(guard, "runtime_fallback_source"))
+        .or_else(|| trade_builder_notify_text(guard, "fallback_level"))
+        .unwrap_or("not_available");
+    let protection = trade_builder_notify_text(guard, "protection").unwrap_or("not_available");
+    let reason = trade_builder_notify_text(guard, "reason_code").unwrap_or("not_available");
+    let lookup_key = live_gap_guard_profile_lookup_key_line(guard)
+        .map(|line| format!("\n{line}"))
+        .unwrap_or_default();
+    format!(
+        "No-Reversal:\nProfile: {profile}\nProfile Status: {profile_status}{prewarmer_status}{prewarm_detail}\nProfile Lookup Fallback: {profile_lookup_fallback}\nFallback: {fallback}\nProtection: {protection}\nFloor: {}\nReason: {reason}{lookup_key}",
+        trade_builder_notify_fmt_signed_usd(trade_builder_notify_f64(guard, "ptb_floor_usd")),
+    )
+}
+
+fn build_trade_builder_live_gap_submitted_notification_message(
+    order: &TradeBuilderOrder,
+    submitted_payload: &serde_json::Value,
+    live_gap_metadata: &serde_json::Value,
+) -> String {
+    let target_qty = trade_builder_submitted_target_qty(order, submitted_payload);
+    let estimated_vwap = trade_builder_submitted_estimated_avg_fill(submitted_payload);
+    let best_ask = trade_builder_submitted_best_ask(submitted_payload)
+        .or_else(|| trade_builder_notify_f64(live_gap_metadata, "best_ask"));
+    let effective_fill = trade_builder_notify_f64(live_gap_metadata, "effective_fill_price")
+        .or_else(|| trade_builder_submitted_cost_per_share(submitted_payload))
+        .or(estimated_vwap);
+    let estimated_notional =
+        trade_builder_notify_f64(submitted_payload, "submitted_estimated_notional")
+            .or_else(|| estimated_vwap.zip(target_qty).map(|(price, qty)| price * qty));
+    let remaining_sec = live_gap_metadata
+        .get("remaining_sec")
+        .and_then(value_as_i64)
+        .or_else(|| {
+            live_gap_metadata
+                .get("candidate_remaining_sec")
+                .and_then(value_as_i64)
+        });
+
+    format!(
+        "Emir Gonderildi - Live Gap Collector\nMarket: {}\nOutcome: {}\nSide: {}\nOrder Status: SUBMITTED\nOrder Type: {}\n\nLive Gap\nCurrent Gap: {}\nRequired Gap: {}\nRegime: {}\nRemaining: {}\n\n{}\n\nPricing\nBest Ask: {}\nEstimated VWAP: {}\nEffective Fill: {}\nSize Mode: {}\nTarget Qty: {}\nEstimated Notional: {}\nCLOB: SUBMITTED",
+        order.market_slug,
+        order.outcome_label,
+        order.side,
+        trade_builder_notify_upper_text(trade_builder_notify_text(submitted_payload, "order_type")),
+        trade_builder_notify_fmt_signed_usd(trade_builder_notify_f64(live_gap_metadata, "live_gap_usd")),
+        trade_builder_notify_fmt_signed_usd(trade_builder_notify_f64(live_gap_metadata, "required_gap_usd")),
+        trade_builder_notify_text(live_gap_metadata, "regime").unwrap_or("not_available"),
+        trade_builder_notify_fmt_seconds(remaining_sec),
+        trade_builder_submitted_live_gap_no_reversal_block(live_gap_metadata),
+        trade_builder_notify_fmt_price(best_ask),
+        trade_builder_notify_fmt_price(estimated_vwap),
+        trade_builder_notify_fmt_price(effective_fill),
+        trade_builder_notify_text(submitted_payload, "size_basis").unwrap_or("N/A"),
+        trade_builder_notify_fmt_qty(target_qty),
+        trade_builder_notify_fmt_usdc(estimated_notional),
+    )
+}
+
+fn trade_builder_exit_child_label(order: &TradeBuilderOrder) -> &'static str {
+    match order.trigger_condition.as_deref() {
+        Some("cross_above") => "TP Child Exit",
+        Some("cross_below") => "SL Child Exit",
+        _ => "Exit Child",
+    }
+}
+
+fn build_trade_builder_exit_child_submitted_notification_message(
+    order: &TradeBuilderOrder,
+    submitted_payload: &serde_json::Value,
+) -> String {
+    let target_qty = trade_builder_submitted_target_qty(order, submitted_payload);
+    let submit_price = trade_builder_submitted_estimated_avg_fill(submitted_payload)
+        .or_else(|| trade_builder_notify_f64(submitted_payload, "execution_price"));
+    let estimated_proceeds = submit_price.zip(target_qty).map(|(price, qty)| price * qty);
+    format!(
+        "Emir Gonderildi - {}\nMarket: {}\nOutcome: {}\nSide: {}\nOrder Status: SUBMITTED\nOrder Type: {}\n\nExit Submit\nTarget Qty: {}\nSubmit Price: {}\nEstimated Proceeds: {}\nRemaining Qty Before Submit: {}\nCLOB: SUBMITTED",
+        trade_builder_exit_child_label(order),
+        order.market_slug,
+        order.outcome_label,
+        order.side,
+        trade_builder_notify_upper_text(trade_builder_notify_text(submitted_payload, "order_type")),
+        trade_builder_notify_fmt_qty(target_qty),
+        trade_builder_notify_fmt_price(submit_price),
+        trade_builder_notify_fmt_usdc(estimated_proceeds),
+        trade_builder_notify_fmt_qty(order.remaining_qty),
+    )
+}
+
+fn trade_builder_exit_fill_position_summary_block(
+    order: &TradeBuilderOrder,
+    summary: &TradeBuilderExitFillPositionSummary,
+) -> String {
+    let sold = match summary.target_qty {
+        Some(target_qty) => format!(
+            "{} / {}",
+            trade_builder_notify_fmt_qty(Some(summary.sold_this_fill_qty)),
+            trade_builder_notify_fmt_qty(Some(target_qty))
+        ),
+        None => trade_builder_notify_fmt_qty(Some(summary.sold_this_fill_qty)),
+    };
+    let source = if summary.remaining_qty_estimated {
+        format!("estimated: {}", summary.remaining_qty_source)
+    } else {
+        summary.remaining_qty_source.to_string()
+    };
+    let state = if summary.closed { "closed" } else { "open" };
+    format!(
+        "\n\nRemaining Position\nSold This Fill: {sold}\nRemaining Qty: {} {} ({source})\nRemaining Mark: {} @ {} ({})\nRemaining Max Loss: {}\nIf {} wins: {}\nState: {state}",
+        trade_builder_notify_fmt_qty(summary.remaining_qty),
+        order.outcome_label,
+        trade_builder_notify_fmt_usdc(summary.remaining_mark_value),
+        trade_builder_notify_fmt_price(summary.mark_price),
+        summary.mark_price_source,
+        trade_builder_notify_fmt_usdc(summary.remaining_max_loss),
+        order.outcome_label,
+        trade_builder_notify_fmt_usdc(summary.remaining_if_win),
+    )
+}
+
+#[cfg(test)]
 fn build_trade_builder_submitted_notification_message(
     order: &TradeBuilderOrder,
     submitted_payload: &serde_json::Value,
     flow_payload: Option<&serde_json::Value>,
 ) -> String {
+    build_trade_builder_submitted_notification_message_with_live_gap(
+        order,
+        submitted_payload,
+        flow_payload,
+        None,
+    )
+}
+
+fn build_trade_builder_submitted_notification_message_with_live_gap(
+    order: &TradeBuilderOrder,
+    submitted_payload: &serde_json::Value,
+    flow_payload: Option<&serde_json::Value>,
+    live_gap_metadata: Option<&serde_json::Value>,
+) -> String {
+    if trade_builder_should_use_exit_child_submitted_template(order) {
+        return build_trade_builder_exit_child_submitted_notification_message(order, submitted_payload);
+    }
+    if trade_builder_should_use_live_gap_submitted_template(order, live_gap_metadata) {
+        if let Some(metadata) = live_gap_metadata {
+            return build_trade_builder_live_gap_submitted_notification_message(
+                order,
+                submitted_payload,
+                metadata,
+            );
+        }
+    }
+
     let iv = trade_builder_notify_iv(flow_payload);
     let target_qty = trade_builder_submitted_target_qty(order, submitted_payload);
     let expected_vwap = trade_builder_submitted_estimated_avg_fill(submitted_payload);
@@ -453,6 +674,12 @@ async fn maybe_send_trade_builder_submitted_notification(
     if !order.notify_on_order_submitted {
         return Ok(false);
     }
+    let live_gap_metadata = if trade_builder_is_primary_buy_entry(order) {
+        repo.load_trade_builder_order_live_gap_metadata(order.id)
+            .await?
+    } else {
+        None
+    };
     let idempotency_key =
         trade_builder_submitted_notification_idempotency_key(order, submitted_payload);
     let events = repo
@@ -469,8 +696,12 @@ async fn maybe_send_trade_builder_submitted_notification(
         return Ok(false);
     }
 
-    let message =
-        build_trade_builder_submitted_notification_message(order, submitted_payload, flow_payload);
+    let message = build_trade_builder_submitted_notification_message_with_live_gap(
+        order,
+        submitted_payload,
+        flow_payload,
+        live_gap_metadata.as_ref(),
+    );
     Ok(send_trade_builder_notification_with_payload(
         repo,
         order,
@@ -558,6 +789,7 @@ fn build_trade_builder_fill_analysis_block(
     analysis: &TradeBuilderFillExecutionAnalysis,
     flow_payload: Option<&serde_json::Value>,
     submitted_payload: Option<&serde_json::Value>,
+    exit_position_summary: Option<&TradeBuilderExitFillPositionSummary>,
 ) -> String {
     let iv = trade_builder_notify_iv(flow_payload);
     let target_qty = submitted_payload
@@ -577,8 +809,20 @@ fn build_trade_builder_fill_analysis_block(
     let if_win = analysis.actual_filled_qty - total_cost;
     let if_loss = -total_cost;
 
+    let position_block = exit_position_summary
+        .map(|summary| trade_builder_exit_fill_position_summary_block(order, summary))
+        .unwrap_or_else(|| {
+            format!(
+                "\n\nPosition Risk\nIf {} wins: {}\nIf {} loses: {}",
+                order.outcome_label,
+                trade_builder_notify_fmt_usdc(Some(if_win)),
+                order.outcome_label,
+                trade_builder_notify_fmt_usdc(Some(if_loss)),
+            )
+        });
+
     format!(
-        "\n\nFill Analysis\nTarget Qty: {}\nFilled Qty: {}\nFill Ratio: {}\nPartial Fill: {}\nActual Fill Price: {}\nActual Notional: {}\nActual Fill Source: {}\n\nComparison\nExpected VWAP: {}\nBest Ask at Submit: {}\nSlippage vs VWAP: {}\nSlippage vs Best Ask: {}\n\nActual Effective Cost\n{} = fill {} + fee {} + buffer {}\n\nPosition Risk\nIf {} wins: {}\nIf {} loses: {}",
+        "\n\nFill Analysis\nTarget Qty: {}\nFilled Qty: {}\nFill Ratio: {}\nPartial Fill: {}\nActual Fill Price: {}\nActual Notional: {}\nActual Fill Source: {}\n\nComparison\nExpected VWAP: {}\nBest Ask at Submit: {}\nSlippage vs VWAP: {}\nSlippage vs Best Ask: {}\n\nActual Effective Cost\n{} = fill {} + fee {} + buffer {}{}",
         trade_builder_notify_fmt_qty(Some(target_qty)),
         trade_builder_notify_fmt_qty(Some(analysis.actual_filled_qty)),
         fill_ratio
@@ -602,9 +846,6 @@ fn build_trade_builder_fill_analysis_block(
         trade_builder_notify_fmt_price(Some(analysis.actual_fill_price)),
         trade_builder_notify_fmt_price(Some(fee_component)),
         trade_builder_notify_fmt_price(Some(buffer_component)),
-        order.outcome_label,
-        trade_builder_notify_fmt_usdc(Some(if_win)),
-        order.outcome_label,
-        trade_builder_notify_fmt_usdc(Some(if_loss)),
+        position_block,
     )
 }

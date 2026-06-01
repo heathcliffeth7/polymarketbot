@@ -1,7 +1,7 @@
 use crate::claim_relayer::{
-    ClaimFundsActivationAdapterRequest, ClaimFundsActivationAdapterSuccess, ClaimRelayerAdapter,
-    ClaimRelayerAdapterErrorBody, ClaimRelayerAdapterRequest, ClaimRelayerAdapterSuccess,
-    ClaimSubmitFailure, SubmittedRedeemTx,
+    ClaimFundsActivationAdapterRequest, ClaimFundsActivationAdapterSuccess,
+    ClaimMergeRelayerAdapterRequest, ClaimRelayerAdapter, ClaimRelayerAdapterErrorBody,
+    ClaimRelayerAdapterRequest, ClaimRelayerAdapterSuccess, ClaimSubmitFailure, SubmittedRedeemTx,
 };
 use crate::config::{AppConfig, ClaimExecutionMode};
 use crate::db::{AutoClaimJob, PostgresRepository};
@@ -40,6 +40,7 @@ abigen!(
     ConditionalTokens,
     r#"[
         function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)
+        function mergePositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount)
     ]"#,
 );
 
@@ -91,6 +92,346 @@ pub struct AutoClaimService {
     safe_contract: Option<GnosisSafe<ClaimSigner>>,
     collateral_token: Address,
     needs_processing_recovery: bool,
+}
+
+pub struct CtfMergeExecutor {
+    user_id: i64,
+    signer_address: String,
+    safe_address: Option<String>,
+    execution_mode: ClaimExecutionMode,
+    relayer_adapter: Option<ClaimRelayerAdapter>,
+    http: Client,
+    middleware: Arc<ClaimSigner>,
+    ctf_contract: ConditionalTokens<ClaimSigner>,
+    safe_contract: Option<GnosisSafe<ClaimSigner>>,
+    collateral_token: Address,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubmittedCtfMergeTx {
+    pub tx_hash: String,
+    pub returned_usdc: f64,
+    pub amount_raw: String,
+    pub submission_mode: &'static str,
+}
+
+impl CtfMergeExecutor {
+    pub fn from_app_config(user_id: i64, cfg: &AppConfig) -> Result<Self> {
+        let user_address_raw = cfg.claim.resolve_user_address()?;
+        let user_address = normalize_address(&user_address_raw)?;
+
+        let private_key = cfg.claim.resolve_private_key()?;
+        let rpc_url = cfg.claim.resolve_rpc_url()?;
+
+        let provider = Provider::<Http>::try_from(rpc_url.trim())
+            .with_context(|| format!("invalid claim rpc url: {rpc_url}"))?;
+        let wallet = private_key
+            .parse::<LocalWallet>()
+            .context("failed to parse merge private key")?
+            .with_chain_id(cfg.claim.chain_id);
+        let wallet_address = wallet.address();
+
+        let signer_address = format!("{:#x}", wallet_address);
+        anyhow::ensure!(
+            signer_address == user_address,
+            "merge signer address ({signer_address}) does not match configured claim user address ({user_address})"
+        );
+
+        let nonce_manager = NonceManagerMiddleware::new(provider, wallet_address);
+        let middleware = Arc::new(SignerMiddleware::new(nonce_manager, wallet));
+        let safe_address = cfg
+            .exchange
+            .resolve_gnosis_safe_address()
+            .map(|raw| parse_address(&raw, "exchange.gnosis_safe_address"))
+            .transpose()?;
+        let execution_mode = cfg.claim.execution_mode()?;
+        let relayer_adapter = if matches!(
+            execution_mode,
+            ClaimExecutionMode::BuilderRelayer | ClaimExecutionMode::RelayerApiKey
+        ) {
+            anyhow::ensure!(
+                safe_address.is_some(),
+                "exchange.gnosis_safe_address is required when claim.execution_mode=builder_relayer or relayer_api_key"
+            );
+            Some(ClaimRelayerAdapter::from_env()?)
+        } else {
+            None
+        };
+        let ctf_contract = ConditionalTokens::new(
+            parse_address(
+                &cfg.claim.ctf_contract_address,
+                "claim.ctf_contract_address",
+            )?,
+            middleware.clone(),
+        );
+        let safe_contract =
+            safe_address.map(|address| GnosisSafe::new(address, middleware.clone()));
+
+        Ok(Self {
+            user_id,
+            signer_address: user_address,
+            safe_address: safe_address.map(|address| format!("{:#x}", address)),
+            execution_mode,
+            relayer_adapter,
+            http: Client::new(),
+            middleware: middleware.clone(),
+            ctf_contract,
+            safe_contract,
+            collateral_token: parse_address(
+                &cfg.claim.collateral_token_address,
+                "claim.collateral_token_address",
+            )?,
+        })
+    }
+
+    pub async fn submit_merge(
+        &self,
+        condition_id: &str,
+        amount_usdc: f64,
+    ) -> Result<SubmittedCtfMergeTx> {
+        self.submit_merge_tx(condition_id, amount_usdc)
+            .await
+            .map_err(|err| anyhow::anyhow!("{}", compact_submit_failure(&err)))
+    }
+
+    async fn submit_merge_tx(
+        &self,
+        condition_id: &str,
+        amount_usdc: f64,
+    ) -> std::result::Result<SubmittedCtfMergeTx, ClaimSubmitFailure> {
+        if matches!(
+            self.execution_mode,
+            ClaimExecutionMode::BuilderRelayer | ClaimExecutionMode::RelayerApiKey
+        ) {
+            return self
+                .submit_merge_tx_via_relayer(condition_id, amount_usdc)
+                .await;
+        }
+        if self.safe_address.is_some() {
+            return self
+                .submit_merge_tx_via_safe(condition_id, amount_usdc)
+                .await;
+        }
+        self.submit_merge_tx_direct(condition_id, amount_usdc).await
+    }
+
+    async fn submit_merge_tx_direct(
+        &self,
+        condition_id: &str,
+        amount_usdc: f64,
+    ) -> std::result::Result<SubmittedCtfMergeTx, ClaimSubmitFailure> {
+        let condition = parse_condition_id(condition_id).map_err(|err| {
+            ClaimSubmitFailure::non_retryable(format!(
+                "invalid merge condition id {condition_id}: {err:#}"
+            ))
+        })?;
+        let amount_raw = ctf_merge_amount_raw(amount_usdc)?;
+        let partition = ctf_merge_partition();
+        let gas_price = self.effective_gas_price().await.map_err(|err| {
+            ClaimSubmitFailure::retryable(format!(
+                "failed to fetch gas price for mergePositions {condition_id}: {err:#}"
+            ))
+        })?;
+
+        let call = self.ctf_contract.merge_positions(
+            self.collateral_token,
+            [0u8; 32],
+            condition.to_fixed_bytes(),
+            partition,
+            amount_raw,
+        );
+        let call = call.gas_price(gas_price);
+        let pending_tx = call.send().await.map_err(|err| {
+            ClaimSubmitFailure::retryable(format!(
+                "mergePositions send failed for {condition_id}: {err:#}"
+            ))
+        })?;
+
+        Ok(SubmittedCtfMergeTx {
+            tx_hash: format!("{:#x}", pending_tx.tx_hash()),
+            returned_usdc: ctf_merge_raw_to_usdc(amount_raw),
+            amount_raw: amount_raw.to_string(),
+            submission_mode: "direct",
+        })
+    }
+
+    async fn submit_merge_tx_via_safe(
+        &self,
+        condition_id: &str,
+        amount_usdc: f64,
+    ) -> std::result::Result<SubmittedCtfMergeTx, ClaimSubmitFailure> {
+        let safe_contract = self.safe_contract.as_ref().ok_or_else(|| {
+            ClaimSubmitFailure::non_retryable("safe contract not configured for pairlock merge")
+        })?;
+        let signer_address =
+            parse_address(&self.signer_address, "claim.user_address").map_err(|err| {
+                ClaimSubmitFailure::non_retryable(format!(
+                    "invalid claim.user_address for safe merge: {err:#}"
+                ))
+            })?;
+        let condition = parse_condition_id(condition_id).map_err(|err| {
+            ClaimSubmitFailure::non_retryable(format!(
+                "invalid merge condition id {condition_id}: {err:#}"
+            ))
+        })?;
+        let amount_raw = ctf_merge_amount_raw(amount_usdc)?;
+        let merge_call = self.ctf_contract.merge_positions(
+            self.collateral_token,
+            [0u8; 32],
+            condition.to_fixed_bytes(),
+            ctf_merge_partition(),
+            amount_raw,
+        );
+        let merge_calldata = merge_call.calldata().ok_or_else(|| {
+            ClaimSubmitFailure::non_retryable(format!(
+                "failed to build mergePositions calldata for {condition_id}"
+            ))
+        })?;
+        let signatures = build_safe_prevalidated_signature(signer_address);
+        let safe_call = safe_contract.exec_transaction(
+            self.ctf_contract.address(),
+            U256::zero(),
+            merge_calldata,
+            0u8,
+            U256::zero(),
+            U256::zero(),
+            U256::zero(),
+            Address::zero(),
+            Address::zero(),
+            signatures,
+        );
+        let simulation_ok = safe_call.clone().call().await.map_err(|err| {
+            ClaimSubmitFailure::retryable(format!(
+                "safe merge simulation failed for {condition_id}: {err:#}"
+            ))
+        })?;
+        if !simulation_ok {
+            return Err(ClaimSubmitFailure::retryable(format!(
+                "safe merge simulation returned false for {condition_id}"
+            )));
+        }
+        let gas_price = self.effective_gas_price().await.map_err(|err| {
+            ClaimSubmitFailure::retryable(format!(
+                "failed to fetch gas price for safe merge {condition_id}: {err:#}"
+            ))
+        })?;
+        let safe_call = safe_call.gas_price(gas_price);
+        let pending_tx = safe_call.send().await.map_err(|err| {
+            ClaimSubmitFailure::retryable(format!(
+                "safe merge send failed for {condition_id}: {err:#}"
+            ))
+        })?;
+
+        Ok(SubmittedCtfMergeTx {
+            tx_hash: format!("{:#x}", pending_tx.tx_hash()),
+            returned_usdc: ctf_merge_raw_to_usdc(amount_raw),
+            amount_raw: amount_raw.to_string(),
+            submission_mode: "safe",
+        })
+    }
+
+    async fn submit_merge_tx_via_relayer(
+        &self,
+        condition_id: &str,
+        amount_usdc: f64,
+    ) -> std::result::Result<SubmittedCtfMergeTx, ClaimSubmitFailure> {
+        let safe_address = self.safe_address.as_deref().ok_or_else(|| {
+            ClaimSubmitFailure::non_retryable(
+                "builder_relayer merge requires exchange.gnosis_safe_address",
+            )
+        })?;
+        let adapter = self.relayer_adapter.as_ref().ok_or_else(|| {
+            ClaimSubmitFailure::non_retryable(
+                "claim relayer adapter not configured for pairlock merge",
+            )
+        })?;
+        let amount_raw = ctf_merge_amount_raw(amount_usdc)?;
+        let request = ClaimMergeRelayerAdapterRequest {
+            user_id: self.user_id,
+            owner_address: safe_address.to_string(),
+            condition_id: normalize_condition_id(condition_id).map_err(|err| {
+                ClaimSubmitFailure::non_retryable(format!(
+                    "invalid merge condition id {condition_id}: {err:#}"
+                ))
+            })?,
+            collateral_token: format!("{:#x}", self.collateral_token),
+            partition: AUTO_CLAIM_INDEX_SETS.to_vec(),
+            amount_raw: amount_raw.to_string(),
+        };
+
+        let response = self
+            .http
+            .post(&adapter.merge_url)
+            .bearer_auth(&adapter.token)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                ClaimSubmitFailure::retryable(format!(
+                    "claim merge relayer adapter request failed for {condition_id}: {err:#}"
+                ))
+            })?;
+        let status = response.status();
+        let body = response.text().await.map_err(|err| {
+            ClaimSubmitFailure::retryable(format!(
+                "failed reading claim merge adapter response for {condition_id}: {err:#}"
+            ))
+        })?;
+
+        if !status.is_success() {
+            let parsed = serde_json::from_str::<ClaimRelayerAdapterErrorBody>(&body).ok();
+            let (retryable, code, message) =
+                claim_relayer_adapter_error_details(status, parsed.as_ref(), &body);
+            return Err(if retryable {
+                ClaimSubmitFailure::retryable(format!("{code}: {message}"))
+            } else {
+                ClaimSubmitFailure::non_retryable(format!("{code}: {message}"))
+            });
+        }
+
+        let payload = serde_json::from_str::<ClaimRelayerAdapterSuccess>(&body).map_err(|err| {
+            ClaimSubmitFailure::retryable(format!(
+                "failed to parse claim merge adapter success response for {condition_id}: {err:#}"
+            ))
+        })?;
+        let tx_hash = normalize_tx_hash(&payload.tx_hash).map_err(|err| {
+            ClaimSubmitFailure::retryable(format!(
+                "claim merge adapter returned invalid tx hash for {condition_id}: {err:#}"
+            ))
+        })?;
+
+        Ok(SubmittedCtfMergeTx {
+            tx_hash,
+            returned_usdc: ctf_merge_raw_to_usdc(amount_raw),
+            amount_raw: amount_raw.to_string(),
+            submission_mode: if matches!(self.execution_mode, ClaimExecutionMode::RelayerApiKey) {
+                "relayer_api_key"
+            } else {
+                "builder_relayer"
+            },
+        })
+    }
+
+    async fn effective_gas_price(&self) -> Result<U256> {
+        let gas_price = self
+            .middleware
+            .get_gas_price()
+            .await
+            .context("failed to fetch gas price for merge tx")?;
+        let base_fee = self
+            .middleware
+            .get_block(BlockNumber::Latest)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|block| block.base_fee_per_gas)
+            .unwrap_or(U256::zero());
+        let min_priority = U256::from(MIN_PRIORITY_FEE_GWEI) * U256::from(1_000_000_000u64);
+        let base_plus_priority = base_fee + min_priority;
+        Ok(apply_gas_price_floor_and_buffer(
+            gas_price.max(base_plus_priority),
+        ))
+    }
 }
 
 impl AutoClaimService {
@@ -923,6 +1264,33 @@ fn normalize_address(raw: &str) -> Result<String> {
 fn normalize_condition_id(raw: &str) -> Result<String> {
     let hash = parse_condition_id(raw)?;
     Ok(format!("{:#x}", hash))
+}
+
+fn ctf_merge_partition() -> Vec<U256> {
+    AUTO_CLAIM_INDEX_SETS
+        .iter()
+        .copied()
+        .map(U256::from)
+        .collect()
+}
+
+fn ctf_merge_amount_raw(amount_usdc: f64) -> std::result::Result<U256, ClaimSubmitFailure> {
+    if !amount_usdc.is_finite() || amount_usdc <= 0.0 {
+        return Err(ClaimSubmitFailure::non_retryable(
+            "merge amount must be a finite positive USDC value",
+        ));
+    }
+    let raw = (amount_usdc * 1_000_000.0).floor();
+    if !raw.is_finite() || raw < 1.0 || raw > u64::MAX as f64 {
+        return Err(ClaimSubmitFailure::non_retryable(
+            "merge amount is outside supported 6-decimal raw range",
+        ));
+    }
+    Ok(U256::from(raw as u64))
+}
+
+fn ctf_merge_raw_to_usdc(raw: U256) -> f64 {
+    raw.as_u128() as f64 / 1_000_000.0
 }
 
 fn parse_condition_id(raw: &str) -> Result<H256> {

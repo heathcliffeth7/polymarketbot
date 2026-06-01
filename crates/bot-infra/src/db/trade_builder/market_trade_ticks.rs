@@ -57,21 +57,29 @@ impl PostgresRepository {
         let start_10s = now - chrono::Duration::seconds(10);
         let start_30s = now - chrono::Duration::seconds(30);
         let start_60s = now - chrono::Duration::seconds(60);
+        let start_90s = now - chrono::Duration::seconds(90);
+        let start_120s = now - chrono::Duration::seconds(120);
         let row = sqlx::query(
             "SELECT \
                 COALESCE(SUM(notional_usdc) FILTER (WHERE event_ts >= $2), 0.0)::DOUBLE PRECISION AS volume_10s, \
                 COALESCE(SUM(notional_usdc) FILTER (WHERE event_ts >= $3), 0.0)::DOUBLE PRECISION AS volume_30s, \
                 COALESCE(SUM(notional_usdc) FILTER (WHERE event_ts >= $4), 0.0)::DOUBLE PRECISION AS volume_60s, \
+                COALESCE(SUM(notional_usdc) FILTER (WHERE event_ts >= $5), 0.0)::DOUBLE PRECISION AS volume_90s, \
+                COALESCE(SUM(notional_usdc) FILTER (WHERE event_ts >= $6), 0.0)::DOUBLE PRECISION AS volume_120s, \
                 COUNT(*) FILTER (WHERE event_ts >= $2)::BIGINT AS trade_count_10s, \
                 COUNT(*) FILTER (WHERE event_ts >= $3)::BIGINT AS trade_count_30s, \
-                COUNT(*) FILTER (WHERE event_ts >= $4)::BIGINT AS trade_count_60s \
+                COUNT(*) FILTER (WHERE event_ts >= $4)::BIGINT AS trade_count_60s, \
+                COUNT(*) FILTER (WHERE event_ts >= $5)::BIGINT AS trade_count_90s, \
+                COUNT(*) FILTER (WHERE event_ts >= $6)::BIGINT AS trade_count_120s \
              FROM market_trade_ticks \
-             WHERE market_slug = $1 AND event_ts >= $4 AND event_ts <= $5",
+             WHERE market_slug = $1 AND event_ts >= $6 AND event_ts <= $7",
         )
         .bind(market_slug)
         .bind(start_10s)
         .bind(start_30s)
         .bind(start_60s)
+        .bind(start_90s)
+        .bind(start_120s)
         .bind(now)
         .fetch_one(self.pool())
         .await?;
@@ -80,9 +88,13 @@ impl PostgresRepository {
             volume_10s: row.get::<f64, _>("volume_10s").max(0.0),
             volume_30s: row.get::<f64, _>("volume_30s").max(0.0),
             volume_60s: row.get::<f64, _>("volume_60s").max(0.0),
+            volume_90s: row.get::<f64, _>("volume_90s").max(0.0),
+            volume_120s: row.get::<f64, _>("volume_120s").max(0.0),
             trade_count_10s: row.get("trade_count_10s"),
             trade_count_30s: row.get("trade_count_30s"),
             trade_count_60s: row.get("trade_count_60s"),
+            trade_count_90s: row.get("trade_count_90s"),
+            trade_count_120s: row.get("trade_count_120s"),
         })
     }
 

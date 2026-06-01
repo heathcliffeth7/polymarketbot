@@ -43,7 +43,6 @@ async fn append_trade_builder_guard_diagnostics_event(
     );
     Ok(())
 }
-
 #[allow(clippy::too_many_arguments)]
 async fn submit_trade_builder_trigger_order(
     repo: &PostgresRepository,
@@ -497,6 +496,7 @@ async fn submit_trade_builder_trigger_order(
             "above_max_price",
         )
         .await?;
+        record_adaptive_low_gap_above_max_or_warn(repo, order, submit_started_at.timestamp_millis()).await;
         if retry_on_max_price_block {
             let notification_message = order.notify_on_max_price_blocked.then(|| {
                 build_max_price_waiting_notification_message(
@@ -853,6 +853,66 @@ async fn submit_trade_builder_trigger_order(
             .await
         }
     };
+    let min_notional_cap_usdc = order
+        .size_usdc
+        .max(submit_remaining_usdc.unwrap_or(0.0))
+        .max((submit_size * desired_price).max(0.0));
+    if let Some(top_up) = trade_builder_marketable_buy_min_notional_top_up(
+        &order.side,
+        order_type,
+        size_basis,
+        desired_price,
+        submit_size,
+        min_notional_cap_usdc,
+    ) {
+        if top_up.blocked_by_cap {
+            let reason = "marketable_buy_min_notional_exceeds_cap";
+            repo.set_trade_builder_order_status(order.id, "error", Some(reason))
+                .await?;
+            repo.append_trade_builder_order_event(
+                order.id,
+                reason,
+                &json!({
+                    "submit_kind": "submit",
+                    "status_before": &order.status,
+                    "current_price": current_price,
+                    "desired_price": desired_price,
+                    "order_type": order_type,
+                    "size_basis": size_basis,
+                    "original_qty": top_up.original_qty,
+                    "adjusted_qty": top_up.adjusted_qty,
+                    "original_notional_usdc": top_up.original_notional_usdc,
+                    "adjusted_notional_usdc": top_up.adjusted_notional_usdc,
+                    "min_notional_usdc": top_up.min_notional_usdc,
+                    "cap_usdc": top_up.cap_usdc,
+                    "cap_tolerance_usdc": top_up.cap_tolerance_usdc,
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
+        submit_size = top_up.adjusted_qty;
+        submit_remaining_qty = Some(top_up.adjusted_qty);
+        submit_remaining_usdc = Some(top_up.adjusted_notional_usdc);
+        deferred_submit_events.defer_order_event(
+            "marketable_buy_min_notional_top_up",
+            json!({
+                "submit_kind": "submit",
+                "status_before": &order.status,
+                "current_price": current_price,
+                "desired_price": desired_price,
+                "order_type": order_type,
+                "size_basis": size_basis,
+                "original_qty": top_up.original_qty,
+                "adjusted_qty": top_up.adjusted_qty,
+                "original_notional_usdc": top_up.original_notional_usdc,
+                "adjusted_notional_usdc": top_up.adjusted_notional_usdc,
+                "min_notional_usdc": top_up.min_notional_usdc,
+                "cap_usdc": top_up.cap_usdc,
+                "cap_tolerance_usdc": top_up.cap_tolerance_usdc,
+            }),
+        );
+    }
     if maybe_handle_trade_builder_share_submit_below_market_min(
         repo,
         order,

@@ -109,6 +109,96 @@ pub struct TradeBuilderAdverseMoveStats {
 }
 
 #[derive(Debug, Clone)]
+pub struct TradeBuilderAdverseMoveStatsBulkLookbackQuery {
+    pub fallback_level: String,
+    pub lookback_name: String,
+    pub hours: i64,
+    pub min_samples: i64,
+    pub min_markets: i64,
+    pub since: DateTime<Utc>,
+    pub until: DateTime<Utc>,
+    pub gap_min: Option<f64>,
+    pub gap_max: Option<f64>,
+    pub slope_bucket: Option<String>,
+    pub quantile: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderAdverseMoveStatsBulkFromFeaturesQuery {
+    pub asset: String,
+    pub direction: String,
+    pub current_market_slug: String,
+    pub remaining_min_sec: f64,
+    pub remaining_max_sec: f64,
+    pub price_min: f64,
+    pub price_max: f64,
+    pub lookbacks: Vec<TradeBuilderAdverseMoveStatsBulkLookbackQuery>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradeBuilderAdverseMoveStatsBulkRow {
+    pub fallback_level: String,
+    pub lookback_name: String,
+    pub hours: i64,
+    pub min_samples: i64,
+    pub min_markets: i64,
+    pub adverse_quantile: Option<f64>,
+    pub sample_count: i64,
+    pub market_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoReversalAdverseProfileKey {
+    pub target_market_slug: String,
+    pub target_window_start: DateTime<Utc>,
+    pub definition_id: i64,
+    pub node_key: String,
+    pub profile_config_hash: String,
+    pub asset: String,
+    pub direction: String,
+    pub remaining_bucket: String,
+    pub price_bucket: String,
+    pub gap_bucket: String,
+    pub slope_bucket: String,
+    pub quantile: f64,
+    pub high_late: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoReversalAdverseProfileInput {
+    pub key: NoReversalAdverseProfileKey,
+    pub status: String,
+    pub selected_adverse: Option<f64>,
+    pub raw_selected_adverse: Option<f64>,
+    pub fallback_level: Option<String>,
+    pub lookbacks_json: Value,
+    pub sample_count: i64,
+    pub market_count: i64,
+    pub profile_as_of: DateTime<Utc>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoReversalAdverseProfileRecord {
+    pub status: String,
+    pub selected_adverse: Option<f64>,
+    pub raw_selected_adverse: Option<f64>,
+    pub fallback_level: Option<String>,
+    pub lookbacks_json: Value,
+    pub sample_count: i64,
+    pub market_count: i64,
+    pub profile_as_of: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoReversalAdverseProfileDiagnostics {
+    pub prewarmer_status: String,
+    pub summary_json: Value,
+}
+
+#[derive(Debug, Clone)]
 pub struct TradeBuilderMarketTradeTickInput {
     pub market_slug: String,
     pub asset: String,
@@ -142,9 +232,13 @@ pub struct MarketTradeVolumeSummary {
     pub volume_10s: f64,
     pub volume_30s: f64,
     pub volume_60s: f64,
+    pub volume_90s: f64,
+    pub volume_120s: f64,
     pub trade_count_10s: i64,
     pub trade_count_30s: i64,
     pub trade_count_60s: i64,
+    pub trade_count_90s: i64,
+    pub trade_count_120s: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +309,7 @@ pub struct TradeBuilderOrderNodeSnapshotInput {
     pub node_type: String,
     pub node_config_hash: String,
     pub snapshot_json: Value,
+    pub config_version: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +323,7 @@ pub struct TradeBuilderOrderNodeSnapshotRecord {
     pub node_type: String,
     pub node_config_hash: String,
     pub snapshot_json: Value,
+    pub config_version: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -427,6 +523,168 @@ pub struct TradeBuilderParentPositionSeed {
     pub expected_visible_qty: Option<f64>,
     pub reference_price: Option<f64>,
     pub qty_source: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderPositiveQuantityFlipGridFillInput {
+    pub user_id: i64,
+    pub flow_definition_id: Option<i64>,
+    pub flow_run_id: Option<i64>,
+    pub root_flow_node_key: String,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub grid_side: String,
+    pub order_side: String,
+    pub builder_order_id: i64,
+    pub parent_builder_order_id: Option<i64>,
+    pub quantity: f64,
+    pub execution_price: f64,
+    pub notional_usdc: f64,
+    pub payload_json: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderPositiveQuantityFlipGridLot {
+    pub parent_builder_order_id: i64,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub grid_side: String,
+    pub intent: String,
+    pub quantity: f64,
+    pub execution_price: f64,
+    pub notional_usdc: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderPositiveQuantityFlipGridMergeLegInput {
+    pub parent_builder_order_id: i64,
+    pub grid_side: String,
+    pub quantity: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderPositiveQuantityFlipGridMergeInput {
+    pub user_id: i64,
+    pub flow_definition_id: Option<i64>,
+    pub flow_run_id: Option<i64>,
+    pub root_flow_node_key: String,
+    pub market_slug: String,
+    pub condition_id: String,
+    pub quantity: f64,
+    pub returned_usdc: f64,
+    pub tx_hash: String,
+    pub submission_mode: String,
+    pub payload_json: Value,
+    pub up_legs: Vec<TradeBuilderPositiveQuantityFlipGridMergeLegInput>,
+    pub down_legs: Vec<TradeBuilderPositiveQuantityFlipGridMergeLegInput>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TradeBuilderPositiveQuantityFlipGridState {
+    pub up_qty: f64,
+    pub down_qty: f64,
+    pub total_buy_cost: f64,
+    pub total_sell_revenue: f64,
+    pub total_merge_return: f64,
+    pub net_cost: f64,
+    pub buy_count: i64,
+    pub last_buy_grid_side: Option<String>,
+    pub last_balance_failure_order_id: Option<i64>,
+    pub last_balance_failure_grid_side: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderPositiveQuantityFlipGridActiveBuy {
+    pub order_id: i64,
+    pub status: String,
+    pub grid_side: String,
+    pub outcome_label: String,
+    pub size_usdc: f64,
+    pub target_qty: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderRevengeFlipFillInput {
+    pub user_id: i64,
+    pub flow_definition_id: i64,
+    pub flow_run_id: Option<i64>,
+    pub root_flow_node_key: String,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub revenge_side: String,
+    pub intent: String,
+    pub order_side: String,
+    pub builder_order_id: i64,
+    pub parent_builder_order_id: Option<i64>,
+    pub source_trade_id: Option<i64>,
+    pub quantity: f64,
+    pub execution_price: f64,
+    pub notional_usdc: f64,
+    pub stop_loss_enabled: Option<bool>,
+    pub stop_loss_pct: Option<f64>,
+    pub payload_json: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradeBuilderRevengeFlipState {
+    pub user_id: i64,
+    pub flow_definition_id: i64,
+    pub root_flow_node_key: String,
+    pub market_slug: String,
+    pub current_side: Option<String>,
+    pub next_entry_side: Option<String>,
+    pub position_qty: f64,
+    pub position_avg_cost: f64,
+    pub position_entry_price: f64,
+    pub position_stop_loss_enabled: bool,
+    pub position_stop_loss_pct: f64,
+    pub position_source_trade_id: Option<i64>,
+    pub position_builder_order_id: Option<i64>,
+    pub flip_count: i64,
+    pub total_loss_usdc: f64,
+    pub realized_pnl_usdc: f64,
+    pub total_buy_cost: f64,
+    pub total_sell_revenue: f64,
+    pub ptb_bump_count: i64,
+    pub ptb_bump_total_usdc: f64,
+    pub last_intent: Option<String>,
+    pub last_builder_order_id: Option<i64>,
+    pub last_action_json: Value,
+}
+
+impl Default for TradeBuilderRevengeFlipState {
+    fn default() -> Self {
+        Self {
+            user_id: 0,
+            flow_definition_id: 0,
+            root_flow_node_key: String::new(),
+            market_slug: String::new(),
+            current_side: None,
+            next_entry_side: None,
+            position_qty: 0.0,
+            position_avg_cost: 0.0,
+            position_entry_price: 0.0,
+            position_stop_loss_enabled: true,
+            position_stop_loss_pct: 0.20,
+            position_source_trade_id: None,
+            position_builder_order_id: None,
+            flip_count: 0,
+            total_loss_usdc: 0.0,
+            realized_pnl_usdc: 0.0,
+            total_buy_cost: 0.0,
+            total_sell_revenue: 0.0,
+            ptb_bump_count: 0,
+            ptb_bump_total_usdc: 0.0,
+            last_intent: None,
+            last_builder_order_id: None,
+            last_action_json: Value::Object(Default::default()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -934,4 +1192,24 @@ pub struct AutoClaimJob {
     pub last_seen_redeemable_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigChangeLogInput {
+    pub config_version: String,
+    pub changed_by: Option<String>,
+    pub change_reason: Option<String>,
+    pub changed_fields: Value,
+    pub full_config_snapshot: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigChangeLogRecord {
+    pub id: i64,
+    pub config_version: String,
+    pub changed_by: Option<String>,
+    pub change_reason: Option<String>,
+    pub changed_fields: Value,
+    pub full_config_snapshot: Value,
+    pub created_at: DateTime<Utc>,
 }

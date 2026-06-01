@@ -1,23 +1,28 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bot_core::{
-    can_transition, DefaultRiskPolicy, DualSideStrategy, ExecutionMode, LegSide, MarketCycleId,
+    DefaultRiskPolicy, DualSideStrategy, ExecutionMode, LegSide, MarketCycleId,
     PriceThresholdStrategy, RiskDecision, RiskInput, RiskLimits, RiskPolicy, Strategy,
-    SymmetricDualDcaStrategy, TradeState,
+    SymmetricDualDcaStrategy, TradeState, can_transition,
 };
 use bot_infra::claim::AutoClaimService;
 use bot_infra::config::{AppConfig, TelegramConfig};
 use bot_infra::contracts::{OrderExecutor, StateRepository};
 use bot_infra::db::{
-    ActiveTradeFlowRunOrderPeer, PendingTradeBuilderFirstVisibleInventoryObservation,
-    PostgresRepository, TradeBuilderExchangeFillSummary, TradeBuilderMarketSecondSnapshot,
-    TradeBuilderInventoryObservationInput, TradeBuilderOrder, TradeBuilderOrderEventRecord,
+    ActiveTradeFlowRunOrderPeer, NoReversalAdverseProfileDiagnostics,
+    NoReversalAdverseProfileInput, NoReversalAdverseProfileKey,
+    PendingTradeBuilderFirstVisibleInventoryObservation, PostgresRepository,
+    TradeBuilderExchangeFillSummary, TradeBuilderInventoryObservationInput,
+    TradeBuilderMarketSecondSnapshot, TradeBuilderOrder, TradeBuilderOrderEventRecord,
     TradeBuilderPairSession, TradeBuilderParentPosition, TradeBuilderParentPositionInput,
-    TradeBuilderParentPositionSeed, TradeBuilderPriceExitRule, TradeBuilderTimeExitRule,
-    TradeBuilderWorkflow, TradeBuilderWorkflowLeg, TradeFlowAutoScopeAnalysisRowInput,
+    TradeBuilderParentPositionSeed, TradeBuilderPositiveQuantityFlipGridActiveBuy,
+    PositiveQuantityFlipGridBuyExecutionLock,
+    TradeBuilderPriceExitRule, TradeBuilderRevengeFlipFillInput,
+    TradeBuilderRevengeFlipState, TradeBuilderTimeExitRule, TradeBuilderWorkflow,
+    TradeBuilderWorkflowLeg, TradeFlowAutoScopeAnalysisRowInput,
     TradeFlowAutoScopeTradeDiagnosticInput, TradeFlowDefinitionRuntime, TradeFlowEventRecord,
     TradeFlowRun, TradeFlowRunStep, TradeFlowVersionRuntime,
 };
@@ -37,11 +42,12 @@ use ethers::{
     signers::{LocalWallet, Signer as _},
     types::Address,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     env,
     fs::{self, OpenOptions},
+    hash::{Hash, Hasher},
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex as StdMutex},
@@ -49,7 +55,7 @@ use std::{
 };
 use tokio::{
     sync::{Notify, RwLock},
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -130,8 +136,7 @@ const FLOW_NODE_STATE_REENTRY_GENERATION: &str = "reentry_generation";
 const FLOW_NODE_STATE_REENTRY_ATTEMPTS_USED: &str = "reentry_attempts_used";
 const FLOW_NODE_STATE_REENTRY_MARKET_SLUG: &str = "reentry_market_slug";
 const FLOW_NODE_STATE_PTB_SL_BUMP_COUNT: &str = "ptb_stop_loss_bump_count";
-const FLOW_NODE_STATE_PTB_SL_BUMP_LAST_MARKET_SLUG: &str =
-    "ptb_stop_loss_bump_last_market_slug";
+const FLOW_NODE_STATE_PTB_SL_BUMP_LAST_MARKET_SLUG: &str = "ptb_stop_loss_bump_last_market_slug";
 const FLOW_NODE_STATE_PTB_SL_BUMP_LAST_CHILD_ORDER_ID: &str =
     "ptb_stop_loss_bump_last_child_order_id";
 const FLOW_NODE_STATE_PTB_SL_BUMP_UPDATED_AT: &str = "ptb_stop_loss_bump_updated_at";

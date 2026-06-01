@@ -104,6 +104,7 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
     signal_market: Option<PriceToBeatSignalFormulaMarketInput>,
 ) -> Result<Option<crate::TradeFlowNodeExecution>> {
     crate::set_flow_context(context, "priceToBeatGuard", Value::Null);
+    crate::set_flow_context(context, "cexDirectionGuard", Value::Null);
     crate::set_flow_context(context, "priceToBeatIvSelectedMaxPrice", Value::Null);
 
     if side != "buy" {
@@ -113,9 +114,25 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
     }
 
     let guard_enabled = crate::node_config_bool(node, "priceToBeatGuardEnabled").unwrap_or(false);
-    if !guard_enabled {
+    let cex_direction_guard_enabled =
+        crate::node_config_bool(node, "cexDirectionGuardEnabled").unwrap_or(false);
+    if !guard_enabled && !cex_direction_guard_enabled {
         clear_price_to_beat_guard_waiting_context(context);
         return Ok(None);
+    }
+    if !guard_enabled {
+        return super::cex_direction_guard::maybe_block_action_place_order_cex_direction_guard_only(
+            repo,
+            run,
+            node,
+            context,
+            market_slug,
+            token_id,
+            outcome_label,
+            side,
+            execution_mode,
+        )
+        .await;
     }
     let runtime =
         PriceToBeatGuardRuntimeContext::standard_action_place_order(repo, run.user_id, cfg, client);
@@ -1180,6 +1197,12 @@ pub(crate) async fn evaluate_action_place_order_price_to_beat_guard_state(
         apply_price_to_beat_risk_penalty(&mut evaluation, resolution.stop_loss_bump_usd);
     }
     super::apply_action_place_order_early_stale_side_guard(
+        node,
+        market_slug,
+        outcome_label,
+        &mut evaluation,
+    );
+    super::cex_direction_guard::apply_action_place_order_cex_direction_guard(
         node,
         market_slug,
         outcome_label,

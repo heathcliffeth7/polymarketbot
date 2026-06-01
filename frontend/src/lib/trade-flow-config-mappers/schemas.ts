@@ -21,8 +21,10 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'Standard', value: 'standard' },
         { label: 'Pair Lock', value: 'pair_lock_only' },
         { label: 'DCA Live', value: 'dca_live_only' },
+        { label: 'Positive Flip Grid', value: 'positive_quantity_flip_grid_only' },
+        { label: 'RevengeFlip', value: 'revenge_flip_only' },
       ],
-      help: 'Pair Lock icin downstream action.place_order mode=pair_lock; DCA Live icin downstream action.place_order mode=dca_live_v1 gerekir. Ek olarak action.notify/action.telegram_notify baglanabilir.',
+      help: 'Pair Lock icin downstream mode=pair_lock; DCA Live icin mode=dca_live_v1; Positive Flip Grid icin grid modlari; RevengeFlip icin mode=revenge_flip_v1 gerekir. Ek olarak action.notify/action.telegram_notify baglanabilir.',
     },
     { key: 'marketSlug', label: 'Market Slug', input: 'text' },
     {

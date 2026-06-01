@@ -604,17 +604,6 @@ fn resolve_action_place_order_underlying_protection(
         .or_else(|| step_input_value(step, &["protection"]).cloned())
 }
 
-fn resolve_flow_source_trade_id(node: &TradeFlowNode, context: &Value) -> Option<i64> {
-    node_config_i64(node, "sourceTradeId")
-        .or_else(|| {
-            context
-                .get("flowContext")
-                .and_then(|v| v.get("sourceTradeId"))
-                .and_then(value_as_i64)
-        })
-        .filter(|value| *value > 0)
-}
-
 fn resolve_flow_builder_order_id(node: &TradeFlowNode, context: &Value) -> Option<i64> {
     if let Some(id) = node_config_i64(node, "builderOrderId") {
         return Some(id);
@@ -858,7 +847,9 @@ async fn resolve_action_place_order_sell_sizing(
     trigger_size_for_first_fire: Option<f64>,
     configured_size_usdc: Option<f64>,
     configured_size_pct: Option<f64>,
+    configured_target_qty: Option<f64>,
     use_pct_size: bool,
+    use_share_size: bool,
 ) -> Result<ActionPlaceOrderSizing> {
     let (position_qty, fallback_price) =
         load_action_place_order_sell_position(repo, source_trade_id, token_id).await?;
@@ -871,7 +862,18 @@ async fn resolve_action_place_order_sell_sizing(
             )
         })?;
 
-    let (requested_qty, resolved_size_mode, resolved_size_pct) = if use_pct_size {
+    let (requested_qty, resolved_size_mode, resolved_size_pct) = if use_share_size {
+        let target_qty = trigger_size_for_first_fire
+            .or(configured_target_qty)
+            .ok_or_else(|| {
+                anyhow::anyhow!("action.place_order requires targetQty > 0 when sizeMode is shares")
+            })?;
+        anyhow::ensure!(
+            target_qty > 0.0 && target_qty.is_finite(),
+            "action.place_order targetQty must be > 0"
+        );
+        (target_qty, "shares", None)
+    } else if use_pct_size {
         let size_pct = trigger_size_for_first_fire
             .or(configured_size_pct)
             .ok_or_else(|| {

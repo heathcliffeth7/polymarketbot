@@ -112,6 +112,17 @@ fn fast_sl_order() -> TradeBuilderOrder {
     order
 }
 
+fn revenge_immediate_sl_order() -> TradeBuilderOrder {
+    let mut order = fast_sl_order();
+    order.kind = "immediate".to_string();
+    order.trigger_condition = None;
+    order.trigger_price = None;
+    order.runtime_snapshot_json = Some(json!({
+        "revenge_flip_intent": "stop_loss_sell"
+    }));
+    order
+}
+
 fn fast_sl_order_book(best_bid: f64) -> OrderBookSnapshot {
     OrderBookSnapshot {
         bids: vec![bot_infra::exchange::OrderBookLevel {
@@ -151,6 +162,90 @@ fn fast_sl_request(order: &TradeBuilderOrder, price: f64) -> PlaceOrderRequest {
         fee_rate_bps: 0,
         neg_risk: false,
     }
+}
+
+#[tokio::test]
+async fn revenge_immediate_stop_loss_submit_uses_fresh_book() {
+    let executor = sl_submit_executor(vec![fast_sl_order_book(0.67)], 0);
+    let ws = ClobWsClient::new("ws://127.0.0.1:0".to_string());
+    let order = revenge_immediate_sl_order();
+
+    let price = resolve_trade_builder_fast_stop_loss_initial_submit_price(
+        &executor,
+        &ws,
+        &order,
+        0.56,
+        Some(0.56),
+        Some(0.56),
+        Some(5.0),
+        TRADE_BUILDER_SIZE_BASIS_SHARES,
+        None,
+    )
+    .await
+    .expect("revenge immediate stop-loss should use fast submit price");
+
+    assert_eq!(price.quote_source, "rest_orderbook");
+    assert!((price.sell_submit_price.desired_price - 0.66).abs() < 1e-9);
+    assert_eq!(executor.order_book_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn revenge_immediate_stop_loss_fast_retries_after_fak_miss() {
+    let executor = sl_submit_executor(vec![fast_sl_order_book(0.56)], 0);
+    let ws = ClobWsClient::new("ws://127.0.0.1:0".to_string());
+    let order = revenge_immediate_sl_order();
+    let base_req = fast_sl_request(&order, 0.63);
+
+    let outcome = try_trade_builder_fast_stop_loss_retry(
+        &executor,
+        &ws,
+        &order,
+        &base_req,
+        "FAK",
+        TRADE_BUILDER_SIZE_BASIS_SHARES,
+        "HTTP 400: no orders found to match with FAK order",
+        0.63,
+        Some(0.63),
+        Some(0.63),
+        Some(5.0),
+    )
+    .await;
+
+    let TradeBuilderFastStopLossRetryOutcome::Success(success) = outcome else {
+        panic!("expected revenge immediate fast stop-loss retry success");
+    };
+    assert_eq!(success.attempt_payload["fast_sl_retry_attempt"], json!(1));
+    assert!((success.desired_price - 0.55).abs() < 1e-9);
+
+    let calls = executor.place_calls.lock().expect("place calls");
+    assert_eq!(calls.len(), 1);
+    assert!((calls[0].price - 0.55).abs() < 1e-9);
+    assert_ne!(calls[0].client_order_id, base_req.client_order_id);
+    assert_eq!(executor.order_book_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn non_revenge_immediate_sell_does_not_use_fast_stop_loss_submit() {
+    let executor = sl_submit_executor(vec![fast_sl_order_book(0.67)], 0);
+    let ws = ClobWsClient::new("ws://127.0.0.1:0".to_string());
+    let mut order = revenge_immediate_sl_order();
+    order.runtime_snapshot_json = None;
+
+    let price = resolve_trade_builder_fast_stop_loss_initial_submit_price(
+        &executor,
+        &ws,
+        &order,
+        0.56,
+        Some(0.56),
+        Some(0.56),
+        Some(5.0),
+        TRADE_BUILDER_SIZE_BASIS_SHARES,
+        None,
+    )
+    .await;
+
+    assert!(price.is_none());
+    assert_eq!(executor.order_book_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

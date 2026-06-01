@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import * as TOML from '@iarna/toml';
+import parseToml from '@iarna/toml/parse-string';
 import { pool } from '@/lib/db';
 import type {
   ClaimRelayerConfigForServer,
@@ -351,7 +351,7 @@ async function readFallbackFileConfig(name: string): Promise<Record<string, unkn
   const filePath = path.join(CONFIG_DIR, `${name}.toml`);
   try {
     const raw = await fs.readFile(filePath, 'utf-8');
-    return TOML.parse(raw) as Record<string, unknown>;
+    return parseToml(raw) as Record<string, unknown>;
   } catch (err) {
     if (
       name === 'telegram' &&

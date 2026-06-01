@@ -9,6 +9,8 @@ struct ActionPlaceOrderLiveGapCollectorConfig {
     normal_gap_usd: f64,
     high_gap_usd: f64,
     high_chop_gap_usd: f64,
+    detailed_gap_bands: LiveGapDetailedGapBandsConfig,
+    adaptive_low_gap: LiveGapAdaptiveLowGapConfig,
     latency_buffer_usd: f64,
     strong_only_under_sec: i64,
     no_new_entry_under_sec: i64,
@@ -17,6 +19,8 @@ struct ActionPlaceOrderLiveGapCollectorConfig {
     no_reversal_entry_guard: NoReversalEntryGuardConfig,
     notify_pre_buy_collapse_guard_decision: bool,
     pre_buy_collapse_guard_notification_mode: String,
+    notify_on_adaptive_low_gap_change: bool,
+    notify_on_adaptive_low_gap_near_miss_change: bool,
     live_gap_history_prewarm_enabled: bool,
     live_gap_history_prewarm_sec: i64,
     live_gap_history_prewarm_start_mode: String,
@@ -102,6 +106,18 @@ fn resolve_action_place_order_live_gap_collector_config(
     let hard_max_price =
         (node_config_f64(node, "liveGapCollectorHardMaxPriceCent").unwrap_or(93.0) / 100.0)
             .clamp(0.01, 0.99);
+    let low_clean_gap_usd = node_config_f64(node, "liveGapCollectorLowCleanGapUsd").unwrap_or(22.0);
+    let normal_gap_usd = node_config_f64(node, "liveGapCollectorNormalGapUsd").unwrap_or(32.0);
+    let high_gap_usd = node_config_f64(node, "liveGapCollectorHighGapUsd").unwrap_or(48.0);
+    let high_chop_gap_usd = node_config_f64(node, "liveGapCollectorHighChopGapUsd").unwrap_or(55.0);
+    let detailed_gap_bands = resolve_live_gap_detailed_gap_bands_config(
+        node,
+        low_clean_gap_usd,
+        normal_gap_usd,
+        high_gap_usd,
+        high_chop_gap_usd,
+    );
+    let adaptive_low_gap = resolve_live_gap_adaptive_low_gap_config(node);
     let config = ActionPlaceOrderLiveGapCollectorConfig {
         window_start_sec: node_config_i64(node, "liveGapCollectorWindowStartSec")
             .unwrap_or(220)
@@ -116,10 +132,12 @@ fn resolve_action_place_order_live_gap_collector_config(
         binance_max_stale_ms: node_config_i64(node, "liveGapCollectorBinanceMaxStaleMs")
             .unwrap_or(1_500)
             .clamp(100, 30_000),
-        low_clean_gap_usd: node_config_f64(node, "liveGapCollectorLowCleanGapUsd").unwrap_or(22.0),
-        normal_gap_usd: node_config_f64(node, "liveGapCollectorNormalGapUsd").unwrap_or(32.0),
-        high_gap_usd: node_config_f64(node, "liveGapCollectorHighGapUsd").unwrap_or(48.0),
-        high_chop_gap_usd: node_config_f64(node, "liveGapCollectorHighChopGapUsd").unwrap_or(55.0),
+        low_clean_gap_usd,
+        normal_gap_usd,
+        high_gap_usd,
+        high_chop_gap_usd,
+        detailed_gap_bands,
+        adaptive_low_gap,
         latency_buffer_usd: node_config_f64(node, "liveGapCollectorLatencyBufferUsd")
             .unwrap_or(2.0)
             .max(0.0),
@@ -149,10 +167,20 @@ fn resolve_action_place_order_live_gap_collector_config(
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "smart".to_string()),
+        notify_on_adaptive_low_gap_change: node_config_bool(
+            node,
+            "notifyOnLiveGapAdaptiveLowGapChange",
+        )
+        .unwrap_or(true),
+        notify_on_adaptive_low_gap_near_miss_change: node_config_bool(
+            node,
+            "notifyOnLiveGapAdaptiveLowGapNearMissChange",
+        )
+        .unwrap_or(true),
         live_gap_history_prewarm_enabled: node_config_bool(node, "liveGapHistoryPrewarmEnabled")
             .unwrap_or(true),
         live_gap_history_prewarm_sec: node_config_i64(node, "liveGapHistoryPrewarmSec")
-            .unwrap_or(20)
+            .unwrap_or(35)
             .clamp(0, 120),
         live_gap_history_prewarm_start_mode: node_config_string(
             node,
@@ -170,7 +198,10 @@ fn resolve_action_place_order_live_gap_collector_config(
             .clamp(50, 5_000),
         live_gap_history_retention_ms: node_config_i64(node, "liveGapHistoryRetentionMs")
             .unwrap_or(PRE_BUY_COLLAPSE_HISTORY_DEFAULT_RETENTION_MS)
-            .clamp(PRE_BUY_COLLAPSE_HISTORY_DEFAULT_RETENTION_MS, 120_000),
+            .clamp(
+                PRE_BUY_COLLAPSE_HISTORY_DEFAULT_RETENTION_MS,
+                NO_REVERSAL_LOCAL_PATH_MAX_LOOKBACK_MS,
+            ),
         notify_on_pre_buy_history_warning: node_config_bool(node, "notifyOnPreBuyHistoryWarning")
             .unwrap_or(true),
         pre_buy_history_warning_mode: node_config_string(node, "preBuyHistoryWarningMode")
@@ -200,19 +231,6 @@ fn resolve_action_place_order_live_gap_collector_config(
         "action.place_order live_gap_collector_v1 requires liveGapCollectorWindowStartSec < liveGapCollectorWindowEndSec"
     );
     Ok(Some(config))
-}
-
-fn live_gap_collector_effective_max_price(
-    max_price: Option<f64>,
-    config: Option<&ActionPlaceOrderLiveGapCollectorConfig>,
-) -> Option<f64> {
-    config
-        .map(|cfg| {
-            max_price
-                .unwrap_or(cfg.hard_max_price)
-                .min(cfg.hard_max_price)
-        })
-        .or(max_price)
 }
 
 fn live_gap_collector_direction(outcome_label: &str) -> Option<&'static str> {
@@ -253,42 +271,21 @@ fn live_gap_collector_elapsed_sec(market_slug: &str, now: DateTime<Utc>) -> Opti
     )
 }
 
-fn live_gap_collector_price_adjustment(price: Option<f64>) -> f64 {
+fn live_gap_collector_price_adjustment(
+    config: &ActionPlaceOrderLiveGapCollectorConfig,
+    price: Option<f64>,
+) -> f64 {
     let Some(price) = price.filter(|value| value.is_finite()) else {
         return 0.0;
     };
+    let scaled_adjustment = config.strong_signal_extra_gap_usd * 0.5;
     if price >= 0.90 {
-        4.0
+        scaled_adjustment
     } else if price < 0.85 {
-        -4.0
+        -scaled_adjustment
     } else {
         0.0
     }
-}
-
-fn live_gap_collector_required_gap(
-    config: &ActionPlaceOrderLiveGapCollectorConfig,
-    regime: LiveGapCollectorRegime,
-    remaining_sec: i64,
-    fill_price: Option<f64>,
-) -> f64 {
-    let base = match regime {
-        LiveGapCollectorRegime::LowClean => config.low_clean_gap_usd,
-        LiveGapCollectorRegime::Normal => config.normal_gap_usd,
-        LiveGapCollectorRegime::High => config.high_gap_usd,
-        LiveGapCollectorRegime::HighChop => config.high_chop_gap_usd,
-        LiveGapCollectorRegime::Red => f64::INFINITY,
-    };
-    let late_penalty = if remaining_sec < config.strong_only_under_sec {
-        config.strong_signal_extra_gap_usd
-    } else {
-        0.0
-    };
-    (base
-        + live_gap_collector_price_adjustment(fill_price)
-        + late_penalty
-        + config.latency_buffer_usd)
-        .max(0.0)
 }
 
 fn live_gap_collector_regime_label(regime: LiveGapCollectorRegime) -> &'static str {
@@ -323,11 +320,15 @@ fn live_gap_collector_resolved_config_snapshot(
         "normalGapUsd": config.normal_gap_usd,
         "highGapUsd": config.high_gap_usd,
         "highChopGapUsd": config.high_chop_gap_usd,
+        "detailedGapBands": live_gap_detailed_gap_bands_config_snapshot(&config.detailed_gap_bands),
+        "adaptiveLowGap": live_gap_adaptive_low_gap_config_snapshot(&config.adaptive_low_gap),
         "latencyBufferUsd": config.latency_buffer_usd,
         "strongOnlyUnderSec": config.strong_only_under_sec,
         "strongSignalExtraGapUsd": config.strong_signal_extra_gap_usd,
         "notifyOnPreBuyCollapseGuardDecision": config.notify_pre_buy_collapse_guard_decision,
         "preBuyCollapseGuardNotificationMode": config.pre_buy_collapse_guard_notification_mode,
+        "notifyOnLiveGapAdaptiveLowGapChange": config.notify_on_adaptive_low_gap_change,
+        "notifyOnLiveGapAdaptiveLowGapNearMissChange": config.notify_on_adaptive_low_gap_near_miss_change,
         "liveGapHistoryPrewarmEnabled": config.live_gap_history_prewarm_enabled,
         "liveGapHistoryPrewarmSec": config.live_gap_history_prewarm_sec,
         "liveGapHistoryPrewarmStartMode": config.live_gap_history_prewarm_start_mode,
@@ -338,59 +339,6 @@ fn live_gap_collector_resolved_config_snapshot(
         "preBuyHistoryWarningMode": config.pre_buy_history_warning_mode,
         "noReversalEntryGuard": no_reversal_entry_guard_config_snapshot(&config.no_reversal_entry_guard),
     })
-}
-
-fn live_gap_collector_best_ask(order_book: &OrderBookSnapshot) -> Option<f64> {
-    order_book
-        .asks
-        .iter()
-        .filter(|level| level.price.is_finite() && level.price > 0.0 && level.price < 1.0)
-        .map(|level| level.price)
-        .min_by(f64::total_cmp)
-}
-
-fn live_gap_collector_intended_qty(sizing: &ActionPlaceOrderSizing, best_ask: f64) -> Option<f64> {
-    sizing
-        .target_qty
-        .filter(|qty| qty.is_finite() && *qty > 0.0)
-        .or_else(|| (best_ask.is_finite() && best_ask > 0.0).then_some(sizing.size_usdc / best_ask))
-        .filter(|qty| qty.is_finite() && *qty > 0.0)
-}
-
-async fn live_gap_collector_volume_ratio(
-    repo: &PostgresRepository,
-    market_slug: &str,
-    asset: &str,
-    now: DateTime<Utc>,
-) -> Option<f64> {
-    let summary = repo
-        .market_trade_volume_summary(market_slug, now)
-        .await
-        .ok()?;
-    let baseline = repo
-        .market_trade_volume_bucket_median(asset, 30.0, 0.0, 7, 30, market_slug, now)
-        .await
-        .ok()
-        .filter(|median| median.sample_count >= 20)
-        .map(|median| median.median_volume_usdc)
-        .filter(|value| value.is_finite() && *value > 0.0)?;
-    Some(summary.volume_30s / baseline)
-}
-
-fn live_gap_collector_volatility_usd(asset: &str, now_ms: i64) -> Option<f64> {
-    let samples = trade_flow::guards::chainlink_price::get_chainlink_price_samples(
-        asset,
-        now_ms - 15_000,
-        now_ms,
-    )
-    .ok()?;
-    let mut min_price = f64::INFINITY;
-    let mut max_price = f64::NEG_INFINITY;
-    for sample in samples {
-        min_price = min_price.min(sample.price);
-        max_price = max_price.max(sample.price);
-    }
-    (min_price.is_finite() && max_price.is_finite()).then_some(max_price - min_price)
 }
 
 fn live_gap_collector_regime(
@@ -422,7 +370,8 @@ fn live_gap_collector_regime(
 async fn evaluate_action_place_order_live_gap_collector(
     repo: &PostgresRepository,
     client: Option<&dyn OrderExecutor>,
-    _node: &TradeFlowNode,
+    run: &TradeFlowRun,
+    node: &TradeFlowNode,
     market_slug: &str,
     token_id: &str,
     outcome_label: &str,
@@ -466,9 +415,11 @@ async fn evaluate_action_place_order_live_gap_collector(
         );
     }
 
-    let open_tick = match trade_flow::guards::chainlink_price::get_chainlink_price_start_tick(
+    let open_tick = match live_gap_collector_open_price_snapshot(
         scope.asset,
+        market_slug,
         window_start.timestamp_millis(),
+        now_ms,
     ) {
         Ok(snapshot) => snapshot,
         Err(err) => {
@@ -479,17 +430,20 @@ async fn evaluate_action_place_order_live_gap_collector(
             );
         }
     };
-    let binance =
-        match trade_flow::guards::binance_price::get_binance_price_snapshot(scope.asset, now_ms) {
-            Ok(snapshot) => snapshot,
-            Err(err) => {
-                return live_gap_collector_block(
-                    "binance_price_unavailable",
-                    false,
-                    json!({ "error": err.to_string() }),
-                );
-            }
-        };
+    let current_price = match live_gap_collector_current_price_snapshot(
+        scope.asset,
+        now_ms,
+        config.binance_max_stale_ms,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return live_gap_collector_block(
+                "current_price_unavailable",
+                false,
+                json!({ "error": err.to_string() }),
+            );
+        }
+    };
     let Some(client) = client else {
         return live_gap_collector_block("order_executor_unavailable", false, json!({}));
     };
@@ -506,32 +460,69 @@ async fn evaluate_action_place_order_live_gap_collector(
         }
     };
     let orderbook_ms = live_gap_collector_elapsed_ms(orderbook_started_at);
-    let Some(best_ask) = live_gap_collector_best_ask(&order_book) else {
-        return live_gap_collector_block("best_ask_unavailable", false, json!({}));
+    let orderbook_best_ask = live_gap_collector_best_ask(&order_book);
+    let mut fallback_best_bid = None;
+    let mut fallback_best_ask = None;
+    let best_ask_missing_from_orderbook = orderbook_best_ask.is_none();
+    if best_ask_missing_from_orderbook {
+        if let Ok((bid, ask)) = client.best_bid_ask(token_id).await {
+            fallback_best_bid = live_gap_collector_normalize_probability(bid);
+            fallback_best_ask = live_gap_collector_normalize_probability(ask);
+        }
+    }
+    let best_ask = orderbook_best_ask.or(fallback_best_ask);
+    let best_ask_source = match (orderbook_best_ask, fallback_best_ask) {
+        (Some(_), _) => "order_book",
+        (None, Some(_)) => "best_bid_ask_fallback",
+        (None, None) => "unavailable",
     };
-    let intended_qty = live_gap_collector_intended_qty(sizing, best_ask);
-    let depth = trade_flow::guards::price_to_beat::evaluate_price_to_beat_iv_depth(
-        Some(&order_book),
-        best_ask,
-        intended_qty,
-        (config.hard_max_price - best_ask).max(0.0),
-        true,
-    );
-    let effective_fill = depth.estimated_avg_fill.or(Some(best_ask));
+    let best_ask_unavailable_relax_applied = best_ask_missing_from_orderbook;
+    let intended_qty = best_ask.and_then(|price| live_gap_collector_intended_qty(sizing, price));
+    let depth = if best_ask_unavailable_relax_applied {
+        trade_flow::guards::price_to_beat::evaluate_price_to_beat_iv_depth(
+            None,
+            best_ask.unwrap_or(LIVE_GAP_BEST_ASK_UNAVAILABLE_RELAX_MAX_PRICE),
+            intended_qty,
+            0.0,
+            false,
+        )
+    } else if let Some(best_ask) = best_ask {
+        trade_flow::guards::price_to_beat::evaluate_price_to_beat_iv_depth(
+            Some(&order_book),
+            best_ask,
+            intended_qty,
+            (config.hard_max_price - best_ask).max(0.0),
+            true,
+        )
+    } else {
+        trade_flow::guards::price_to_beat::evaluate_price_to_beat_iv_depth(
+            None,
+            LIVE_GAP_BEST_ASK_UNAVAILABLE_RELAX_MAX_PRICE,
+            intended_qty,
+            0.0,
+            false,
+        )
+    };
+    let effective_fill = if best_ask_unavailable_relax_applied {
+        best_ask
+    } else {
+        depth.estimated_avg_fill.or(best_ask)
+    };
     let volume_started_at = Instant::now();
-    let volume_ratio = live_gap_collector_volume_ratio(repo, market_slug, scope.asset, now).await;
+    let volume_context =
+        live_gap_collector_volume_context(repo, market_slug, scope.asset, now).await;
     let volume_ms = live_gap_collector_elapsed_ms(volume_started_at);
     let volatility_usd = live_gap_collector_volatility_usd(scope.asset, now_ms);
+    let regime_staleness_ms = live_gap_collector_regime_staleness_ms(&current_price);
     let regime = live_gap_collector_regime(
-        binance.staleness_ms,
+        regime_staleness_ms,
         config.binance_max_stale_ms,
-        volume_ratio,
+        volume_context.volume_ratio_30s,
         volatility_usd,
     );
-    let live_gap = live_gap_collector_directional_gap(direction, open_tick.price, binance.price);
-    let required_gap =
-        live_gap_collector_required_gap(config, regime, remaining_sec, effective_fill);
-    if let Some(fill_price) = effective_fill {
+    let live_gap =
+        live_gap_collector_directional_gap(direction, open_tick.price, current_price.price);
+    if let (Some(fill_price), Some(best_ask)) = (effective_fill, best_ask) {
         record_pre_buy_collapse_sample_with_retention(
             market_slug,
             token_id,
@@ -546,6 +537,48 @@ async fn evaluate_action_place_order_live_gap_collector(
             config.live_gap_history_retention_ms,
         );
     }
+    let path_context = live_gap_band_path_context(
+        market_slug,
+        token_id,
+        outcome_label,
+        now_ms,
+        effective_fill
+            .or(best_ask)
+            .unwrap_or(LIVE_GAP_BEST_ASK_UNAVAILABLE_RELAX_MAX_PRICE),
+        live_gap,
+    );
+    let effective_fill_for_gap = effective_fill.or_else(|| {
+        best_ask_unavailable_relax_applied.then_some(LIVE_GAP_BEST_ASK_UNAVAILABLE_RELAX_MAX_PRICE)
+    });
+    let gap_band = live_gap_select_detailed_gap_band(
+        config,
+        regime,
+        &volume_context,
+        volatility_usd,
+        &path_context,
+        effective_fill_for_gap,
+    );
+    let required_gap_eval =
+        live_gap_required_gap_evaluation(config, &gap_band, remaining_sec, effective_fill_for_gap);
+    let dead_activity_reason = volume_context.dead_activity_block_reason();
+    let adaptive_low_gap = live_gap_adaptive_low_gap_evaluate(LiveGapAdaptiveLowGapInput {
+        config: &config.adaptive_low_gap,
+        run_id: Some(run.id),
+        node_key: &node.key,
+        market_slug,
+        outcome_label,
+        asset: scope.asset,
+        direction,
+        band: gap_band.band,
+        local_path_decision: gap_band.local_path_decision,
+        dead_activity_reason,
+        effective_fill: effective_fill_for_gap,
+        remaining_sec,
+        live_gap_usd: live_gap,
+        pre_required_gap_usd: required_gap_eval.required_gap_usd,
+        now_ms,
+    });
+    let required_gap = adaptive_low_gap.adaptive_required_gap_usd;
     let sl_threshold = config
         .live_gap_stop_loss_gap_usd
         .unwrap_or(live_gap.max(0.0) * config.live_gap_stop_loss_entry_gap_ratio)
@@ -567,23 +600,39 @@ async fn evaluate_action_place_order_live_gap_collector(
         "open_price_ts_ms".to_string(),
         json!(open_tick.timestamp_ms),
     );
+    payload_obj.insert("open_price_source".to_string(), json!(&open_tick.source));
     payload_obj.insert(
-        "open_price_source".to_string(),
-        json!("chainlink_rtds_start_tick"),
+        "open_price_fallback_reason".to_string(),
+        json!(&open_tick.fallback_reason),
     );
-    payload_obj.insert("current_price".to_string(), json!(binance.price));
+    payload_obj.insert("current_price".to_string(), json!(current_price.price));
     payload_obj.insert(
         "current_price_ts_ms".to_string(),
-        json!(binance.timestamp_ms),
+        json!(current_price.timestamp_ms),
     );
-    payload_obj.insert("binance_price_ts".to_string(), json!(binance.timestamp_ms));
     payload_obj.insert(
         "current_price_source".to_string(),
-        json!("binance_live_data_ws"),
+        json!(&current_price.source),
+    );
+    payload_obj.insert(
+        "current_price_staleness_ms".to_string(),
+        json!(current_price.staleness_ms),
+    );
+    payload_obj.insert(
+        "regime_staleness_ms".to_string(),
+        json!(regime_staleness_ms),
+    );
+    payload_obj.insert(
+        "current_price_fallback_reason".to_string(),
+        json!(&current_price.fallback_reason),
+    );
+    payload_obj.insert(
+        "binance_price_ts".to_string(),
+        json!(current_price.timestamp_ms),
     );
     payload_obj.insert(
         "binance_staleness_ms".to_string(),
-        json!(binance.staleness_ms),
+        json!(current_price.binance_staleness_ms),
     );
     payload_obj.insert("elapsed_sec".to_string(), json!(elapsed_sec));
     payload_obj.insert("remaining_sec".to_string(), json!(remaining_sec));
@@ -593,9 +642,18 @@ async fn evaluate_action_place_order_live_gap_collector(
         "regime".to_string(),
         json!(live_gap_collector_regime_label(regime)),
     );
-    payload_obj.insert("volume_ratio".to_string(), json!(volume_ratio));
+    live_gap_append_volume_context(&mut payload_obj, &volume_context);
+    live_gap_append_required_gap_evaluation(&mut payload_obj, &required_gap_eval);
+    live_gap_append_adaptive_low_gap_evaluation(&mut payload_obj, &adaptive_low_gap);
     payload_obj.insert("volatility_usd_15s".to_string(), json!(volatility_usd));
     payload_obj.insert("best_ask".to_string(), json!(best_ask));
+    payload_obj.insert("best_ask_source".to_string(), json!(best_ask_source));
+    payload_obj.insert(
+        "best_ask_missing_from_orderbook".to_string(),
+        json!(best_ask_missing_from_orderbook),
+    );
+    payload_obj.insert("fallback_best_bid".to_string(), json!(fallback_best_bid));
+    payload_obj.insert("fallback_best_ask".to_string(), json!(fallback_best_ask));
     payload_obj.insert("hard_max_price".to_string(), json!(config.hard_max_price));
     payload_obj.insert("effective_fill_price".to_string(), json!(effective_fill));
     payload_obj.insert("candidate_created_at_ms".to_string(), json!(now_ms));
@@ -659,6 +717,39 @@ async fn evaluate_action_place_order_live_gap_collector(
     if regime == LiveGapCollectorRegime::Red {
         return live_gap_collector_block("regime_red_or_stale", false, payload);
     }
+    if let Some(reason_code) = dead_activity_reason {
+        return live_gap_collector_block(reason_code, false, payload);
+    }
+    if live_gap < required_gap {
+        live_gap_record_adaptive_low_gap_near_miss(
+            &mut payload,
+            &adaptive_low_gap,
+            "live_gap_below_required",
+            now_ms,
+        );
+        return live_gap_collector_block("live_gap_below_required", false, payload);
+    }
+    if best_ask_unavailable_relax_applied {
+        live_gap_collector_append_best_ask_unavailable_relax(
+            &mut payload,
+            fallback_best_bid,
+            fallback_best_ask,
+            best_ask_source,
+        );
+        live_gap_collector_insert_timings(
+            &mut payload,
+            eval_started_at,
+            Some(orderbook_ms),
+            Some(volume_ms),
+            None,
+        );
+        return LiveGapCollectorDecision {
+            passed: true,
+            terminal: false,
+            reason_code: LIVE_GAP_BEST_ASK_UNAVAILABLE_RELAX_REASON,
+            payload,
+        };
+    }
     if depth.result != "pass" {
         return live_gap_collector_block(
             depth.block_reason.unwrap_or("depth_guard_blocked"),
@@ -669,9 +760,7 @@ async fn evaluate_action_place_order_live_gap_collector(
     if effective_fill.is_none_or(|price| price > config.hard_max_price) {
         return live_gap_collector_block("effective_fill_above_hard_max", false, payload);
     }
-    if live_gap < required_gap {
-        return live_gap_collector_block("live_gap_below_required", false, payload);
-    }
+    let best_ask = best_ask.expect("best ask exists after non-relaxed depth pass");
     let guard_input = PreBuyCollapseGuardInput {
         market_slug,
         token_id,
@@ -717,6 +806,10 @@ async fn evaluate_action_place_order_live_gap_collector(
     if config.no_reversal_entry_guard.enabled {
         let no_reversal_input = NoReversalEntryGuardInput {
             market_slug,
+            token_id,
+            outcome_label,
+            definition_id: run.definition_id,
+            node_key: &node.key,
             asset: scope.asset,
             direction,
             remaining_sec,
@@ -807,20 +900,23 @@ async fn maybe_block_action_place_order_live_gap_collector(
     side: &str,
     execution_mode: &str,
     sizing: &ActionPlaceOrderSizing,
+    step: &TradeFlowRunStep,
     config: Option<&ActionPlaceOrderLiveGapCollectorConfig>,
 ) -> Result<Option<TradeFlowNodeExecution>> {
     let Some(config) = config else {
         return Ok(None);
     };
+    let config = live_gap_collector_config_with_workflow_local_path(config, step);
     let decision = evaluate_action_place_order_live_gap_collector(
         repo,
         client,
+        run,
         node,
         market_slug,
         token_id,
         outcome_label,
         sizing,
-        config,
+        &config,
     )
     .await;
     let mut payload = decision.payload.clone();
@@ -866,7 +962,7 @@ async fn maybe_block_action_place_order_live_gap_collector(
         let protection_applied = no_reversal_guard
             .get("protection")
             .and_then(Value::as_str)
-            .is_some_and(|value| value == "applied");
+            .is_some_and(|value| value == "applied" || value == "local_path_applied");
         repo.append_trade_flow_event(
             Some(run.id),
             run.definition_id,
@@ -890,6 +986,8 @@ async fn maybe_block_action_place_order_live_gap_collector(
         )
         .await?;
     }
+    maybe_send_live_gap_adaptive_low_gap_change_notification(repo, run, node, &config, &payload)
+        .await;
     if decision.passed {
         maybe_append_live_gap_collector_ptb_late_confirmed_event(repo, run, node, &payload).await?;
     }
@@ -898,7 +996,7 @@ async fn maybe_block_action_place_order_live_gap_collector(
         run,
         node,
         context,
-        config,
+        &config,
         &decision,
         &payload,
         market_slug,
@@ -909,7 +1007,7 @@ async fn maybe_block_action_place_order_live_gap_collector(
     .await;
     if !pre_buy_notification_handled {
         maybe_send_live_gap_collector_decision_notification(
-            repo, run, node, config, &decision, &payload,
+            repo, run, node, &config, &decision, &payload,
         )
         .await;
     }

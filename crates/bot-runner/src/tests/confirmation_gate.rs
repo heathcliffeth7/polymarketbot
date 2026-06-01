@@ -509,10 +509,10 @@ fn cross_leave_reenter_no_accumulated_time() {
         .signed_duration_since(second_pending_at)
         .num_milliseconds();
     assert!(
-            elapsed_ms < 2_000,
-            "Elapsed from re-entry should be near-zero (got {}ms), not accumulated from first entry (8s)",
-            elapsed_ms
-        );
+        elapsed_ms < 2_000,
+        "Elapsed from re-entry should be near-zero (got {}ms), not accumulated from first entry (8s)",
+        elapsed_ms
+    );
     assert!(
         elapsed_ms < market_price_confirmation_ms(&node).unwrap(),
         "Should not have fired yet — confirmation_ms={} not yet elapsed",

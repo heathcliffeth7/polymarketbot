@@ -1045,17 +1045,6 @@ async fn finalize_builder_fill(
         },
     );
 
-    if let Some((notification_type, message)) = build_trade_builder_fill_notification(
-        order,
-        execution_price,
-        canonical_entry_qty,
-        flow_created_payload.as_ref(),
-        submitted_payload.as_ref(),
-        Some(&fill_execution_analysis),
-    ) {
-        send_trade_builder_notification(repo, order, notification_type, &message).await;
-    }
-
     if let Err(err) = maybe_record_action_place_order_buy_fill_lock_fill(
         repo,
         order,
@@ -1097,6 +1086,35 @@ async fn finalize_builder_fill(
     } else {
         None
     };
+    if let Err(err) = maybe_record_positive_quantity_flip_grid_fill(
+        repo,
+        order,
+        parent_order.as_ref(),
+        flow_created_payload.as_ref(),
+        actual_fill_qty.unwrap_or(canonical_entry_qty),
+        execution_price,
+    )
+    .await
+    {
+        warn!(
+            builder_order_id = order.id,
+            error = %err,
+            "POSITIVE_QUANTITY_FLIP_GRID_FILL_RECORD_FAILED"
+        );
+    }
+    if let Err(err) = maybe_record_revenge_flip_fill(
+        repo,
+        order,
+        parent_order.as_ref(),
+        flow_created_payload.as_ref(),
+        actual_fill_qty.unwrap_or(canonical_entry_qty),
+        execution_price,
+    )
+    .await
+    {
+        warn!(builder_order_id = order.id, error = %err, "REVENGE_FLIP_FILL_RECORD_FAILED");
+    }
+    let mut exit_position_summary = None;
     if let Some(parent_order) = parent_order.as_ref() {
         let mut updated_parent_position = None;
         let applied_fill_qty = trade_builder_is_child_exit_sell(order)
@@ -1111,6 +1129,12 @@ async fn finalize_builder_fill(
                 actual_fill_qty_source,
             )
             .await?;
+            exit_position_summary = trade_builder_exit_fill_position_summary(
+                order,
+                applied_fill_qty,
+                execution_price,
+                updated_parent_position.as_ref(),
+            );
         }
         if trade_builder_order_has_exit_ladders(parent_order)
             && !should_request_trade_builder_oco_cancel(order, "filled")
@@ -1223,6 +1247,25 @@ async fn finalize_builder_fill(
                 );
             }
         }
+    }
+    if exit_position_summary.is_none() && trade_builder_is_child_exit_sell(order) {
+        let applied_fill_qty = persisted_fill_qty.or(Some(canonical_entry_qty));
+        exit_position_summary =
+            trade_builder_exit_fill_position_summary(order, applied_fill_qty, execution_price, None);
+    }
+
+    if let Some((notification_type, message)) =
+        build_trade_builder_fill_notification_with_position_summary(
+            order,
+            execution_price,
+            canonical_entry_qty,
+            flow_created_payload.as_ref(),
+            submitted_payload.as_ref(),
+            Some(&fill_execution_analysis),
+            exit_position_summary.as_ref(),
+        )
+    {
+        send_trade_builder_notification(repo, order, notification_type, &message).await;
     }
 
     if trade_builder_pair_lock_is_unwind_order(order) {

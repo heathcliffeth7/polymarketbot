@@ -40,6 +40,19 @@ fn live_gap_submit_revalidation_candidate_reuse_decision(
     }
 }
 
+fn live_gap_submit_revalidation_candidate_reuse_label(
+    candidate_stale: bool,
+    floor_invalidated: bool,
+) -> &'static str {
+    if floor_invalidated {
+        "denied, floor_breach"
+    } else if candidate_stale {
+        "denied, revalidation_required"
+    } else {
+        "allowed"
+    }
+}
+
 fn live_gap_submit_revalidation_fresh_decision(
     decision: &LiveGapSubmitRevalidationDecision,
 ) -> &'static str {
@@ -134,6 +147,7 @@ fn copy_live_gap_submit_revalidation_notification_state(source: &Value, target: 
 fn annotate_live_gap_submit_revalidation_payload(
     decision: &mut LiveGapSubmitRevalidationDecision,
     previous_metadata: &Value,
+    candidate_created_at_ms: i64,
     candidate_age_ms: i64,
     candidate_reuse_max_ms: i64,
     candidate_stale: bool,
@@ -153,6 +167,10 @@ fn annotate_live_gap_submit_revalidation_payload(
         live_gap_submit_revalidation_fresh_snapshot_age_ms(&decision.payload, now_ms);
     let late_high_price_risk =
         live_gap_submit_revalidation_late_high_price_risk(&decision.payload);
+    let candidate_created_at_ms = previous_metadata
+        .get("candidate_created_at_ms")
+        .and_then(value_as_i64)
+        .unwrap_or(candidate_created_at_ms);
 
     if let Some(obj) = decision.payload.as_object_mut() {
         obj.insert(
@@ -166,6 +184,17 @@ fn annotate_live_gap_submit_revalidation_payload(
                 candidate_stale,
                 floor_invalidated,
             )),
+        );
+        obj.insert(
+            "candidate_reuse".to_string(),
+            json!(live_gap_submit_revalidation_candidate_reuse_label(
+                candidate_stale,
+                floor_invalidated,
+            )),
+        );
+        obj.insert(
+            "candidate_created_at_ms".to_string(),
+            json!(candidate_created_at_ms),
         );
         obj.insert("original_candidate_age_ms".to_string(), json!(candidate_age_ms));
         obj.insert(

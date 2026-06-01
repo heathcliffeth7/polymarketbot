@@ -688,7 +688,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
     tokio::spawn(run_market_trade_volume_recorder(repo.clone(), volume_rx));
     ws.set_tick_callback(build_combined_market_tick_callback(vec![
         build_tick_trigger_callback(tick_trigger_tx),
-        build_live_gap_history_prewarm_callback(),
+        build_live_gap_history_prewarm_callback(repo.clone()),
         build_market_second_snapshot_callback(snapshot_tx),
     ]))
     .await;
@@ -1197,6 +1197,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
 async fn wait_for_trade_builder_ptb_stop_loss_dirty_update() {
     tokio::select! {
         _ = crate::trade_flow::guards::chainlink_price::wait_for_chainlink_dirty_asset_update() => {}
+        _ = crate::trade_flow::guards::cex_microstructure::wait_for_cex_microstructure_dirty_asset_update() => {}
         _ = crate::trade_flow::guards::polymarket_price_to_beat::wait_for_price_to_beat_dirty_market_update() => {}
     }
 }
@@ -1206,8 +1207,18 @@ async fn process_trade_builder_ptb_fast_path_dirty_context(
     run_id: i64,
     ws: &ClobWsClient,
 ) -> Result<()> {
-    let dirty_assets = crate::trade_flow::guards::chainlink_price::take_chainlink_dirty_assets();
+    let mut dirty_assets = crate::trade_flow::guards::chainlink_price::take_chainlink_dirty_assets();
     crate::trade_flow::guards::chainlink_price::clear_chainlink_dirty_assets(&dirty_assets);
+    let cex_dirty_assets =
+        crate::trade_flow::guards::cex_microstructure::take_cex_microstructure_dirty_assets();
+    crate::trade_flow::guards::cex_microstructure::clear_cex_microstructure_dirty_assets(
+        &cex_dirty_assets,
+    );
+    for asset in cex_dirty_assets {
+        if !dirty_assets.iter().any(|dirty_asset| dirty_asset == &asset) {
+            dirty_assets.push(asset);
+        }
+    }
     let dirty_market_slugs =
         crate::trade_flow::guards::polymarket_price_to_beat::take_price_to_beat_dirty_market_slugs(
         );

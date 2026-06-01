@@ -262,7 +262,10 @@ function normalizeNodeConfig(
     ...normalizeTriggerMarketPriceCycleWindowConfig(config),
     priceMode: validPriceModes.has(priceModeRaw) ? priceModeRaw : 'composite',
     bindingMode:
-      bindingModeRaw === 'pair_lock_only' || bindingModeRaw === 'dca_live_only'
+      bindingModeRaw === 'pair_lock_only' ||
+      bindingModeRaw === 'dca_live_only' ||
+      bindingModeRaw === 'positive_quantity_flip_grid_only' ||
+      bindingModeRaw === 'revenge_flip_only'
         ? bindingModeRaw
         : 'standard',
   };

@@ -7,6 +7,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 mod auto_threshold;
+mod cex_direction_guard;
 mod current_price;
 mod early_stale_side;
 mod iv_mismatch_adaptive;
@@ -32,6 +33,7 @@ use self::auto_threshold::{
     resolve_auto_price_to_beat_threshold, AutoPriceToBeatThresholdResolution,
     AutoPriceToBeatThresholdStrategy,
 };
+pub(crate) use self::cex_direction_guard::CexDirectionGuardConfig;
 use self::current_price::resolve_price_to_beat_current_price;
 #[cfg(test)]
 use self::current_price::{
@@ -193,6 +195,7 @@ pub(crate) struct PriceToBeatGuardEvaluation {
     pub(crate) signal_formula: Option<Value>,
     pub(crate) iv_mismatch_edge: Option<Value>,
     pub(crate) early_stale_side: Option<Value>,
+    pub(crate) cex_direction_guard: Option<Value>,
 }
 
 impl PriceToBeatGuardEvaluation {
@@ -249,6 +252,7 @@ impl PriceToBeatGuardEvaluation {
             insert_value!("signal_formula", self.signal_formula);
             insert_value!("iv_mismatch_edge", self.iv_mismatch_edge);
             insert_value!("early_stale_side", self.early_stale_side);
+            insert_value!("cex_direction_guard", self.cex_direction_guard);
             obj.insert(
                 "base_threshold_value".to_string(),
                 json!(self.base_threshold_value),
@@ -1265,6 +1269,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_current_source(
         signal_formula: signal_evaluation.map(|evaluation| evaluation.to_value()),
         iv_mismatch_edge: iv_mismatch_evaluation.map(|evaluation| evaluation.to_value()),
         early_stale_side: None,
+        cex_direction_guard: None,
     }
 }
 
@@ -1362,6 +1367,7 @@ fn blocked_price_to_beat_guard_evaluation(
         signal_formula: None,
         iv_mismatch_edge: None,
         early_stale_side: None,
+        cex_direction_guard: None,
     }
 }
 

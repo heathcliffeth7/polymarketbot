@@ -1007,7 +1007,7 @@ pub(crate) fn build_price_to_beat_query_spec(market_slug: &str) -> Result<PriceT
         other => {
             return Err(anyhow!(
                 "unsupported updown market timeframe for price to beat guard: {other}"
-            ))
+            ));
         }
     };
     let query_timeframe = match scope.timeframe {

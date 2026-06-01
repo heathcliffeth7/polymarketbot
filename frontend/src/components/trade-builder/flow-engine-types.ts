@@ -1,21 +1,8 @@
 import type React from 'react';
 import type { ContextFormState } from '@/lib/trade-flow-config-mappers';
-import type {
-  TradeFlowDefinition,
-  TradeFlowDefinitionDetail,
-  TradeFlowGraph,
-  TradeFlowOpenPositionOption,
-  TradeFlowOpenPositionsMeta,
-  TradeFlowValidationResult,
-} from '@/lib/types';
+import type { TradeFlowDefinition, TradeFlowDefinitionDetail, TradeFlowGraph, TradeFlowOpenPositionOption, TradeFlowOpenPositionsMeta, TradeFlowValidationResult } from '@/lib/types';
 
-export type BusyAction =
-  | 'create'
-  | 'save'
-  | 'validate'
-  | 'publish'
-  | 'delete'
-  | null;
+export type BusyAction = 'create' | 'save' | 'validate' | 'publish' | 'delete' | null;
 
 export type TemplateKind =
   | 'starter'
@@ -23,7 +10,12 @@ export type TemplateKind =
   | 'dca'
   | 'sl_tp'
   | 'position_monitor'
-  | 'multi_leg_hedge';
+  | 'multi_leg_hedge'
+  | 'revenge_flip_10_80'
+  | 'pairlock_hyperliquid_70_80'
+  | 'positive_quantity_flip_grid_1usdc'
+  | 'positive_quantity_flip_grid_inventory_balance'
+  | 'positive_flip_pairlock_compression';
 
 export type DraftSaveStatus = 'idle' | 'pending' | 'error';
 
@@ -96,16 +88,10 @@ export interface FlowEngineControllerActions {
   confirmAndDeleteCurrentFlow: () => Promise<void>;
   deleteFlowFromList: (definitionId: number) => Promise<void>;
   handleStopFlow: () => Promise<void>;
-  updateGraphFromCanvas: (
-    nextGraph: TradeFlowGraph,
-    options?: { allowGraphShrink?: boolean; persistImmediately?: boolean }
-  ) => void;
+  updateGraphFromCanvas: (nextGraph: TradeFlowGraph, options?: { allowGraphShrink?: boolean; persistImmediately?: boolean }) => void;
   applyContextFromForm: () => Record<string, unknown>;
   applyContextFromAdvanced: () => Record<string, unknown> | null;
-  applyCanvasContextPatch: (
-    patch: Record<string, unknown>,
-    successMessage?: string
-  ) => Promise<void>;
+  applyCanvasContextPatch: (patch: Record<string, unknown>, successMessage?: string) => Promise<void>;
   toggleDefinitionSelection: (definitionId: number) => void;
   selectAllDefinitions: () => void;
   deselectAllDefinitions: () => void;

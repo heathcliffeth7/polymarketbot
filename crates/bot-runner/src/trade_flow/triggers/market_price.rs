@@ -40,6 +40,8 @@ async fn execute_trigger_market_price(
         .to_ascii_lowercase();
     let pair_lock_only_mode = binding_mode == "pair_lock_only";
     let dca_live_only_mode = binding_mode == "dca_live_only";
+    let positive_quantity_flip_grid_only_mode = binding_mode == POSITIVE_QUANTITY_FLIP_GRID_BINDING_MODE;
+    let revenge_flip_only_mode = binding_mode == REVENGE_FLIP_BINDING_MODE;
     // --- Early WS-sourced detection for auto_scope guard ---
     let ws_sourced = step
         .input_json
@@ -384,12 +386,8 @@ async fn execute_trigger_market_price(
         .get("outcomeConditions")
         .and_then(|v| v.as_array())
         .cloned();
-    let binding_only_path = (pair_lock_only_mode || dca_live_only_mode)
-        && outcome_conditions
-            .as_ref()
-            .map(|rows| rows.is_empty())
-            .unwrap_or(true);
-
+    let binding_only_path = (pair_lock_only_mode || dca_live_only_mode || positive_quantity_flip_grid_only_mode || revenge_flip_only_mode)
+        && outcome_conditions.as_ref().map(|rows| rows.is_empty()).unwrap_or(true);
     let mut triggered_token_id = String::new();
     let mut triggered_outcome_label = String::new();
     let mut triggered_condition = String::new();
@@ -438,6 +436,9 @@ async fn execute_trigger_market_price(
         "pair_lock_only"
     } else if dca_live_only_mode && binding_only_path {
         "dca_live_only"
+    } else if positive_quantity_flip_grid_only_mode && binding_only_path {
+        POSITIVE_QUANTITY_FLIP_GRID_BINDING_MODE
+    } else if revenge_flip_only_mode && binding_only_path { REVENGE_FLIP_BINDING_MODE
     } else if outcome_conditions.is_some() {
         "multi_outcome"
     } else {
@@ -462,7 +463,6 @@ async fn execute_trigger_market_price(
             },
         );
     }
-
     if binding_only_path {
         pair_lock_yes_token_id = node_auto_scope_yes_token_id(context, &node.key)
             .or_else(|| flow_context_string(context, "yesTokenId"));
@@ -483,11 +483,7 @@ async fn execute_trigger_market_price(
         pass = ws_hard_ignore_reason.is_none();
         current_price = ws_price_from_step;
         triggered_max_price = selected_entry_max_price;
-        trigger_evaluation_mode = if dca_live_only_mode {
-            "dca_live_only"
-        } else {
-            "pair_lock_only"
-        };
+        trigger_evaluation_mode = if dca_live_only_mode { "dca_live_only" } else if positive_quantity_flip_grid_only_mode { POSITIVE_QUANTITY_FLIP_GRID_BINDING_MODE } else if revenge_flip_only_mode { REVENGE_FLIP_BINDING_MODE } else { "pair_lock_only" };
     } else if ws_execution_path == "cross_confirm_short_circuit" {
         let conf_token_id = ws_token_id_from_step.clone().unwrap_or_default();
         let conf_price = ws_price_from_step;

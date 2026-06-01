@@ -15,10 +15,13 @@ struct LiveGapHistoryPrewarmTarget {
     trigger_window_start_sec: i64,
     action_window_start_sec: i64,
     action_window_end_sec: i64,
+    execution_floor_price: f64,
+    hard_max_price: f64,
     sample_ms: i64,
     retention_ms: i64,
     trigger_condition: String,
     trigger_price: f64,
+    no_reversal_config: NoReversalEntryGuardConfig,
 }
 
 static LIVE_GAP_HISTORY_PREWARM_LAST_SAMPLE_MS: LazyLock<StdMutex<HashMap<String, i64>>> =
@@ -149,7 +152,11 @@ fn build_live_gap_history_prewarm_targets_for_trigger(
     };
 
     let mut targets = Vec::new();
-    for edge in graph.edges.iter().filter(|edge| edge.source == spec.node_key) {
+    for edge in graph
+        .edges
+        .iter()
+        .filter(|edge| edge.source == spec.node_key)
+    {
         let Some(action_node) = flow_node(graph, &edge.target) else {
             continue;
         };
@@ -160,10 +167,18 @@ fn build_live_gap_history_prewarm_targets_for_trigger(
             .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "buy".to_string());
-        let Ok(Some(config)) = resolve_action_place_order_live_gap_collector_config(action_node, &side)
+        let Ok(Some(config)) =
+            resolve_action_place_order_live_gap_collector_config(action_node, &side)
         else {
             continue;
         };
+        let config = live_gap_collector_config_with_trigger_cycle_window(
+            &config,
+            spec.cycle_window_mode.as_deref(),
+            spec.cycle_window_secs,
+            spec.cycle_window_start_sec,
+            spec.cycle_window_end_sec,
+        );
         let trigger_window_start_sec = spec
             .cycle_window_start_sec
             .unwrap_or(config.window_start_sec)
@@ -198,10 +213,16 @@ fn build_live_gap_history_prewarm_targets_for_trigger(
                 trigger_window_start_sec,
                 action_window_start_sec: config.window_start_sec,
                 action_window_end_sec: config.window_end_sec,
+                execution_floor_price: (node_config_f64(action_node, "executionFloorPriceCent")
+                    .unwrap_or(0.0)
+                    / 100.0)
+                    .clamp(0.0, 0.99),
+                hard_max_price: config.hard_max_price,
                 sample_ms: config.live_gap_history_sample_ms,
                 retention_ms: config.live_gap_history_retention_ms,
                 trigger_condition: spec.trigger_condition.clone(),
                 trigger_price: spec.trigger_price,
+                no_reversal_config: config.no_reversal_entry_guard.clone(),
             });
         }
     }
@@ -250,6 +271,7 @@ fn live_gap_history_prewarm_should_sample(key: &str, now_ms: i64, sample_ms: i64
 }
 
 fn maybe_record_live_gap_history_prewarm_sample(
+    repo: &PostgresRepository,
     target: &LiveGapHistoryPrewarmTarget,
     snapshot: &MarketDataSnapshot,
     now: DateTime<Utc>,
@@ -257,41 +279,40 @@ fn maybe_record_live_gap_history_prewarm_sample(
     let Some(elapsed_sec) = live_gap_collector_elapsed_sec(&target.market_slug, now) else {
         return;
     };
-    if elapsed_sec < target.prewarm_start_elapsed_sec || elapsed_sec > target.action_window_end_sec {
+    if elapsed_sec < target.prewarm_start_elapsed_sec || elapsed_sec > target.action_window_end_sec
+    {
         return;
     }
     let now_ms = now.timestamp_millis();
-    let key = pre_buy_collapse_guard_key(
-        &target.market_slug,
-        &target.token_id,
-        &target.outcome_label,
-    );
+    let key =
+        pre_buy_collapse_guard_key(&target.market_slug, &target.token_id, &target.outcome_label);
     if !live_gap_history_prewarm_should_sample(&key, now_ms, target.sample_ms) {
         return;
     }
-    let Some(best_ask) = snapshot.best_ask.filter(|value| value.is_finite() && *value > 0.0)
+    let Some(best_ask) = snapshot
+        .best_ask
+        .filter(|value| value.is_finite() && *value > 0.0)
     else {
         return;
     };
     let Some(window_start) = MarketCycleId(target.market_slug.clone()).start_time() else {
         return;
     };
-    let open_tick = match trade_flow::guards::chainlink_price::get_chainlink_price_start_tick(
+    let open_tick = match live_gap_collector_open_price_snapshot(
         &target.asset,
+        &target.market_slug,
         window_start.timestamp_millis(),
-    ) {
-        Ok(snapshot) => snapshot,
-        Err(_) => return,
-    };
-    let binance = match trade_flow::guards::binance_price::get_binance_price_snapshot(
-        &target.asset,
         now_ms,
     ) {
         Ok(snapshot) => snapshot,
         Err(_) => return,
     };
+    let current = match live_gap_collector_current_price_snapshot(&target.asset, now_ms, 1_500) {
+        Ok(snapshot) => snapshot,
+        Err(_) => return,
+    };
     let live_gap =
-        live_gap_collector_directional_gap(&target.direction, open_tick.price, binance.price);
+        live_gap_collector_directional_gap(&target.direction, open_tick.price, current.price);
     live_gap_history_register_prewarm_context(target, now_ms);
     record_pre_buy_collapse_sample_with_retention(
         &target.market_slug,
@@ -306,9 +327,70 @@ fn maybe_record_live_gap_history_prewarm_sample(
         },
         target.retention_ms,
     );
+    maybe_spawn_no_reversal_profile_prewarm(repo, target, best_ask, live_gap, now_ms);
 }
 
-fn build_live_gap_history_prewarm_callback() -> MarketTickCallback {
+fn maybe_spawn_no_reversal_profile_prewarm(
+    repo: &PostgresRepository,
+    target: &LiveGapHistoryPrewarmTarget,
+    best_ask: f64,
+    live_gap: f64,
+    now_ms: i64,
+) {
+    let config = &target.no_reversal_config;
+    if !(config.enabled && config.precomputed_profiles_enabled) {
+        return;
+    }
+    if best_ask < target.execution_floor_price || best_ask > target.hard_max_price {
+        return;
+    }
+    let remaining_sec =
+        live_gap_collector_remaining_sec(&target.market_slug, Utc::now()).unwrap_or_default();
+    let metrics = pre_buy_collapse_guard_metrics(
+        &target.market_slug,
+        &target.token_id,
+        &target.outcome_label,
+        now_ms,
+        best_ask,
+        live_gap,
+    );
+    let slope_bucket = match metrics.gap_slope_3s_usd_per_sec {
+        Some(slope) if slope < 0.0 => "negative",
+        Some(_) => "non_negative",
+        None => "unknown",
+    };
+    let profile_config_hash = no_reversal_config_hash(config);
+    let target_window_start = MarketCycleId(target.market_slug.clone()).start_time();
+    let keyspace_input = NoReversalProfileKeyspaceInput {
+        market_slug: target.market_slug.clone(),
+        target_window_start,
+        definition_id: target.definition_id,
+        node_key: target.node_key.clone(),
+        profile_config_hash,
+        asset: target.asset.clone(),
+        direction: target.direction.clone(),
+        current_remaining_sec: remaining_sec,
+        current_best_ask: best_ask,
+        current_live_gap: live_gap,
+        current_slope_bucket: slope_bucket.to_string(),
+    };
+    let candidates = no_reversal_profile_keyspace_candidates(&keyspace_input);
+    let expected_total = candidates.len();
+    for (index, candidate) in candidates.into_iter().enumerate() {
+        let cache_key = no_reversal_cache_key_from_query(config, &candidate.query);
+        no_reversal_spawn_profile_warmup_expected(
+            repo.clone(),
+            config.clone(),
+            candidate.query,
+            cache_key,
+            index + 1,
+            expected_total,
+            candidate.priority,
+        );
+    }
+}
+
+fn build_live_gap_history_prewarm_callback(repo: PostgresRepository) -> MarketTickCallback {
     Arc::new(move |token_id, snapshot| {
         let targets = if let Ok(cache) = TRADE_FLOW_WS_FAST_PATH_CACHE.try_read() {
             cache
@@ -324,7 +406,7 @@ fn build_live_gap_history_prewarm_callback() -> MarketTickCallback {
         }
         let now = Utc::now();
         for target in targets {
-            maybe_record_live_gap_history_prewarm_sample(&target, snapshot, now);
+            maybe_record_live_gap_history_prewarm_sample(&repo, &target, snapshot, now);
         }
     })
 }
@@ -409,5 +491,54 @@ mod live_gap_history_prewarm_tests {
                 ("Down".to_string(), "tok-down".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn prewarm_target_asset_comes_from_market_slug_not_workflow_context() {
+        let trigger = spec();
+        let run_spec = WsOpenPositionPriceRunSpec {
+            run_id: 7,
+            definition_id: 4320,
+            version_id: 11,
+            version_no: 1,
+            context: json!({
+                "workflowName": "test3_manual_self_tune_eth",
+                "flowContext": { "yesTokenId": "tok-up" }
+            }),
+            nodes: vec![trigger.clone()],
+            context_dirty: false,
+        };
+        let graph = TradeFlowGraphRuntime {
+            context: json!({}),
+            nodes: vec![TradeFlowNode {
+                key: "action_btc".to_string(),
+                node_type: "action.place_order".to_string(),
+                config: json!({
+                    "mode": ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1,
+                    "side": "buy",
+                    "liveGapHistoryPrewarmSides": "triggered"
+                }),
+            }],
+            edges: vec![TradeFlowEdge {
+                source: "trigger".to_string(),
+                target: "action_btc".to_string(),
+                edge_type: "default".to_string(),
+                condition: None,
+            }],
+        };
+
+        let targets = build_live_gap_history_prewarm_targets_for_trigger(
+            &run_spec,
+            &graph,
+            &run_spec.context,
+            &trigger,
+        );
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].market_slug, "btc-updown-5m-1777900500");
+        assert_eq!(targets[0].asset, "btc");
+        assert_eq!(targets[0].direction, "up");
+        assert_eq!(targets[0].retention_ms, 300_000);
+        assert_eq!(targets[0].no_reversal_config.local_path_lookback_ms, 300_000);
     }
 }

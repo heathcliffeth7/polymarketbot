@@ -14,6 +14,9 @@ struct ActionPlaceOrderPtbStopLossConfig {
     current_price_source: PriceToBeatCurrentPriceSource,
 }
 
+#[cfg(test)]
+mod ptb_stop_loss_hybrid_tests;
+
 #[derive(Debug, Clone, PartialEq)]
 struct TradeBuilderPtbStopLossEvaluation {
     asset: Option<String>,
@@ -26,6 +29,38 @@ struct TradeBuilderPtbStopLossEvaluation {
     directional_gap: Option<f64>,
     reason_code: &'static str,
     should_trigger: bool,
+    source_evaluations: Vec<TradeBuilderPtbStopLossSourceEvaluation>,
+}
+
+include!("ptb_stop_loss_cex_consensus.rs");
+
+#[derive(Debug, Clone, PartialEq)]
+struct TradeBuilderPtbStopLossSourceEvaluation {
+    config_source: &'static str,
+    current_price_source: &'static str,
+    current_price: Option<f64>,
+    directional_gap: Option<f64>,
+    reason_code: &'static str,
+    should_trigger: bool,
+    error_code: Option<&'static str>,
+    error_detail: Option<String>,
+    metadata: Option<Value>,
+}
+
+impl TradeBuilderPtbStopLossSourceEvaluation {
+    fn to_value(&self) -> Value {
+        json!({
+            "config_source": self.config_source,
+            "current_price_source": self.current_price_source,
+            "current_price": self.current_price,
+            "directional_gap": self.directional_gap,
+            "reason_code": self.reason_code,
+            "should_trigger": self.should_trigger,
+            "error_code": self.error_code,
+            "error_detail": self.error_detail,
+            "metadata": self.metadata,
+        })
+    }
 }
 
 fn trade_builder_market_supports_ptb_stop_loss(market_slug: &str) -> bool {
@@ -176,21 +211,31 @@ fn trade_builder_ptb_stop_loss_gap_usd(order: &TradeBuilderOrder) -> Option<f64>
         .filter(|value| value.is_finite())
 }
 
+#[cfg(test)]
 fn trade_builder_ptb_stop_loss_effective_gap_usd(
     order: &TradeBuilderOrder,
     threshold_gap_usd: f64,
 ) -> f64 {
-    let mode = order
-        .ptb_stop_loss_time_decay_mode
-        .as_deref()
-        .unwrap_or("tighten");
+    trade_builder_ptb_stop_loss_effective_gap_usd_for_market(
+        &order.market_slug,
+        threshold_gap_usd,
+        order.ptb_stop_loss_time_decay_mode.as_deref(),
+    )
+}
+
+fn trade_builder_ptb_stop_loss_effective_gap_usd_for_market(
+    market_slug: &str,
+    threshold_gap_usd: f64,
+    time_decay_mode: Option<&str>,
+) -> f64 {
+    let mode = time_decay_mode.unwrap_or("tighten");
     if mode == "none" || threshold_gap_usd < 0.0 {
         return threshold_gap_usd;
     }
-    let Some(scope) = find_updown_scope_by_slug(&order.market_slug) else {
+    let Some(scope) = find_updown_scope_by_slug(market_slug) else {
         return threshold_gap_usd;
     };
-    let Some(window_start) = MarketCycleId(order.market_slug.clone()).start_time() else {
+    let Some(window_start) = MarketCycleId(market_slug.to_string()).start_time() else {
         return threshold_gap_usd;
     };
     let window_seconds = updown_scope_window_seconds(scope).max(1);
@@ -215,68 +260,199 @@ fn trade_builder_ptb_direction(outcome_label: &str) -> Option<&'static str> {
     }
 }
 
-fn trade_builder_evaluate_ptb_stop_loss(
-    order: &TradeBuilderOrder,
-) -> Option<TradeBuilderPtbStopLossEvaluation> {
-    let threshold_gap_usd = trade_builder_ptb_stop_loss_gap_usd(order)?;
-    let threshold_gap_usd = trade_builder_ptb_stop_loss_effective_gap_usd(order, threshold_gap_usd);
-    let current_price_source =
-        PriceToBeatCurrentPriceSource::parse(Some(order.ptb_current_price_source.as_str()));
-    let current_price_source_label = current_price_source.current_price_source_label();
-    if !trade_builder_is_stop_loss_child(order) {
-        return None;
+fn trade_builder_ptb_directional_gap(
+    direction: &str,
+    ptb_reference_price: f64,
+    current_price: f64,
+) -> f64 {
+    if direction == "up" {
+        current_price - ptb_reference_price
+    } else {
+        ptb_reference_price - current_price
+    }
+}
+
+fn trade_builder_ptb_stop_loss_source_reason_code(
+    current_price_source: PriceToBeatCurrentPriceSource,
+    should_trigger: bool,
+) -> &'static str {
+    if !should_trigger {
+        return "threshold_not_met";
+    }
+    match current_price_source {
+        PriceToBeatCurrentPriceSource::Chainlink => "chainlink_threshold_hit",
+        PriceToBeatCurrentPriceSource::CexConsensus => "cex_consensus_threshold_hit",
+        _ => "source_threshold_hit",
+    }
+}
+
+fn trade_builder_ptb_stop_loss_source_evaluation(
+    current_price_source: PriceToBeatCurrentPriceSource,
+    market_slug: &str,
+    asset: &str,
+    direction: &str,
+    threshold_gap_usd: f64,
+    ptb_reference_price: f64,
+) -> TradeBuilderPtbStopLossSourceEvaluation {
+    match resolve_price_to_beat_current_price_snapshot(
+        current_price_source,
+        PriceToBeatSource::Polymarket,
+        market_slug,
+        asset,
+        None,
+    ) {
+        Ok((current_price, current_price_source_label)) => {
+            let directional_gap =
+                trade_builder_ptb_directional_gap(direction, ptb_reference_price, current_price);
+            let should_trigger = directional_gap <= threshold_gap_usd;
+            TradeBuilderPtbStopLossSourceEvaluation {
+                config_source: current_price_source.as_config_str(),
+                current_price_source: current_price_source_label,
+                current_price: Some(current_price),
+                directional_gap: Some(directional_gap),
+                reason_code: trade_builder_ptb_stop_loss_source_reason_code(
+                    current_price_source,
+                    should_trigger,
+                ),
+                should_trigger,
+                error_code: None,
+                error_detail: None,
+                metadata: None,
+            }
+        }
+        Err((error_code, error_detail)) => TradeBuilderPtbStopLossSourceEvaluation {
+            config_source: current_price_source.as_config_str(),
+            current_price_source: current_price_source.current_price_source_label(),
+            current_price: None,
+            directional_gap: None,
+            reason_code: "threshold_not_met",
+            should_trigger: false,
+            error_code: Some(error_code),
+            error_detail: Some(error_detail),
+            metadata: None,
+        },
+    }
+}
+
+fn trade_builder_ptb_stop_loss_source_evaluations(
+    current_price_source: PriceToBeatCurrentPriceSource,
+    market_slug: &str,
+    asset: &str,
+    direction: &str,
+    threshold_gap_usd: f64,
+    ptb_reference_price: f64,
+) -> Vec<TradeBuilderPtbStopLossSourceEvaluation> {
+    if current_price_source == PriceToBeatCurrentPriceSource::CexConsensus {
+        return vec![
+            trade_builder_ptb_stop_loss_source_evaluation(
+                PriceToBeatCurrentPriceSource::Chainlink,
+                market_slug,
+                asset,
+                direction,
+                threshold_gap_usd,
+                ptb_reference_price,
+            ),
+            evaluate_cex_consensus_ptb_stop_loss(
+                market_slug,
+                direction,
+                threshold_gap_usd,
+                ptb_reference_price,
+            ),
+        ];
     }
 
-    let Some(scope) = find_updown_scope_by_slug(&order.market_slug) else {
-        return Some(TradeBuilderPtbStopLossEvaluation {
+    if current_price_source == PriceToBeatCurrentPriceSource::BinanceHyperliquid {
+        return [PriceToBeatCurrentPriceSource::Binance, PriceToBeatCurrentPriceSource::Hyperliquid]
+            .into_iter()
+            .map(|source| {
+                trade_builder_ptb_stop_loss_source_evaluation(
+                    source,
+                    market_slug,
+                    asset,
+                    direction,
+                    threshold_gap_usd,
+                    ptb_reference_price,
+                )
+            })
+            .collect();
+    }
+
+    vec![trade_builder_ptb_stop_loss_source_evaluation(
+        current_price_source,
+        market_slug,
+        asset,
+        direction,
+        threshold_gap_usd,
+        ptb_reference_price,
+    )]
+}
+
+fn trade_builder_evaluate_ptb_stop_loss_inputs(
+    market_slug: &str,
+    outcome_label: &str,
+    threshold_gap_usd: f64,
+    ptb_reference_price: Option<f64>,
+    current_price_source: PriceToBeatCurrentPriceSource,
+    time_decay_mode: Option<&str>,
+) -> TradeBuilderPtbStopLossEvaluation {
+    let threshold_gap_usd = trade_builder_ptb_stop_loss_effective_gap_usd_for_market(
+        market_slug,
+        threshold_gap_usd,
+        time_decay_mode,
+    );
+    let current_price_source_label = current_price_source.current_price_source_label();
+    let Some(scope) = find_updown_scope_by_slug(market_slug) else {
+        return TradeBuilderPtbStopLossEvaluation {
             asset: None,
             direction: None,
             threshold_gap_usd,
-            ptb_reference_price: order.ptb_reference_price,
+            ptb_reference_price,
             current_price: None,
             current_price_source: current_price_source_label,
             current_chainlink_price: None,
             directional_gap: None,
             reason_code: "unsupported_market",
             should_trigger: false,
-        });
+            source_evaluations: Vec::new(),
+        };
     };
     if !matches!(scope.timeframe, "5m" | "15m") {
-        return Some(TradeBuilderPtbStopLossEvaluation {
+        return TradeBuilderPtbStopLossEvaluation {
             asset: Some(scope.asset.to_string()),
             direction: None,
             threshold_gap_usd,
-            ptb_reference_price: order.ptb_reference_price,
+            ptb_reference_price,
             current_price: None,
             current_price_source: current_price_source_label,
             current_chainlink_price: None,
             directional_gap: None,
             reason_code: "unsupported_market",
             should_trigger: false,
-        });
+            source_evaluations: Vec::new(),
+        };
     }
 
-    let Some(direction) = trade_builder_ptb_direction(&order.outcome_label) else {
-        return Some(TradeBuilderPtbStopLossEvaluation {
+    let Some(direction) = trade_builder_ptb_direction(outcome_label) else {
+        return TradeBuilderPtbStopLossEvaluation {
             asset: Some(scope.asset.to_string()),
             direction: None,
             threshold_gap_usd,
-            ptb_reference_price: order.ptb_reference_price,
+            ptb_reference_price,
             current_price: None,
             current_price_source: current_price_source_label,
             current_chainlink_price: None,
             directional_gap: None,
             reason_code: "unsupported_outcome_label",
             should_trigger: false,
-        });
+            source_evaluations: Vec::new(),
+        };
     };
 
-    let ptb_reference_price = order
-        .ptb_reference_price
+    let ptb_reference_price = ptb_reference_price
         .filter(|value| value.is_finite() && *value > 0.0)
-        .or_else(|| trade_builder_cached_ptb_reference_price(&order.market_slug));
+        .or_else(|| trade_builder_cached_ptb_reference_price(market_slug));
     if ptb_reference_price.is_none() {
-        return Some(TradeBuilderPtbStopLossEvaluation {
+        return TradeBuilderPtbStopLossEvaluation {
             asset: Some(scope.asset.to_string()),
             direction: Some(direction.to_string()),
             threshold_gap_usd,
@@ -287,20 +463,42 @@ fn trade_builder_evaluate_ptb_stop_loss(
             directional_gap: None,
             reason_code: "ptb_reference_pending",
             should_trigger: false,
-        });
+            source_evaluations: Vec::new(),
+        };
     }
 
-    let current_price = resolve_price_to_beat_current_price_snapshot(
+    let ptb_reference_price_value = ptb_reference_price.unwrap_or_default();
+    let source_evaluations = trade_builder_ptb_stop_loss_source_evaluations(
         current_price_source,
-        PriceToBeatSource::Polymarket,
-        &order.market_slug,
+        market_slug,
         scope.asset,
-        None,
-    )
-    .ok()
-    .map(|(price, _)| price);
-    let Some(current_price) = current_price else {
-        return Some(TradeBuilderPtbStopLossEvaluation {
+        direction,
+        threshold_gap_usd,
+        ptb_reference_price_value,
+    );
+    let selected_source = source_evaluations
+        .iter()
+        .find(|evaluation| {
+            evaluation.config_source == "chainlink"
+                && evaluation.current_price.is_some()
+                && evaluation.should_trigger
+        })
+        .or_else(|| {
+            let has_triggering_source = source_evaluations
+                .iter()
+                .any(|evaluation| evaluation.current_price.is_some() && evaluation.should_trigger);
+            source_evaluations
+                .iter()
+                .filter(|evaluation| evaluation.current_price.is_some())
+                .filter(|evaluation| !has_triggering_source || evaluation.should_trigger)
+                .min_by(|left, right| {
+                    left.directional_gap
+                        .unwrap_or(f64::INFINITY)
+                        .total_cmp(&right.directional_gap.unwrap_or(f64::INFINITY))
+                })
+        });
+    let Some(selected_source) = selected_source else {
+        return TradeBuilderPtbStopLossEvaluation {
             asset: Some(scope.asset.to_string()),
             direction: Some(direction.to_string()),
             threshold_gap_usd,
@@ -311,33 +509,53 @@ fn trade_builder_evaluate_ptb_stop_loss(
             directional_gap: None,
             reason_code: "ptb_current_price_unavailable",
             should_trigger: false,
-        });
+            source_evaluations,
+        };
     };
 
-    let directional_gap = if direction == "up" {
-        current_price - ptb_reference_price.unwrap_or_default()
-    } else {
-        ptb_reference_price.unwrap_or_default() - current_price
-    };
     // Negative thresholds intentionally mean "wait for parity, then overshoot against the position".
-    let should_trigger = directional_gap <= threshold_gap_usd;
-    Some(TradeBuilderPtbStopLossEvaluation {
+    let should_trigger = selected_source.should_trigger;
+    let current_price = selected_source.current_price.unwrap_or_default();
+    let current_chainlink_price = source_evaluations
+        .iter()
+        .find(|evaluation| evaluation.config_source == "chainlink")
+        .and_then(|evaluation| evaluation.current_price);
+    TradeBuilderPtbStopLossEvaluation {
         asset: Some(scope.asset.to_string()),
         direction: Some(direction.to_string()),
         threshold_gap_usd,
         ptb_reference_price,
         current_price: Some(current_price),
-        current_price_source: current_price_source_label,
-        current_chainlink_price: (current_price_source == PriceToBeatCurrentPriceSource::Chainlink)
-            .then_some(current_price),
-        directional_gap: Some(directional_gap),
+        current_price_source: selected_source.current_price_source,
+        current_chainlink_price,
+        directional_gap: selected_source.directional_gap,
         reason_code: if should_trigger {
             "ptb_gap_threshold_hit"
         } else {
             "ptb_gap_threshold_not_met"
         },
         should_trigger,
-    })
+        source_evaluations,
+    }
+}
+
+fn trade_builder_evaluate_ptb_stop_loss(
+    order: &TradeBuilderOrder,
+) -> Option<TradeBuilderPtbStopLossEvaluation> {
+    let threshold_gap_usd = trade_builder_ptb_stop_loss_gap_usd(order)?;
+    if !trade_builder_is_stop_loss_child(order) {
+        return None;
+    }
+    let current_price_source =
+        PriceToBeatCurrentPriceSource::parse(Some(order.ptb_current_price_source.as_str()));
+    Some(trade_builder_evaluate_ptb_stop_loss_inputs(
+        &order.market_slug,
+        &order.outcome_label,
+        threshold_gap_usd,
+        order.ptb_reference_price,
+        current_price_source,
+        order.ptb_stop_loss_time_decay_mode.as_deref(),
+    ))
 }
 
 fn trade_builder_ptb_reference_price_persist_candidate(
@@ -372,12 +590,17 @@ fn append_trade_builder_ptb_stop_loss_payload(
             "current_chainlink_price": evaluation.current_chainlink_price,
             "directional_gap": evaluation.directional_gap,
             "should_trigger": evaluation.should_trigger,
+            "source_evaluations": evaluation
+                .source_evaluations
+                .iter()
+                .map(TradeBuilderPtbStopLossSourceEvaluation::to_value)
+                .collect::<Vec<_>>(),
         }),
     );
 }
 
 #[cfg(test)]
-mod trade_builder_ptb_stop_loss_tests {
+pub(crate) mod trade_builder_ptb_stop_loss_tests {
     use super::*;
     use crate::trade_flow::guards::cex_microstructure::{
         clear_cex_microstructure_test_state, seed_cex_book_test_sample, CexBookSample, CexVenue,
@@ -387,7 +610,7 @@ mod trade_builder_ptb_stop_loss_tests {
 
     static PTB_STOP_LOSS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn lock_ptb_stop_loss_test_state() -> MutexGuard<'static, ()> {
+    pub(crate) fn lock_ptb_stop_loss_test_state() -> MutexGuard<'static, ()> {
         PTB_STOP_LOSS_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -403,7 +626,7 @@ mod trade_builder_ptb_stop_loss_tests {
         ));
     }
 
-    fn test_ptb_stop_loss_order(
+    pub(crate) fn test_ptb_stop_loss_order(
         market_slug: &str,
         outcome_label: &str,
         gap_usd: f64,
@@ -496,7 +719,7 @@ mod trade_builder_ptb_stop_loss_tests {
         }
     }
 
-    fn seed_ptb_stop_loss_current_price(asset: &str, current_chainlink_price: f64) {
+    pub(crate) fn seed_ptb_stop_loss_current_price(asset: &str, current_chainlink_price: f64) {
         let now_ms = Utc::now().timestamp_millis();
         trade_flow::guards::chainlink_price::seed_chainlink_price_test_ticks(
             asset,
@@ -511,6 +734,15 @@ mod trade_builder_ptb_stop_loss_tests {
     fn seed_ptb_stop_loss_cex_current_price(asset: &str, venue: CexVenue, current_price: f64) {
         let now_ms = Utc::now().timestamp_millis();
         clear_cex_microstructure_test_state();
+        seed_ptb_stop_loss_cex_current_price_without_clear(asset, venue, current_price, now_ms);
+    }
+
+    fn seed_ptb_stop_loss_cex_current_price_without_clear(
+        asset: &str,
+        venue: CexVenue,
+        current_price: f64,
+        now_ms: i64,
+    ) {
         seed_cex_book_test_sample(CexBookSample {
             venue,
             asset: asset.to_string(),
@@ -521,6 +753,34 @@ mod trade_builder_ptb_stop_loss_tests {
             ask_size: Some(1.0),
             source: "ticker",
         });
+    }
+
+    pub(crate) fn seed_ptb_stop_loss_cex_window_price(
+        asset: &str,
+        venue: CexVenue,
+        timestamp_ms: i64,
+        current_price: f64,
+    ) {
+        seed_cex_book_test_sample(CexBookSample {
+            venue,
+            asset: asset.to_string(),
+            timestamp_ms,
+            bid: current_price - 0.5,
+            ask: current_price + 0.5,
+            bid_size: Some(1.0),
+            ask_size: Some(1.0),
+            source: if matches!(venue, CexVenue::Binance | CexVenue::Bybit | CexVenue::Coinbase) && timestamp_ms % 300_000 == 0 {
+                "rest_open"
+            } else {
+                "ticker"
+            },
+        });
+    }
+
+    pub(crate) fn current_5m_market_slug(asset: &str) -> (String, i64) {
+        let now = Utc::now().timestamp();
+        let start = now - (now % 300);
+        (format!("{asset}-updown-5m-{start}"), start * 1_000)
     }
 
     fn evaluate_test_ptb_stop_loss(
@@ -647,6 +907,277 @@ mod trade_builder_ptb_stop_loss_tests {
         assert_eq!(evaluation.current_chainlink_price, None);
         assert_eq!(evaluation.directional_gap, Some(-10.0));
         assert!(evaluation.should_trigger);
+    }
+
+    #[test]
+    fn ptb_stop_loss_uses_selected_hyperliquid_current_price() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        seed_ptb_stop_loss_current_price("btc", 140.0);
+        seed_ptb_stop_loss_cex_current_price("btc", CexVenue::Hyperliquid, 90.0);
+        let mut order =
+            test_ptb_stop_loss_order("btc-updown-5m-1774013100", "Up", -10.0, Some(100.0));
+        order.ptb_current_price_source = "hyperliquid".to_string();
+
+        let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
+
+        assert_eq!(evaluation.current_price_source, "hyperliquid_l2book_mid");
+        assert_eq!(evaluation.current_price, Some(90.0));
+        assert_eq!(evaluation.current_chainlink_price, None);
+        assert_eq!(evaluation.directional_gap, Some(-10.0));
+        assert!(evaluation.should_trigger);
+    }
+
+    #[test]
+    fn ptb_stop_loss_binance_hyperliquid_triggers_when_binance_hits_gap() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        seed_ptb_stop_loss_current_price("btc", 140.0);
+        clear_cex_microstructure_test_state();
+        let now_ms = Utc::now().timestamp_millis();
+        seed_ptb_stop_loss_cex_current_price_without_clear(
+            "btc",
+            CexVenue::Binance,
+            90.0,
+            now_ms,
+        );
+        seed_ptb_stop_loss_cex_current_price_without_clear(
+            "btc",
+            CexVenue::Hyperliquid,
+            95.0,
+            now_ms,
+        );
+        let mut order =
+            test_ptb_stop_loss_order("btc-updown-5m-1774013100", "Up", -10.0, Some(100.0));
+        order.ptb_current_price_source = "binance_hyperliquid".to_string();
+
+        let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
+
+        assert_eq!(evaluation.current_price_source, "binance_cex_ws_mid");
+        assert_eq!(evaluation.current_price, Some(90.0));
+        assert_eq!(evaluation.directional_gap, Some(-10.0));
+        assert_eq!(evaluation.source_evaluations.len(), 2);
+        assert!(evaluation.should_trigger);
+    }
+
+    #[test]
+    fn ptb_stop_loss_binance_hyperliquid_triggers_when_hyperliquid_hits_gap() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        seed_ptb_stop_loss_current_price("btc", 140.0);
+        clear_cex_microstructure_test_state();
+        let now_ms = Utc::now().timestamp_millis();
+        seed_ptb_stop_loss_cex_current_price_without_clear(
+            "btc",
+            CexVenue::Binance,
+            95.0,
+            now_ms,
+        );
+        seed_ptb_stop_loss_cex_current_price_without_clear(
+            "btc",
+            CexVenue::Hyperliquid,
+            90.0,
+            now_ms,
+        );
+        let mut order =
+            test_ptb_stop_loss_order("btc-updown-5m-1774013100", "Up", -10.0, Some(100.0));
+        order.ptb_current_price_source = "binance_hyperliquid".to_string();
+
+        let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
+
+        assert_eq!(evaluation.current_price_source, "hyperliquid_l2book_mid");
+        assert_eq!(evaluation.current_price, Some(90.0));
+        assert_eq!(evaluation.directional_gap, Some(-10.0));
+        assert!(evaluation.should_trigger);
+    }
+
+    #[test]
+    fn ptb_stop_loss_binance_hyperliquid_uses_available_source_when_other_missing() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        seed_ptb_stop_loss_current_price("btc", 140.0);
+        seed_ptb_stop_loss_cex_current_price("btc", CexVenue::Binance, 90.0);
+        let mut order =
+            test_ptb_stop_loss_order("btc-updown-5m-1774013100", "Up", -10.0, Some(100.0));
+        order.ptb_current_price_source = "binance_hyperliquid".to_string();
+
+        let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
+
+        assert_eq!(evaluation.current_price_source, "binance_cex_ws_mid");
+        assert_eq!(evaluation.current_price, Some(90.0));
+        assert_eq!(evaluation.source_evaluations.len(), 2);
+        assert_eq!(evaluation.source_evaluations[1].error_code, Some("current_price_unavailable"));
+        assert!(evaluation.should_trigger);
+    }
+
+    #[tokio::test]
+    async fn ptb_stop_loss_cex_consensus_triggers_with_bybit_and_confirmation() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        clear_cex_microstructure_test_state();
+        seed_ptb_stop_loss_current_price("btc", 120.0);
+        let (market_slug, start_ms) = current_5m_market_slug("btc");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Bybit, start_ms, 100.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Bybit, now_ms, 90.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Binance, start_ms, 200.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Binance, now_ms, 190.0);
+        let mut order = test_ptb_stop_loss_order(&market_slug, "Up", -5.0, Some(100.0));
+        order.ptb_current_price_source = "cex_consensus".to_string();
+
+        let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
+
+        assert_eq!(evaluation.current_price_source, "cex_consensus_bybit_plus_one");
+        assert_eq!(evaluation.current_price, Some(90.0));
+        assert_eq!(evaluation.directional_gap, Some(-10.0));
+        let cex_metadata = evaluation.source_evaluations[1]
+            .metadata
+            .as_ref()
+            .expect("cex metadata");
+        assert_eq!(
+            cex_metadata["confirming_venues"],
+            json!(["binance"])
+        );
+        assert!(evaluation.should_trigger);
+    }
+
+    #[tokio::test]
+    async fn ptb_stop_loss_cex_consensus_triggers_with_coinbase_confirmation() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        clear_cex_microstructure_test_state();
+        seed_ptb_stop_loss_current_price("btc", 120.0);
+        let (market_slug, start_ms) = current_5m_market_slug("btc");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Bybit, start_ms, 100.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Bybit, now_ms, 90.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Coinbase, start_ms, 200.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Coinbase, now_ms, 190.0);
+        let mut order = test_ptb_stop_loss_order(&market_slug, "Up", -5.0, Some(100.0));
+        order.ptb_current_price_source = "cex_consensus".to_string();
+
+        let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
+
+        assert_eq!(evaluation.current_price_source, "cex_consensus_bybit_plus_one");
+        assert_eq!(evaluation.current_price, Some(90.0));
+        assert_eq!(evaluation.directional_gap, Some(-10.0));
+        let cex_metadata = evaluation.source_evaluations[1]
+            .metadata
+            .as_ref()
+            .expect("cex metadata");
+        assert_eq!(
+            cex_metadata["confirming_venues"],
+            json!(["coinbase"])
+        );
+        assert!(evaluation.should_trigger);
+    }
+
+    #[tokio::test]
+    async fn ptb_stop_loss_cex_consensus_waits_for_confirmation() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        clear_cex_microstructure_test_state();
+        seed_ptb_stop_loss_current_price("btc", 120.0);
+        let (market_slug, start_ms) = current_5m_market_slug("btc");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Bybit, start_ms, 100.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Bybit, now_ms, 90.0);
+        let mut order = test_ptb_stop_loss_order(&market_slug, "Up", -5.0, Some(100.0));
+        order.ptb_current_price_source = "cex_consensus".to_string();
+
+        let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
+
+        assert_eq!(evaluation.current_price_source, "cex_consensus_bybit_plus_one");
+        assert_eq!(evaluation.directional_gap, Some(-10.0));
+        assert_eq!(
+            evaluation.source_evaluations[1].error_code,
+            Some("cex_consensus_unconfirmed")
+        );
+        assert!(!evaluation.should_trigger);
+    }
+
+    #[tokio::test]
+    async fn ptb_stop_loss_cex_consensus_requires_confirm_threshold_not_just_side() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        clear_cex_microstructure_test_state();
+        seed_ptb_stop_loss_current_price("btc", 120.0);
+        let (market_slug, start_ms) = current_5m_market_slug("btc");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Bybit, start_ms, 100.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Bybit, now_ms, 90.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Binance, start_ms, 200.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Binance, now_ms, 199.0);
+        let mut order = test_ptb_stop_loss_order(&market_slug, "Up", -5.0, Some(100.0));
+        order.ptb_current_price_source = "cex_consensus".to_string();
+
+        let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
+
+        assert_eq!(evaluation.current_price_source, "cex_consensus_bybit_plus_one");
+        assert_eq!(evaluation.directional_gap, Some(-10.0));
+        let cex_metadata = evaluation.source_evaluations[1]
+            .metadata
+            .as_ref()
+            .expect("cex metadata");
+        assert_eq!(
+            cex_metadata["venue_deltas"]["binance"]["directional_gap"],
+            json!(-1.0)
+        );
+        assert_eq!(
+            cex_metadata["confirming_venues"],
+            json!([])
+        );
+        assert!(!evaluation.should_trigger);
+    }
+
+    #[tokio::test]
+    async fn ptb_stop_loss_cex_consensus_requires_bybit_lead() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        clear_cex_microstructure_test_state();
+        seed_ptb_stop_loss_current_price("btc", 120.0);
+        let (market_slug, start_ms) = current_5m_market_slug("btc");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Binance, start_ms, 200.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Binance, now_ms, 190.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Coinbase, start_ms, 300.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Coinbase, now_ms, 290.0);
+        let mut order = test_ptb_stop_loss_order(&market_slug, "Up", -5.0, Some(100.0));
+        order.ptb_current_price_source = "cex_consensus".to_string();
+
+        let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
+
+        assert_eq!(evaluation.current_price_source, "chainlink_live_data_ws");
+        assert_eq!(evaluation.current_price, Some(120.0));
+        assert_eq!(
+            evaluation.source_evaluations[1].error_code,
+            Some("cex_consensus_bybit_unavailable")
+        );
+        assert!(!evaluation.should_trigger);
+    }
+
+    #[tokio::test]
+    async fn ptb_stop_loss_cex_consensus_does_not_raw_trigger_when_window_baseline_is_late() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        clear_cex_microstructure_test_state();
+        seed_ptb_stop_loss_current_price("btc", 120.0);
+        let (market_slug, _) = current_5m_market_slug("btc");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Bybit, now_ms, 88.0);
+        seed_ptb_stop_loss_cex_window_price("btc", CexVenue::Binance, now_ms, 87.0);
+        let mut order = test_ptb_stop_loss_order(&market_slug, "Up", -10.0, Some(100.0));
+        order.ptb_current_price_source = "cex_consensus".to_string();
+
+        let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
+
+        assert_eq!(evaluation.current_price_source, "chainlink_live_data_ws");
+        assert_eq!(evaluation.current_price, Some(120.0));
+        assert_eq!(evaluation.directional_gap, Some(20.0));
+        assert!(!evaluation.should_trigger);
+        assert_eq!(
+            evaluation.source_evaluations[1].error_code,
+            Some("cex_consensus_bybit_unavailable")
+        );
+        assert_ne!(evaluation.source_evaluations[1].current_price, Some(88.0));
+        let cex_metadata = evaluation.source_evaluations[1]
+            .metadata
+            .as_ref()
+            .expect("cex metadata");
+        assert!(cex_metadata["venue_deltas"]["bybit"]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("window open book missing"));
     }
 
     #[test]

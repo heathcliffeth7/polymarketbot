@@ -1,5 +1,9 @@
 import { PAIR_LOCK_UNSUPPORTED_EXIT_FIELD_KEYS } from '@/lib/trade-flow-config-mappers/pair-lock';
-import { isPtbCurrentPriceSource, isPtbMode } from '@/lib/trade-flow-config-mappers/ptb-modes';
+import {
+  isPtbCurrentPriceSource,
+  isPtbMode,
+  isPtbStopLossCurrentPriceSource,
+} from '@/lib/trade-flow-config-mappers/ptb-modes';
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
 import { hasUpstreamAutoScopeMarketTrigger } from './graph';
 import {
@@ -12,6 +16,7 @@ import {
 } from './shared';
 import { normalizePtbStopLossGapUnitValue } from './validation-action-place-order-ptb-stop-loss';
 import { pushNodeError } from './validation-core';
+import { validatePositiveQuantityFlipGridConfig } from './validation-positive-quantity-flip-grid';
 
 interface ParsedExitLadderRule {
   priceCent: number;
@@ -241,12 +246,20 @@ export function validateActionPlaceOrderPairLockConfig(
     return;
   }
 
+  if (
+    mode === 'positive_quantity_flip_grid_v1' ||
+    mode === 'positive_flip_pairlock_compression_v1'
+  ) {
+    validatePositiveQuantityFlipGridConfig(issues, node, graph, config, side, executionMode);
+    return;
+  }
+
   if (mode !== 'pair_lock') {
     pushNodeError(
       issues,
       node,
       'invalid_place_order_mode',
-      'action.place_order mode must be single, pair_lock, dca_live_v1, or live_gap_collector_v1.'
+      'action.place_order mode must be single, pair_lock, dca_live_v1, live_gap_collector_v1, positive_quantity_flip_grid_v1, or positive_flip_pairlock_compression_v1.'
     );
     return;
   }
@@ -1021,13 +1034,13 @@ export function validateActionPlaceOrderPairLockConfig(
   ).toLowerCase();
   if (
     counterLegPtbStopLossCurrentSourceRaw &&
-    !isPtbCurrentPriceSource(counterLegPtbStopLossCurrentSourceRaw)
+    !isPtbStopLossCurrentPriceSource(counterLegPtbStopLossCurrentSourceRaw)
   ) {
     pushNodeError(
       issues,
       node,
       'invalid_counter_leg_ptb_stop_loss_current_price_source',
-      'action.place_order counterLegPtbStopLossCurrentPriceSource must be chainlink, binance, or coinbase.'
+      'action.place_order counterLegPtbStopLossCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, binance_hyperliquid, or cex_consensus.'
     );
   }
   if (
@@ -1212,7 +1225,7 @@ export function validateActionPlaceOrderPairLockConfig(
       issues,
       node,
       'invalid_counter_leg_price_to_beat_current_price_source',
-      'action.place_order counterLegPriceToBeatCurrentPriceSource must be chainlink, binance, or coinbase.'
+      'action.place_order counterLegPriceToBeatCurrentPriceSource must be chainlink, binance, coinbase, or hyperliquid.'
     );
   }
   if (

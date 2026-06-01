@@ -1,5 +1,5 @@
 import type { TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
-import { isPtbCurrentPriceSource } from '@/lib/trade-flow-config-mappers/ptb-modes';
+import { isPtbStopLossCurrentPriceSource } from '@/lib/trade-flow-config-mappers/ptb-modes';
 import { isRecord, toFiniteNumber } from './shared';
 import { pushNodeError } from './validation-core';
 
@@ -91,12 +91,12 @@ export function validateActionPlaceOrderPtbStopLossConfig(
     .trim()
     .toLowerCase();
 
-  if (ptbStopLossCurrentSourceRaw && !isPtbCurrentPriceSource(ptbStopLossCurrentSourceRaw)) {
+  if (ptbStopLossCurrentSourceRaw && !isPtbStopLossCurrentPriceSource(ptbStopLossCurrentSourceRaw)) {
     pushNodeError(
       issues,
       node,
       'invalid_ptb_stop_loss_current_price_source',
-      'action.place_order ptbStopLossCurrentPriceSource must be chainlink, binance, or coinbase.'
+      'action.place_order ptbStopLossCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, binance_hyperliquid, or cex_consensus.'
     );
   }
   if (ptbStopLossCurrentSourceRaw && !ptbStopLossActive) {

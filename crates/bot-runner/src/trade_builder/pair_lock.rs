@@ -43,7 +43,16 @@ fn action_place_order_mode(node: &TradeFlowNode) -> &'static str {
     {
         ACTION_PLACE_ORDER_MODE_PAIR_LOCK => ACTION_PLACE_ORDER_MODE_PAIR_LOCK,
         ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1 => ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1,
-        ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1 => ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1,
+        ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1 => {
+            ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1
+        }
+        ACTION_PLACE_ORDER_MODE_POSITIVE_QUANTITY_FLIP_GRID_V1 => {
+            ACTION_PLACE_ORDER_MODE_POSITIVE_QUANTITY_FLIP_GRID_V1
+        }
+        ACTION_PLACE_ORDER_MODE_POSITIVE_FLIP_PAIRLOCK_COMPRESSION_V1 => {
+            ACTION_PLACE_ORDER_MODE_POSITIVE_FLIP_PAIRLOCK_COMPRESSION_V1
+        }
+        ACTION_PLACE_ORDER_MODE_REVENGE_FLIP_V1 => ACTION_PLACE_ORDER_MODE_REVENGE_FLIP_V1,
         _ => ACTION_PLACE_ORDER_MODE_SINGLE,
     }
 }
@@ -878,6 +887,18 @@ async fn execute_action_place_order_dispatch(
 ) -> Result<TradeFlowNodeExecution> {
     if action_place_order_uses_dca_live(node) {
         return execute_action_place_order_dca_live(
+            repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
+        )
+        .await;
+    }
+    if action_place_order_uses_positive_quantity_flip_grid(node) {
+        return execute_action_place_order_positive_quantity_flip_grid(
+            repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
+        )
+        .await;
+    }
+    if action_place_order_uses_revenge_flip(node) {
+        return execute_action_place_order_revenge_flip(
             repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
         )
         .await;

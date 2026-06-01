@@ -322,6 +322,7 @@ fn trade_builder_should_retry_after_processing_error(order: &TradeBuilderOrder) 
     }
     trade_builder_should_retry_exit_sell(order)
         && (trade_builder_stop_loss_latched(order)
+            || trade_builder_order_is_revenge_flip_stop_loss_sell(order)
             || order
                 .last_error
                 .as_deref()
@@ -409,6 +410,21 @@ struct TradeBuilderMarketBuyExecutionPrice {
     trigger_reference_price: Option<f64>,
 }
 
+const TRADE_BUILDER_MARKETABLE_BUY_MIN_NOTIONAL_USDC: f64 = 1.0;
+const TRADE_BUILDER_MARKETABLE_BUY_MIN_NOTIONAL_CAP_TOLERANCE_USDC: f64 = 0.01;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TradeBuilderMarketableBuyMinNotionalTopUp {
+    original_qty: f64,
+    adjusted_qty: f64,
+    original_notional_usdc: f64,
+    adjusted_notional_usdc: f64,
+    min_notional_usdc: f64,
+    cap_usdc: f64,
+    cap_tolerance_usdc: f64,
+    blocked_by_cap: bool,
+}
+
 fn trade_builder_market_buy_execution_price(
     order: &TradeBuilderOrder,
     current_price: f64,
@@ -440,6 +456,46 @@ fn trade_builder_market_buy_execution_price(
             .unwrap_or_else(|| clamp_probability(current_price)),
         source: "current_price_fallback",
         trigger_reference_price,
+    })
+}
+
+fn trade_builder_marketable_buy_min_notional_top_up(
+    side: &str,
+    order_type: &str,
+    size_basis: &str,
+    desired_price: f64,
+    submit_qty: f64,
+    cap_usdc: f64,
+) -> Option<TradeBuilderMarketableBuyMinNotionalTopUp> {
+    if side != "buy"
+        || size_basis != TRADE_BUILDER_SIZE_BASIS_SHARES
+        || !matches!(order_type, "FAK" | "FOK")
+        || !desired_price.is_finite()
+        || desired_price <= 0.0
+        || !submit_qty.is_finite()
+        || submit_qty <= 0.0
+    {
+        return None;
+    }
+    let original_notional_usdc = submit_qty * desired_price;
+    if original_notional_usdc + 0.000001 >= TRADE_BUILDER_MARKETABLE_BUY_MIN_NOTIONAL_USDC {
+        return None;
+    }
+    let adjusted_qty = round_trade_builder_share_qty(
+        ((TRADE_BUILDER_MARKETABLE_BUY_MIN_NOTIONAL_USDC / desired_price) * 100.0).ceil()
+            / 100.0,
+    );
+    let adjusted_notional_usdc = adjusted_qty * desired_price;
+    Some(TradeBuilderMarketableBuyMinNotionalTopUp {
+        original_qty: submit_qty,
+        adjusted_qty,
+        original_notional_usdc,
+        adjusted_notional_usdc,
+        min_notional_usdc: TRADE_BUILDER_MARKETABLE_BUY_MIN_NOTIONAL_USDC,
+        cap_usdc,
+        cap_tolerance_usdc: TRADE_BUILDER_MARKETABLE_BUY_MIN_NOTIONAL_CAP_TOLERANCE_USDC,
+        blocked_by_cap: adjusted_notional_usdc
+            > cap_usdc + TRADE_BUILDER_MARKETABLE_BUY_MIN_NOTIONAL_CAP_TOLERANCE_USDC,
     })
 }
 

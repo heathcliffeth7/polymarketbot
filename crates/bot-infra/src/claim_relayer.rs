@@ -4,15 +4,18 @@ use serde::{Deserialize, Serialize};
 use std::env;
 
 const CLAIM_RELAYER_ADAPTER_URL_ENV: &str = "CLAIM_RELAYER_ADAPTER_URL";
+const CLAIM_MERGE_ADAPTER_URL_ENV: &str = "CLAIM_MERGE_ADAPTER_URL";
 const CLAIM_FUNDS_ACTIVATION_ADAPTER_URL_ENV: &str = "CLAIM_FUNDS_ACTIVATION_ADAPTER_URL";
 const CLAIM_RELAYER_ADAPTER_TOKEN_ENV: &str = "CLAIM_RELAYER_ADAPTER_TOKEN";
 const DEFAULT_CLAIM_RELAYER_ADAPTER_URL: &str = "http://127.0.0.1:3000/api/internal/claim/redeem";
+const DEFAULT_CLAIM_MERGE_ADAPTER_URL: &str = "http://127.0.0.1:3000/api/internal/claim/merge";
 const DEFAULT_CLAIM_FUNDS_ACTIVATION_ADAPTER_URL: &str =
     "http://127.0.0.1:3000/api/internal/claim/activate-funds";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ClaimRelayerAdapter {
     pub(crate) redeem_url: String,
+    pub(crate) merge_url: String,
     pub(crate) activate_funds_url: String,
     pub(crate) token: String,
 }
@@ -59,6 +62,21 @@ pub(crate) struct ClaimRelayerAdapterRequest {
     pub(crate) collateral_token: String,
     #[serde(rename = "indexSets")]
     pub(crate) index_sets: Vec<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ClaimMergeRelayerAdapterRequest {
+    #[serde(rename = "userId")]
+    pub(crate) user_id: i64,
+    #[serde(rename = "ownerAddress")]
+    pub(crate) owner_address: String,
+    #[serde(rename = "conditionId")]
+    pub(crate) condition_id: String,
+    #[serde(rename = "collateralToken")]
+    pub(crate) collateral_token: String,
+    pub(crate) partition: Vec<u64>,
+    #[serde(rename = "amountRaw")]
+    pub(crate) amount_raw: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,6 +134,12 @@ impl ClaimRelayerAdapter {
             redeem_url.starts_with("http://") || redeem_url.starts_with("https://"),
             "{CLAIM_RELAYER_ADAPTER_URL_ENV} must start with http:// or https://"
         );
+        let merge_url = env::var(CLAIM_MERGE_ADAPTER_URL_ENV)
+            .unwrap_or_else(|_| DEFAULT_CLAIM_MERGE_ADAPTER_URL.to_string());
+        anyhow::ensure!(
+            merge_url.starts_with("http://") || merge_url.starts_with("https://"),
+            "{CLAIM_MERGE_ADAPTER_URL_ENV} must start with http:// or https://"
+        );
         let activate_funds_url = env::var(CLAIM_FUNDS_ACTIVATION_ADAPTER_URL_ENV)
             .unwrap_or_else(|_| DEFAULT_CLAIM_FUNDS_ACTIVATION_ADAPTER_URL.to_string());
         anyhow::ensure!(
@@ -125,6 +149,7 @@ impl ClaimRelayerAdapter {
 
         Ok(Self {
             redeem_url,
+            merge_url,
             activate_funds_url,
             token: token.trim().to_string(),
         })

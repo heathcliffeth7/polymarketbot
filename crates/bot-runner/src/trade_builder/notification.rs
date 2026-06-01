@@ -323,6 +323,7 @@ fn trade_builder_fill_notification_type(order: &TradeBuilderOrder) -> Option<&'s
     Some("order_filled")
 }
 
+#[cfg(test)]
 fn build_trade_builder_fill_notification(
     order: &TradeBuilderOrder,
     execution_price: f64,
@@ -330,6 +331,26 @@ fn build_trade_builder_fill_notification(
     flow_created_payload: Option<&Value>,
     submitted_payload: Option<&Value>,
     fill_execution_analysis: Option<&TradeBuilderFillExecutionAnalysis>,
+) -> Option<(&'static str, String)> {
+    build_trade_builder_fill_notification_with_position_summary(
+        order,
+        execution_price,
+        filled_qty,
+        flow_created_payload,
+        submitted_payload,
+        fill_execution_analysis,
+        None,
+    )
+}
+
+fn build_trade_builder_fill_notification_with_position_summary(
+    order: &TradeBuilderOrder,
+    execution_price: f64,
+    filled_qty: f64,
+    flow_created_payload: Option<&Value>,
+    submitted_payload: Option<&Value>,
+    fill_execution_analysis: Option<&TradeBuilderFillExecutionAnalysis>,
+    exit_position_summary: Option<&TradeBuilderExitFillPositionSummary>,
 ) -> Option<(&'static str, String)> {
     let notification_type = trade_builder_fill_notification_type(order)?;
     let (title, reason) = match notification_type {
@@ -380,6 +401,7 @@ fn build_trade_builder_fill_notification(
             analysis,
             flow_created_payload,
             submitted_payload,
+            exit_position_summary,
         ));
     }
     if let Some(block) =

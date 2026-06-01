@@ -663,6 +663,7 @@ fn trade_builder_spawn_entry_evaluated_decision_log(
         let market = build_trade_builder_market_timing_payload(&order, event_ts);
         let ptb = build_trade_builder_ptb_payload(&repo, &order, event_ts).await;
         let volume = build_trade_builder_volume_payload(&repo, &order, event_ts).await;
+        let config_version = get_active_config_version(&repo).await;
         let node_snapshot = repo
             .get_trade_builder_order_node_snapshot(order.id)
             .await
@@ -706,10 +707,10 @@ fn trade_builder_spawn_entry_evaluated_decision_log(
             "risk_tag_thresholds": risk_tag_thresholds_payload(),
             "node_snapshot": node_snapshot,
             "config": {
-                "strategy_config_version": "runtime",
+                "strategy_config_version": config_version.clone(),
                 "workflow_config_hash": order.origin_flow_definition_id.map(|id| format!("flow_definition:{id}")),
-                "ptb_config_version": "runtime",
-                "sl_config_version": "runtime"
+                "ptb_config_version": config_version.clone(),
+                "sl_config_version": config_version
             },
             "data_freshness": {
                 "chainlink_age_ms": Value::Null,

@@ -11,8 +11,10 @@ import { applyPtbStopLossFormDefaults, buildPtbStopLossRules, normalizePtbStopLo
 import { normalizeTriggerMarketPriceCycleWindowConfig, readTriggerMarketPriceCycleWindowFields } from './cycle-window';
 import { applyLiveGapCollectorFormDefaults, normalizeLiveGapCollectorBuildConfig } from './live-gap-collector';
 import { applyAutoTuneFormDefaults, normalizeAutoTuneBuildConfig } from './auto-tune';
+import { applyPositiveQuantityFlipGridFormDefaults, normalizePositiveQuantityFlipGridBuildConfig } from './positive-quantity-flip-grid';
+import { applyRevengeFlipFormDefaults, normalizeRevengeFlipBuildConfig, REVENGE_FLIP_BINDING_MODE } from './revenge-flip';
 import { TRIGGER_MARKET_ONCE_SCOPE_VERSION } from './constants';
-import { normalizeOptionalPtbCurrentPriceSource, normalizeOptionalPtbCurrentPriceSourceConfig, normalizePtbCurrentPriceSource, normalizePtbMode } from './ptb-modes';
+import { normalizeOptionalPtbStopLossCurrentPriceSource, normalizeOptionalPtbStopLossCurrentPriceSourceConfig, normalizePtbCurrentPriceSource, normalizePtbMode } from './ptb-modes';
 import type { DrawdownRuleRow, EntryTimingProfileRow, ExitLadderRuleRow, NodeConfigFormState, OutcomeConditionRow, PtbIvTimeRuleRow, PtbStopLossBumpLossRuleRow, PtbStopLossRuleRow, TimeExitRuleRow } from './types';
 import {
   createId,
@@ -67,6 +69,8 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     fields.botToken = toStringValue(cfg.botToken);
   }
   if (nodeType === 'action.place_order') {
+    applyPositiveQuantityFlipGridFormDefaults(fields, cfg);
+    applyRevengeFlipFormDefaults(fields, cfg);
     if (Array.isArray(cfg.manualSlugs)) {
       fields.manualSlugs = safeJsonStringify(cfg.manualSlugs);
     }
@@ -97,6 +101,20 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     if ((fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true') {
       fields.priceToBeatMode = normalizePtbMode(fields.priceToBeatMode);
       fields.priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(fields.priceToBeatCurrentPriceSource);
+    }
+    if ((fields.cexDirectionGuardEnabled ?? '').trim().toLowerCase() === 'true') {
+      if (!(fields.cexDirectionGuardMode ?? '').trim()) {
+        fields.cexDirectionGuardMode = 'bybit_plus_one';
+      }
+      if (!(fields.cexDirectionGuardMaxStaleMs ?? '').trim()) {
+        fields.cexDirectionGuardMaxStaleMs = '2500';
+      }
+      if (!(fields.cexDirectionGuardMinMoveUsd ?? '').trim()) {
+        fields.cexDirectionGuardMinMoveUsd = '1';
+      }
+      if (!(fields.cexDirectionGuardFailClosed ?? '').trim()) {
+        fields.cexDirectionGuardFailClosed = 'true';
+      }
     }
     if (
       (fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true' &&
@@ -215,11 +233,11 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     if (shouldEnablePtbStopLossFromConfig(cfg, ptbStopLossRuleRows)) {
       fields.ptbStopLossEnabled = 'true';
       fields.priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(fields.priceToBeatCurrentPriceSource);
-      fields.ptbStopLossCurrentPriceSource = normalizeOptionalPtbCurrentPriceSource(fields.ptbStopLossCurrentPriceSource);
+      fields.ptbStopLossCurrentPriceSource = normalizeOptionalPtbStopLossCurrentPriceSource(fields.ptbStopLossCurrentPriceSource);
     }
     if ((fields.counterLegPtbStopLossEnabled ?? '').trim().toLowerCase() === 'true') {
       fields.counterLegPriceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(fields.counterLegPriceToBeatCurrentPriceSource);
-      fields.counterLegPtbStopLossCurrentPriceSource = normalizeOptionalPtbCurrentPriceSource(fields.counterLegPtbStopLossCurrentPriceSource);
+      fields.counterLegPtbStopLossCurrentPriceSource = normalizeOptionalPtbStopLossCurrentPriceSource(fields.counterLegPtbStopLossCurrentPriceSource);
     }
 
     if (Array.isArray(cfg.timeExitRules)) {
@@ -380,7 +398,10 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     fields.onceScope = resolveTriggerMarketOnceScope(cfg, marketMode, fields.repeatMode as 'once' | 'loop');
     const bindingModeRaw = toStringValue(cfg.bindingMode).trim().toLowerCase();
     fields.bindingMode =
-      bindingModeRaw === 'pair_lock_only' || bindingModeRaw === 'dca_live_only'
+      bindingModeRaw === 'pair_lock_only' ||
+      bindingModeRaw === 'dca_live_only' ||
+      bindingModeRaw === 'positive_quantity_flip_grid_only' ||
+      bindingModeRaw === REVENGE_FLIP_BINDING_MODE
         ? bindingModeRaw
         : 'standard';
 
@@ -417,7 +438,9 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
       nodeType === 'trigger.market_price' &&
       (
         toStringValue(cfg.bindingMode).trim().toLowerCase() === 'pair_lock_only' ||
-        toStringValue(cfg.bindingMode).trim().toLowerCase() === 'dca_live_only'
+        toStringValue(cfg.bindingMode).trim().toLowerCase() === 'dca_live_only' ||
+        toStringValue(cfg.bindingMode).trim().toLowerCase() === 'positive_quantity_flip_grid_only' ||
+        toStringValue(cfg.bindingMode).trim().toLowerCase() === REVENGE_FLIP_BINDING_MODE
       );
     if (Array.isArray(cfg.outcomeConditions) && !pairLockOnlyTrigger) {
       for (const item of cfg.outcomeConditions as Record<string, unknown>[]) {
@@ -560,6 +583,16 @@ export function buildNodeConfigFromForm(
   }
 
   if (nodeType === 'action.place_order') {
+    const positiveGridRaw = (form.fields.positiveQuantityFlipGrid ?? '').trim();
+    if (positiveGridRaw) {
+      try {
+        const parsed = JSON.parse(positiveGridRaw);
+        config.positiveQuantityFlipGrid = isRecord(parsed) ? parsed : positiveGridRaw;
+      } catch {
+        config.positiveQuantityFlipGrid = positiveGridRaw;
+      }
+    }
+
     const presetKindRaw = (form.fields.presetKind ?? '').trim();
     if (presetKindRaw) {
       config.presetKind = presetKindRaw;
@@ -630,6 +663,8 @@ export function buildNodeConfigFromForm(
     const pairLockMode = modeRaw === 'pair_lock';
     const dcaLiveMode = modeRaw === 'dca_live_v1';
     const liveGapCollectorMode = normalizeLiveGapCollectorBuildConfig(config);
+    const positiveGridMode = normalizePositiveQuantityFlipGridBuildConfig(config, form.fields);
+    const revengeFlipMode = normalizeRevengeFlipBuildConfig(config, form.fields);
     const sideRaw = toStringValue(config.side).trim().toLowerCase();
     const isBuySide = sideRaw === 'buy';
     if (dcaLiveMode) {
@@ -722,7 +757,9 @@ export function buildNodeConfigFromForm(
       }
       normalizePairLockTakeProfitBuildConfig(config);
     } else {
-      if (!dcaLiveMode && !liveGapCollectorMode) delete config.mode;
+      if (!dcaLiveMode && !liveGapCollectorMode && !positiveGridMode && !revengeFlipMode) {
+        delete config.mode;
+      }
       for (const key of PAIR_LOCK_CONFIG_KEYS) delete config[key];
     }
     if (!isBuySide) {
@@ -750,6 +787,11 @@ export function buildNodeConfigFromForm(
       delete config.executionFloorPriceCent;
       delete config.retryOnPriceToBeatGuardBlock;
       delete config.priceToBeatGuardEnabled;
+      delete config.cexDirectionGuardEnabled;
+      delete config.cexDirectionGuardMode;
+      delete config.cexDirectionGuardMaxStaleMs;
+      delete config.cexDirectionGuardMinMoveUsd;
+      delete config.cexDirectionGuardFailClosed;
       delete config.priceToBeatCurrentPriceSource;
       delete config.priceToBeatMaxDiff;
       delete config.priceToBeatMaxDiffUnit;
@@ -856,6 +898,18 @@ export function buildNodeConfigFromForm(
         delete config.executionFloorPriceCent;
       }
       normalizePrimaryPriceToBeatGuardBuildConfig(config, form);
+      if (config.cexDirectionGuardEnabled !== true) {
+        delete config.cexDirectionGuardEnabled;
+        delete config.cexDirectionGuardMode;
+        delete config.cexDirectionGuardMaxStaleMs;
+        delete config.cexDirectionGuardMinMoveUsd;
+        delete config.cexDirectionGuardFailClosed;
+      } else {
+        config.cexDirectionGuardMode = 'bybit_plus_one';
+        if (config.cexDirectionGuardFailClosed == null) {
+          config.cexDirectionGuardFailClosed = true;
+        }
+      }
       normalizePtbIvTimeRuleBuildConfig(config, form);
       if (pairLockMode) {
         normalizePairLockStopLossBuildConfig(config);
@@ -908,7 +962,7 @@ export function buildNodeConfigFromForm(
       } else {
         delete config.priceToBeatCurrentPriceSource;
       }
-      normalizeOptionalPtbCurrentPriceSourceConfig(config, 'ptbStopLossCurrentPriceSource', config.ptbStopLossEnabled === true || (Array.isArray(config.ptbStopLossRules) && config.ptbStopLossRules.length > 0));
+      normalizeOptionalPtbStopLossCurrentPriceSourceConfig(config, 'ptbStopLossCurrentPriceSource', config.ptbStopLossEnabled === true || (Array.isArray(config.ptbStopLossRules) && config.ptbStopLossRules.length > 0));
       if (!slEnabled) {
         delete config.slEnabled;
         delete config.slPriceCent;
@@ -1208,7 +1262,9 @@ export function buildNodeConfigFromForm(
       }
       if (
         toStringValue(config.bindingMode).trim().toLowerCase() === 'pair_lock_only' ||
-        toStringValue(config.bindingMode).trim().toLowerCase() === 'dca_live_only'
+        toStringValue(config.bindingMode).trim().toLowerCase() === 'dca_live_only' ||
+        toStringValue(config.bindingMode).trim().toLowerCase() === 'positive_quantity_flip_grid_only' ||
+        toStringValue(config.bindingMode).trim().toLowerCase() === REVENGE_FLIP_BINDING_MODE
       ) {
         delete config.priceToBeatTriggerEnabled;
         delete config.priceToBeatMode;
@@ -1329,7 +1385,9 @@ export function buildNodeConfigFromForm(
       nodeType === 'trigger.market_price' &&
       (
         toStringValue(config.bindingMode).trim().toLowerCase() === 'pair_lock_only' ||
-        toStringValue(config.bindingMode).trim().toLowerCase() === 'dca_live_only'
+        toStringValue(config.bindingMode).trim().toLowerCase() === 'dca_live_only' ||
+        toStringValue(config.bindingMode).trim().toLowerCase() === 'positive_quantity_flip_grid_only' ||
+        toStringValue(config.bindingMode).trim().toLowerCase() === REVENGE_FLIP_BINDING_MODE
       )
     )
   ) {

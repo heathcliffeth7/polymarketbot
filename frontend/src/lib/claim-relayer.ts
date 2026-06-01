@@ -47,7 +47,7 @@ const SAFE_MULTISEND_BY_CHAIN: Record<number, Address> = {
   137: '0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761',
   80002: '0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761',
 };
-const CTF_REDEEM_ABI = [
+const CTF_ABI = [
   {
     type: 'function',
     name: 'redeemPositions',
@@ -57,6 +57,19 @@ const CTF_REDEEM_ABI = [
       { name: 'parentCollectionId', type: 'bytes32' },
       { name: 'conditionId', type: 'bytes32' },
       { name: 'indexSets', type: 'uint256[]' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'mergePositions',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'collateralToken', type: 'address' },
+      { name: 'parentCollectionId', type: 'bytes32' },
+      { name: 'conditionId', type: 'bytes32' },
+      { name: 'partition', type: 'uint256[]' },
+      { name: 'amount', type: 'uint256' },
     ],
     outputs: [],
   },
@@ -110,6 +123,15 @@ export interface ClaimRedeemRequestBody {
   conditionId: string;
   collateralToken: string;
   indexSets: number[];
+}
+
+export interface ClaimMergeRequestBody {
+  userId: number;
+  ownerAddress: string;
+  conditionId: string;
+  collateralToken: string;
+  partition: number[];
+  amountRaw: string;
 }
 
 export interface ClaimRedeemSuccess {
@@ -206,7 +228,7 @@ export async function submitClaimViaBuilderRelayer(
   const transaction = {
     to: config.ctfContractAddress,
     data: encodeFunctionData({
-      abi: CTF_REDEEM_ABI,
+      abi: CTF_ABI,
       functionName: 'redeemPositions',
       args: [
         config.collateralTokenAddress as Address,
@@ -315,7 +337,7 @@ export async function submitClaimViaRelayerApiKey(
 
   try {
     const calldata = encodeFunctionData({
-      abi: CTF_REDEEM_ABI,
+      abi: CTF_ABI,
       functionName: 'redeemPositions',
       args: [config.collateralTokenAddress as Address, zeroHash, body.conditionId as Hex, body.indexSets.map((v) => BigInt(v))],
     });
@@ -323,6 +345,70 @@ export async function submitClaimViaRelayerApiKey(
       config,
       [{ to: config.ctfContractAddress, data: calldata, value: '0' }],
       'auto-claim redeem positions'
+    );
+    return { txHash };
+  } catch (err) {
+    throw classifyRelayerError(err);
+  }
+}
+
+export async function submitMergeViaBuilderRelayer(
+  config: ClaimRelayerConfigForServer,
+  body: ClaimMergeRequestBody
+): Promise<ClaimRedeemSuccess> {
+  validateConfig(config);
+  validateMergeRequest(body);
+
+  if (config.executionMode !== 'builder_relayer') {
+    throw new ClaimRelayerRouteError(
+      400,
+      'claim_execution_mode_invalid',
+      false,
+      `claim.execution_mode must be builder_relayer, got ${config.executionMode}`
+    );
+  }
+  validateSafeMergeRequest(config, body);
+
+  try {
+    const txHash = await submitSafeTransactionsViaBuilderRelayer(
+      config,
+      [buildMergeTransaction(config, body)],
+      'positive flip pairlock merge positions'
+    );
+    return { txHash };
+  } catch (err) {
+    throw classifyRelayerError(err);
+  }
+}
+
+export async function submitMergeViaRelayerApiKey(
+  config: ClaimRelayerConfigForServer,
+  body: ClaimMergeRequestBody
+): Promise<ClaimRedeemSuccess> {
+  validateBaseConfig(config);
+  validateMergeRequest(body);
+
+  if (config.executionMode !== 'relayer_api_key') {
+    throw new ClaimRelayerRouteError(
+      400,
+      'claim_execution_mode_invalid',
+      false,
+      `expected relayer_api_key, got ${config.executionMode}`
+    );
+  }
+  if (!config.relayerApiKey.trim()) {
+    throw new ClaimRelayerRouteError(400, 'missing_relayer_api_key', false, 'relayer_api_key is required');
+  }
+  if (!isAddress(config.relayerApiKeyAddress)) {
+    throw new ClaimRelayerRouteError(400, 'invalid_relayer_api_key_address', false, 'relayer_api_key_address must be a valid address');
+  }
+  validateSafeMergeRequest(config, body);
+
+  try {
+    const txHash = await submitSafeTransactionsViaRelayerApiKey(
+      config,
+      [buildMergeTransaction(config, body)],
+      'positive flip pairlock merge positions'
     );
     return { txHash };
   } catch (err) {
@@ -572,6 +658,73 @@ function validateRequest(body: ClaimRedeemRequestBody): void {
   if (!Array.isArray(body.indexSets) || body.indexSets.length === 0 || body.indexSets.some((value) => !Number.isInteger(value) || value <= 0)) {
     throw new ClaimRelayerRouteError(400, 'invalid_index_sets', false, 'indexSets must be a non-empty array of positive integers');
   }
+}
+
+function validateMergeRequest(body: ClaimMergeRequestBody): void {
+  if (!Number.isFinite(body.userId) || body.userId <= 0) {
+    throw new ClaimRelayerRouteError(400, 'invalid_user_id', false, 'userId must be a positive integer');
+  }
+  if (!isAddress(body.ownerAddress)) {
+    throw new ClaimRelayerRouteError(400, 'invalid_owner_address', false, 'ownerAddress must be a valid 0x address');
+  }
+  if (!isAddress(body.collateralToken)) {
+    throw new ClaimRelayerRouteError(400, 'invalid_collateral_token', false, 'collateralToken must be a valid 0x address');
+  }
+  if (!/^0x[a-fA-F0-9]{64}$/.test(body.conditionId)) {
+    throw new ClaimRelayerRouteError(400, 'invalid_condition_id', false, 'conditionId must be a 32-byte 0x hash');
+  }
+  if (
+    !Array.isArray(body.partition) ||
+    body.partition.length !== 2 ||
+    body.partition[0] !== 1 ||
+    body.partition[1] !== 2
+  ) {
+    throw new ClaimRelayerRouteError(400, 'invalid_partition', false, 'partition must be exactly [1, 2]');
+  }
+  if (!/^[1-9][0-9]*$/.test(String(body.amountRaw ?? '').trim())) {
+    throw new ClaimRelayerRouteError(400, 'invalid_amount_raw', false, 'amountRaw must be a positive integer string');
+  }
+}
+
+function validateSafeMergeRequest(
+  config: ClaimRelayerConfigForServer,
+  body: ClaimMergeRequestBody
+): void {
+  const account = privateKeyToAccount(config.privateKey as Hex);
+  if (!sameAddress(account.address, config.userAddress)) {
+    throw new ClaimRelayerRouteError(400, 'claim_signer_mismatch', false, 'claim.private_key does not match claim.user_address');
+  }
+  const expectedSafe = deriveSafe(account.address, config.chainId);
+  if (!sameAddress(expectedSafe, config.safeAddress)) {
+    throw new ClaimRelayerRouteError(400, 'configured_safe_mismatch', false, `gnosis_safe_address does not match derived Safe (${expectedSafe})`);
+  }
+  if (!sameAddress(body.ownerAddress, config.safeAddress)) {
+    throw new ClaimRelayerRouteError(400, 'owner_address_mismatch', false, 'ownerAddress does not match gnosis_safe_address');
+  }
+  if (!sameAddress(body.collateralToken, config.collateralTokenAddress)) {
+    throw new ClaimRelayerRouteError(400, 'collateral_token_mismatch', false, 'collateralToken does not match collateral_token_address');
+  }
+}
+
+function buildMergeTransaction(
+  config: ClaimRelayerConfigForServer,
+  body: ClaimMergeRequestBody
+): Transaction {
+  return {
+    to: config.ctfContractAddress,
+    data: encodeFunctionData({
+      abi: CTF_ABI,
+      functionName: 'mergePositions',
+      args: [
+        config.collateralTokenAddress as Address,
+        zeroHash,
+        body.conditionId as Hex,
+        body.partition.map((value) => BigInt(value)),
+        BigInt(body.amountRaw),
+      ],
+    }),
+    value: '0',
+  };
 }
 
 function validateFundsActivationConfig(config: ClaimRelayerConfigForServer): void {

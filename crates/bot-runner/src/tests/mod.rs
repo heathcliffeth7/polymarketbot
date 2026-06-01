@@ -8,6 +8,7 @@ mod place_order_core;
 mod place_order_entry_timing;
 mod place_order_fast_sl_submit;
 mod place_order_inventory;
+mod place_order_live_gap_notifications;
 mod place_order_notifications;
 mod place_order_pair_lock;
 mod place_order_ptb_stop_loss_bump;

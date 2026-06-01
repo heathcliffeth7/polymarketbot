@@ -2,22 +2,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import {
-  createEmptyKeyValueDraft,
-  type ContextFormState,
-  type PrimitiveValueType,
-} from '@/lib/trade-flow-config-mappers';
-import type {
-  TradeFlowCustomRangeSnapshot,
-  TradeFlowDefinition,
-  TradeFlowDefinitionDetail,
-  TradeFlowGraph,
-  TradeFlowValidationResult,
-} from '@/lib/types';
-import {
-  buildGraphFingerprint,
-  summarizeTradeFlowGraph,
-} from './flow-engine-utils';
+import { createEmptyKeyValueDraft, type ContextFormState, type PrimitiveValueType } from '@/lib/trade-flow-config-mappers';
+import type { TradeFlowCustomRangeSnapshot, TradeFlowDefinition, TradeFlowDefinitionDetail, TradeFlowGraph, TradeFlowValidationResult } from '@/lib/types';
+import { buildGraphFingerprint, summarizeTradeFlowGraph } from './flow-engine-utils';
 import type { BusyAction, TemplateKind } from './flow-engine-types';
 
 interface FlowContextEditorProps {
@@ -30,15 +17,7 @@ interface FlowContextEditorProps {
   onAutoClaimEnabledChange?: (enabled: boolean) => void;
 }
 
-export function FlowContextEditor({
-  contextForm,
-  contextTab,
-  onContextFormChange,
-  onContextTabChange,
-  onApplyFromForm,
-  onApplyFromAdvanced,
-  onAutoClaimEnabledChange,
-}: FlowContextEditorProps) {
+export function FlowContextEditor({ contextForm, contextTab, onContextFormChange, onContextTabChange, onApplyFromForm, onApplyFromAdvanced, onAutoClaimEnabledChange }: FlowContextEditorProps) {
   return (
     <div className="space-y-2 md:col-span-3">
       <p className="text-xs text-zinc-500">Graph Context</p>
@@ -55,7 +34,12 @@ export function FlowContextEditor({
               <Input
                 type="number"
                 value={contextForm.sourceTradeId}
-                onChange={(e) => onContextFormChange((prev) => ({ ...prev, sourceTradeId: e.target.value }))}
+                onChange={(e) =>
+                  onContextFormChange((prev) => ({
+                    ...prev,
+                    sourceTradeId: e.target.value,
+                  }))
+                }
                 className="h-8 border-zinc-700 bg-zinc-800 text-xs text-zinc-200"
               />
             </div>
@@ -63,7 +47,12 @@ export function FlowContextEditor({
               <p className="text-[11px] text-zinc-500">Market Slug</p>
               <Input
                 value={contextForm.marketSlug}
-                onChange={(e) => onContextFormChange((prev) => ({ ...prev, marketSlug: e.target.value }))}
+                onChange={(e) =>
+                  onContextFormChange((prev) => ({
+                    ...prev,
+                    marketSlug: e.target.value,
+                  }))
+                }
                 className="h-8 border-zinc-700 bg-zinc-800 text-xs text-zinc-200"
               />
             </div>
@@ -71,7 +60,12 @@ export function FlowContextEditor({
               <p className="text-[11px] text-zinc-500">Token ID</p>
               <Input
                 value={contextForm.tokenId}
-                onChange={(e) => onContextFormChange((prev) => ({ ...prev, tokenId: e.target.value }))}
+                onChange={(e) =>
+                  onContextFormChange((prev) => ({
+                    ...prev,
+                    tokenId: e.target.value,
+                  }))
+                }
                 className="h-8 border-zinc-700 bg-zinc-800 text-xs text-zinc-200"
               />
             </div>
@@ -79,7 +73,12 @@ export function FlowContextEditor({
               <p className="text-[11px] text-zinc-500">Outcome Label</p>
               <Input
                 value={contextForm.outcomeLabel}
-                onChange={(e) => onContextFormChange((prev) => ({ ...prev, outcomeLabel: e.target.value }))}
+                onChange={(e) =>
+                  onContextFormChange((prev) => ({
+                    ...prev,
+                    outcomeLabel: e.target.value,
+                  }))
+                }
                 className="h-8 border-zinc-700 bg-zinc-800 text-xs text-zinc-200"
               />
             </div>
@@ -88,8 +87,7 @@ export function FlowContextEditor({
                 <div className="space-y-1">
                   <p className="text-[11px] font-medium text-zinc-300">Autoclaim</p>
                   <p className="text-[11px] text-zinc-500">
-                    Acikken ayar aninda kaydedilir. Runner bir sonraki turda wallet&apos;taki
-                    kazanilmis redeemable prediction&apos;lari otomatik claim etmeyi dener.
+                    Acikken ayar aninda kaydedilir. Runner bir sonraki turda wallet&apos;taki kazanilmis redeemable prediction&apos;lari otomatik claim etmeyi dener.
                   </p>
                 </div>
                 <Switch
@@ -99,7 +97,10 @@ export function FlowContextEditor({
                       onAutoClaimEnabledChange(checked);
                       return;
                     }
-                    onContextFormChange((prev) => ({ ...prev, autoClaimEnabled: checked }));
+                    onContextFormChange((prev) => ({
+                      ...prev,
+                      autoClaimEnabled: checked,
+                    }));
                   }}
                 />
               </div>
@@ -118,9 +119,7 @@ export function FlowContextEditor({
                     onChange={(e) =>
                       onContextFormChange((prev) => ({
                         ...prev,
-                        extras: prev.extras.map((item) =>
-                          item.id === row.id ? { ...item, key: e.target.value } : item
-                        ),
+                        extras: prev.extras.map((item) => (item.id === row.id ? { ...item, key: e.target.value } : item)),
                       }))
                     }
                     placeholder="key"
@@ -132,7 +131,12 @@ export function FlowContextEditor({
                       onContextFormChange((prev) => ({
                         ...prev,
                         extras: prev.extras.map((item) =>
-                          item.id === row.id ? { ...item, valueType: e.target.value as PrimitiveValueType } : item
+                          item.id === row.id
+                            ? {
+                                ...item,
+                                valueType: e.target.value as PrimitiveValueType,
+                              }
+                            : item,
                         ),
                       }))
                     }
@@ -147,9 +151,7 @@ export function FlowContextEditor({
                     onChange={(e) =>
                       onContextFormChange((prev) => ({
                         ...prev,
-                        extras: prev.extras.map((item) =>
-                          item.id === row.id ? { ...item, value: e.target.value } : item
-                        ),
+                        extras: prev.extras.map((item) => (item.id === row.id ? { ...item, value: e.target.value } : item)),
                       }))
                     }
                     placeholder="value"
@@ -157,37 +159,56 @@ export function FlowContextEditor({
                   />
                   <div className="col-span-3 flex justify-end">
                     <Button
-                      size="sm" variant="outline" className="border-zinc-700 text-zinc-300"
+                      size="sm"
+                      variant="outline"
+                      className="border-zinc-700 text-zinc-300"
                       onClick={() =>
                         onContextFormChange((prev) => ({
                           ...prev,
                           extras: prev.extras.filter((item) => item.id !== row.id),
                         }))
-                      }>Satir Sil</Button>
+                      }
+                    >
+                      Satir Sil
+                    </Button>
                   </div>
                 </div>
               ))
             )}
             <Button
-              size="sm" variant="outline" className="w-full border-zinc-700 text-zinc-300"
+              size="sm"
+              variant="outline"
+              className="w-full border-zinc-700 text-zinc-300"
               onClick={() =>
                 onContextFormChange((prev) => ({
                   ...prev,
                   extras: [...prev.extras, createEmptyKeyValueDraft()],
                 }))
-              }>+ Ek Alan Ekle</Button>
+              }
+            >
+              + Ek Alan Ekle
+            </Button>
           </div>
-          <Button size="sm" onClick={onApplyFromForm}>Context Uygula</Button>
+          <Button size="sm" onClick={onApplyFromForm}>
+            Context Uygula
+          </Button>
         </TabsContent>
 
         <TabsContent value="advanced" className="space-y-2 pt-2">
           <p className="text-[11px] text-amber-400">Gelismis mod JSON icindir. Normal kullanimda Form sekmesini kullanin.</p>
           <textarea
             value={contextForm.advancedJson}
-            onChange={(e) => onContextFormChange((prev) => ({ ...prev, advancedJson: e.target.value }))}
+            onChange={(e) =>
+              onContextFormChange((prev) => ({
+                ...prev,
+                advancedJson: e.target.value,
+              }))
+            }
             className="min-h-24 w-full rounded-md border border-zinc-700 bg-zinc-800 p-2 text-xs text-zinc-200"
           />
-          <Button size="sm" onClick={onApplyFromAdvanced}>JSON Uygula</Button>
+          <Button size="sm" onClick={onApplyFromAdvanced}>
+            JSON Uygula
+          </Button>
         </TabsContent>
       </Tabs>
     </div>
@@ -220,18 +241,12 @@ function renderGraphSummaryLine(label: string, summary: ReturnType<typeof summar
       <p className="mt-1 text-[11px] text-zinc-400">
         Node {summary.nodes} • Edge {summary.edges} • Trigger {summary.triggers} • Action {summary.actions}
       </p>
-      <p className="text-[11px] text-zinc-500">
-        Telegram: {summary.hasTelegramNotify ? 'Var' : 'Yok'}
-      </p>
+      <p className="text-[11px] text-zinc-500">Telegram: {summary.hasTelegramNotify ? 'Var' : 'Yok'}</p>
     </div>
   );
 }
 
-function renderCustomRangeSummary(
-  label: string,
-  snapshots: TradeFlowCustomRangeSnapshot[],
-  versionLabel?: string | null
-) {
+function renderCustomRangeSummary(label: string, snapshots: TradeFlowCustomRangeSnapshot[], versionLabel?: string | null) {
   return (
     <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-2">
       <p className="text-[11px] font-medium text-zinc-300">
@@ -255,20 +270,15 @@ function renderCustomRangeSummary(
 }
 
 export function FlowSummaryBar({ graph, validation, detail, autoSaveError }: FlowSummaryBarProps) {
-  const autoClaimEnabled =
-    graph.context?.autoClaimEnabled === true || graph.context?.autoClaimEnabled === 'true';
+  const autoClaimEnabled = graph.context?.autoClaimEnabled === true || graph.context?.autoClaimEnabled === 'true';
   const localSummary = summarizeTradeFlowGraph(graph);
   const draftSummary = summarizeTradeFlowGraph(detail?.draftVersion?.graph_json);
   const publishedSummary = summarizeTradeFlowGraph(detail?.publishedVersion?.graph_json);
   const localFingerprint = buildGraphFingerprint(graph);
   const draftFingerprint = buildGraphFingerprint(detail?.draftVersion?.graph_json);
   const publishedFingerprint = buildGraphFingerprint(detail?.publishedVersion?.graph_json);
-  const hasLocalDraftDiff =
-    localFingerprint != null && draftFingerprint != null && localFingerprint !== draftFingerprint;
-  const hasDraftPublishedDiff =
-    draftFingerprint != null &&
-    publishedFingerprint != null &&
-    draftFingerprint !== publishedFingerprint;
+  const hasLocalDraftDiff = localFingerprint != null && draftFingerprint != null && localFingerprint !== draftFingerprint;
+  const hasDraftPublishedDiff = draftFingerprint != null && publishedFingerprint != null && draftFingerprint !== publishedFingerprint;
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
@@ -281,47 +291,19 @@ export function FlowSummaryBar({ graph, validation, detail, autoSaveError }: Flo
         <span>AutoClaim: {autoClaimEnabled ? 'Acik' : 'Kapali'}</span>
       </div>
       <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
-        {autoSaveError && (
-          <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-amber-300">
-            Autosave failed
-          </span>
-        )}
-        {hasLocalDraftDiff && (
-          <span className="rounded-full border border-red-500/40 bg-red-500/10 px-2 py-1 text-red-300">
-            Local != Draft
-          </span>
-        )}
-        {hasDraftPublishedDiff && (
-          <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-sky-300">
-            Draft != Published
-          </span>
-        )}
+        {autoSaveError && <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-amber-300">Autosave failed</span>}
+        {hasLocalDraftDiff && <span className="rounded-full border border-red-500/40 bg-red-500/10 px-2 py-1 text-red-300">Local != Draft</span>}
+        {hasDraftPublishedDiff && <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-sky-300">Draft != Published</span>}
       </div>
       <div className="mt-3 grid gap-2 md:grid-cols-3">
         {renderGraphSummaryLine('Local Canvas', localSummary)}
-        {renderGraphSummaryLine(
-          'Draft',
-          draftSummary,
-          detail?.draftVersion ? `v${detail.draftVersion.version_no}` : null
-        )}
-        {renderGraphSummaryLine(
-          'Published',
-          publishedSummary,
-          detail?.publishedVersion ? `v${detail.publishedVersion.version_no}` : null
-        )}
+        {renderGraphSummaryLine('Draft', draftSummary, detail?.draftVersion ? `v${detail.draftVersion.version_no}` : null)}
+        {renderGraphSummaryLine('Published', publishedSummary, detail?.publishedVersion ? `v${detail.publishedVersion.version_no}` : null)}
       </div>
       {detail && (
         <div className="mt-3 grid gap-2 md:grid-cols-2">
-          {renderCustomRangeSummary(
-            'Draft custom_range',
-            detail.draftCustomRangeSnapshots,
-            detail.draftVersion ? `v${detail.draftVersion.version_no}` : null
-          )}
-          {renderCustomRangeSummary(
-            'Published custom_range',
-            detail.publishedCustomRangeSnapshots,
-            detail.publishedVersion ? `v${detail.publishedVersion.version_no}` : null
-          )}
+          {renderCustomRangeSummary('Draft custom_range', detail.draftCustomRangeSnapshots, detail.draftVersion ? `v${detail.draftVersion.version_no}` : null)}
+          {renderCustomRangeSummary('Published custom_range', detail.publishedCustomRangeSnapshots, detail.publishedVersion ? `v${detail.publishedVersion.version_no}` : null)}
         </div>
       )}
       {validation && (
@@ -331,10 +313,7 @@ export function FlowSummaryBar({ graph, validation, detail, autoSaveError }: Flo
             <p className="text-[11px] text-zinc-500">Issue bulunmadi.</p>
           ) : (
             validation.issues.map((issue, idx) => (
-              <p
-                key={`${issue.code}-${idx}`}
-                className={issue.severity === 'error' ? 'text-[11px] text-red-400' : 'text-[11px] text-amber-400'}
-              >
+              <p key={`${issue.code}-${idx}`} className={issue.severity === 'error' ? 'text-[11px] text-red-400' : 'text-[11px] text-amber-400'}>
                 {issue.severity.toUpperCase()} | {issue.code} | {issue.message}
               </p>
             ))
@@ -386,17 +365,43 @@ interface CreateFlowSlotProps {
 }
 
 export function CreateFlowSlot({
-  createName, createDescription, createTemplateKind, busyAction,
-  isWorkflowListOpen, workflowListQuery, definitionsLoading,
-  filteredDefinitions, selectedDefinitionId, deletingDefinitionId,
-  onCreateNameChange, onCreateDescriptionChange, onTemplateKindChange,
-  onCreateFromTemplate, onToggleWorkflowList, onWorkflowListQueryChange,
-  onSelectDefinition, onDeleteFromList,
-  showWorkflowActions = false, workflowActionsDisabled = false,
-  onSaveDraft, onValidate, onReloadDraft, onPublish, onDeleteFlow, publishDisabled = false,
-  canStopFlow, onStopFlow, stoppingFlow,
-  selectedDefinitionIds, onToggleDefinitionSelection, onSelectAllDefinitions, onDeselectAllDefinitions, onBulkDelete, bulkDeleting,
-  autoClaimEnabled = false, onAutoClaimEnabledChange,
+  createName,
+  createDescription,
+  createTemplateKind,
+  busyAction,
+  isWorkflowListOpen,
+  workflowListQuery,
+  definitionsLoading,
+  filteredDefinitions,
+  selectedDefinitionId,
+  deletingDefinitionId,
+  onCreateNameChange,
+  onCreateDescriptionChange,
+  onTemplateKindChange,
+  onCreateFromTemplate,
+  onToggleWorkflowList,
+  onWorkflowListQueryChange,
+  onSelectDefinition,
+  onDeleteFromList,
+  showWorkflowActions = false,
+  workflowActionsDisabled = false,
+  onSaveDraft,
+  onValidate,
+  onReloadDraft,
+  onPublish,
+  onDeleteFlow,
+  publishDisabled = false,
+  canStopFlow,
+  onStopFlow,
+  stoppingFlow,
+  selectedDefinitionIds,
+  onToggleDefinitionSelection,
+  onSelectAllDefinitions,
+  onDeselectAllDefinitions,
+  onBulkDelete,
+  bulkDeleting,
+  autoClaimEnabled = false,
+  onAutoClaimEnabledChange,
 }: CreateFlowSlotProps) {
   return (
     <div className="space-y-2 overflow-hidden rounded-md border border-slate-200 bg-white p-2">
@@ -404,13 +409,7 @@ export function CreateFlowSlot({
         <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-2">
           <p className="text-[11px] font-medium text-slate-700">Workflow Aksiyonlari</p>
           <div className="space-y-1">
-            <Button
-              type="button"
-              size="sm"
-              className="h-8 w-full"
-              disabled={workflowActionsDisabled || !onSaveDraft}
-              onClick={onSaveDraft}
-            >
+            <Button type="button" size="sm" className="h-8 w-full" disabled={workflowActionsDisabled || !onSaveDraft} onClick={onSaveDraft}>
               Draft Kaydet
             </Button>
             <Button
@@ -477,12 +476,9 @@ export function CreateFlowSlot({
                 <span className="space-y-1">
                   <span className="block text-[11px] font-medium text-emerald-900">Autoclaim</span>
                   <span className="block text-[10px] text-emerald-800">
-                    Kazandigin prediction varsa checkbox&apos;i isaretledigin anda ayar kaydolur.
-                    Runner bir sonraki turda bu kullaniciya ait claim ayarlariyla kontrol baslatir.
+                    Kazandigin prediction varsa checkbox&apos;i isaretledigin anda ayar kaydolur. Runner bir sonraki turda bu kullaniciya ait claim ayarlariyla kontrol baslatir.
                   </span>
-                  <span className="block text-[10px] text-emerald-700">
-                    Gerekli wallet, private key ve RPC ayarlari Settings -&gt; Claim ekranindan gelir.
-                  </span>
+                  <span className="block text-[10px] text-emerald-700">Gerekli wallet, private key ve RPC ayarlari Settings -&gt; Claim ekranindan gelir.</span>
                 </span>
               </label>
             )}
@@ -492,21 +488,39 @@ export function CreateFlowSlot({
 
       <p className="text-[11px] font-medium text-slate-700">Yeni Workflow Olustur</p>
       <Input value={createName} onChange={(e) => onCreateNameChange(e.target.value)} placeholder="Workflow adi" className="h-8 border-slate-300 bg-white text-xs text-slate-900" />
-      <Input value={createDescription} onChange={(e) => onCreateDescriptionChange(e.target.value)} placeholder="Aciklama (opsiyonel)" className="h-8 border-slate-300 bg-white text-xs text-slate-900" />
-      <select value={createTemplateKind} onChange={(e) => onTemplateKindChange(e.target.value as TemplateKind)} className="h-8 w-full rounded-md border border-slate-300 bg-white px-2 text-xs text-slate-900">
+      <Input
+        value={createDescription}
+        onChange={(e) => onCreateDescriptionChange(e.target.value)}
+        placeholder="Aciklama (opsiyonel)"
+        className="h-8 border-slate-300 bg-white text-xs text-slate-900"
+      />
+      <select
+        value={createTemplateKind}
+        onChange={(e) => onTemplateKindChange(e.target.value as TemplateKind)}
+        className="h-8 w-full rounded-md border border-slate-300 bg-white px-2 text-xs text-slate-900"
+      >
         <option value="starter">Starter Sablon</option>
         <option value="sell_buy_if">Satis + If/Else + Alis</option>
         <option value="dca">DCA (Zamana Dayali Alis)</option>
         <option value="sl_tp">Stop Loss + Take Profit</option>
         <option value="position_monitor">Pozisyon Izleme + Bildirim</option>
         <option value="multi_leg_hedge">Multi-Leg Hedge</option>
+        <option value="revenge_flip_10_80">RevengeFlip 10/80</option>
+        <option value="pairlock_hyperliquid_70_80">PairLock 70-80 Hyperliquid</option>
+        <option value="positive_quantity_flip_grid_1usdc">Positive Quantity Flip Grid 1 USDC</option>
+        <option value="positive_quantity_flip_grid_inventory_balance">Positive Grid Inventory Balance</option>
+        <option value="positive_flip_pairlock_compression">Positive Flip Pairlock Compression</option>
       </select>
       <Button type="button" size="sm" className="h-8 w-full" disabled={busyAction !== null} onClick={() => onCreateFromTemplate(createTemplateKind)}>
         {busyAction === 'create' ? 'Workflow Olusturuluyor...' : 'Workflow Olustur'}
       </Button>
       <p className="text-[10px] text-slate-500">Sablon secili piyasa/sonuc ile dolar, sonrasinda canvas uzerinde duzenleyebilirsiniz.</p>
 
-      <button type="button" className="flex h-8 w-full items-center justify-between rounded-md border border-slate-300 px-2 text-left text-xs text-slate-700 hover:bg-slate-100" onClick={onToggleWorkflowList}>
+      <button
+        type="button"
+        className="flex h-8 w-full items-center justify-between rounded-md border border-slate-300 px-2 text-left text-xs text-slate-700 hover:bg-slate-100"
+        onClick={onToggleWorkflowList}
+      >
         <span>Workflow Listesi</span>
         <span className="text-[10px] text-slate-500">{isWorkflowListOpen ? 'Gizle' : 'Goster'}</span>
       </button>
@@ -522,14 +536,15 @@ export function CreateFlowSlot({
                   type="checkbox"
                   className="accent-red-500"
                   checked={filteredDefinitions.length > 0 && filteredDefinitions.every((d) => selectedDefinitionIds.has(d.id))}
-                  onChange={(e) => { if (e.target.checked) onSelectAllDefinitions(); else onDeselectAllDefinitions(); }}
+                  onChange={(e) => {
+                    if (e.target.checked) onSelectAllDefinitions();
+                    else onDeselectAllDefinitions();
+                  }}
                 />
                 Tumunu Sec
               </label>
               {selectedDefinitionIds.size > 0 && onBulkDelete && (
-                <Button type="button" size="sm" variant="outline"
-                  className="h-6 border-red-300 px-2 text-[10px] text-red-600 hover:bg-red-50"
-                  disabled={bulkDeleting} onClick={onBulkDelete}>
+                <Button type="button" size="sm" variant="outline" className="h-6 border-red-300 px-2 text-[10px] text-red-600 hover:bg-red-50" disabled={bulkDeleting} onClick={onBulkDelete}>
                   {bulkDeleting ? 'Siliniyor...' : `Secilenleri Sil (${selectedDefinitionIds.size})`}
                 </Button>
               )}
@@ -544,21 +559,26 @@ export function CreateFlowSlot({
               filteredDefinitions.map((def) => (
                 <div key={def.id} className="flex items-stretch gap-1">
                   {onToggleDefinitionSelection && selectedDefinitionIds && (
-                    <input
-                      type="checkbox"
-                      className="mt-2 accent-red-500"
-                      checked={selectedDefinitionIds.has(def.id)}
-                      onChange={() => onToggleDefinitionSelection(def.id)}
-                    />
+                    <input type="checkbox" className="mt-2 accent-red-500" checked={selectedDefinitionIds.has(def.id)} onChange={() => onToggleDefinitionSelection(def.id)} />
                   )}
-                  <button type="button" onClick={() => onSelectDefinition(def.id)}
-                    className={`min-w-0 flex-1 rounded-md border px-2 py-1.5 text-left ${selectedDefinitionId === def.id ? 'border-sky-300 bg-sky-100' : 'border-slate-300 bg-white hover:bg-slate-100'}`}>
-                    <p className="truncate text-[11px] font-medium text-slate-800">#{def.id} - {def.name}</p>
+                  <button
+                    type="button"
+                    onClick={() => onSelectDefinition(def.id)}
+                    className={`min-w-0 flex-1 rounded-md border px-2 py-1.5 text-left ${selectedDefinitionId === def.id ? 'border-sky-300 bg-sky-100' : 'border-slate-300 bg-white hover:bg-slate-100'}`}
+                  >
+                    <p className="truncate text-[11px] font-medium text-slate-800">
+                      #{def.id} - {def.name}
+                    </p>
                     <p className="text-[10px] text-slate-500">{def.status}</p>
                   </button>
-                  <Button type="button" size="sm" variant="outline"
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
                     className="h-auto min-h-0 whitespace-nowrap border-red-300 px-2 py-1 text-[11px] text-red-600 hover:bg-red-50"
-                    disabled={busyAction !== null} onClick={() => onDeleteFromList(def.id)}>
+                    disabled={busyAction !== null}
+                    onClick={() => onDeleteFromList(def.id)}
+                  >
                     {deletingDefinitionId === def.id ? 'Siliniyor...' : 'Sil'}
                   </Button>
                 </div>

@@ -119,6 +119,7 @@ fn sync_armed_builder_order_cache_entry(
 
     if trade_builder_is_ws_fast_path_ptb_child(&order) {
         if let Some(asset) = trade_builder_ptb_asset_cache_key(&order) {
+            trade_flow::guards::cex_microstructure::ensure_cex_microstructure_started(&asset);
             push_order_into_armed_builder_bucket(&mut cache.ptb_by_asset, asset, &order);
         }
         push_order_into_armed_builder_bucket(

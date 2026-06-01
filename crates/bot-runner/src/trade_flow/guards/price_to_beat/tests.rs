@@ -87,6 +87,7 @@ fn default_guard_evaluation() -> PriceToBeatGuardEvaluation {
         signal_formula: None,
         iv_mismatch_edge: None,
         early_stale_side: None,
+        cex_direction_guard: None,
     }
 }
 fn test_action_place_order_node(config: Value) -> crate::TradeFlowNode {

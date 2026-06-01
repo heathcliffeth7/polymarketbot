@@ -293,6 +293,40 @@ test('validateActionPlaceOrderConfig accepts auto_vol_pct on supported explicit 
   );
 });
 
+test('validateActionPlaceOrderConfig accepts hyperliquid PTB current source', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: { sourceTradeId: 42 },
+    nodes: [
+      {
+        key: 'hyperliquid_ptb_buy',
+        type: 'action.place_order',
+        positionX: 0,
+        positionY: 0,
+        config: {
+          side: 'buy',
+          executionMode: 'market',
+          sizeMode: 'usdc',
+          sizeUsdc: 10,
+          marketSlug: 'btc-updown-5m-1774013100',
+          tokenId: 'btc-up-token',
+          outcomeLabel: 'Up',
+          priceToBeatGuardEnabled: true,
+          priceToBeatCurrentPriceSource: 'hyperliquid',
+          priceToBeatMaxDiff: 10,
+          priceToBeatMaxDiffUnit: 'usd',
+        },
+      },
+    ],
+    edges: [],
+  });
+
+  const issues = collectActionIssues(graph, 'hyperliquid_ptb_buy');
+  assert.equal(
+    issues.some((issue) => issue.code === 'invalid_price_to_beat_current_price_source'),
+    false
+  );
+});
+
 test('validateActionPlaceOrderConfig rejects auto_vol_pct on upstream xrp auto_scope trigger', () => {
   const graph = normalizeTradeFlowGraph({
     context: {},

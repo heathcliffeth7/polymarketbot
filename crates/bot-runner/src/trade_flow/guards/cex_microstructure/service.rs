@@ -29,6 +29,7 @@ const MAX_BOOK_SAMPLES: usize = 4_000;
 const MAX_TRADE_SAMPLES: usize = 20_000;
 const MAX_SKEW_SAMPLES: usize = 4_000;
 const MAX_WINDOW_OPEN_BOOK_AGE_MS: i64 = 10_000;
+const OPEN_BACKFILL_FAIL_COOLDOWN_MS: i64 = 30_000;
 const RECONNECT_DELAY_MS: u64 = 500;
 const WS_IDLE_TIMEOUT_SECS: u64 = 20;
 
@@ -81,6 +82,7 @@ struct CexMicrostructureService {
     state: RwLock<HashMap<String, AssetState>>,
     started_assets: RwLock<HashSet<String>>,
     open_backfill_inflight: Mutex<HashSet<String>>,
+    open_backfill_fail_cooldown_until_ms: Mutex<HashMap<String, i64>>,
     dirty_assets: Mutex<HashSet<String>>,
     dirty_update_notify: Notify,
 }
@@ -93,6 +95,7 @@ impl CexMicrostructureService {
             state: RwLock::new(HashMap::new()),
             started_assets: RwLock::new(HashSet::new()),
             open_backfill_inflight: Mutex::new(HashSet::new()),
+            open_backfill_fail_cooldown_until_ms: Mutex::new(HashMap::new()),
             dirty_assets: Mutex::new(HashSet::new()),
             dirty_update_notify: Notify::new(),
         }
@@ -288,11 +291,36 @@ impl CexMicrostructureService {
         result
     }
 
+    fn has_pinned_rest_window_open(
+        &self,
+        asset: &str,
+        venue: CexVenue,
+        window_start_ms: i64,
+    ) -> bool {
+        let state = self.state.read();
+        let Some(entry) = state.get(asset) else {
+            return false;
+        };
+        window_open_book(venue, venue_state(entry, venue), window_start_ms).is_some()
+    }
+
     fn schedule_window_open_backfill(&self, asset: String, venue: CexVenue, window_start_ms: i64) {
         if matches!(venue, CexVenue::Hyperliquid) {
             return;
         }
         let key = format!("{}:{}:{}", asset, venue.as_str(), window_start_ms);
+        if self.has_pinned_rest_window_open(&asset, venue, window_start_ms) {
+            return;
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        if self
+            .open_backfill_fail_cooldown_until_ms
+            .lock()
+            .get(&key)
+            .is_some_and(|until_ms| now_ms < *until_ms)
+        {
+            return;
+        }
         {
             let mut inflight = self.open_backfill_inflight.lock();
             if !inflight.insert(key.clone()) {
@@ -318,6 +346,7 @@ impl CexMicrostructureService {
         result: Result<CexBookSample>,
     ) {
         self.open_backfill_inflight.lock().remove(&key);
+        self.open_backfill_fail_cooldown_until_ms.lock().remove(&key);
         match result {
             Ok(book) => {
                 let open_mid = book.mid();
@@ -339,6 +368,14 @@ impl CexMicrostructureService {
                 self.mark_dirty_asset(&asset);
             }
             Err(err) => {
+                if self.has_pinned_rest_window_open(&asset, venue, window_start_ms) {
+                    return;
+                }
+                let cooldown_until_ms =
+                    Utc::now().timestamp_millis() + OPEN_BACKFILL_FAIL_COOLDOWN_MS;
+                self.open_backfill_fail_cooldown_until_ms
+                    .lock()
+                    .insert(key, cooldown_until_ms);
                 tracing::debug!(
                     asset = %asset,
                     venue = venue.as_str(),
@@ -936,6 +973,7 @@ pub(crate) fn clear_cex_microstructure_test_state() {
     SERVICE.state.write().clear();
     SERVICE.started_assets.write().clear();
     SERVICE.open_backfill_inflight.lock().clear();
+    SERVICE.open_backfill_fail_cooldown_until_ms.lock().clear();
     SERVICE.dirty_assets.lock().clear();
 }
 
@@ -1018,6 +1056,30 @@ mod tests {
 
         assert_eq!(snapshot.consensus_side, Some("up"));
         assert!(snapshot.normalized_source_skew_usd.abs() <= 0.001);
+    }
+
+    #[tokio::test]
+    async fn schedule_window_open_backfill_skips_when_rest_open_already_pinned() {
+        let _guard = lock_cex_microstructure_test_state();
+        clear_cex_microstructure_test_state();
+        let window_start_ms = 1780291200000_i64;
+        seed_cex_open_test_sample(CexBookSample {
+            venue: CexVenue::Bybit,
+            asset: "btc".to_string(),
+            timestamp_ms: window_start_ms,
+            bid: 73_460.4,
+            ask: 73_460.4,
+            bid_size: None,
+            ask_size: None,
+            source: "rest_open",
+        });
+        seed_cex_book_test_sample(book(CexVenue::Bybit, window_start_ms + 30_000, 73_500.0, 73_502.0));
+
+        SERVICE.schedule_window_open_backfill("btc".to_string(), CexVenue::Bybit, window_start_ms);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let key = format!("btc:bybit:{window_start_ms}");
+        assert!(!SERVICE.open_backfill_inflight.lock().contains(&key));
     }
 
     #[test]

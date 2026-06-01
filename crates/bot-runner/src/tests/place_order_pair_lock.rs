@@ -443,7 +443,7 @@ fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
         "ptbStopLossEnabled": true,
         "ptbStopLossGapUsd": 0.0,
         "ptbStopLossGapUnit": "usd",
-        "ptbStopLossCurrentPriceSource": "coinbase",
+        "ptbStopLossCurrentPriceSource": "cex_consensus",
         "priceToBeatCurrentPriceSource": "binance",
         "ptbStopLossTimeDecayMode": "tighten",
         "notifyOnSlHit": true,
@@ -526,7 +526,7 @@ fn pair_lock_counter_leg_prefers_independent_stop_loss_fields() {
             .config
             .get("ptbStopLossCurrentPriceSource")
             .and_then(Value::as_str),
-        Some("coinbase")
+        Some("cex_consensus")
     );
     assert_eq!(
         primary

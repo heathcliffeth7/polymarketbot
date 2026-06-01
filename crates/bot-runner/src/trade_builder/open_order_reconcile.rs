@@ -891,6 +891,72 @@ async fn reconcile_trade_builder_open_order(
     let market_spec =
         resolve_trade_builder_market_spec_with_client(client, cfg, &order.market_slug, &order.token_id)
             .await;
+    let order_type =
+        clob_order_type_for_execution_mode(normalize_trade_builder_execution_mode(
+            &order.execution_mode,
+        ));
+    let min_notional_cap_usdc = order
+        .size_usdc
+        .max(remaining_usdc.unwrap_or(0.0))
+        .max((size * desired_price).max(0.0));
+    if let Some(top_up) = trade_builder_marketable_buy_min_notional_top_up(
+        &order.side,
+        order_type,
+        size_basis,
+        desired_price,
+        size,
+        min_notional_cap_usdc,
+    ) {
+        if top_up.blocked_by_cap {
+            let reason = "marketable_buy_min_notional_exceeds_cap";
+            repo.set_trade_builder_order_status(order.id, "error", Some(reason))
+                .await?;
+            repo.append_trade_builder_order_event(
+                order.id,
+                reason,
+                &json!({
+                    "submit_kind": "reprice",
+                    "status_before": &order.status,
+                    "current_price": current_price,
+                    "desired_price": desired_price,
+                    "order_type": order_type,
+                    "size_basis": size_basis,
+                    "original_qty": top_up.original_qty,
+                    "adjusted_qty": top_up.adjusted_qty,
+                    "original_notional_usdc": top_up.original_notional_usdc,
+                    "adjusted_notional_usdc": top_up.adjusted_notional_usdc,
+                    "min_notional_usdc": top_up.min_notional_usdc,
+                    "cap_usdc": top_up.cap_usdc,
+                    "cap_tolerance_usdc": top_up.cap_tolerance_usdc,
+                }),
+            )
+            .await?;
+            return Ok(());
+        }
+        repo.append_trade_builder_order_event(
+            order.id,
+            "marketable_buy_min_notional_top_up",
+            &json!({
+                "submit_kind": "reprice",
+                "status_before": &order.status,
+                "current_price": current_price,
+                "desired_price": desired_price,
+                "order_type": order_type,
+                "size_basis": size_basis,
+                "original_qty": top_up.original_qty,
+                "adjusted_qty": top_up.adjusted_qty,
+                "original_notional_usdc": top_up.original_notional_usdc,
+                "adjusted_notional_usdc": top_up.adjusted_notional_usdc,
+                "min_notional_usdc": top_up.min_notional_usdc,
+                "cap_usdc": top_up.cap_usdc,
+                "cap_tolerance_usdc": top_up.cap_tolerance_usdc,
+            }),
+        )
+        .await?;
+        size = top_up.adjusted_qty;
+        remaining_qty = Some(top_up.adjusted_qty);
+        remaining_usdc = Some(top_up.adjusted_notional_usdc);
+    }
     if maybe_handle_trade_builder_share_submit_below_market_min(
         repo,
         &order,
@@ -915,10 +981,7 @@ async fn reconcile_trade_builder_open_order(
         price: desired_price,
         size,
         intent: "manual_reprice".to_string(),
-        order_type: clob_order_type_for_execution_mode(normalize_trade_builder_execution_mode(
-            &order.execution_mode,
-        ))
-        .to_string(),
+        order_type: order_type.to_string(),
         client_order_id: format!("tb-reprice-{}", Uuid::new_v4()),
         leg_side: None,
         fee_rate_bps,

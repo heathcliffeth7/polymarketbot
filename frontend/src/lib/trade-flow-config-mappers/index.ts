@@ -12,6 +12,7 @@ export * from './node-config';
 export * from './edge-config';
 export * from './context';
 export * from './cycle-window';
+export * from './revenge-flip';
 export {
   isRecord,
   isSupportedMarketPriceTriggerCondition,

@@ -215,6 +215,82 @@ fn trade_builder_should_allow_latched_stop_loss_below_market_min(
     trade_builder_is_child_exit_sell(order) && trade_builder_stop_loss_latched(order)
 }
 
+fn trade_builder_order_revenge_flip_intent(order: &TradeBuilderOrder) -> Option<&str> {
+    order
+        .runtime_snapshot_json
+        .as_ref()
+        .and_then(|snapshot| snapshot.get(REVENGE_FLIP_RUNTIME_INTENT_KEY))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn trade_builder_order_is_revenge_flip_stop_loss_sell(order: &TradeBuilderOrder) -> bool {
+    order.side == "sell"
+        && order.kind == "immediate"
+        && trade_builder_order_revenge_flip_intent(order) == Some("stop_loss_sell")
+}
+
+fn trade_builder_should_allow_stop_loss_below_market_min(order: &TradeBuilderOrder) -> bool {
+    trade_builder_should_allow_latched_stop_loss_below_market_min(order)
+        || trade_builder_order_is_revenge_flip_stop_loss_sell(order)
+}
+
+async fn maybe_notify_revenge_flip_stop_loss_min_size_blocked(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    reason: &str,
+    requested_qty: Option<f64>,
+    submit_qty: f64,
+    order_min_size: f64,
+) {
+    if !trade_builder_order_is_revenge_flip_stop_loss_sell(order) {
+        return;
+    }
+    let message = format!(
+        "RevengeFlip PTB stop loss tetiklendi ancak satış bot min-size guard tarafından bloklandı.\n\
+         Market: {}\n\
+         Order: #{}\n\
+         Submit qty: {submit_qty:.2}\n\
+         Requested qty: {}\n\
+         Market min size: {order_min_size:.2}\n\
+         Reason: {reason}",
+        order.market_slug,
+        order.id,
+        requested_qty
+            .map(|qty| format!("{qty:.2}"))
+            .unwrap_or_else(|| "?".to_string()),
+    );
+    send_trade_builder_notification(
+        repo,
+        order,
+        "revenge_flip_ptb_sl_blocked_min_size",
+        &message,
+    )
+    .await;
+    trade_builder_spawn_decision_log(
+        repo,
+        order,
+        "PTB_STOP_LOSS_BLOCKED_MIN_SIZE",
+        json!({
+            "reason": reason,
+            "reason_code": "below_market_min_size",
+            "requested_qty": requested_qty,
+            "attempted_qty": submit_qty,
+            "order_min_size": order_min_size,
+            "revenge_flip_intent": trade_builder_order_revenge_flip_intent(order),
+        }),
+        TradeBuilderDecisionLogOptions {
+            idempotency_key: Some(format!(
+                "PTB_STOP_LOSS_BLOCKED_MIN_SIZE:{}:{}",
+                order.id,
+                submit_qty.to_bits()
+            )),
+            ..TradeBuilderDecisionLogOptions::default()
+        },
+    );
+}
+
 fn trade_builder_next_min_size_retry_stage(
     attempt_stage: Option<TradeBuilderExitSubmitStage>,
 ) -> Option<TradeBuilderExitSubmitStage> {
@@ -266,15 +342,28 @@ async fn maybe_handle_trade_builder_share_submit_below_market_min(
         format!("{submit_kind} size ({submit_qty:.2}) below market minimum: {order_min_size:.2}");
 
     if decision == TradeBuilderShareSubmitMinSizeDecision::Block
-        && trade_builder_should_allow_latched_stop_loss_below_market_min(order)
+        && trade_builder_should_allow_stop_loss_below_market_min(order)
     {
+        let is_revenge_flip_stop_loss_sell = trade_builder_order_is_revenge_flip_stop_loss_sell(order);
+        let event_type = if is_revenge_flip_stop_loss_sell {
+            "below_market_min_soft_submit"
+        } else {
+            "sl_below_market_min_retry"
+        };
+        let reason_code = if is_revenge_flip_stop_loss_sell {
+            "revenge_flip_sl_submit_below_min"
+        } else {
+            "latched_sl_retry_below_min"
+        };
         repo.append_trade_builder_order_event(
             order.id,
-            "sl_below_market_min_retry",
+            event_type,
             &json!({
-                "reason": "latched_sl_retry_below_min",
+                "reason": reason_code,
                 "reason_detail": reason,
                 "reason_code": "below_market_min_size",
+                "revenge_flip_stop_loss_sell": is_revenge_flip_stop_loss_sell,
+                "below_market_min_soft_submit": true,
                 "status_before": &order.status,
                 "status_after": &order.status,
                 "submit_kind": submit_kind,
@@ -347,6 +436,15 @@ async fn maybe_handle_trade_builder_share_submit_below_market_min(
                 }),
             )
             .await?;
+            maybe_notify_revenge_flip_stop_loss_min_size_blocked(
+                repo,
+                order,
+                &reason,
+                requested_qty,
+                submit_qty,
+                order_min_size,
+            )
+            .await;
         }
     }
 

@@ -8,10 +8,11 @@ import {
 } from '@/components/ui/select';
 import {
   createEmptyPtbStopLossRuleRow,
-  PTB_CURRENT_PRICE_SOURCE_OPTIONS,
-  normalizeOptionalPtbCurrentPriceSource,
+  PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_OPTIONS,
+  normalizeOptionalPtbStopLossCurrentPriceSource,
   type PtbCurrentPriceSource,
   type PtbGapUnit,
+  type PtbStopLossCurrentPriceSource,
   type PtbStopLossRuleRow,
 } from '@/lib/trade-flow-config-mappers';
 import { PtbStopLossRuleSection } from './exit-sections';
@@ -28,8 +29,8 @@ interface PtbStopLossSectionProps {
   onUpdateRows: (updater: (rows: PtbStopLossRuleRow[]) => PtbStopLossRuleRow[]) => void;
 }
 
-function currentSourceLabel(source: PtbCurrentPriceSource): string {
-  return PTB_CURRENT_PRICE_SOURCE_OPTIONS.find((option) => option.value === source)?.label ?? 'Chainlink';
+function currentSourceLabel(source: PtbCurrentPriceSource | PtbStopLossCurrentPriceSource): string {
+  return PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_OPTIONS.find((option) => option.value === source)?.label ?? 'Chainlink';
 }
 
 function createDefaultPtbStopLossRuleRow(): PtbStopLossRuleRow {
@@ -46,7 +47,7 @@ export function PtbStopLossSection({
   onUpdateField,
   onUpdateRows,
 }: PtbStopLossSectionProps) {
-  const normalizedOverride = normalizeOptionalPtbCurrentPriceSource(currentSourceOverride);
+  const normalizedOverride = normalizeOptionalPtbStopLossCurrentPriceSource(currentSourceOverride);
   const selectedCurrentSourceText = normalizedOverride
     ? currentSourceLabel(normalizedOverride)
     : `Entry PTB kaynagi ile ayni (${currentSourceLabel(inheritedCurrentSource)})`;
@@ -137,7 +138,7 @@ export function PtbStopLossSection({
                 <SelectItem value={EMPTY_SELECT_SENTINEL}>
                   Entry PTB kaynagi ile ayni ({currentSourceLabel(inheritedCurrentSource)})
                 </SelectItem>
-                {PTB_CURRENT_PRICE_SOURCE_OPTIONS.map((option) => (
+                {PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_OPTIONS.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>

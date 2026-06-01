@@ -31,7 +31,13 @@ export function isAutoPtbMode(value: unknown): boolean {
   return normalizePtbMode(value) !== 'manual';
 }
 
-export const PTB_CURRENT_PRICE_SOURCE_VALUES = ['chainlink', 'binance', 'coinbase'] as const;
+export const PTB_CURRENT_PRICE_SOURCE_VALUES = [
+  'chainlink',
+  'binance',
+  'coinbase',
+  'hyperliquid',
+  'bybit',
+] as const;
 
 export type PtbCurrentPriceSource = (typeof PTB_CURRENT_PRICE_SOURCE_VALUES)[number];
 
@@ -42,9 +48,32 @@ export const PTB_CURRENT_PRICE_SOURCE_OPTIONS: Array<{
   { label: 'Chainlink', value: 'chainlink' },
   { label: 'Binance', value: 'binance' },
   { label: 'Coinbase', value: 'coinbase' },
+  { label: 'Hyperliquid', value: 'hyperliquid' },
+  { label: 'Bybit', value: 'bybit' },
+];
+
+export const PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_VALUES = [
+  ...PTB_CURRENT_PRICE_SOURCE_VALUES,
+  'binance_hyperliquid',
+  'cex_consensus',
+] as const;
+
+export type PtbStopLossCurrentPriceSource =
+  (typeof PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_VALUES)[number];
+
+export const PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_OPTIONS: Array<{
+  label: string;
+  value: PtbStopLossCurrentPriceSource;
+}> = [
+  ...PTB_CURRENT_PRICE_SOURCE_OPTIONS,
+  { label: 'Binance + Hyperliquid', value: 'binance_hyperliquid' },
+  { label: 'CEX consensus (Bybit + 1)', value: 'cex_consensus' },
 ];
 
 const PTB_CURRENT_PRICE_SOURCE_VALUE_SET = new Set<string>(PTB_CURRENT_PRICE_SOURCE_VALUES);
+const PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_VALUE_SET = new Set<string>(
+  PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_VALUES
+);
 
 export function isPtbCurrentPriceSource(value: unknown): value is PtbCurrentPriceSource {
   return typeof value === 'string' && PTB_CURRENT_PRICE_SOURCE_VALUE_SET.has(value);
@@ -65,12 +94,38 @@ export function normalizeOptionalPtbCurrentPriceSource(
   return isPtbCurrentPriceSource(normalized) ? normalized : '';
 }
 
+export function isPtbStopLossCurrentPriceSource(
+  value: unknown
+): value is PtbStopLossCurrentPriceSource {
+  return (
+    typeof value === 'string' &&
+    PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_VALUE_SET.has(value)
+  );
+}
+
+export function normalizeOptionalPtbStopLossCurrentPriceSource(
+  value: unknown
+): PtbStopLossCurrentPriceSource | '' {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  return isPtbStopLossCurrentPriceSource(normalized) ? normalized : '';
+}
+
 export function normalizeOptionalPtbCurrentPriceSourceConfig(
   config: Record<string, unknown>,
   key: string,
   active: boolean
 ): void {
   const normalized = normalizeOptionalPtbCurrentPriceSource(config[key]);
+  if (active && normalized) config[key] = normalized;
+  else delete config[key];
+}
+
+export function normalizeOptionalPtbStopLossCurrentPriceSourceConfig(
+  config: Record<string, unknown>,
+  key: string,
+  active: boolean
+): void {
+  const normalized = normalizeOptionalPtbStopLossCurrentPriceSource(config[key]);
   if (active && normalized) config[key] = normalized;
   else delete config[key];
 }

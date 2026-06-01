@@ -157,6 +157,17 @@ fn gas_price_floor_and_buffer_preserves_higher_node_quote() {
 }
 
 #[test]
+fn ctf_merge_amount_uses_six_decimal_raw_units() {
+    let amount = ctf_merge_amount_raw(2.0).unwrap();
+    assert_eq!(amount, U256::from(2_000_000u64));
+    assert_eq!(ctf_merge_raw_to_usdc(amount), 2.0);
+    assert_eq!(
+        ctf_merge_partition(),
+        vec![U256::from(1u64), U256::from(2u64)]
+    );
+}
+
+#[test]
 fn max_inflight_claim_jobs_limits_builder_relayer_to_one() {
     assert_eq!(
         max_inflight_claim_jobs(ClaimExecutionMode::BuilderRelayer, 10),

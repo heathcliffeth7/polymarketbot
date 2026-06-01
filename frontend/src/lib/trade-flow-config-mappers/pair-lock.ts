@@ -1,6 +1,6 @@
 import { safeJsonStringify, toStringValue } from './utils';
 import { normalizePtbStopLossGapUnit } from './ptb-stop-loss';
-import { normalizeOptionalPtbCurrentPriceSourceConfig, normalizePtbCurrentPriceSource, normalizePtbMode } from './ptb-modes';
+import { normalizeOptionalPtbStopLossCurrentPriceSourceConfig, normalizePtbCurrentPriceSource, normalizePtbMode } from './ptb-modes';
 
 const ADAPTIVE_MAX_PRICE_CONFIG_KEYS = [
   'adaptiveMaxPriceMissCount',
@@ -923,7 +923,7 @@ export function normalizePairLockStopLossBuildConfig(
     config.priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(
       config.priceToBeatCurrentPriceSource
     );
-    normalizeOptionalPtbCurrentPriceSourceConfig(config, 'ptbStopLossCurrentPriceSource', true);
+    normalizeOptionalPtbStopLossCurrentPriceSourceConfig(config, 'ptbStopLossCurrentPriceSource', true);
     config.ptbStopLossGapUnit = normalizePtbStopLossGapUnit(config.ptbStopLossGapUnit);
     const ptbStopLossTimeDecayModeRaw = toStringValue(config.ptbStopLossTimeDecayMode)
       .trim()
@@ -962,7 +962,7 @@ export function normalizePairLockStopLossBuildConfig(
     config.counterLegPriceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(
       config.counterLegPriceToBeatCurrentPriceSource
     );
-    normalizeOptionalPtbCurrentPriceSourceConfig(config, 'counterLegPtbStopLossCurrentPriceSource', true);
+    normalizeOptionalPtbStopLossCurrentPriceSourceConfig(config, 'counterLegPtbStopLossCurrentPriceSource', true);
     config.counterLegPtbStopLossGapUnit = normalizePtbStopLossGapUnit(
       config.counterLegPtbStopLossGapUnit,
       config.ptbStopLossGapUnit === 'cent' ? 'cent' : 'usd'

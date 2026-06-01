@@ -1,18 +1,17 @@
 'use client';
 
 import { formatClientRequestError, hasClientRequestErrorCode } from '@/lib/http-client';
-import {
-  FLOW_DEFINITION_BUSY_CODE,
-  FLOW_DEFINITION_BUSY_MESSAGE,
-} from '@/lib/queries/trade-flow/mutation-errors';
-import {
-  buildContextFromForm,
-  type ContextFormState,
-} from '@/lib/trade-flow-config-mappers';
+import { FLOW_DEFINITION_BUSY_CODE, FLOW_DEFINITION_BUSY_MESSAGE } from '@/lib/queries/trade-flow/mutation-errors';
+import { buildContextFromForm, type ContextFormState } from '@/lib/trade-flow-config-mappers';
 import {
   createDcaTradeFlowGraph,
   createMultiLegHedgeGraph,
+  createPairLockHyperliquid70To80Graph,
   createPositionMonitorNotifyGraph,
+  createPositiveFlipPairlockCompressionGraph,
+  createPositiveQuantityFlipGrid1UsdcGraph,
+  createPositiveQuantityFlipGridInventoryBalanceGraph,
+  createRevengeFlip10_80Graph,
   createStarterTradeFlowGraph,
   createStopLossTakeProfitGraph,
 } from '@/lib/trade-flow-templates';
@@ -20,11 +19,7 @@ import type { TradeFlowGraph } from '@/lib/types';
 import type { TemplateKind } from '@/components/trade-builder/flow-engine-types';
 import { createSellBuyIfElseTemplate, isRecord } from '@/components/trade-builder/flow-engine-utils';
 
-export function buildFlowDraftPersistPayload(
-  graphJson: TradeFlowGraph,
-  draftName: string,
-  draftDescription: string
-) {
+export function buildFlowDraftPersistPayload(graphJson: TradeFlowGraph, draftName: string, draftDescription: string) {
   const name = draftName.trim();
   if (!name) {
     throw new Error('Flow adi bos olamaz.');
@@ -36,19 +31,19 @@ export function buildFlowDraftPersistPayload(
   };
 }
 
-export function createTemplateGraph(
-  kind: TemplateKind,
-  defaultMarketSlug: string | null,
-  defaultOutcome: { token_id: string; label: string } | null
-): TradeFlowGraph {
+export function createTemplateGraph(kind: TemplateKind, defaultMarketSlug: string | null, defaultOutcome: { token_id: string; label: string } | null): TradeFlowGraph {
   const templateMap: Record<TemplateKind, () => TradeFlowGraph> = {
     starter: () => createStarterTradeFlowGraph(defaultMarketSlug, defaultOutcome),
     sell_buy_if: () => createSellBuyIfElseTemplate(defaultMarketSlug, defaultOutcome),
     dca: () => createDcaTradeFlowGraph(defaultMarketSlug, defaultOutcome),
     sl_tp: () => createStopLossTakeProfitGraph(defaultMarketSlug, defaultOutcome),
-    position_monitor: () =>
-      createPositionMonitorNotifyGraph(defaultMarketSlug, defaultOutcome),
+    position_monitor: () => createPositionMonitorNotifyGraph(defaultMarketSlug, defaultOutcome),
     multi_leg_hedge: () => createMultiLegHedgeGraph(defaultMarketSlug, defaultOutcome),
+    revenge_flip_10_80: () => createRevengeFlip10_80Graph(defaultMarketSlug, defaultOutcome),
+    pairlock_hyperliquid_70_80: () => createPairLockHyperliquid70To80Graph(defaultMarketSlug, defaultOutcome),
+    positive_quantity_flip_grid_1usdc: () => createPositiveQuantityFlipGrid1UsdcGraph(defaultMarketSlug, defaultOutcome),
+    positive_quantity_flip_grid_inventory_balance: () => createPositiveQuantityFlipGridInventoryBalanceGraph(defaultMarketSlug, defaultOutcome),
+    positive_flip_pairlock_compression: () => createPositiveFlipPairlockCompressionGraph(defaultMarketSlug, defaultOutcome),
   };
 
   return templateMap[kind]();
@@ -73,15 +68,17 @@ export function getTemplateCreatedMessage(kind: TemplateKind): string {
     sl_tp: 'Stop Loss + Take Profit sablonu olusturuldu.',
     position_monitor: 'Pozisyon Izleme + Bildirim sablonu olusturuldu.',
     multi_leg_hedge: 'Multi-Leg Hedge sablonu olusturuldu.',
+    revenge_flip_10_80: 'RevengeFlip 10/80 sablonu olusturuldu.',
+    pairlock_hyperliquid_70_80: 'PairLock 70-80 Hyperliquid sablonu olusturuldu.',
+    positive_quantity_flip_grid_1usdc: 'Positive Quantity Flip Grid 1 USDC sablonu olusturuldu.',
+    positive_quantity_flip_grid_inventory_balance: 'Positive Grid Inventory Balance sablonu olusturuldu.',
+    positive_flip_pairlock_compression: 'Positive Flip Pairlock Compression sablonu olusturuldu.',
   };
 
   return templateLabels[kind];
 }
 
-export function resolveFlowContextInput(
-  contextTab: 'basic' | 'advanced',
-  contextForm: ContextFormState
-) {
+export function resolveFlowContextInput(contextTab: 'basic' | 'advanced', contextForm: ContextFormState) {
   if (contextTab === 'advanced') {
     try {
       const parsed = JSON.parse(contextForm.advancedJson) as unknown;
@@ -90,8 +87,7 @@ export function resolveFlowContextInput(
     } catch (error) {
       return {
         context: null,
-        errorMessage:
-          error instanceof Error ? `Context JSON hatali: ${error.message}` : 'Context JSON hatali.',
+        errorMessage: error instanceof Error ? `Context JSON hatali: ${error.message}` : 'Context JSON hatali.',
       };
     }
   }

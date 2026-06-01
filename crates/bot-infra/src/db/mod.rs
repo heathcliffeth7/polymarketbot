@@ -24,3 +24,8 @@ mod trades;
 pub use core::{PostgresRepository, RunnerSingletonDbLock};
 pub(crate) use mappers::{db_to_leg_side, leg_side_to_db, parse_state};
 pub use models::*;
+pub use trade_builder::{
+    positive_quantity_flip_grid_buy_execution_lock_keys,
+    trade_builder_revenge_flip_execution_lock_keys, PositiveQuantityFlipGridBuyExecutionLock,
+    TradeBuilderRevengeFlipExecutionLock,
+};

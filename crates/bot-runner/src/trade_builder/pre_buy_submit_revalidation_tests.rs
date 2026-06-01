@@ -29,6 +29,49 @@ mod pre_buy_submit_revalidation_semantics_tests {
         })
     }
 
+    fn local_path_guard_payload() -> Value {
+        json!({
+            "profile_source": "missing",
+            "profile_lookup_status": "row_missing",
+            "fallback_level": "gap_relaxed",
+            "profile_lookup_fallback_level": "gap_relaxed",
+            "runtime_fallback_source": "local_2m_path",
+            "local_path_fallback_source": "local_2m_path",
+            "protection": "local_path_applied",
+            "ptb_floor_usd": 13.0,
+            "reason_code": "local_path_drop_too_high",
+            "decision": "block_retry",
+            "local_path_history_ms": 42_000,
+            "local_path_sample_count": 170,
+            "largest_sample_gap_ms": 496,
+            "local_path_min_gap_30s": 44.7,
+            "local_path_min_gap_60s": 40.1,
+            "local_path_min_gap_2m": 40.1,
+            "local_path_drop_10s": 6.0,
+            "local_path_drop_30s": 13.2,
+            "local_path_drop_60s": 13.2,
+            "local_path_slope_3s": -0.7,
+            "local_path_slope_10s": -0.3,
+            "local_path_slope_30s": -0.1,
+            "local_path_decision_reason": "local_path_drop_too_high",
+            "profile_lookup_key": {
+                "target_market_slug": "btc-updown-5m-1777917600",
+                "target_window_start": "2026-05-06T12:00:00Z",
+                "definition_id": 4320,
+                "node_key": "action_0rt6iz",
+                "profile_config_hash": "abcdef1234567890",
+                "asset": "btc",
+                "direction": "down",
+                "remaining_bucket": "late",
+                "price_bucket": "very_high",
+                "gap_bucket": "medium",
+                "slope_bucket": "negative",
+                "quantile": 0.98,
+                "high_late": true
+            }
+        })
+    }
+
     fn annotate(
         decision: &mut LiveGapSubmitRevalidationDecision,
         candidate_stale: bool,
@@ -37,11 +80,12 @@ mod pre_buy_submit_revalidation_semantics_tests {
         annotate_live_gap_submit_revalidation_payload(
             decision,
             &json!({}),
+            812,
             1_188,
             500,
             candidate_stale,
             floor_invalidated,
-            1_080,
+            2_000,
         );
     }
 
@@ -156,6 +200,13 @@ mod pre_buy_submit_revalidation_semantics_tests {
             decision.payload["candidate_reuse_decision"],
             "reuse_denied_revalidation_required"
         );
+        assert_eq!(
+            decision.payload["candidate_reuse"],
+            "denied, revalidation_required"
+        );
+        assert_eq!(decision.payload["candidate_created_at_ms"], 812);
+        assert_eq!(decision.payload["fresh_snapshot_age_ms"], 1_000);
+        assert_eq!(decision.payload["fresh_revalidation_ts_ms"], 2_000);
         assert_eq!(
             decision.payload["clob_submit_decision"],
             LIVE_GAP_SUBMIT_REVALIDATION_CLOB_ALLOWED
@@ -274,6 +325,45 @@ mod pre_buy_submit_revalidation_semantics_tests {
         assert!(message.contains("Pre-Buy Submit Revalidation Block"));
         assert!(message.contains("Decision Reason: effective_fill_above_hard_max"));
         assert!(message.contains("CLOB: CLOB_NOT_SUBMITTED"));
+    }
+
+    #[test]
+    fn submit_revalidation_block_message_shows_fresh_timing_and_local_path() {
+        let mut payload = base_payload();
+        payload
+            .as_object_mut()
+            .expect("payload object")
+            .insert("no_reversal_entry_guard".to_string(), local_path_guard_payload());
+        let mut decision =
+            submit_revalidation_decision(false, false, "local_path_drop_too_high", payload);
+        annotate(&mut decision, true, false);
+
+        let message = build_live_gap_submit_revalidation_notification_message_from_fields(
+            "btc-updown-5m-1777917600",
+            "Down",
+            None,
+            &decision.payload,
+        );
+
+        assert!(message.contains("Pre-Buy Submit Revalidation Block"));
+        assert!(message.contains("Candidate Created At: 812ms"));
+        assert!(message.contains("Fresh Snapshot Age: 1000ms"));
+        assert!(message.contains("Fresh Revalidation TS: 2000ms"));
+        assert!(message.contains("Candidate Reuse: denied, revalidation_required"));
+        assert!(message.contains("CLOB: CLOB_NOT_SUBMITTED"));
+        assert!(message.contains("No-Reversal:"));
+        assert!(message.contains("Profile Lookup Fallback: gap_relaxed"));
+        assert!(message.contains("Fallback: local_2m_path"));
+        assert!(message.contains("Profile Lookup Key: window_start=2026-05-06T12:00:00Z"));
+        assert!(message.contains("hash=abcdef12"));
+        assert!(message.contains("Local Path:"));
+        assert!(message.contains("History: 42s"));
+        assert!(message.contains("Samples: 170"));
+        assert!(message.contains("Largest Sample Gap: 496ms"));
+        assert!(message.contains("Min Gap 60s: +40.1 USD"));
+        assert!(message.contains("Drop10/30/60: 6.0 USD / 13.2 USD / 13.2 USD"));
+        assert!(message.contains("Decision: BLOCK"));
+        assert!(message.contains("Reason: local_path_drop_too_high"));
     }
 
     #[test]
