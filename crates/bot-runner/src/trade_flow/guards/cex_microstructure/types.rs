@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 pub(crate) enum CexVenue {
     Binance,
     Coinbase,
+    Hyperliquid,
+    Bybit,
 }
 
 impl CexVenue {
@@ -11,6 +13,8 @@ impl CexVenue {
         match self {
             Self::Binance => "binance",
             Self::Coinbase => "coinbase",
+            Self::Hyperliquid => "hyperliquid",
+            Self::Bybit => "bybit",
         }
     }
 }
@@ -105,6 +109,43 @@ pub(crate) struct CexCurrentPriceSnapshot {
     pub(crate) ask: f64,
     pub(crate) book_staleness_ms: i64,
     pub(crate) ticker_staleness_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CexVenueDeltaSnapshot {
+    pub(crate) venue: CexVenue,
+    pub(crate) open_mid: f64,
+    pub(crate) current_mid: f64,
+    pub(crate) delta_usd: f64,
+    pub(crate) side: Option<&'static str>,
+    pub(crate) role: Option<&'static str>,
+    pub(crate) directional_gap: Option<f64>,
+    pub(crate) threshold_hit: Option<bool>,
+    pub(crate) open_source: &'static str,
+    pub(crate) open_timestamp_ms: i64,
+    pub(crate) current_timestamp_ms: i64,
+    pub(crate) open_lag_ms: i64,
+    pub(crate) book_staleness_ms: i64,
+}
+
+impl CexVenueDeltaSnapshot {
+    pub(crate) fn to_value(&self) -> Value {
+        json!({
+            "venue": self.venue.as_str(),
+            "open_mid": self.open_mid,
+            "current_mid": self.current_mid,
+            "delta_usd": self.delta_usd,
+            "side": self.side,
+            "role": self.role,
+            "directional_gap": self.directional_gap,
+            "threshold_hit": self.threshold_hit,
+            "open_source": self.open_source,
+            "open_timestamp_ms": self.open_timestamp_ms,
+            "current_timestamp_ms": self.current_timestamp_ms,
+            "open_lag_ms": self.open_lag_ms,
+            "book_staleness_ms": self.book_staleness_ms,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

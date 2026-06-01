@@ -73,6 +73,22 @@ fn auto_scope_rotation_lag_ms(rotation: &AutoScopeMarketRotation) -> Option<i64>
     })
 }
 
+fn prefetch_cex_window_opens_for_auto_scope_market(market_slug: &str) {
+    let Some(scope) = crate::find_updown_scope_by_slug(market_slug) else {
+        return;
+    };
+    if !matches!(scope.timeframe, "5m" | "15m") {
+        return;
+    }
+    let Some(window_start) = crate::MarketCycleId(market_slug.to_string()).start_time() else {
+        return;
+    };
+    crate::trade_flow::guards::cex_microstructure::prefetch_cex_window_opens(
+        scope.asset,
+        window_start.timestamp_millis(),
+    );
+}
+
 const FLOW_NODE_STATE_CYCLE_WINDOW_CONFIG_SNAPSHOT_PREFIX: &str = "cycle_window_config_snapshot_";
 
 fn cycle_window_config_snapshot_state_key(token_id: &str) -> String {
@@ -1070,6 +1086,7 @@ async fn build_trade_flow_ws_fast_path_cache(
             {
                 match sync_trigger_market_auto_scope_context(&flow_cfg, node, &mut context).await {
                     Ok(Some(selected)) => {
+                        prefetch_cex_window_opens_for_auto_scope_market(&selected.slug);
                         auto_scope_selected_by_node.insert(node.key.clone(), selected);
                     }
                     Ok(None) => {
@@ -1279,6 +1296,7 @@ async fn build_trade_flow_ws_fast_path_cache(
             if let Some(expected_market_start) = rotation.expected_market_start.as_ref() {
                 if let Some(scope) = crate::find_updown_scope_by_slug(&rotation.new_market_slug) {
                     if matches!(scope.timeframe, "5m" | "15m") {
+                        prefetch_cex_window_opens_for_auto_scope_market(&rotation.new_market_slug);
                         match crate::trade_flow::guards::chainlink_price::get_chainlink_price_start_tick(
                             &scope.asset,
                             expected_market_start.timestamp_millis(),

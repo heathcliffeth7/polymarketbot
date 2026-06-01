@@ -1,7 +1,7 @@
 use super::clob::{
     build_place_order_body, clob_order_amounts, clob_rounding_config,
     extract_best_bid_ask_from_book, extract_order_book_from_book, normalize_clob_order_type,
-    parse_clob_market_info_response, parse_fee_rate_bps_response,
+    parse_clob_market_info_response, parse_collateral_balance_usdc, parse_fee_rate_bps_response,
 };
 use super::parse::{parse_gamma_market, parse_gamma_market_any, parse_yes_no_token_ids};
 use super::{ClobHttpClient, ClobRestClient, OrderBookLevel, PlaceOrderRequest};
@@ -429,4 +429,23 @@ fn place_order_body_uses_clob_v2_wire_fields() {
     assert!(body.get("feeRateBps").is_none());
     assert_eq!(body.get("owner").and_then(Value::as_str), Some("api-key"));
     assert_eq!(body.get("orderType").and_then(Value::as_str), Some("FAK"));
+}
+
+#[test]
+fn parse_collateral_balance_usdc_from_balance_allowance_micro_units() {
+    let balance = parse_collateral_balance_usdc(&json!({
+        "balance": "5230000",
+        "allowance": "5230000"
+    }))
+    .expect("balance");
+    assert!((balance - 5.23).abs() < 0.000001);
+}
+
+#[test]
+fn parse_collateral_balance_usdc_from_plain_usdc_value() {
+    let balance = parse_collateral_balance_usdc(&json!({
+        "balance": 12.5
+    }))
+    .expect("balance");
+    assert!((balance - 12.5).abs() < 0.000001);
 }

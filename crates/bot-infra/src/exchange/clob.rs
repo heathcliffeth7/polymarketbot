@@ -523,6 +523,37 @@ pub(super) fn extract_best_bid_ask_from_book(
     (best_bid, best_ask)
 }
 
+pub(crate) fn parse_collateral_balance_usdc(raw: &serde_json::Value) -> Result<f64> {
+    let balance_raw = raw
+        .get("balance")
+        .or_else(|| raw.get("available"))
+        .or_else(|| {
+            raw.as_array().and_then(|arr| {
+                arr.iter()
+                    .find(|v| v.get("asset").and_then(|a| a.as_str()) == Some("USDC"))
+                    .and_then(|v| v.get("available").or_else(|| v.get("balance")))
+            })
+        });
+
+    let balance = balance_raw
+        .and_then(parse_f64_value)
+        .or_else(|| balance_raw.and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()))
+        .ok_or_else(|| anyhow::anyhow!("collateral balance missing from balance-allowance response"))?;
+
+    Ok(normalize_collateral_balance_usdc(balance))
+}
+
+fn normalize_collateral_balance_usdc(balance: f64) -> f64 {
+    if !balance.is_finite() || balance <= 0.0 {
+        return 0.0;
+    }
+    if balance >= 1_000_000.0 {
+        balance / 1_000_000.0
+    } else {
+        balance
+    }
+}
+
 #[async_trait]
 impl ClobRestClient for ClobHttpClient {
     async fn get_price_snapshot(&self, market: &str) -> Result<PriceSnapshot> {
@@ -1076,26 +1107,13 @@ impl ClobRestClient for ClobHttpClient {
     }
 
     async fn get_balance(&self) -> Result<f64> {
-        let request_path = format!("/data/balances?user_id={}", self.address);
+        let request_path = format!(
+            "/balance-allowance?asset_type=COLLATERAL&signature_type={}",
+            self.signature_type
+        );
         let resp = self.signed_json(Method::GET, &request_path, None).await?.0;
         let raw: serde_json::Value = resp.json().await?;
-        let balance = raw
-            .as_array()
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|v| v.get("asset").and_then(|a| a.as_str()) == Some("USDC"))
-            })
-            .and_then(|v| v.get("available").or_else(|| v.get("balance")))
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<f64>().ok())
-            .or_else(|| {
-                raw.get("balance")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse().ok())
-            })
-            .or_else(|| raw.get("balance").and_then(|v| v.as_f64()))
-            .unwrap_or(0.0);
-        Ok(balance)
+        parse_collateral_balance_usdc(&raw)
     }
 
     async fn get_token_inventory(&self, token_id: &str) -> Result<Option<f64>> {
