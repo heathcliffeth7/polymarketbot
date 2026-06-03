@@ -217,11 +217,17 @@ if pgrep -f "$FRONTEND_DIR/node_modules/.bin/next dev --webpack" >/dev/null 2>&1
   fail "Port 3000 is occupied by next dev. Stop dev mode (or disable user service polymarket-frontend.service) before starting dextrabot-frontend."
 fi
 
-step "Install and start frontend systemd service"
+step "Install and restart frontend systemd service"
 install_unit_file
 sudo systemctl daemon-reload
-sudo systemctl enable --now dextrabot-frontend
-ok "dextrabot-frontend enabled and started"
+sudo systemctl enable dextrabot-frontend
+if sudo systemctl is-active --quiet dextrabot-frontend; then
+  sudo systemctl restart dextrabot-frontend
+  ok "dextrabot-frontend enabled and restarted"
+else
+  sudo systemctl start dextrabot-frontend
+  ok "dextrabot-frontend enabled and started"
+fi
 
 step "Print service status"
 sudo systemctl --no-pager -l status dextrabot-frontend || true

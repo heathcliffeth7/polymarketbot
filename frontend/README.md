@@ -53,6 +53,11 @@ Or install the systemd service from the repository root:
 ./scripts/setup_frontend_service.sh
 ```
 
+For production redeploys, prefer the setup script. It builds the bundle, makes
+`.next` readable by the `dextrabot` service user, and restarts
+`dextrabot-frontend`; if you run `npm run build` manually, repeat the permission
+fix and service restart before using the dashboard.
+
 When `SYSTEMD_CONTROL_ENABLED=true`, the service user needs passwordless permission for:
 
 ```text

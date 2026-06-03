@@ -100,6 +100,11 @@ Install the dashboard as a systemd service:
 ./scripts/setup_frontend_service.sh
 ```
 
+Use the same script for production frontend redeploys. It builds the dashboard,
+fixes `.next` permissions for the `dextrabot` service user, and restarts
+`dextrabot-frontend`; after a manual `cd frontend && npm run build`, reapply
+those permissions and restart the service before refreshing the dashboard.
+
 For HTTP-only server-IP deployments, set `AUTH_COOKIE_SECURE=false` in the frontend environment file.
 
 ## Live Trading
