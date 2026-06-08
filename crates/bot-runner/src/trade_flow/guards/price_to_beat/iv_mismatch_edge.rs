@@ -1,22 +1,65 @@
+use super::iv_borderline_pump_book_lead::{
+    PriceToBeatIvBorderlinePumpBookLeadConfig, PriceToBeatIvBorderlinePumpBookLeadEvaluation,
+    PriceToBeatIvBorderlinePumpBookLeadInput, evaluate_price_to_beat_iv_borderline_pump_book_lead,
+};
+use super::iv_cex_open_gap::{
+    PriceToBeatIvCexOpenGapConfig, PriceToBeatIvCexOpenGapEvaluation, PriceToBeatIvCexOpenGapInput,
+    cex_open_gap_book_mismatch_reason, evaluate_price_to_beat_iv_cex_open_gap,
+};
+use super::iv_entry_quality::{
+    IvEntryQualityConfig, IvEntryQualityDecision, IvEntryQualityInput, evaluate_iv_entry_quality,
+};
+use super::iv_execution_vwap::{
+    PriceToBeatIvExecutionVwapConfig, PriceToBeatIvExecutionVwapEvaluation,
+    PriceToBeatIvExecutionVwapInput, evaluate_price_to_beat_iv_execution_vwap,
+};
+use super::iv_gap_fail_cex_book_guard::{
+    PriceToBeatIvGapFailCexBookGuardConfig, PriceToBeatIvGapFailCexBookGuardEvaluation,
+    PriceToBeatIvGapFailCexBookGuardInput, evaluate_price_to_beat_iv_gap_fail_cex_book_guard,
+};
 use super::iv_mismatch_adaptive::{
-    evaluate_price_to_beat_iv_adaptive_volume, PriceToBeatIvAdaptiveConfig,
-    PriceToBeatIvAdaptiveEvaluation, PriceToBeatIvAdaptiveInput, PriceToBeatIvAdaptiveVolumeInput,
+    PriceToBeatIvAdaptiveConfig, PriceToBeatIvAdaptiveEvaluation, PriceToBeatIvAdaptiveInput,
+    PriceToBeatIvAdaptiveVolumeInput, evaluate_price_to_beat_iv_adaptive_volume,
 };
-use super::iv_mismatch_depth::{evaluate_price_to_beat_iv_depth, PriceToBeatIvDepthEvaluation};
-use super::iv_mismatch_math::{inverse_normal_cdf, normal_cdf, standard_deviation};
-use super::iv_mismatch_protection::{
-    evaluate_price_to_beat_iv_protection, PriceToBeatIvBookQuotes, PriceToBeatIvProtectionInput,
-    PriceToBeatIvProtectionMode,
+use super::iv_mismatch_binance::{evaluate_binance_disagreement_penalty, evaluate_binance_veto};
+use super::iv_mismatch_depth::{PriceToBeatIvDepthEvaluation, evaluate_price_to_beat_iv_depth};
+use super::iv_mismatch_edge_helpers::{
+    previous_side_gap, side_gap, side_gap_at_or_before, sigma_since, time_normalized_price_deltas,
+    valid_probability, zero_cross_count,
 };
-use super::signal_formula::{signal_formula_taker_fee, SIGNAL_FORMULA_TAKER_FEE_RATE};
+use super::iv_mismatch_expected_move::{
+    PriceToBeatIvExpectedMoveFloorConfig, PriceToBeatIvExpectedMoveFloorEvaluation,
+    PriceToBeatIvExpectedMoveFloorInput, PriceToBeatIvMinExpectedMoveMode,
+    evaluate_expected_move_floor,
+};
+#[path = "iv_mismatch_edge_telemetry.rs"]
+mod iv_mismatch_edge_telemetry;
 use super::PriceToBeatSignalFormulaMarketInput;
-use crate::trade_flow::guards::binance_price::get_binance_price_snapshot;
-use crate::trade_flow::guards::chainlink_price::{
-    get_chainlink_price_samples, ChainlinkPriceSample,
+#[cfg(test)]
+use super::iv_mismatch_math::inverse_normal_cdf;
+use super::iv_mismatch_math::{implied_volatility_ratio, normal_cdf, standard_deviation};
+use super::iv_mismatch_protection::{
+    PriceToBeatIvBookQuotes, PriceToBeatIvProtectionInput, PriceToBeatIvProtectionMode,
+    evaluate_price_to_beat_iv_protection,
 };
+use super::iv_mismatch_ptb_chop::{
+    PriceToBeatIvPtbChopConfig, PriceToBeatIvPtbChopEvaluation, PriceToBeatIvPtbChopInput,
+    evaluate_price_to_beat_iv_ptb_chop,
+};
+use super::iv_mismatch_time_rule::PriceToBeatIvMismatchTimeRule;
+use super::iv_oracle_lag_book_lead::{
+    PriceToBeatIvOracleLagBookLeadConfig, PriceToBeatIvOracleLagBookLeadEvaluation,
+    PriceToBeatIvOracleLagBookLeadInput, evaluate_price_to_beat_iv_oracle_lag_book_lead,
+};
+use super::iv_pump_shock::{
+    PriceToBeatIvPumpShockConfig, PriceToBeatIvPumpShockEvaluation, PriceToBeatIvPumpShockInput,
+    evaluate_price_to_beat_iv_pump_shock,
+};
+use super::signal_formula::signal_formula_taker_fee;
+use crate::trade_flow::guards::chainlink_price::get_chainlink_price_samples;
 use bot_infra::exchange::OrderBookSnapshot;
 use chrono::{Duration as ChronoDuration, Utc};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 const DEFAULT_VOL_WINDOW_SECS: i64 = 45;
 const DEFAULT_MIN_VOL_SAMPLES: usize = 8;
@@ -71,38 +114,6 @@ const DEFAULT_PARTICIPATION_MIN_THRESHOLD: f64 = 0.05;
 const DEFAULT_PROTECTION_SOFT_THRESHOLD_PENALTY: f64 = 0.03;
 const DEFAULT_PROTECTION_SOFT_GAP_STRENGTH_PENALTY: f64 = 0.10;
 const DEFAULT_PROTECTION_DROP_Z_BLOCK_THRESHOLD: f64 = 0.80;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct PriceToBeatIvMismatchTimeRule {
-    pub(crate) start_remaining_secs: f64,
-    pub(crate) end_remaining_secs: f64,
-    pub(crate) max_price: Option<f64>,
-    pub(crate) min_edge: f64,
-    pub(crate) min_gap_strength: f64,
-    pub(crate) min_expected_move_usd: Option<f64>,
-    pub(crate) min_gap_strength_margin: Option<f64>,
-    pub(crate) min_gap_usd_margin: Option<f64>,
-}
-
-impl PriceToBeatIvMismatchTimeRule {
-    fn matches_seconds_left(self, seconds_left: f64) -> bool {
-        seconds_left <= self.start_remaining_secs && seconds_left > self.end_remaining_secs
-    }
-
-    fn to_value(self, index: usize) -> Value {
-        json!({
-            "index": index,
-            "start_remaining_secs": self.start_remaining_secs,
-            "end_remaining_secs": self.end_remaining_secs,
-            "max_price": self.max_price,
-            "min_edge": self.min_edge,
-            "min_gap_strength": self.min_gap_strength,
-            "min_expected_move_usd": self.min_expected_move_usd,
-            "min_gap_strength_margin": self.min_gap_strength_margin,
-            "min_gap_usd_margin": self.min_gap_usd_margin,
-        })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PriceToBeatIvMismatchEdgeConfig {
@@ -160,6 +171,7 @@ pub(crate) struct PriceToBeatIvMismatchEdgeConfig {
     pub(crate) model_book_warn_threshold_penalty: f64,
     pub(crate) model_book_warn_gap_strength_penalty: f64,
     pub(crate) depth_guard_enabled: bool,
+    pub(crate) depth_guard_hard_block_enabled: bool,
     pub(crate) depth_max_slippage: f64,
     pub(crate) depth_order_book: Option<OrderBookSnapshot>,
     pub(crate) depth_intended_qty: Option<f64>,
@@ -180,6 +192,15 @@ pub(crate) struct PriceToBeatIvMismatchEdgeConfig {
     pub(crate) protection_drop_z_block_threshold: f64,
     pub(crate) protection_soft_threshold_penalty: f64,
     pub(crate) protection_soft_gap_strength_penalty: f64,
+    pub(crate) entry_quality: IvEntryQualityConfig,
+    pub(crate) cex_open_gap: PriceToBeatIvCexOpenGapConfig,
+    pub(crate) execution_vwap_guard: PriceToBeatIvExecutionVwapConfig,
+    pub(crate) gap_fail_cex_book: PriceToBeatIvGapFailCexBookGuardConfig,
+    pub(crate) oracle_lag_book_lead: PriceToBeatIvOracleLagBookLeadConfig,
+    pub(crate) borderline_pump_book_lead: PriceToBeatIvBorderlinePumpBookLeadConfig,
+    pub(crate) pump_shock: PriceToBeatIvPumpShockConfig,
+    pub(crate) expected_move_floor: PriceToBeatIvExpectedMoveFloorConfig,
+    pub(crate) ptb_chop: PriceToBeatIvPtbChopConfig,
     pub(crate) adaptive: PriceToBeatIvAdaptiveConfig,
     pub(crate) adaptive_volume: Option<PriceToBeatIvAdaptiveVolumeInput>,
 }
@@ -241,6 +262,7 @@ impl PriceToBeatIvMismatchEdgeConfig {
             model_book_warn_threshold_penalty: DEFAULT_PROTECTION_MODEL_BOOK_WARN_THRESHOLD_PENALTY,
             model_book_warn_gap_strength_penalty: DEFAULT_PROTECTION_MODEL_BOOK_WARN_GAP_PENALTY,
             depth_guard_enabled: true,
+            depth_guard_hard_block_enabled: false,
             depth_max_slippage: DEFAULT_DEPTH_MAX_SLIPPAGE,
             depth_order_book: None,
             depth_intended_qty: None,
@@ -261,6 +283,15 @@ impl PriceToBeatIvMismatchEdgeConfig {
             protection_drop_z_block_threshold: DEFAULT_PROTECTION_DROP_Z_BLOCK_THRESHOLD,
             protection_soft_threshold_penalty: DEFAULT_PROTECTION_SOFT_THRESHOLD_PENALTY,
             protection_soft_gap_strength_penalty: DEFAULT_PROTECTION_SOFT_GAP_STRENGTH_PENALTY,
+            entry_quality: IvEntryQualityConfig::default(),
+            cex_open_gap: PriceToBeatIvCexOpenGapConfig::default(),
+            execution_vwap_guard: PriceToBeatIvExecutionVwapConfig::default(),
+            gap_fail_cex_book: PriceToBeatIvGapFailCexBookGuardConfig::default(),
+            oracle_lag_book_lead: PriceToBeatIvOracleLagBookLeadConfig::default(),
+            borderline_pump_book_lead: PriceToBeatIvBorderlinePumpBookLeadConfig::default(),
+            pump_shock: PriceToBeatIvPumpShockConfig::default(),
+            expected_move_floor: PriceToBeatIvExpectedMoveFloorConfig::default(),
+            ptb_chop: PriceToBeatIvPtbChopConfig::default(),
             adaptive: PriceToBeatIvAdaptiveConfig::default(),
             adaptive_volume: None,
         }
@@ -271,6 +302,7 @@ impl PriceToBeatIvMismatchEdgeConfig {
 pub(crate) struct PriceToBeatIvMismatchEdgeEvaluation {
     pub(crate) passed: bool,
     pub(crate) reason: &'static str,
+    pub(crate) all_reasons: Vec<&'static str>,
     pub(crate) selected_side: Option<&'static str>,
     pub(crate) candidate_side: Option<&'static str>,
     pub(crate) seconds_left: Option<f64>,
@@ -350,6 +382,7 @@ pub(crate) struct PriceToBeatIvMismatchEdgeEvaluation {
     pub(crate) down_bid: Option<f64>,
     pub(crate) down_ask: Option<f64>,
     pub(crate) depth: PriceToBeatIvDepthEvaluation,
+    pub(crate) depth_guard_hard_block_enabled: bool,
     pub(crate) up_mid: Option<f64>,
     pub(crate) down_mid: Option<f64>,
     pub(crate) book_side: Option<&'static str>,
@@ -367,6 +400,15 @@ pub(crate) struct PriceToBeatIvMismatchEdgeEvaluation {
     pub(crate) min_gap_usd_margin: Option<f64>,
     pub(crate) binance_same_direction: Option<bool>,
     pub(crate) falling_knife_flag: Option<bool>,
+    pub(crate) entry_quality: Option<IvEntryQualityDecision>,
+    pub(crate) cex_open_gap: PriceToBeatIvCexOpenGapEvaluation,
+    pub(crate) execution_vwap: PriceToBeatIvExecutionVwapEvaluation,
+    pub(crate) gap_fail_cex_book: PriceToBeatIvGapFailCexBookGuardEvaluation,
+    pub(crate) oracle_lag_book_lead: PriceToBeatIvOracleLagBookLeadEvaluation,
+    pub(crate) borderline_pump_book_lead: PriceToBeatIvBorderlinePumpBookLeadEvaluation,
+    pub(crate) pump_shock: PriceToBeatIvPumpShockEvaluation,
+    pub(crate) expected_move_floor_debug: PriceToBeatIvExpectedMoveFloorEvaluation,
+    pub(crate) ptb_chop: PriceToBeatIvPtbChopEvaluation,
     pub(crate) adaptive: Option<PriceToBeatIvAdaptiveEvaluation>,
 }
 
@@ -375,6 +417,7 @@ impl PriceToBeatIvMismatchEdgeEvaluation {
         Self {
             passed: false,
             reason: "pending",
+            all_reasons: Vec::new(),
             selected_side: None,
             candidate_side: None,
             seconds_left: None,
@@ -454,6 +497,7 @@ impl PriceToBeatIvMismatchEdgeEvaluation {
             down_bid: config.book_quotes.and_then(|book| book.down_bid),
             down_ask: config.book_quotes.and_then(|book| book.down_ask),
             depth: PriceToBeatIvDepthEvaluation::off(),
+            depth_guard_hard_block_enabled: config.depth_guard_hard_block_enabled,
             up_mid: None,
             down_mid: None,
             book_side: None,
@@ -471,6 +515,15 @@ impl PriceToBeatIvMismatchEdgeEvaluation {
             min_gap_usd_margin: None,
             binance_same_direction: None,
             falling_knife_flag: None,
+            entry_quality: None,
+            cex_open_gap: PriceToBeatIvCexOpenGapEvaluation::default(),
+            execution_vwap: PriceToBeatIvExecutionVwapEvaluation::default(),
+            gap_fail_cex_book: PriceToBeatIvGapFailCexBookGuardEvaluation::default(),
+            oracle_lag_book_lead: PriceToBeatIvOracleLagBookLeadEvaluation::default(),
+            borderline_pump_book_lead: PriceToBeatIvBorderlinePumpBookLeadEvaluation::default(),
+            pump_shock: PriceToBeatIvPumpShockEvaluation::default(),
+            expected_move_floor_debug: PriceToBeatIvExpectedMoveFloorEvaluation::fixed(),
+            ptb_chop: PriceToBeatIvPtbChopEvaluation::off(&config.ptb_chop),
             adaptive: None,
         }
     }
@@ -485,224 +538,7 @@ impl PriceToBeatIvMismatchEdgeEvaluation {
     }
 
     pub(crate) fn to_value(&self) -> Value {
-        let mut value = json!({
-            "passed": self.passed,
-            "decision_reason": self.reason,
-            "selected_side": self.selected_side,
-            "candidate_side": self.candidate_side,
-            "q": self.q,
-            "q_up": self.q_up,
-            "q_down": self.q_down,
-            "cost": self.cost,
-            "edge": self.edge,
-            "sigma": self.sigma,
-            "iv_ratio": self.iv_ratio,
-            "zero_cross_count": self.zero_cross_count,
-            "chainlink_staleness_ms": self.chainlink_staleness_ms,
-            "spread": self.spread,
-            "threshold": self.threshold,
-            "seconds_left": self.seconds_left,
-            "ask": self.ask,
-            "bid": self.bid,
-            "node_max_price": self.node_max_price,
-            "effective_max_price": self.effective_max_price,
-            "fee": self.fee,
-            "buffer": self.buffer,
-            "sample_count": self.sample_count,
-            "delta_count": self.delta_count,
-            "expected_move": self.expected_move,
-            "expected_move_raw": self.expected_move,
-            "z": self.z,
-            "vol_window_sec": DEFAULT_VOL_WINDOW_SECS,
-            "fast_vol_window_sec": DEFAULT_FAST_VOL_WINDOW_SECS,
-            "fee_rate": SIGNAL_FORMULA_TAKER_FEE_RATE,
-        });
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("x_now".to_string(), json!(self.x_now));
-            obj.insert("x_prev".to_string(), json!(self.x_prev));
-            obj.insert("gap_velocity".to_string(), json!(self.gap_velocity));
-            obj.insert(
-                "latency_horizon_secs".to_string(),
-                json!(self.latency_horizon_secs),
-            );
-            obj.insert("x_eff".to_string(), json!(self.x_eff));
-            obj.insert("sigma_15".to_string(), json!(self.sigma_15));
-            obj.insert("sigma_eff".to_string(), json!(self.sigma_eff));
-            obj.insert(
-                "expected_move_model".to_string(),
-                json!(self.expected_move_model),
-            );
-            obj.insert(
-                "expected_move_floor".to_string(),
-                json!(self.expected_move_floor),
-            );
-            obj.insert("q_before_floor".to_string(), json!(self.q_before_floor));
-            obj.insert("q_after_floor".to_string(), json!(self.q_after_floor));
-            obj.insert("q_chain_adj".to_string(), json!(self.q_chain_adj));
-            obj.insert("binance_price".to_string(), json!(self.binance_price));
-            obj.insert(
-                "binance_staleness_ms".to_string(),
-                json!(self.binance_staleness_ms),
-            );
-            obj.insert("q_binance".to_string(), json!(self.q_binance));
-            obj.insert("q_final".to_string(), json!(self.q_final));
-            obj.insert("edge_adj".to_string(), json!(self.edge_adj));
-            obj.insert("adjusted_margin".to_string(), json!(self.adjusted_margin));
-            obj.insert(
-                "min_adjusted_margin".to_string(),
-                json!(self.min_adjusted_margin),
-            );
-            obj.insert("thin_margin_flag".to_string(), json!(self.thin_margin_flag));
-            obj.insert("min_final_q".to_string(), json!(self.min_final_q));
-            obj.insert("q_disagreement".to_string(), json!(self.q_disagreement));
-            obj.insert(
-                "q_disagreement_abs".to_string(),
-                json!(self.q_disagreement_abs),
-            );
-            obj.insert(
-                "q_disagreement_bucket".to_string(),
-                json!(self.q_disagreement_bucket),
-            );
-            obj.insert(
-                "dynamic_threshold_before_participation".to_string(),
-                json!(self.dynamic_threshold_before_participation),
-            );
-            obj.insert(
-                "dynamic_threshold".to_string(),
-                json!(self.dynamic_threshold),
-            );
-            obj.insert(
-                "participation_credit".to_string(),
-                json!(self.participation_credit),
-            );
-            obj.insert(
-                "participation_last_fill_age_minutes".to_string(),
-                json!(self.participation_last_fill_age_minutes),
-            );
-            obj.insert(
-                "high_price_penalty".to_string(),
-                json!(self.high_price_penalty_applied),
-            );
-            obj.insert(
-                "stale_penalty".to_string(),
-                json!(self.stale_penalty_applied),
-            );
-            obj.insert("drop_penalty".to_string(), json!(self.drop_penalty_applied));
-            obj.insert(
-                "binance_missing_penalty".to_string(),
-                json!(self.binance_missing_penalty_applied),
-            );
-            obj.insert(
-                "binance_disagreement_penalty".to_string(),
-                json!(self.binance_disagreement_penalty_applied),
-            );
-            obj.insert("confidence_score".to_string(), json!(self.confidence_score));
-            obj.insert("drop_z".to_string(), json!(self.drop_z));
-            obj.insert(
-                "binance_veto_status".to_string(),
-                json!(self.binance_veto_status),
-            );
-            obj.insert(
-                "selected_time_rule_index".to_string(),
-                json!(self.selected_time_rule_index),
-            );
-            obj.insert(
-                "selected_time_rule".to_string(),
-                json!(self
-                    .selected_time_rule
-                    .zip(self.selected_time_rule_index)
-                    .map(|(rule, index)| rule.to_value(index))),
-            );
-            obj.insert(
-                "time_rule_max_price".to_string(),
-                json!(self.time_rule_max_price),
-            );
-            obj.insert(
-                "expected_move_eff".to_string(),
-                json!(self.expected_move_eff),
-            );
-            obj.insert("gap_strength".to_string(), json!(self.gap_strength));
-            obj.insert(
-                "required_gap_strength".to_string(),
-                json!(self.required_gap_strength),
-            );
-            obj.insert("required_gap_usd".to_string(), json!(self.required_gap_usd));
-            obj.insert(
-                "gap_strength_stale_penalty".to_string(),
-                json!(self.gap_strength_stale_penalty),
-            );
-            obj.insert(
-                "gap_strength_velocity_penalty".to_string(),
-                json!(self.gap_strength_velocity_penalty),
-            );
-            obj.insert("protection_mode".to_string(), json!(self.protection_mode));
-            obj.insert(
-                "protection_result".to_string(),
-                json!(self.protection_result),
-            );
-            obj.insert(
-                "protection_reasons".to_string(),
-                json!(self.protection_reasons),
-            );
-            obj.insert(
-                "protection_threshold_penalty".to_string(),
-                json!(self.protection_threshold_penalty),
-            );
-            obj.insert(
-                "protection_gap_strength_penalty".to_string(),
-                json!(self.protection_gap_strength_penalty),
-            );
-            obj.insert("up_bid".to_string(), json!(self.up_bid));
-            obj.insert("up_ask".to_string(), json!(self.up_ask));
-            obj.insert("down_bid".to_string(), json!(self.down_bid));
-            obj.insert("down_ask".to_string(), json!(self.down_ask));
-            self.depth.append_to_json(obj);
-            obj.insert("up_mid".to_string(), json!(self.up_mid));
-            obj.insert("down_mid".to_string(), json!(self.down_mid));
-            obj.insert("book_side".to_string(), json!(self.book_side));
-            obj.insert("book_mid_diff".to_string(), json!(self.book_mid_diff));
-            obj.insert("opposite_mid".to_string(), json!(self.opposite_mid));
-            obj.insert("selected_mid".to_string(), json!(self.selected_mid));
-            obj.insert("selected_ask".to_string(), json!(self.selected_ask));
-            obj.insert("model_book_gap".to_string(), json!(self.model_book_gap));
-            obj.insert(
-                "model_book_gap_warn_threshold".to_string(),
-                json!(self.model_book_gap_warn_threshold),
-            );
-            obj.insert(
-                "too_good_threshold".to_string(),
-                json!(self.too_good_threshold),
-            );
-            obj.insert(
-                "book_confirmation_result".to_string(),
-                json!(self.book_confirmation_result),
-            );
-            obj.insert(
-                "gap_strength_margin".to_string(),
-                json!(self.gap_strength_margin),
-            );
-            obj.insert("gap_usd_margin".to_string(), json!(self.gap_usd_margin));
-            obj.insert(
-                "min_gap_strength_margin".to_string(),
-                json!(self.min_gap_strength_margin),
-            );
-            obj.insert(
-                "min_gap_usd_margin".to_string(),
-                json!(self.min_gap_usd_margin),
-            );
-            obj.insert(
-                "binance_same_direction".to_string(),
-                json!(self.binance_same_direction),
-            );
-            obj.insert(
-                "falling_knife_flag".to_string(),
-                json!(self.falling_knife_flag),
-            );
-            if let Some(adaptive) = &self.adaptive {
-                adaptive.append_to_json(obj);
-            }
-        }
-        value
+        iv_mismatch_edge_telemetry::to_value(self)
     }
 }
 
@@ -769,11 +605,11 @@ pub(crate) fn evaluate_price_to_beat_iv_mismatch_edge(
     if spread > config.max_spread {
         return evaluation.finish(false, "blocked_spread_wide");
     }
-    if let Some(max_price) = evaluation.time_rule_max_price {
-        if ask > max_price {
-            return evaluation.finish(false, "blocked_time_rule_max_price");
-        }
-    }
+    let time_rule_price_blocked = !config.entry_quality.eq77_risk_cap_enabled
+        && evaluation
+            .time_rule_max_price
+            .map(|max_price| ask > max_price)
+            .unwrap_or(false);
 
     let now_ms = Utc::now().timestamp_millis();
     let samples = match get_chainlink_price_samples(
@@ -827,7 +663,9 @@ pub(crate) fn evaluate_price_to_beat_iv_mismatch_edge(
         ask,
         config.depth_intended_qty,
         config.depth_max_slippage,
-        config.depth_guard_enabled,
+        config.depth_guard_enabled
+            || config.execution_vwap_guard.enabled
+            || config.execution_vwap_guard.limit_by_vwap_enabled,
     );
     let effective_fill_price = depth.estimated_avg_fill.unwrap_or(ask);
     let fee = signal_formula_taker_fee(effective_fill_price);
@@ -858,9 +696,63 @@ pub(crate) fn evaluate_price_to_beat_iv_mismatch_edge(
     }
     let z_before_floor = x_eff / expected_move_model;
     let q_before_floor = normal_cdf(z_before_floor);
-    let expected_move_floor = selected_time_rule
+    let time_rule_expected_move_floor = selected_time_rule
         .and_then(|(_, rule)| rule.min_expected_move_usd)
         .filter(|value| value.is_finite() && *value > 0.0);
+    let entry_quality_expected_move_floor = config
+        .entry_quality
+        .enabled
+        .then(|| config.entry_quality.expected_move_floor(current_price))
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let expected_move_floor = [
+        time_rule_expected_move_floor,
+        entry_quality_expected_move_floor,
+    ]
+    .into_iter()
+    .flatten()
+    .max_by(f64::total_cmp);
+    let base_expected_move_eff = expected_move_floor
+        .map(|floor| expected_move_model.max(floor))
+        .unwrap_or(expected_move_model);
+    let expected_move_floor_debug =
+        if config.expected_move_floor.mode == PriceToBeatIvMinExpectedMoveMode::Adaptive {
+            let base_q_chain_adj = normal_cdf(x_eff / base_expected_move_eff);
+            let preliminary_binance_adjustment = evaluate_binance_veto(
+                asset,
+                side,
+                price_to_beat,
+                base_expected_move_eff,
+                base_q_chain_adj,
+                now_ms,
+                &config,
+            );
+            let preliminary_disagreement = evaluate_binance_disagreement_penalty(
+                base_q_chain_adj,
+                preliminary_binance_adjustment.q_binance,
+                &config,
+            );
+            evaluate_expected_move_floor(
+                &config.expected_move_floor,
+                PriceToBeatIvExpectedMoveFloorInput {
+                    current_price,
+                    spread,
+                    source_staleness_ms: staleness_ms.max(
+                        preliminary_binance_adjustment
+                            .binance_staleness_ms
+                            .unwrap_or(0),
+                    ),
+                    sigma_fast: sigma_15,
+                    sigma_eff,
+                    disagreement_abs: preliminary_disagreement.absolute,
+                },
+            )
+        } else {
+            PriceToBeatIvExpectedMoveFloorEvaluation::fixed()
+        };
+    let expected_move_floor = [expected_move_floor, expected_move_floor_debug.floor_usd]
+        .into_iter()
+        .flatten()
+        .max_by(f64::total_cmp);
     let expected_move_eff = expected_move_floor
         .map(|floor| expected_move_model.max(floor))
         .unwrap_or(expected_move_model);
@@ -928,7 +820,20 @@ pub(crate) fn evaluate_price_to_beat_iv_mismatch_edge(
         + drop_penalty
         + binance_missing_penalty
         + binance_disagreement.penalty;
-    let q_final = binance_adjustment.q_final;
+    let mut cex_open_gap = evaluate_price_to_beat_iv_cex_open_gap(PriceToBeatIvCexOpenGapInput {
+        config: config.cex_open_gap,
+        market_slug,
+        asset,
+        selected_side: side,
+        current_price,
+        chainlink_signed_gap: x_now,
+        expected_move_eff,
+        q_final_before: binance_adjustment.q_final,
+    });
+    let cex_open_gap_block_reason = cex_open_gap.block_reason;
+    let q_final = cex_open_gap
+        .q_final_after_cex_consensus
+        .unwrap_or(binance_adjustment.q_final);
     let binance_same_direction = binance_adjustment
         .binance_price
         .map(|price| side_gap(side, price, price_to_beat) > 0.0);
@@ -968,8 +873,31 @@ pub(crate) fn evaluate_price_to_beat_iv_mismatch_edge(
         .as_ref()
         .map(|evaluation| evaluation.gap_usd_margin_delta)
         .unwrap_or(0.0);
-    let base_required_gap_strength =
+    let base_required_gap_strength_before_chop =
         raw_required_gap_strength + adaptive_gap_strength_delta.max(-raw_required_gap_strength);
+    let ptb_movement_model_book_dislocation = config
+        .book_quotes
+        .and_then(|quotes| selected_book_mid_for_ptb_movement(quotes, side))
+        .map(|selected_mid| q_final - selected_mid);
+    let ptb_chop = evaluate_price_to_beat_iv_ptb_chop(PriceToBeatIvPtbChopInput {
+        config: &config.ptb_chop,
+        asset,
+        selected_side: side,
+        samples: &samples,
+        price_to_beat,
+        current_price,
+        latest_timestamp_ms,
+        expected_move_eff,
+        gap_strength,
+        required_gap_strength: base_required_gap_strength_before_chop,
+        cex_consensus: config
+            .cex_open_gap
+            .enabled
+            .then_some(cex_open_gap.consensus),
+        model_book_dislocation: ptb_movement_model_book_dislocation,
+    });
+    let base_required_gap_strength =
+        base_required_gap_strength_before_chop + ptb_chop.gap_strength_penalty.max(0.0);
     let base_required_gap_usd = base_required_gap_strength * expected_move_eff;
     let min_gap_strength_margin = base_min_gap_strength_margin;
     let min_gap_usd_margin = base_min_gap_usd_margin
@@ -1083,7 +1011,7 @@ pub(crate) fn evaluate_price_to_beat_iv_mismatch_edge(
     evaluation.binance_disagreement_penalty_applied = Some(binance_disagreement.penalty);
     evaluation.confidence_score = Some(confidence_score);
     evaluation.drop_z = Some(drop_z);
-    evaluation.binance_veto_status = Some(binance_adjustment.status);
+    evaluation.binance_veto_status = Some(binance_adjustment.status.clone());
     evaluation.gap_strength = Some(gap_strength);
     evaluation.required_gap_strength = Some(required_gap_strength);
     evaluation.required_gap_usd = Some(required_gap_usd);
@@ -1122,7 +1050,208 @@ pub(crate) fn evaluate_price_to_beat_iv_mismatch_edge(
     evaluation.min_gap_usd_margin = min_gap_usd_margin;
     evaluation.binance_same_direction = binance_same_direction;
     evaluation.falling_knife_flag = protection.falling_knife_flag;
+    evaluation.expected_move_floor_debug = expected_move_floor_debug;
+    evaluation.ptb_chop = ptb_chop.clone();
     evaluation.adaptive = adaptive.clone();
+    let execution_vwap =
+        evaluate_price_to_beat_iv_execution_vwap(PriceToBeatIvExecutionVwapInput {
+            config: config.execution_vwap_guard,
+            time_rule_price_blocked,
+            time_rule_max_price: evaluation.time_rule_max_price,
+            model_ask: ask,
+            depth: &evaluation.depth,
+            effective_max_price: evaluation.effective_max_price,
+            q_final,
+            dynamic_threshold,
+            safety_buffer: config.buffer,
+        });
+    let execution_vwap_block_reason = execution_vwap.block_reason;
+    evaluation.execution_vwap = execution_vwap;
+    let gap_fail_cex_book =
+        evaluate_price_to_beat_iv_gap_fail_cex_book_guard(PriceToBeatIvGapFailCexBookGuardInput {
+            config: config.gap_fail_cex_book,
+            seconds_left,
+            gap_strength,
+            required_gap_strength,
+            q_raw: q,
+            book_confirmation_available: ptb_movement_model_book_dislocation.is_some(),
+            cex_open_gap: &cex_open_gap,
+            execution_vwap: &evaluation.execution_vwap,
+        });
+    let gap_fail_cex_book_block_reason = gap_fail_cex_book.block_reason;
+    evaluation.gap_fail_cex_book = gap_fail_cex_book;
+    let oracle_lag_book_lead =
+        evaluate_price_to_beat_iv_oracle_lag_book_lead(PriceToBeatIvOracleLagBookLeadInput {
+            config: config.oracle_lag_book_lead,
+            seconds_left,
+            q_final,
+            execution_vwap: &evaluation.execution_vwap,
+            spread: Some(spread),
+            cex_consensus: config
+                .cex_open_gap
+                .enabled
+                .then_some(cex_open_gap.consensus),
+        });
+    let oracle_lag_block_reason = oracle_lag_book_lead.block_reason;
+    evaluation.oracle_lag_book_lead = oracle_lag_book_lead;
+    let chainlink_cex_book_mismatch_block_reason = cex_open_gap_book_mismatch_reason(
+        &config.cex_open_gap,
+        &cex_open_gap,
+        evaluation.oracle_lag_book_lead.dislocation,
+    );
+    cex_open_gap.chainlink_cex_book_mismatch_reason = chainlink_cex_book_mismatch_block_reason;
+    let pump_hold_gap = side_gap_at_or_before(
+        &samples,
+        side,
+        price_to_beat,
+        latest_timestamp_ms - config.pump_shock.min_hold_ms.max(0),
+    );
+    let pump_shock = evaluate_price_to_beat_iv_pump_shock(PriceToBeatIvPumpShockInput {
+        config: config.pump_shock,
+        seconds_left,
+        x_now,
+        x_prev,
+        expected_move_eff,
+        same_side_gap_at_hold: pump_hold_gap,
+        model_book_dislocation: evaluation.oracle_lag_book_lead.dislocation,
+        dislocation_red: config.oracle_lag_book_lead.dislocation_red,
+        cex_consensus: config
+            .cex_open_gap
+            .enabled
+            .then_some(cex_open_gap.consensus),
+        execution_ref_reliable: Some(
+            evaluation.oracle_lag_book_lead.reference_status == "reliable",
+        ),
+        token_price_confirming: Some(gap_velocity.unwrap_or(0.0) >= 0.0),
+        book_dislocation_improving: None,
+    });
+    let pump_shock_block_reason = pump_shock.block_reason;
+    evaluation.pump_shock = pump_shock;
+    evaluation.cex_open_gap = cex_open_gap;
+    let borderline_pump_book_lead = evaluate_price_to_beat_iv_borderline_pump_book_lead(
+        PriceToBeatIvBorderlinePumpBookLeadInput {
+            config: config.borderline_pump_book_lead,
+            seconds_left,
+            gap_strength,
+            required_gap_strength_raw: required_gap_strength,
+            q_final,
+            oracle_lag_book_lead: &evaluation.oracle_lag_book_lead,
+            pump_shock: &evaluation.pump_shock,
+        },
+    );
+    let borderline_pump_book_lead_block_reason = borderline_pump_book_lead.block_reason;
+    evaluation.borderline_pump_book_lead = borderline_pump_book_lead;
+
+    let mut eq77_entry_quality_gap_override = false;
+    let mut entry_quality_block_reason = None;
+    if config.entry_quality.enabled {
+        let entry_quality = evaluate_iv_entry_quality(IvEntryQualityInput {
+            config: &config.entry_quality,
+            side,
+            price_to_beat,
+            current_price,
+            samples: &samples,
+            latest_timestamp_ms,
+            seconds_left,
+            ask,
+            spread,
+            chainlink_age_ms: Some(staleness_ms),
+            expected_move_raw: expected_move_model,
+            expected_move_eff,
+            q_final: Some(q_final),
+            fee,
+            buffer: config.buffer,
+            dynamic_threshold,
+            configured_max_price: evaluation.effective_max_price,
+            gap_velocity,
+            cex_price: binance_adjustment.binance_price,
+            cex_fresh: binance_adjustment.is_fresh(),
+            cex_same_direction: binance_same_direction,
+            rule_required_gap_strength: Some(required_gap_strength),
+            rule_gap_strength_margin: min_gap_strength_margin,
+        });
+        let block_reason = entry_quality.primary_reason.map(|reason| reason.as_str());
+        eq77_entry_quality_gap_override =
+            config.entry_quality.eq77_risk_cap_enabled && entry_quality.allowed;
+        evaluation.entry_quality = Some(entry_quality);
+        entry_quality_block_reason = block_reason;
+    }
+
+    if time_rule_price_blocked {
+        evaluation.all_reasons.push("blocked_time_rule_max_price");
+        if let Some(reason) = cex_open_gap_block_reason {
+            evaluation.all_reasons.push(reason);
+        }
+        for reason in &evaluation.gap_fail_cex_book.all_reasons {
+            evaluation.all_reasons.push(reason);
+        }
+        if let Some(reason) = chainlink_cex_book_mismatch_block_reason {
+            evaluation.all_reasons.push(reason);
+        }
+        if let Some(reason) = oracle_lag_block_reason {
+            evaluation.all_reasons.push(reason);
+        }
+        if let Some(reason) = borderline_pump_book_lead_block_reason {
+            evaluation.all_reasons.push(reason);
+        }
+        if let Some(reason) = pump_shock_block_reason {
+            evaluation.all_reasons.push(reason);
+        }
+        if let Some(reason) = execution_vwap_block_reason {
+            evaluation.all_reasons.push(reason);
+        }
+        if let Some(reason) = entry_quality_block_reason {
+            evaluation.all_reasons.push(reason);
+        }
+        if let Some(reason) = evaluation.ptb_chop.block_reason {
+            evaluation.all_reasons.push(reason);
+        }
+        return evaluation.finish(false, "blocked_time_rule_max_price");
+    }
+    if let Some(reason) = cex_open_gap_block_reason {
+        evaluation.all_reasons.push(reason);
+        return evaluation.finish(false, reason);
+    }
+    if let Some(reason) = gap_fail_cex_book_block_reason {
+        for reason in &evaluation.gap_fail_cex_book.all_reasons {
+            evaluation.all_reasons.push(reason);
+        }
+        return evaluation.finish(false, reason);
+    }
+    if let Some(reason) = chainlink_cex_book_mismatch_block_reason {
+        evaluation.all_reasons.push(reason);
+        return evaluation.finish(false, reason);
+    }
+    if let Some(reason) = oracle_lag_block_reason {
+        evaluation.all_reasons.push(reason);
+        return evaluation.finish(false, reason);
+    }
+    if let Some(reason) = borderline_pump_book_lead_block_reason {
+        evaluation.all_reasons.push(reason);
+        return evaluation.finish(false, reason);
+    }
+    if let Some(reason) = pump_shock_block_reason {
+        evaluation.all_reasons.push(reason);
+        return evaluation.finish(false, reason);
+    }
+    if let Some(reason) = execution_vwap_block_reason {
+        evaluation.all_reasons.push(reason);
+        return evaluation.finish(false, reason);
+    }
+    if let Some(reason) = entry_quality_block_reason {
+        evaluation.all_reasons.push(reason);
+        return evaluation.finish(false, reason);
+    }
+    if let Some(reason) = evaluation.ptb_chop.block_reason {
+        evaluation.all_reasons.push(reason);
+        return evaluation.finish(false, reason);
+    }
+    if config.depth_guard_enabled && config.depth_guard_hard_block_enabled {
+        if let Some(reason) = evaluation.depth.block_reason {
+            evaluation.all_reasons.push(reason);
+            return evaluation.finish(false, reason);
+        }
+    }
 
     if let Some(reason) = protection.block_reason.filter(|reason| {
         matches!(
@@ -1135,7 +1264,9 @@ pub(crate) fn evaluate_price_to_beat_iv_mismatch_edge(
     }) {
         return evaluation.finish(false, reason);
     }
-    if gap_strength < required_gap_strength {
+    if gap_strength < required_gap_strength
+        && (!eq77_entry_quality_gap_override || evaluation.ptb_chop.gap_strength_penalty > 0.0)
+    {
         return evaluation.finish(false, "blocked_gap_strength_below_threshold");
     }
     if iv_ratio
@@ -1177,117 +1308,21 @@ pub(crate) fn evaluate_price_to_beat_iv_mismatch_edge(
     evaluation.finish(true, "selected_edge_passed")
 }
 
-struct BinanceDisagreement {
-    adverse: Option<f64>,
-    absolute: Option<f64>,
-    bucket: Option<&'static str>,
-    penalty: f64,
-}
-
-fn evaluate_binance_disagreement_penalty(
-    q_chain_adj: f64,
-    q_binance: Option<f64>,
-    config: &PriceToBeatIvMismatchEdgeConfig,
-) -> BinanceDisagreement {
-    let Some(q_binance) = q_binance else {
-        return BinanceDisagreement {
-            adverse: None,
-            absolute: None,
-            bucket: None,
-            penalty: 0.0,
-        };
-    };
-    let absolute = (q_chain_adj - q_binance).abs();
-    let adverse = (q_chain_adj - q_binance).max(0.0);
-    if config
-        .large_binance_disagreement_threshold
-        .filter(|threshold| adverse > *threshold)
-        .is_some()
-    {
-        return BinanceDisagreement {
-            adverse: Some(adverse),
-            absolute: Some(absolute),
-            bucket: Some("large"),
-            penalty: config.large_binance_disagreement_penalty.max(0.0),
-        };
-    }
-    if config
-        .binance_disagreement_threshold
-        .filter(|threshold| adverse > *threshold)
-        .is_some()
-    {
-        return BinanceDisagreement {
-            adverse: Some(adverse),
-            absolute: Some(absolute),
-            bucket: Some("small"),
-            penalty: config.binance_disagreement_penalty.max(0.0),
-        };
-    }
-    BinanceDisagreement {
-        adverse: Some(adverse),
-        absolute: Some(absolute),
-        bucket: Some("none"),
-        penalty: 0.0,
+fn selected_book_mid_for_ptb_movement(
+    book_quotes: PriceToBeatIvBookQuotes,
+    selected_side: &str,
+) -> Option<f64> {
+    if selected_side == "up" {
+        quote_mid_for_ptb_movement(book_quotes.up_bid, book_quotes.up_ask)
+    } else {
+        quote_mid_for_ptb_movement(book_quotes.down_bid, book_quotes.down_ask)
     }
 }
 
-struct BinanceAdjustment {
-    q_final: f64,
-    q_binance: Option<f64>,
-    binance_price: Option<f64>,
-    binance_staleness_ms: Option<i64>,
-    status: String,
-}
-
-impl BinanceAdjustment {
-    fn is_fresh(&self) -> bool {
-        self.status == "fresh_conservative_min"
-    }
-
-    fn is_missing(&self) -> bool {
-        self.status == "fail_open_stale" || self.status.starts_with("fail_open_unavailable:")
-    }
-}
-
-fn evaluate_binance_veto(
-    asset: &str,
-    side: &str,
-    price_to_beat: f64,
-    expected_move_eff: f64,
-    q_chain_adj: f64,
-    now_ms: i64,
-    config: &PriceToBeatIvMismatchEdgeConfig,
-) -> BinanceAdjustment {
-    let snapshot = match get_binance_price_snapshot(asset, now_ms) {
-        Ok(snapshot) => snapshot,
-        Err(err) => {
-            return BinanceAdjustment {
-                q_final: q_chain_adj,
-                q_binance: None,
-                binance_price: None,
-                binance_staleness_ms: None,
-                status: format!("fail_open_unavailable:{err}"),
-            };
-        }
-    };
-    if snapshot.staleness_ms > config.binance_stale_ms {
-        return BinanceAdjustment {
-            q_final: q_chain_adj,
-            q_binance: None,
-            binance_price: Some(snapshot.price),
-            binance_staleness_ms: Some(snapshot.staleness_ms),
-            status: "fail_open_stale".to_string(),
-        };
-    }
-
-    let q_binance = normal_cdf(side_gap(side, snapshot.price, price_to_beat) / expected_move_eff);
-    BinanceAdjustment {
-        q_final: q_chain_adj.min(q_binance + config.binance_q_buffer.max(0.0)),
-        q_binance: Some(q_binance),
-        binance_price: Some(snapshot.price),
-        binance_staleness_ms: Some(snapshot.staleness_ms),
-        status: "fresh_conservative_min".to_string(),
-    }
+fn quote_mid_for_ptb_movement(bid: Option<f64>, ask: Option<f64>) -> Option<f64> {
+    let bid = bid.filter(|value| valid_probability(*value))?;
+    let ask = ask.filter(|value| valid_probability(*value))?;
+    (ask >= bid).then_some((bid + ask) / 2.0)
 }
 
 fn iv_mismatch_side(outcome_label: &str) -> Option<&'static str> {
@@ -1345,131 +1380,6 @@ fn select_time_rule(
         .copied()
         .enumerate()
         .find(|(_, rule)| rule.matches_seconds_left(seconds_left))
-}
-
-fn valid_probability(value: f64) -> bool {
-    value.is_finite() && value > 0.0 && value < 1.0
-}
-
-fn side_gap(side: &str, price: f64, price_to_beat: f64) -> f64 {
-    if side == "up" {
-        price - price_to_beat
-    } else {
-        price_to_beat - price
-    }
-}
-
-fn previous_side_gap(
-    samples: &[ChainlinkPriceSample],
-    side: &str,
-    price_to_beat: f64,
-    latest_timestamp_ms: i64,
-) -> Option<(i64, f64)> {
-    let target_ms = latest_timestamp_ms - 1_000;
-    samples
-        .iter()
-        .rev()
-        .find(|sample| sample.timestamp_ms <= target_ms)
-        .or_else(|| {
-            samples
-                .iter()
-                .rev()
-                .find(|sample| sample.timestamp_ms < latest_timestamp_ms)
-        })
-        .map(|sample| {
-            (
-                sample.timestamp_ms,
-                side_gap(side, sample.price, price_to_beat),
-            )
-        })
-}
-
-fn side_gap_at_or_before(
-    samples: &[ChainlinkPriceSample],
-    side: &str,
-    price_to_beat: f64,
-    target_ms: i64,
-) -> Option<f64> {
-    samples
-        .iter()
-        .rev()
-        .find(|sample| sample.timestamp_ms <= target_ms)
-        .map(|sample| side_gap(side, sample.price, price_to_beat))
-}
-
-fn sigma_since(samples: &[ChainlinkPriceSample], start_ms: i64) -> Option<f64> {
-    let deltas = time_normalized_price_deltas_since(samples, start_ms);
-    if deltas.len() < 2 {
-        return None;
-    }
-    let sigma = standard_deviation(&deltas);
-    (sigma.is_finite() && sigma > 0.0).then_some(sigma)
-}
-
-fn time_normalized_price_deltas(samples: &[ChainlinkPriceSample]) -> Vec<f64> {
-    time_normalized_price_deltas_since(samples, i64::MIN)
-}
-
-fn time_normalized_price_deltas_since(samples: &[ChainlinkPriceSample], start_ms: i64) -> Vec<f64> {
-    let mut deltas = Vec::new();
-    let filtered = samples
-        .iter()
-        .filter(|sample| sample.timestamp_ms >= start_ms)
-        .collect::<Vec<_>>();
-    for pair in filtered.windows(2) {
-        let prev = &pair[0];
-        let next = &pair[1];
-        let dt_secs = (next.timestamp_ms - prev.timestamp_ms) as f64 / 1_000.0;
-        if dt_secs <= 0.0 {
-            continue;
-        }
-        let delta = (next.price - prev.price) / dt_secs.sqrt();
-        if delta.is_finite() {
-            deltas.push(delta);
-        }
-    }
-    deltas
-}
-
-fn zero_cross_count(samples: &[ChainlinkPriceSample], price_to_beat: f64) -> usize {
-    let mut previous = None;
-    let mut count = 0;
-    for sample in samples {
-        let sign = gap_sign(sample.price - price_to_beat);
-        if let Some(previous_sign) = previous {
-            if sign != previous_sign {
-                count += 1;
-            }
-        }
-        previous = Some(sign);
-    }
-    count
-}
-
-fn gap_sign(gap: f64) -> i8 {
-    if gap > 0.0 {
-        1
-    } else if gap < 0.0 {
-        -1
-    } else {
-        0
-    }
-}
-
-fn implied_volatility_ratio(
-    q_market: f64,
-    gap_abs: f64,
-    seconds_left: f64,
-    sigma_real: f64,
-) -> Option<f64> {
-    if q_market <= 0.50 || q_market >= 1.0 || gap_abs <= 0.0 || sigma_real <= 0.0 {
-        return None;
-    }
-    let z_market = inverse_normal_cdf(q_market)?;
-    if !z_market.is_finite() || z_market <= 0.0 {
-        return None;
-    }
-    Some(gap_abs / (z_market * seconds_left.sqrt()) / sigma_real)
 }
 
 #[cfg(test)]

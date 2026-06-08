@@ -1,4 +1,5 @@
 use super::iv_mismatch_edge::PriceToBeatIvMismatchEdgeConfig;
+use super::iv_mismatch_expected_move::PriceToBeatIvMinExpectedMoveMode;
 use super::iv_mismatch_protection::PriceToBeatIvProtectionMode;
 
 pub(crate) fn apply_action_place_order_iv_mismatch_risk_config(
@@ -30,8 +31,29 @@ pub(crate) fn apply_action_place_order_iv_mismatch_risk_config(
         crate::node_config_bool(node, "priceToBeatIvBlockOnOppositeBookLead").unwrap_or(true);
     apply_model_book_config(node, config);
     apply_depth_config(node, config);
+    config.execution_vwap_guard.enabled =
+        crate::node_config_bool(node, "priceToBeatIvExecutionVwapCostGuardEnabled")
+            .unwrap_or(false);
+    config.execution_vwap_guard.required_on_high_dislocation =
+        crate::node_config_bool(node, "priceToBeatIvExecutionVwapRequiredOnHighDislocation")
+            .unwrap_or(false);
+    config.execution_vwap_guard.limit_by_vwap_enabled =
+        crate::node_config_bool(node, "priceToBeatIvExecutionLimitByVwapEnabled").unwrap_or(false);
+    if let Some(value) = cent_config(node, "priceToBeatIvExecutionVwapMaxSlippageCent")
+        .filter(|value| *value >= 0.0 && *value <= 1.0)
+    {
+        config.execution_vwap_guard.max_slippage = value;
+    }
+    apply_cex_open_gap_config(node, config);
+    apply_gap_fail_cex_book_config(node, config);
+    apply_oracle_lag_book_lead_config(node, config);
+    apply_borderline_pump_book_lead_config(node, config);
+    apply_pump_shock_config(node, config);
+    apply_ptb_chop_config(node, config);
     apply_late_high_price_config(node, config);
     apply_participation_config(node, config);
+    apply_expected_move_floor_config(node, config);
+    apply_entry_quality_config(node, config);
     config.require_binance_fresh_under_sec =
         crate::node_config_f64(node, "priceToBeatIvRequireBinanceFreshUnderSec")
             .filter(|value| value.is_finite() && *value >= 0.0);
@@ -61,6 +83,458 @@ pub(crate) fn apply_action_place_order_iv_mismatch_risk_config(
     }
 }
 
+fn apply_ptb_chop_config(
+    node: &crate::TradeFlowNode,
+    config: &mut PriceToBeatIvMismatchEdgeConfig,
+) {
+    config.ptb_chop.enabled =
+        crate::node_config_bool(node, "priceToBeatIvPtbChopGuardEnabled").unwrap_or(false);
+    if let Some(value) = crate::node_config_i64(node, "priceToBeatIvPtbChopLookbackSeconds")
+        .filter(|value| *value > 0)
+    {
+        config.ptb_chop.lookback_seconds = value;
+    }
+    if let Some(value) = crate::node_config_i64(node, "priceToBeatIvPtbChopExtendedLookbackSeconds")
+        .filter(|value| *value > 0)
+    {
+        config.ptb_chop.extended_lookback_seconds = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPtbChopDeadbandBps") {
+        config.ptb_chop.deadband_bps = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPtbChopDeadbandMinUsdBtc") {
+        config.ptb_chop.deadband_min_usd_btc = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPtbChopDeadbandMinUsdEth") {
+        config.ptb_chop.deadband_min_usd_eth = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPtbChopDeadbandMinUsdSol") {
+        config.ptb_chop.deadband_min_usd_sol = value;
+    }
+    if let Some(value) = crate::node_config_i64(node, "priceToBeatIvPtbChopZeroCrossBlock10s")
+        .filter(|value| *value >= 0)
+    {
+        config.ptb_chop.zero_cross_block_10s = value as usize;
+    }
+    if let Some(value) = crate::node_config_i64(node, "priceToBeatIvPtbChopZeroCrossBlock15s")
+        .filter(|value| *value >= 0)
+    {
+        config.ptb_chop.zero_cross_block_15s = value as usize;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPtbChopPathZWarn") {
+        config.ptb_chop.path_z_warn = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPtbChopPathZBlock") {
+        config.ptb_chop.path_z_block = value;
+    }
+    if let Some(value) = unit_config(node, "priceToBeatIvPtbChopEfficiencyWarn") {
+        config.ptb_chop.efficiency_warn = value;
+    }
+    if let Some(value) = unit_config(node, "priceToBeatIvPtbChopEfficiencyBlock") {
+        config.ptb_chop.efficiency_block = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPtbChopOppositeDepthZWarn") {
+        config.ptb_chop.opposite_depth_z_warn = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPtbChopOppositeDepthZBlock") {
+        config.ptb_chop.opposite_depth_z_block = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPtbChopMaxGapStrengthPenalty") {
+        config.ptb_chop.max_gap_strength_penalty = value;
+    }
+}
+
+fn apply_cex_open_gap_config(
+    node: &crate::TradeFlowNode,
+    config: &mut PriceToBeatIvMismatchEdgeConfig,
+) {
+    config.cex_open_gap.enabled =
+        crate::node_config_bool(node, "priceToBeatIvCexOpenGapConsensusGuardEnabled")
+            .or_else(|| crate::node_config_bool(node, "priceToBeatIvCexOpenGapGuardEnabled"))
+            .unwrap_or(false);
+    if let Some(value) = non_negative_config(node, "priceToBeatIvCexOpenGapMinUsd") {
+        config.cex_open_gap.min_usd = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvCexOpenGapMinZ") {
+        config.cex_open_gap.min_z = value;
+    }
+    if let Some(value) = crate::node_config_i64(node, "priceToBeatIvCexOpenGapMaxStaleMs")
+        .filter(|value| *value >= 0)
+    {
+        config.cex_open_gap.max_stale_ms = value;
+    }
+    config.cex_open_gap.apply_negative_conservative_cap =
+        crate::node_config_bool(node, "priceToBeatIvCexOpenGapApplyNegativeConservativeCap")
+            .unwrap_or(false);
+    config.cex_open_gap.lag_guard_enabled =
+        crate::node_config_bool(node, "priceToBeatIvChainlinkCexLagGuardEnabled").unwrap_or(false);
+    if let Some(value) = non_negative_config(node, "priceToBeatIvChainlinkCexDiffZBlock") {
+        config.cex_open_gap.diff_z_block = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvChainlinkCexMaxDiffUsd") {
+        config.cex_open_gap.max_diff_usd = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvChainlinkCexMaxDiffBps") {
+        config.cex_open_gap.max_diff_bps = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvChainlinkCexBookMismatchDislocationCent") {
+        config.cex_open_gap.book_mismatch_dislocation = value;
+    }
+}
+
+fn apply_gap_fail_cex_book_config(
+    node: &crate::TradeFlowNode,
+    config: &mut PriceToBeatIvMismatchEdgeConfig,
+) {
+    config.gap_fail_cex_book.enabled =
+        crate::node_config_bool(node, "priceToBeatIvGapFailCexBookMismatchGuardEnabled")
+            .unwrap_or(false);
+    if let Some(value) = cent_config(node, "priceToBeatIvGapFailBookMaxExecutionRefCent")
+        .filter(|value| *value >= 0.0 && *value <= 1.0)
+    {
+        config.gap_fail_cex_book.book_max_execution_ref = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvGapFailRawBookDislocationCent")
+        .filter(|value| *value >= 0.0 && *value <= 1.0)
+    {
+        config.gap_fail_cex_book.raw_book_dislocation = value;
+    }
+    config.gap_fail_cex_book.mixed_cex_guard_enabled =
+        crate::node_config_bool(node, "priceToBeatIvGapFailMixedCexGuardEnabled")
+            .unwrap_or(false);
+    if let Some(value) = non_negative_config(node, "priceToBeatIvGapFailMixedCexMaxSeconds") {
+        config.gap_fail_cex_book.mixed_cex_max_seconds = value;
+    }
+    config
+        .gap_fail_cex_book
+        .late_expensive_mixed_cex_guard_enabled =
+        crate::node_config_bool(node, "priceToBeatIvLateExpensiveMixedCexGuardEnabled")
+            .unwrap_or(false);
+    if let Some(value) =
+        non_negative_config(node, "priceToBeatIvLateExpensiveMixedCexSeconds")
+    {
+        config.gap_fail_cex_book.late_expensive_mixed_cex_seconds = value;
+    }
+    if let Some(value) =
+        cent_config(node, "priceToBeatIvLateExpensiveMixedCexMinVwapCent")
+            .filter(|value| *value >= 0.0 && *value <= 1.0)
+    {
+        config.gap_fail_cex_book.late_expensive_mixed_cex_min_vwap = value;
+    }
+    config
+        .gap_fail_cex_book
+        .late_expensive_mixed_cex_require_gap_fail_or_lag_high =
+        crate::node_config_bool(
+            node,
+            "priceToBeatIvLateExpensiveMixedCexRequireGapFailOrLagHigh",
+        )
+        .unwrap_or(true);
+    config
+        .gap_fail_cex_book
+        .chainlink_cex_lag_no_book_guard_enabled =
+        crate::node_config_bool(node, "priceToBeatIvChainlinkCexLagNoBookGuardEnabled")
+            .unwrap_or(false);
+    if let Some(value) = non_negative_config(node, "priceToBeatIvChainlinkCexLagNoBookMaxSeconds")
+    {
+        config.gap_fail_cex_book.chainlink_cex_lag_no_book_max_seconds = value;
+    }
+    config
+        .gap_fail_cex_book
+        .chainlink_cex_lag_no_book_require_non_strong_cex =
+        crate::node_config_bool(
+            node,
+            "priceToBeatIvChainlinkCexLagNoBookRequireNonStrongCex",
+        )
+        .unwrap_or(true);
+}
+
+fn apply_oracle_lag_book_lead_config(
+    node: &crate::TradeFlowNode,
+    config: &mut PriceToBeatIvMismatchEdgeConfig,
+) {
+    config.oracle_lag_book_lead.enabled =
+        crate::node_config_bool(node, "priceToBeatIvOracleLagBookLeadGuardEnabled")
+            .unwrap_or(false);
+    if let Some(value) = non_negative_config(node, "priceToBeatIvOracleLagEarlySeconds") {
+        config.oracle_lag_book_lead.early_seconds = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvOracleLagQHighCent") {
+        config.oracle_lag_book_lead.q_high = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvOracleLagCheapTokenCent") {
+        config.oracle_lag_book_lead.cheap_token = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvOracleLagQExtremeCent") {
+        config.oracle_lag_book_lead.q_extreme = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvOracleLagCheapTokenExtremeCent") {
+        config.oracle_lag_book_lead.cheap_token_extreme = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvOracleLagConsensusMismatchQCent") {
+        config.oracle_lag_book_lead.q_consensus_mismatch = value;
+    }
+    if let Some(value) = cent_config(
+        node,
+        "priceToBeatIvOracleLagConsensusMismatchCheapTokenCent",
+    ) {
+        config.oracle_lag_book_lead.cheap_token_consensus_mismatch = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvModelBookDislocationWarnCent") {
+        config.oracle_lag_book_lead.dislocation_warn = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvModelBookDislocationHighCent") {
+        config.oracle_lag_book_lead.dislocation_high = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvModelBookDislocationRedCent") {
+        config.oracle_lag_book_lead.dislocation_red = value;
+    }
+    if let Some(value) = cent_config(
+        node,
+        "priceToBeatIvOracleLagConsensusMismatchDislocationCent",
+    ) {
+        config.oracle_lag_book_lead.dislocation_consensus_mismatch = value;
+    }
+    if let Some(value) = crate::node_config_i64(node, "priceToBeatIvOracleLagMaxBookAgeMs")
+        .filter(|value| *value >= 0)
+    {
+        config.oracle_lag_book_lead.max_book_age_ms = value;
+    }
+    if let Some(value) = unit_config(node, "priceToBeatIvOracleLagMinDepthCoverage") {
+        config.oracle_lag_book_lead.min_depth_coverage = value;
+    }
+    config.oracle_lag_book_lead.use_best_ask_fallback =
+        crate::node_config_bool(node, "priceToBeatIvOracleLagUseBestAskFallback").unwrap_or(false);
+    if let Some(value) = cent_config(node, "priceToBeatIvOracleLagBestAskFallbackMaxSpreadCent") {
+        config.oracle_lag_book_lead.best_ask_fallback_max_spread = value;
+    }
+}
+
+fn apply_borderline_pump_book_lead_config(
+    node: &crate::TradeFlowNode,
+    config: &mut PriceToBeatIvMismatchEdgeConfig,
+) {
+    config.borderline_pump_book_lead.enabled =
+        crate::node_config_bool(node, "priceToBeatIvBorderlinePumpBookLeadGuardEnabled")
+            .unwrap_or(false);
+    if let Some(value) = non_negative_config(node, "priceToBeatIvBorderlineGapMarginEarly") {
+        config.borderline_pump_book_lead.gap_margin_early = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvBorderlinePumpShockRatio") {
+        config.borderline_pump_book_lead.pump_shock_ratio = value;
+    }
+    if let Some(value) = cent_value_config(node, "priceToBeatIvBorderlineBookLeadQMinCent") {
+        config.borderline_pump_book_lead.q_min_cent = value;
+    }
+    if let Some(value) = cent_value_config(node, "priceToBeatIvBorderlineBookLeadCheapTokenCent") {
+        config.borderline_pump_book_lead.cheap_token_cent = value;
+    }
+    if let Some(value) = cent_value_config(node, "priceToBeatIvBorderlineBookLeadDislocationCent") {
+        config.borderline_pump_book_lead.dislocation_cent = value;
+    }
+}
+
+fn apply_pump_shock_config(
+    node: &crate::TradeFlowNode,
+    config: &mut PriceToBeatIvMismatchEdgeConfig,
+) {
+    config.pump_shock.enabled =
+        crate::node_config_bool(node, "priceToBeatIvPumpShockGuardEnabled").unwrap_or(false);
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPumpShockGapGrowthRatio") {
+        config.pump_shock.gap_growth_ratio = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvPumpShockHardRatio") {
+        config.pump_shock.hard_ratio = value;
+    }
+    if let Some(value) =
+        crate::node_config_i64(node, "priceToBeatIvPumpShockMinHoldMs").filter(|value| *value >= 0)
+    {
+        config.pump_shock.min_hold_ms = value;
+    }
+    if let Some(value) = unit_config(node, "priceToBeatIvPumpShockMinBufferRetain") {
+        config.pump_shock.min_buffer_retain = value;
+    }
+}
+
+fn apply_expected_move_floor_config(
+    node: &crate::TradeFlowNode,
+    config: &mut PriceToBeatIvMismatchEdgeConfig,
+) {
+    config.expected_move_floor.mode = PriceToBeatIvMinExpectedMoveMode::parse(
+        crate::node_config_string(node, "priceToBeatIvMinExpectedMoveMode").as_deref(),
+    )
+    .unwrap_or(config.expected_move_floor.mode);
+    if let Some(value) = non_negative_config(node, "priceToBeatIvAdaptiveMinExpectedMoveBaseBps") {
+        config.expected_move_floor.base_bps = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvAdaptiveMinExpectedMoveMinBps") {
+        config.expected_move_floor.min_bps = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvAdaptiveMinExpectedMoveMaxBps") {
+        config.expected_move_floor.max_bps = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvAdaptiveDisagreementBpsAdd") {
+        config.expected_move_floor.disagreement_add_bps = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvAdaptiveStrongDisagreementBpsAdd")
+    {
+        config.expected_move_floor.strong_disagreement_add_bps = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvAdaptiveSpreadBpsAdd") {
+        config.expected_move_floor.spread_add_bps = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvAdaptiveWideSpreadBpsAdd") {
+        config.expected_move_floor.wide_spread_add_bps = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvAdaptiveStaleBpsAdd") {
+        config.expected_move_floor.stale_add_bps = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvAdaptiveNoiseBpsAdd") {
+        config.expected_move_floor.noise_add_bps = value;
+    }
+}
+
+fn apply_entry_quality_config(
+    node: &crate::TradeFlowNode,
+    config: &mut PriceToBeatIvMismatchEdgeConfig,
+) {
+    config.entry_quality.enabled =
+        crate::node_config_bool(node, "priceToBeatIvEntryQualityPolicy").unwrap_or(false);
+    if let Some(value) = cent_config(node, "priceToBeatIvNormalMaxPriceCent")
+        .filter(|value| *value >= 0.0 && *value <= 1.0)
+    {
+        config.entry_quality.normal_max_price = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvPremiumMaxPriceCent")
+        .filter(|value| *value >= 0.0 && *value <= 1.0)
+    {
+        config.entry_quality.premium_max_price = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvNoNewEntryBelowSeconds") {
+        config.entry_quality.no_new_entry_below_seconds = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvMinExpectedMoveBps") {
+        config.entry_quality.min_expected_move_bps = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvMinExpectedMoveUsd") {
+        config.entry_quality.min_expected_move_usd = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvGapStrengthMin60To45") {
+        config.entry_quality.gap_strength_min_60_to_45 = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvGapStrengthMin45To25") {
+        config.entry_quality.gap_strength_min_45_to_25 = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvGapStrengthMin25To10") {
+        config.entry_quality.gap_strength_min_25_to_10 = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvGapStrengthMin10To8") {
+        config.entry_quality.gap_strength_min_10_to_8 = value;
+    }
+    config.entry_quality.buffer_trend_guard_enabled =
+        crate::node_config_bool(node, "priceToBeatIvBufferTrendGuardEnabled").unwrap_or(true);
+    if let Some(value) = unit_config(node, "priceToBeatIvBufferRetain5s") {
+        config.entry_quality.buffer_retain_5s = value;
+    }
+    if let Some(value) = unit_config(node, "priceToBeatIvBufferRetain10s") {
+        config.entry_quality.buffer_retain_10s = value;
+    }
+    if let Some(value) = unit_config(node, "priceToBeatIvPremiumBufferRetain5s") {
+        config.entry_quality.premium_buffer_retain_5s = value;
+    }
+    if let Some(value) = unit_config(node, "priceToBeatIvPremiumBufferRetain10s") {
+        config.entry_quality.premium_buffer_retain_10s = value;
+    }
+    config.entry_quality.spike_fade_guard_enabled =
+        crate::node_config_bool(node, "priceToBeatIvSpikeFadeGuardEnabled").unwrap_or(true);
+    if let Some(value) = crate::node_config_f64(node, "priceToBeatIvSpikeMultiplier")
+        .filter(|value| value.is_finite() && *value > 1.0)
+    {
+        config.entry_quality.spike_multiplier = value;
+    }
+    if let Some(value) = unit_config(node, "priceToBeatIvSpikeRetraceRatio") {
+        config.entry_quality.spike_retrace_ratio = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvPremiumMaxSpreadCent")
+        .filter(|value| *value >= 0.0 && *value <= 1.0)
+    {
+        config.entry_quality.premium_max_spread = value;
+    }
+    if let Some(value) = crate::node_config_i64(node, "priceToBeatIvPremiumMaxChainlinkAgeMs")
+        .filter(|value| *value > 0)
+    {
+        config.entry_quality.premium_max_chainlink_age_ms = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvCexAlignMaxUsd") {
+        config.entry_quality.cex_align_max_usd = Some(value);
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvCexAlignMaxBps") {
+        config.entry_quality.cex_align_max_bps = Some(value);
+    }
+    config.entry_quality.eq77_risk_cap_enabled =
+        crate::node_config_bool(node, "priceToBeatIvEq77RiskCapEnabled").unwrap_or(false);
+    if let Some(value) = non_negative_config(node, "priceToBeatIvRiskScoreCleanMax") {
+        config.entry_quality.risk_score_clean_max = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvRiskScoreModerateMax") {
+        config.entry_quality.risk_score_moderate_max = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvRiskScoreHighMax") {
+        config.entry_quality.risk_score_high_max = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvModerateRiskMaxPriceCent") {
+        config.entry_quality.moderate_risk_max_price = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvHighRiskMaxPriceCent") {
+        config.entry_quality.high_risk_max_price = value;
+    }
+    if let Some(value) = cent_config(node, "priceToBeatIvDeepValueMaxPriceCent") {
+        config.entry_quality.deep_value_max_price = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvMaxRiskHaircutCent") {
+        config.entry_quality.max_risk_haircut_cent = value;
+    }
+    config.entry_quality.wait_for_price_enabled =
+        crate::node_config_bool(node, "priceToBeatIvWaitForPriceEnabled").unwrap_or(true);
+    config.entry_quality.recheck_before_submit =
+        crate::node_config_bool(node, "priceToBeatIvRecheckBeforeSubmit").unwrap_or(true);
+    if let Some(value) = cent_config(node, "priceToBeatIvOddsMaxSpreadCent") {
+        config.entry_quality.odds_max_spread = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvCexUnconfirmedRiskPoints") {
+        config.entry_quality.cex_unconfirmed_risk_points = value;
+    }
+    if let Some(value) = non_negative_config(node, "priceToBeatIvCexConflictRiskPoints") {
+        config.entry_quality.cex_conflict_risk_points = value;
+    }
+    config.entry_quality.passive_bid_enabled =
+        crate::node_config_bool(node, "priceToBeatIvPassiveBidEnabled").unwrap_or(false);
+    if let Some(value) =
+        crate::node_config_i64(node, "priceToBeatIvPassiveBidTtlMs").filter(|value| *value > 0)
+    {
+        config.entry_quality.passive_bid_ttl_ms = value;
+    }
+}
+
+fn cent_config(node: &crate::TradeFlowNode, key: &str) -> Option<f64> {
+    crate::node_config_f64(node, key)
+        .map(|value| value / 100.0)
+        .filter(|value| value.is_finite())
+}
+
+fn cent_value_config(node: &crate::TradeFlowNode, key: &str) -> Option<f64> {
+    crate::node_config_f64(node, key)
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 100.0)
+}
+
+fn non_negative_config(node: &crate::TradeFlowNode, key: &str) -> Option<f64> {
+    crate::node_config_f64(node, key).filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+fn unit_config(node: &crate::TradeFlowNode, key: &str) -> Option<f64> {
+    crate::node_config_f64(node, key)
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 1.0)
+}
+
 fn apply_model_book_config(
     node: &crate::TradeFlowNode,
     config: &mut PriceToBeatIvMismatchEdgeConfig,
@@ -88,6 +562,8 @@ fn apply_model_book_config(
 fn apply_depth_config(node: &crate::TradeFlowNode, config: &mut PriceToBeatIvMismatchEdgeConfig) {
     config.depth_guard_enabled =
         crate::node_config_bool(node, "priceToBeatIvDepthGuardEnabled").unwrap_or(true);
+    config.depth_guard_hard_block_enabled =
+        crate::node_config_bool(node, "priceToBeatIvDepthGuardHardBlockEnabled").unwrap_or(false);
     if let Some(slippage) = crate::node_config_f64(node, "priceToBeatIvDepthMaxSlippage")
         .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 1.0)
     {

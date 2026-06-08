@@ -147,6 +147,540 @@ export function PriceToBeatIvTimeRulesSection({
         <Plus className="mr-1 h-3 w-3" />
         IV Aralik Ekle
       </Button>
+      <div className="space-y-2 border-t border-slate-200 pt-2">
+        <Label className="text-[11px] font-medium text-slate-600">Expected Move Floor</Label>
+        <div className="grid grid-cols-2 gap-2">
+          <IvRuleSelect
+            label="Floor modu"
+            value={fields.priceToBeatIvMinExpectedMoveMode || 'fixed'}
+            onChange={(value) => onUpdateField('priceToBeatIvMinExpectedMoveMode', value)}
+            options={[
+              { label: 'Fixed', value: 'fixed' },
+              { label: 'Adaptive', value: 'adaptive' },
+            ]}
+          />
+          <IvRuleInput
+            label="Base bps"
+            value={fields.priceToBeatIvAdaptiveMinExpectedMoveBaseBps ?? ''}
+            placeholder="1.5"
+            onChange={(value) =>
+              onUpdateField('priceToBeatIvAdaptiveMinExpectedMoveBaseBps', value)
+            }
+          />
+          <IvRuleInput
+            label="Min bps"
+            value={fields.priceToBeatIvAdaptiveMinExpectedMoveMinBps ?? ''}
+            placeholder="1.5"
+            onChange={(value) => onUpdateField('priceToBeatIvAdaptiveMinExpectedMoveMinBps', value)}
+          />
+          <IvRuleInput
+            label="Max bps"
+            value={fields.priceToBeatIvAdaptiveMinExpectedMoveMaxBps ?? ''}
+            placeholder="2.75"
+            onChange={(value) => onUpdateField('priceToBeatIvAdaptiveMinExpectedMoveMaxBps', value)}
+          />
+          <IvRuleInput
+            label="Disagree add"
+            value={fields.priceToBeatIvAdaptiveDisagreementBpsAdd ?? ''}
+            placeholder="0.25"
+            onChange={(value) => onUpdateField('priceToBeatIvAdaptiveDisagreementBpsAdd', value)}
+          />
+          <IvRuleInput
+            label="Strong add"
+            value={fields.priceToBeatIvAdaptiveStrongDisagreementBpsAdd ?? ''}
+            placeholder="0.50"
+            onChange={(value) =>
+              onUpdateField('priceToBeatIvAdaptiveStrongDisagreementBpsAdd', value)
+            }
+          />
+          <IvRuleInput
+            label="Spread add"
+            value={fields.priceToBeatIvAdaptiveSpreadBpsAdd ?? ''}
+            placeholder="0.20"
+            onChange={(value) => onUpdateField('priceToBeatIvAdaptiveSpreadBpsAdd', value)}
+          />
+          <IvRuleInput
+            label="Wide spread add"
+            value={fields.priceToBeatIvAdaptiveWideSpreadBpsAdd ?? ''}
+            placeholder="0.40"
+            onChange={(value) => onUpdateField('priceToBeatIvAdaptiveWideSpreadBpsAdd', value)}
+          />
+          <IvRuleInput
+            label="Stale add"
+            value={fields.priceToBeatIvAdaptiveStaleBpsAdd ?? ''}
+            placeholder="0.20"
+            onChange={(value) => onUpdateField('priceToBeatIvAdaptiveStaleBpsAdd', value)}
+          />
+          <IvRuleInput
+            label="Noise add"
+            value={fields.priceToBeatIvAdaptiveNoiseBpsAdd ?? ''}
+            placeholder="0.25"
+            onChange={(value) => onUpdateField('priceToBeatIvAdaptiveNoiseBpsAdd', value)}
+          />
+        </div>
+      </div>
+      <div className="space-y-2 border-t border-slate-200 pt-2">
+        <Label className="text-[11px] font-medium text-slate-600">EQ77 Risk Cap</Label>
+        <div className="grid grid-cols-2 gap-2">
+          <IvRuleCheckbox
+            label="Risk cap aktif"
+            value={fields.priceToBeatIvEq77RiskCapEnabled}
+            onChange={(value) => onUpdateField('priceToBeatIvEq77RiskCapEnabled', value)}
+          />
+          <IvRuleCheckbox
+            label="Recheck submit"
+            value={fields.priceToBeatIvRecheckBeforeSubmit}
+            onChange={(value) => onUpdateField('priceToBeatIvRecheckBeforeSubmit', value)}
+          />
+          <IvRuleCheckbox
+            label="Wait for price"
+            value={fields.priceToBeatIvWaitForPriceEnabled}
+            onChange={(value) => onUpdateField('priceToBeatIvWaitForPriceEnabled', value)}
+          />
+          <IvRuleCheckbox
+            label="Passive bid"
+            value={fields.priceToBeatIvPassiveBidEnabled}
+            onChange={(value) => onUpdateField('priceToBeatIvPassiveBidEnabled', value)}
+          />
+          <IvRuleInput
+            label="Clean score max"
+            value={fields.priceToBeatIvRiskScoreCleanMax ?? ''}
+            placeholder="20"
+            onChange={(value) => onUpdateField('priceToBeatIvRiskScoreCleanMax', value)}
+          />
+          <IvRuleInput
+            label="Moderate score max"
+            value={fields.priceToBeatIvRiskScoreModerateMax ?? ''}
+            placeholder="45"
+            onChange={(value) => onUpdateField('priceToBeatIvRiskScoreModerateMax', value)}
+          />
+          <IvRuleInput
+            label="High score max"
+            value={fields.priceToBeatIvRiskScoreHighMax ?? ''}
+            placeholder="70"
+            onChange={(value) => onUpdateField('priceToBeatIvRiskScoreHighMax', value)}
+          />
+          <IvRuleInput
+            label="Moderate cap c"
+            value={fields.priceToBeatIvModerateRiskMaxPriceCent ?? ''}
+            placeholder="74"
+            onChange={(value) => onUpdateField('priceToBeatIvModerateRiskMaxPriceCent', value)}
+          />
+          <IvRuleInput
+            label="High cap c"
+            value={fields.priceToBeatIvHighRiskMaxPriceCent ?? ''}
+            placeholder="70"
+            onChange={(value) => onUpdateField('priceToBeatIvHighRiskMaxPriceCent', value)}
+          />
+          <IvRuleInput
+            label="Deep value c"
+            value={fields.priceToBeatIvDeepValueMaxPriceCent ?? ''}
+            placeholder="64"
+            onChange={(value) => onUpdateField('priceToBeatIvDeepValueMaxPriceCent', value)}
+          />
+          <IvRuleInput
+            label="Max haircut c"
+            value={fields.priceToBeatIvMaxRiskHaircutCent ?? ''}
+            placeholder="8"
+            onChange={(value) => onUpdateField('priceToBeatIvMaxRiskHaircutCent', value)}
+          />
+          <IvRuleInput
+            label="Odds spread c"
+            value={fields.priceToBeatIvOddsMaxSpreadCent ?? ''}
+            placeholder="5"
+            onChange={(value) => onUpdateField('priceToBeatIvOddsMaxSpreadCent', value)}
+          />
+          <IvRuleInput
+            label="CEX missing pts"
+            value={fields.priceToBeatIvCexUnconfirmedRiskPoints ?? ''}
+            placeholder="10"
+            onChange={(value) => onUpdateField('priceToBeatIvCexUnconfirmedRiskPoints', value)}
+          />
+          <IvRuleInput
+            label="CEX conflict pts"
+            value={fields.priceToBeatIvCexConflictRiskPoints ?? ''}
+            placeholder="10"
+            onChange={(value) => onUpdateField('priceToBeatIvCexConflictRiskPoints', value)}
+          />
+          <IvRuleInput
+            label="Passive TTL ms"
+            value={fields.priceToBeatIvPassiveBidTtlMs ?? ''}
+            placeholder="1500"
+            onChange={(value) => onUpdateField('priceToBeatIvPassiveBidTtlMs', value)}
+          />
+        </div>
+        <div className="mt-2 border-t border-slate-200 pt-2">
+          <Label className="text-[11px] font-medium text-slate-500">Wait Reprice Guard</Label>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <IvRuleCheckbox
+              label="Wait reprice"
+              value={fields.priceToBeatIvWaitRepriceGuardEnabled}
+              onChange={(value) => onUpdateField('priceToBeatIvWaitRepriceGuardEnabled', value)}
+            />
+            <IvRuleCheckbox
+              label="Falling cap"
+              value={fields.priceToBeatIvFallingIntoCapGuardEnabled}
+              onChange={(value) => onUpdateField('priceToBeatIvFallingIntoCapGuardEnabled', value)}
+            />
+            <IvRuleInput
+              label="Wait early ms"
+              value={fields.priceToBeatIvWaitMaxAgeMsEarly ?? ''}
+              placeholder="8000"
+              onChange={(value) => onUpdateField('priceToBeatIvWaitMaxAgeMsEarly', value)}
+            />
+            <IvRuleInput
+              label="Wait mid ms"
+              value={fields.priceToBeatIvWaitMaxAgeMsMid ?? ''}
+              placeholder="5000"
+              onChange={(value) => onUpdateField('priceToBeatIvWaitMaxAgeMsMid', value)}
+            />
+            <IvRuleInput
+              label="Wait late ms"
+              value={fields.priceToBeatIvWaitMaxAgeMsLate ?? ''}
+              placeholder="3000"
+              onChange={(value) => onUpdateField('priceToBeatIvWaitMaxAgeMsLate', value)}
+            />
+            <IvRuleInput
+              label="Ask over cap c"
+              value={fields.priceToBeatIvWaitInitialAskMaxOverCapCent ?? ''}
+              placeholder="10"
+              onChange={(value) => onUpdateField('priceToBeatIvWaitInitialAskMaxOverCapCent', value)}
+            />
+            <IvRuleInput
+              label="Drop early c"
+              value={fields.priceToBeatIvFallingIntoCapDropCentEarly ?? ''}
+              placeholder="15"
+              onChange={(value) => onUpdateField('priceToBeatIvFallingIntoCapDropCentEarly', value)}
+            />
+            <IvRuleInput
+              label="Drop mid c"
+              value={fields.priceToBeatIvFallingIntoCapDropCentMid ?? ''}
+              placeholder="12"
+              onChange={(value) => onUpdateField('priceToBeatIvFallingIntoCapDropCentMid', value)}
+            />
+            <IvRuleInput
+              label="Drop late c"
+              value={fields.priceToBeatIvFallingIntoCapDropCentLate ?? ''}
+              placeholder="8"
+              onChange={(value) => onUpdateField('priceToBeatIvFallingIntoCapDropCentLate', value)}
+            />
+            <IvRuleCheckbox
+              label="Late expensive"
+              value={fields.priceToBeatIvLateExpensiveEntryGuardEnabled}
+              onChange={(value) => onUpdateField('priceToBeatIvLateExpensiveEntryGuardEnabled', value)}
+            />
+            <IvRuleInput
+              label="Late seconds"
+              value={fields.priceToBeatIvLateExpensiveSeconds ?? ''}
+              placeholder="45"
+              onChange={(value) => onUpdateField('priceToBeatIvLateExpensiveSeconds', value)}
+            />
+            <IvRuleInput
+              label="Late VWAP c"
+              value={fields.priceToBeatIvLateExpensiveVwapCent ?? ''}
+              placeholder="70"
+              onChange={(value) => onUpdateField('priceToBeatIvLateExpensiveVwapCent', value)}
+            />
+            <IvRuleInput
+              label="Late q c"
+              value={fields.priceToBeatIvLateExpensiveMinQCent ?? ''}
+              placeholder="92"
+              onChange={(value) => onUpdateField('priceToBeatIvLateExpensiveMinQCent', value)}
+            />
+            <IvRuleInput
+              label="Late gap extra"
+              value={fields.priceToBeatIvLateExpensiveMinGapStrengthExtra ?? ''}
+              placeholder="0.50"
+              onChange={(value) => onUpdateField('priceToBeatIvLateExpensiveMinGapStrengthExtra', value)}
+            />
+            <IvRuleCheckbox
+              label="Mixed gap block"
+              value={fields.priceToBeatIvGapFailMixedCexGuardEnabled}
+              onChange={(value) => onUpdateField('priceToBeatIvGapFailMixedCexGuardEnabled', value)}
+            />
+            <IvRuleInput
+              label="Mixed max sec"
+              value={fields.priceToBeatIvGapFailMixedCexMaxSeconds ?? ''}
+              placeholder="120"
+              onChange={(value) => onUpdateField('priceToBeatIvGapFailMixedCexMaxSeconds', value)}
+            />
+            <IvRuleCheckbox
+              label="Late mixed"
+              value={fields.priceToBeatIvLateExpensiveMixedCexGuardEnabled}
+              onChange={(value) => onUpdateField('priceToBeatIvLateExpensiveMixedCexGuardEnabled', value)}
+            />
+            <IvRuleInput
+              label="Late mixed sec"
+              value={fields.priceToBeatIvLateExpensiveMixedCexSeconds ?? ''}
+              placeholder="45"
+              onChange={(value) => onUpdateField('priceToBeatIvLateExpensiveMixedCexSeconds', value)}
+            />
+            <IvRuleInput
+              label="Late mixed VWAP c"
+              value={fields.priceToBeatIvLateExpensiveMixedCexMinVwapCent ?? ''}
+              placeholder="70"
+              onChange={(value) => onUpdateField('priceToBeatIvLateExpensiveMixedCexMinVwapCent', value)}
+            />
+            <IvRuleCheckbox
+              label="Late needs fail"
+              value={fields.priceToBeatIvLateExpensiveMixedCexRequireGapFailOrLagHigh}
+              onChange={(value) => onUpdateField('priceToBeatIvLateExpensiveMixedCexRequireGapFailOrLagHigh', value)}
+            />
+          </div>
+        </div>
+        <div className="mt-2 border-t border-slate-200 pt-2">
+          <Label className="text-[11px] font-medium text-slate-500">
+            Oracle Lag / Pump Shock
+          </Label>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <IvRuleCheckbox
+              label="Oracle lag"
+              value={fields.priceToBeatIvOracleLagBookLeadGuardEnabled}
+              onChange={(value) => onUpdateField('priceToBeatIvOracleLagBookLeadGuardEnabled', value)}
+            />
+            <IvRuleCheckbox
+              label="Best ask fallback"
+              value={fields.priceToBeatIvOracleLagUseBestAskFallback}
+              onChange={(value) => onUpdateField('priceToBeatIvOracleLagUseBestAskFallback', value)}
+            />
+            <IvRuleInput
+              label="High q c"
+              value={fields.priceToBeatIvOracleLagQHighCent ?? ''}
+              placeholder="70"
+              onChange={(value) => onUpdateField('priceToBeatIvOracleLagQHighCent', value)}
+            />
+            <IvRuleInput
+              label="Cheap high c"
+              value={fields.priceToBeatIvOracleLagCheapTokenCent ?? ''}
+              placeholder="70"
+              onChange={(value) => onUpdateField('priceToBeatIvOracleLagCheapTokenCent', value)}
+            />
+            <IvRuleInput
+              label="High disloc c"
+              value={fields.priceToBeatIvModelBookDislocationHighCent ?? ''}
+              placeholder="20"
+              onChange={(value) => onUpdateField('priceToBeatIvModelBookDislocationHighCent', value)}
+            />
+            <IvRuleCheckbox
+              label="Lag no-book"
+              value={fields.priceToBeatIvChainlinkCexLagNoBookGuardEnabled}
+              onChange={(value) => onUpdateField('priceToBeatIvChainlinkCexLagNoBookGuardEnabled', value)}
+            />
+            <IvRuleInput
+              label="No-book sec"
+              value={fields.priceToBeatIvChainlinkCexLagNoBookMaxSeconds ?? ''}
+              placeholder="45"
+              onChange={(value) => onUpdateField('priceToBeatIvChainlinkCexLagNoBookMaxSeconds', value)}
+            />
+            <IvRuleCheckbox
+              label="No-book non-strong"
+              value={fields.priceToBeatIvChainlinkCexLagNoBookRequireNonStrongCex}
+              onChange={(value) => onUpdateField('priceToBeatIvChainlinkCexLagNoBookRequireNonStrongCex', value)}
+            />
+            <IvRuleInput
+              label="Extreme q c"
+              value={fields.priceToBeatIvOracleLagQExtremeCent ?? ''}
+              placeholder="98"
+              onChange={(value) => onUpdateField('priceToBeatIvOracleLagQExtremeCent', value)}
+            />
+            <IvRuleInput
+              label="Cheap token c"
+              value={fields.priceToBeatIvOracleLagCheapTokenExtremeCent ?? ''}
+              placeholder="72"
+              onChange={(value) => onUpdateField('priceToBeatIvOracleLagCheapTokenExtremeCent', value)}
+            />
+            <IvRuleInput
+              label="Red disloc c"
+              value={fields.priceToBeatIvModelBookDislocationRedCent ?? ''}
+              placeholder="25"
+              onChange={(value) => onUpdateField('priceToBeatIvModelBookDislocationRedCent', value)}
+            />
+            <IvRuleCheckbox
+              label="VWAP required"
+              value={fields.priceToBeatIvExecutionVwapRequiredOnHighDislocation}
+              onChange={(value) => onUpdateField('priceToBeatIvExecutionVwapRequiredOnHighDislocation', value)}
+            />
+            <IvRuleCheckbox
+              label="Borderline block"
+              value={fields.priceToBeatIvBorderlinePumpBookLeadGuardEnabled}
+              onChange={(value) => onUpdateField('priceToBeatIvBorderlinePumpBookLeadGuardEnabled', value)}
+            />
+            <IvRuleInput
+              label="Border margin"
+              value={fields.priceToBeatIvBorderlineGapMarginEarly ?? ''}
+              placeholder="0.10"
+              onChange={(value) => onUpdateField('priceToBeatIvBorderlineGapMarginEarly', value)}
+            />
+            <IvRuleInput
+              label="Border pump"
+              value={fields.priceToBeatIvBorderlinePumpShockRatio ?? ''}
+              placeholder="1.25"
+              onChange={(value) => onUpdateField('priceToBeatIvBorderlinePumpShockRatio', value)}
+            />
+            <IvRuleInput
+              label="Border q c"
+              value={fields.priceToBeatIvBorderlineBookLeadQMinCent ?? ''}
+              placeholder="95"
+              onChange={(value) => onUpdateField('priceToBeatIvBorderlineBookLeadQMinCent', value)}
+            />
+            <IvRuleInput
+              label="Border cheap c"
+              value={fields.priceToBeatIvBorderlineBookLeadCheapTokenCent ?? ''}
+              placeholder="60"
+              onChange={(value) => onUpdateField('priceToBeatIvBorderlineBookLeadCheapTokenCent', value)}
+            />
+            <IvRuleInput
+              label="Border disloc c"
+              value={fields.priceToBeatIvBorderlineBookLeadDislocationCent ?? ''}
+              placeholder="30"
+              onChange={(value) => onUpdateField('priceToBeatIvBorderlineBookLeadDislocationCent', value)}
+            />
+            <IvRuleCheckbox
+              label="Pump shock"
+              value={fields.priceToBeatIvPumpShockGuardEnabled}
+              onChange={(value) => onUpdateField('priceToBeatIvPumpShockGuardEnabled', value)}
+            />
+            <IvRuleInput
+              label="Pump ratio"
+              value={fields.priceToBeatIvPumpShockGapGrowthRatio ?? ''}
+              placeholder="1.25"
+              onChange={(value) => onUpdateField('priceToBeatIvPumpShockGapGrowthRatio', value)}
+            />
+            <IvRuleInput
+              label="Pump hard"
+              value={fields.priceToBeatIvPumpShockHardRatio ?? ''}
+              placeholder="1.50"
+              onChange={(value) => onUpdateField('priceToBeatIvPumpShockHardRatio', value)}
+            />
+            <IvRuleInput
+              label="Pump hold ms"
+              value={fields.priceToBeatIvPumpShockMinHoldMs ?? ''}
+              placeholder="3000"
+              onChange={(value) => onUpdateField('priceToBeatIvPumpShockMinHoldMs', value)}
+            />
+            <IvRuleInput
+              label="Pump retain"
+              value={fields.priceToBeatIvPumpShockMinBufferRetain ?? ''}
+              placeholder="0.80"
+              onChange={(value) => onUpdateField('priceToBeatIvPumpShockMinBufferRetain', value)}
+            />
+          </div>
+          <div className="mt-2 border-t border-slate-200 pt-2">
+            <Label className="text-[11px] font-medium text-slate-500">PTB Chop</Label>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              <IvRuleCheckbox
+                label="Chop guard"
+                value={fields.priceToBeatIvPtbChopGuardEnabled}
+                onChange={(value) => onUpdateField('priceToBeatIvPtbChopGuardEnabled', value)}
+              />
+              <IvRuleInput
+                label="Lookback sn"
+                value={fields.priceToBeatIvPtbChopLookbackSeconds ?? ''}
+                placeholder="10"
+                onChange={(value) => onUpdateField('priceToBeatIvPtbChopLookbackSeconds', value)}
+              />
+              <IvRuleInput
+                label="Ext lookback sn"
+                value={fields.priceToBeatIvPtbChopExtendedLookbackSeconds ?? ''}
+                placeholder="15"
+                onChange={(value) =>
+                  onUpdateField('priceToBeatIvPtbChopExtendedLookbackSeconds', value)
+                }
+              />
+              <IvRuleInput
+                label="Deadband bps"
+                value={fields.priceToBeatIvPtbChopDeadbandBps ?? ''}
+                placeholder="0.5"
+                onChange={(value) => onUpdateField('priceToBeatIvPtbChopDeadbandBps', value)}
+              />
+              <IvRuleInput
+                label="BTC floor USD"
+                value={fields.priceToBeatIvPtbChopDeadbandMinUsdBtc ?? ''}
+                placeholder="5"
+                onChange={(value) =>
+                  onUpdateField('priceToBeatIvPtbChopDeadbandMinUsdBtc', value)
+                }
+              />
+              <IvRuleInput
+                label="ETH floor USD"
+                value={fields.priceToBeatIvPtbChopDeadbandMinUsdEth ?? ''}
+                placeholder="0.30"
+                onChange={(value) =>
+                  onUpdateField('priceToBeatIvPtbChopDeadbandMinUsdEth', value)
+                }
+              />
+              <IvRuleInput
+                label="SOL floor USD"
+                value={fields.priceToBeatIvPtbChopDeadbandMinUsdSol ?? ''}
+                placeholder="0.03"
+                onChange={(value) =>
+                  onUpdateField('priceToBeatIvPtbChopDeadbandMinUsdSol', value)
+                }
+              />
+              <IvRuleInput
+                label="Cross 10s block"
+                value={fields.priceToBeatIvPtbChopZeroCrossBlock10s ?? ''}
+                placeholder="2"
+                onChange={(value) => onUpdateField('priceToBeatIvPtbChopZeroCrossBlock10s', value)}
+              />
+              <IvRuleInput
+                label="Cross 15s block"
+                value={fields.priceToBeatIvPtbChopZeroCrossBlock15s ?? ''}
+                placeholder="3"
+                onChange={(value) => onUpdateField('priceToBeatIvPtbChopZeroCrossBlock15s', value)}
+              />
+              <IvRuleInput
+                label="Path z warn"
+                value={fields.priceToBeatIvPtbChopPathZWarn ?? ''}
+                placeholder="1.25"
+                onChange={(value) => onUpdateField('priceToBeatIvPtbChopPathZWarn', value)}
+              />
+              <IvRuleInput
+                label="Path z block"
+                value={fields.priceToBeatIvPtbChopPathZBlock ?? ''}
+                placeholder="1.75"
+                onChange={(value) => onUpdateField('priceToBeatIvPtbChopPathZBlock', value)}
+              />
+              <IvRuleInput
+                label="Efficiency warn"
+                value={fields.priceToBeatIvPtbChopEfficiencyWarn ?? ''}
+                placeholder="0.25"
+                onChange={(value) => onUpdateField('priceToBeatIvPtbChopEfficiencyWarn', value)}
+              />
+              <IvRuleInput
+                label="Efficiency block"
+                value={fields.priceToBeatIvPtbChopEfficiencyBlock ?? ''}
+                placeholder="0.15"
+                onChange={(value) => onUpdateField('priceToBeatIvPtbChopEfficiencyBlock', value)}
+              />
+              <IvRuleInput
+                label="Opp depth warn"
+                value={fields.priceToBeatIvPtbChopOppositeDepthZWarn ?? ''}
+                placeholder="0.50"
+                onChange={(value) =>
+                  onUpdateField('priceToBeatIvPtbChopOppositeDepthZWarn', value)
+                }
+              />
+              <IvRuleInput
+                label="Opp depth block"
+                value={fields.priceToBeatIvPtbChopOppositeDepthZBlock ?? ''}
+                placeholder="0.90"
+                onChange={(value) =>
+                  onUpdateField('priceToBeatIvPtbChopOppositeDepthZBlock', value)
+                }
+              />
+              <IvRuleInput
+                label="Penalty cap"
+                value={fields.priceToBeatIvPtbChopMaxGapStrengthPenalty ?? ''}
+                placeholder="0.35"
+                onChange={(value) =>
+                  onUpdateField('priceToBeatIvPtbChopMaxGapStrengthPenalty', value)
+                }
+              />
+            </div>
+          </div>
+        </div>
+      </div>
       <div className="grid grid-cols-2 gap-2 border-t border-slate-200 pt-2">
         <IvRuleInput
           label="Stale ms"
@@ -400,6 +934,11 @@ export function PriceToBeatIvTimeRulesSection({
             label="Depth"
             value={fields.priceToBeatIvDepthGuardEnabled}
             onChange={(value) => onUpdateField('priceToBeatIvDepthGuardEnabled', value)}
+          />
+          <IvRuleCheckbox
+            label="Depth hard block"
+            value={fields.priceToBeatIvDepthGuardHardBlockEnabled}
+            onChange={(value) => onUpdateField('priceToBeatIvDepthGuardHardBlockEnabled', value)}
           />
           <IvRuleCheckbox
             label="Participation"
