@@ -1,4 +1,12 @@
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
+import {
+  CONFIDENCE_LADDER_BINDING_MODE,
+  CONFIDENCE_LADDER_MODE,
+} from '@/lib/trade-flow-config-mappers/confidence-ladder';
+import {
+  AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE,
+  AVG_REBOUND_PAIRLOCK_RESCUE_MODE,
+} from '@/lib/trade-flow-config-mappers/avg-rebound-pairlock-rescue';
 import { isPtbMode, normalizePtbMode, type PtbMode } from '@/lib/trade-flow-config-mappers/ptb-modes';
 import {
   countValidMarketPriceOutcomeConditions,
@@ -59,6 +67,18 @@ function isRevengeFlipDownstreamNode(node: TradeFlowNode): boolean {
   const downstreamConfig = isRecord(node.config) ? node.config : {};
   const downstreamMode = toTrimmedString(downstreamConfig.mode).toLowerCase() || 'single';
   return node.type === 'action.place_order' && downstreamMode === 'revenge_flip_v1';
+}
+
+function isConfidenceLadderDownstreamNode(node: TradeFlowNode): boolean {
+  const downstreamConfig = isRecord(node.config) ? node.config : {};
+  const downstreamMode = toTrimmedString(downstreamConfig.mode).toLowerCase() || 'single';
+  return node.type === 'action.place_order' && downstreamMode === CONFIDENCE_LADDER_MODE;
+}
+
+function isAvgReboundPairlockRescueDownstreamNode(node: TradeFlowNode): boolean {
+  const downstreamConfig = isRecord(node.config) ? node.config : {};
+  const downstreamMode = toTrimmedString(downstreamConfig.mode).toLowerCase() || 'single';
+  return node.type === 'action.place_order' && downstreamMode === AVG_REBOUND_PAIRLOCK_RESCUE_MODE;
 }
 
 function isPairLockAllowedNotificationNode(node: TradeFlowNode): boolean {
@@ -203,6 +223,98 @@ function collectReachableRevengeFlipBindingNodes(
   };
 }
 
+function collectReachableConfidenceLadderBindingNodes(
+  nodeKey: string,
+  graph: TradeFlowGraph
+): { confidenceLadderNodes: TradeFlowNode[]; invalidNodes: TradeFlowNode[] } {
+  const nodeMap = new Map(graph.nodes.map((candidate) => [candidate.key, candidate]));
+  const outgoingBySource = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const outgoing = outgoingBySource.get(edge.source) ?? [];
+    outgoing.push(edge.target);
+    outgoingBySource.set(edge.source, outgoing);
+  }
+
+  const visited = new Set<string>();
+  const confidenceLadderByKey = new Map<string, TradeFlowNode>();
+  const invalidByKey = new Map<string, TradeFlowNode>();
+  const queue = [...(outgoingBySource.get(nodeKey) ?? [])];
+
+  while (queue.length > 0) {
+    const currentKey = queue.shift() as string;
+    if (visited.has(currentKey)) continue;
+    visited.add(currentKey);
+
+    const currentNode = nodeMap.get(currentKey);
+    if (!currentNode) continue;
+
+    const isConfidenceLadder = isConfidenceLadderDownstreamNode(currentNode);
+    const isNotification = isPairLockAllowedNotificationNode(currentNode);
+    const isPassthrough = DCA_LIVE_ALLOWED_PASSTHROUGH_NODES.has(currentNode.type);
+
+    if (isConfidenceLadder) {
+      confidenceLadderByKey.set(currentKey, currentNode);
+    } else if (!isNotification && !isPassthrough) {
+      invalidByKey.set(currentKey, currentNode);
+    }
+
+    if (!isConfidenceLadder && (isPassthrough || isNotification)) {
+      queue.push(...(outgoingBySource.get(currentKey) ?? []));
+    }
+  }
+
+  return {
+    confidenceLadderNodes: [...confidenceLadderByKey.values()],
+    invalidNodes: [...invalidByKey.values()],
+  };
+}
+
+function collectReachableAvgReboundPairlockRescueBindingNodes(
+  nodeKey: string,
+  graph: TradeFlowGraph
+): { avgReboundNodes: TradeFlowNode[]; invalidNodes: TradeFlowNode[] } {
+  const nodeMap = new Map(graph.nodes.map((candidate) => [candidate.key, candidate]));
+  const outgoingBySource = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const outgoing = outgoingBySource.get(edge.source) ?? [];
+    outgoing.push(edge.target);
+    outgoingBySource.set(edge.source, outgoing);
+  }
+
+  const visited = new Set<string>();
+  const avgReboundByKey = new Map<string, TradeFlowNode>();
+  const invalidByKey = new Map<string, TradeFlowNode>();
+  const queue = [...(outgoingBySource.get(nodeKey) ?? [])];
+
+  while (queue.length > 0) {
+    const currentKey = queue.shift() as string;
+    if (visited.has(currentKey)) continue;
+    visited.add(currentKey);
+
+    const currentNode = nodeMap.get(currentKey);
+    if (!currentNode) continue;
+
+    const isAvgRebound = isAvgReboundPairlockRescueDownstreamNode(currentNode);
+    const isNotification = isPairLockAllowedNotificationNode(currentNode);
+    const isPassthrough = DCA_LIVE_ALLOWED_PASSTHROUGH_NODES.has(currentNode.type);
+
+    if (isAvgRebound) {
+      avgReboundByKey.set(currentKey, currentNode);
+    } else if (!isNotification && !isPassthrough) {
+      invalidByKey.set(currentKey, currentNode);
+    }
+
+    if (!isAvgRebound && (isPassthrough || isNotification)) {
+      queue.push(...(outgoingBySource.get(currentKey) ?? []));
+    }
+  }
+
+  return {
+    avgReboundNodes: [...avgReboundByKey.values()],
+    invalidNodes: [...invalidByKey.values()],
+  };
+}
+
 export function validateTriggerMarketPriceNodeConfig(
   issues: TradeFlowValidationIssue[],
   node: TradeFlowNode,
@@ -219,19 +331,23 @@ export function validateTriggerMarketPriceNodeConfig(
   const dcaLiveOnly = bindingMode === 'dca_live_only';
   const positiveGridOnly = bindingMode === 'positive_quantity_flip_grid_only';
   const revengeFlipOnly = bindingMode === 'revenge_flip_only';
-  const bindingOnly = pairLockOnly || dcaLiveOnly || positiveGridOnly || revengeFlipOnly;
+  const confidenceLadderOnly = bindingMode === CONFIDENCE_LADDER_BINDING_MODE;
+  const avgReboundOnly = bindingMode === AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE;
+  const bindingOnly = pairLockOnly || dcaLiveOnly || positiveGridOnly || revengeFlipOnly || confidenceLadderOnly || avgReboundOnly;
   if (
     bindingMode !== 'standard' &&
     bindingMode !== 'pair_lock_only' &&
     bindingMode !== 'dca_live_only' &&
     bindingMode !== 'positive_quantity_flip_grid_only' &&
-    bindingMode !== 'revenge_flip_only'
+    bindingMode !== 'revenge_flip_only' &&
+    bindingMode !== CONFIDENCE_LADDER_BINDING_MODE &&
+    bindingMode !== AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE
   ) {
     pushNodeError(
       issues,
       node,
       'invalid_binding_mode',
-      'trigger.market_price bindingMode must be standard, pair_lock_only, dca_live_only, positive_quantity_flip_grid_only, or revenge_flip_only.'
+      'trigger.market_price bindingMode must be standard, pair_lock_only, dca_live_only, positive_quantity_flip_grid_only, revenge_flip_only, confidence_ladder_only, or avg_rebound_pairlock_rescue_only.'
     );
   }
 
@@ -636,6 +752,92 @@ export function validateTriggerMarketPriceNodeConfig(
         node,
         'revenge_flip_only_disallows_non_notification_downstream',
         'trigger.market_price bindingMode=revenge_flip_only allows one action.place_order mode=revenge_flip_v1, optional logic/guard nodes, and optional notification nodes.'
+      );
+    }
+  }
+
+  if (bindingMode === CONFIDENCE_LADDER_BINDING_MODE) {
+    const hasOutcomeRows =
+      Array.isArray(config.outcomeConditions) && config.outcomeConditions.length > 0;
+    if (hasOutcomeRows) {
+      pushNodeError(
+        issues,
+        node,
+        'confidence_ladder_only_disallows_outcome_conditions',
+        'trigger.market_price bindingMode=confidence_ladder_only does not allow outcomeConditions.'
+      );
+    }
+    if (priceToBeatTriggerEnabled === true) {
+      pushNodeError(
+        issues,
+        node,
+        'confidence_ladder_only_disallows_ptb_trigger',
+        'trigger.market_price bindingMode=confidence_ladder_only does not allow priceToBeatTrigger* fields.'
+      );
+    }
+    if (toTrimmedString(config.marketScope).toLowerCase() !== 'btc_5m_updown') {
+      pushNodeError(
+        issues,
+        node,
+        'confidence_ladder_only_requires_btc_5m_scope',
+        'trigger.market_price bindingMode=confidence_ladder_only requires marketScope=btc_5m_updown.'
+      );
+    }
+    const { confidenceLadderNodes, invalidNodes } =
+      collectReachableConfidenceLadderBindingNodes(node.key, graph);
+    if (confidenceLadderNodes.length !== 1) {
+      pushNodeError(
+        issues,
+        node,
+        'confidence_ladder_only_requires_single_downstream',
+        'trigger.market_price bindingMode=confidence_ladder_only requires exactly one reachable action.place_order mode=confidence_ladder_hedge_lock_v1.'
+      );
+    }
+    if (invalidNodes.length > 0) {
+      pushNodeError(
+        issues,
+        node,
+        'confidence_ladder_only_disallows_non_notification_downstream',
+        'trigger.market_price bindingMode=confidence_ladder_only allows one action.place_order mode=confidence_ladder_hedge_lock_v1, optional logic/guard nodes, and optional notification nodes.'
+      );
+    }
+  }
+
+  if (bindingMode === AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE) {
+    const hasOutcomeRows =
+      Array.isArray(config.outcomeConditions) && config.outcomeConditions.length > 0;
+    if (hasOutcomeRows) {
+      pushNodeError(
+        issues,
+        node,
+        'avg_rebound_pairlock_rescue_only_disallows_outcome_conditions',
+        'trigger.market_price bindingMode=avg_rebound_pairlock_rescue_only does not allow outcomeConditions.'
+      );
+    }
+    if (priceToBeatTriggerEnabled === true) {
+      pushNodeError(
+        issues,
+        node,
+        'avg_rebound_pairlock_rescue_only_disallows_ptb_trigger',
+        'trigger.market_price bindingMode=avg_rebound_pairlock_rescue_only does not allow priceToBeatTrigger* fields.'
+      );
+    }
+    const { avgReboundNodes, invalidNodes } =
+      collectReachableAvgReboundPairlockRescueBindingNodes(node.key, graph);
+    if (avgReboundNodes.length !== 1) {
+      pushNodeError(
+        issues,
+        node,
+        'avg_rebound_pairlock_rescue_only_requires_single_downstream',
+        'trigger.market_price bindingMode=avg_rebound_pairlock_rescue_only requires exactly one reachable action.place_order mode=avg_rebound_pairlock_rescue_v1.'
+      );
+    }
+    if (invalidNodes.length > 0) {
+      pushNodeError(
+        issues,
+        node,
+        'avg_rebound_pairlock_rescue_only_disallows_non_notification_downstream',
+        'trigger.market_price bindingMode=avg_rebound_pairlock_rescue_only allows one action.place_order mode=avg_rebound_pairlock_rescue_v1, optional logic/guard nodes, and optional notification nodes.'
       );
     }
   }

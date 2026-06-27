@@ -1,4 +1,6 @@
 mod analysis;
+mod avg_rebound_pairlock_rescue;
+mod confidence_ladder;
 mod config_changes;
 mod decision_logs;
 mod inventory;
@@ -13,6 +15,13 @@ mod revenge_flip;
 mod second_snapshots;
 mod workflows;
 
+pub use avg_rebound_pairlock_rescue::{
+    trade_builder_avg_rebound_pairlock_rescue_execution_lock_keys,
+    TradeBuilderAvgReboundPairlockRescueExecutionLock,
+};
+pub use confidence_ladder::{
+    trade_builder_confidence_ladder_execution_lock_keys, TradeBuilderConfidenceLadderExecutionLock,
+};
 pub use positive_quantity_flip_grid::{
     positive_quantity_flip_grid_buy_execution_lock_keys, PositiveQuantityFlipGridBuyExecutionLock,
 };

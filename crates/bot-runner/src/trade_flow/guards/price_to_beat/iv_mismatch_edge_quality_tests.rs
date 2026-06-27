@@ -49,6 +49,15 @@ fn market(best_bid: f64, best_ask: f64) -> PriceToBeatSignalFormulaMarketInput {
     }
 }
 
+fn legacy_iv_edge_config(
+    market: PriceToBeatSignalFormulaMarketInput,
+) -> PriceToBeatIvMismatchEdgeConfig {
+    let mut config = PriceToBeatIvMismatchEdgeConfig::crypto_defaults(market);
+    config.cex_open_gap.decision_gap_enabled = false;
+    config.oracle_tick_jump.enabled = false;
+    config
+}
+
 fn config_with_time_rule(
     best_bid: f64,
     best_ask: f64,
@@ -56,7 +65,7 @@ fn config_with_time_rule(
     min_edge: f64,
     min_gap_strength: f64,
 ) -> PriceToBeatIvMismatchEdgeConfig {
-    let mut config = PriceToBeatIvMismatchEdgeConfig::crypto_defaults(market(best_bid, best_ask));
+    let mut config = legacy_iv_edge_config(market(best_bid, best_ask));
     config.time_rules = vec![PriceToBeatIvMismatchTimeRule {
         start_remaining_secs: 120.0,
         end_remaining_secs: 10.0,
@@ -95,7 +104,7 @@ async fn iv_mismatch_edge_uses_fresh_binance_conservative_veto() {
         "btc",
         120.0,
         100.0,
-        PriceToBeatIvMismatchEdgeConfig::crypto_defaults(market(0.59, 0.60)),
+        legacy_iv_edge_config(market(0.59, 0.60)),
     );
 
     assert!(!evaluation.passed, "{evaluation:?}");
@@ -167,7 +176,7 @@ async fn iv_mismatch_edge_supports_all_crypto_rtds_assets() {
             asset,
             120.0,
             100.0,
-            PriceToBeatIvMismatchEdgeConfig::crypto_defaults(market(0.42, 0.44)),
+            legacy_iv_edge_config(market(0.42, 0.44)),
         );
 
         assert!(evaluation.passed, "{asset} evaluation: {evaluation:?}");

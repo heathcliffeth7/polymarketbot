@@ -49,8 +49,9 @@ function action(overrides: Record<string, unknown> = {}): TradeFlowNode {
         ptbStopLossEnabled: true,
         ptbStopLossGapUsd: -4,
         ptbStopLossGapUnit: 'cent',
-        ptbStopLossCurrentPriceSource: 'cex_consensus',
+        ptbStopLossCurrentPriceSource: 'chainlink_cex_consensus',
         ptbStopLossTimeDecayMode: 'none',
+        postStopLossIvMismatchEnabled: true,
         lotLimitPct: 0.98,
         closeOnlySec: 10,
         maxFlip: 0,
@@ -101,6 +102,55 @@ test('validateActionPlaceOrderConfig accepts revenge_flip_v1 with PTB-only stop-
 
   const issues = collectActionIssues(graph, 'revenge_buy');
   assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig accepts negative revenge target pnl', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      trigger(),
+      action({
+        revengeFlip: {
+          initialOrderUsdc: 5,
+          profitTargetUsdc: -1,
+          stopLossPct: 0.2,
+          lotLimitPct: 0.98,
+          closeOnlySec: 10,
+          maxFlip: 0,
+        },
+      }),
+    ],
+    edges: [{ key: 'edge_rf', source: 'trigger_rf', target: 'revenge_buy', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'revenge_buy');
+  assert.equal(issues.length, 0);
+});
+
+test('validateActionPlaceOrderConfig rejects invalid revenge post-stop-loss IV mismatch toggle', () => {
+  const graph = normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      trigger(),
+      action({
+        revengeFlip: {
+          initialOrderUsdc: 5,
+          profitTargetUsdc: 0.25,
+          stopLossPct: 0.2,
+          postStopLossIvMismatchEnabled: 'maybe',
+          lotLimitPct: 0.98,
+          closeOnlySec: 10,
+          maxFlip: 0,
+        },
+      }),
+    ],
+    edges: [{ key: 'edge_rf', source: 'trigger_rf', target: 'revenge_buy', type: 'default', condition: null }],
+  });
+
+  const issues = collectActionIssues(graph, 'revenge_buy');
+  assert.ok(
+    issues.some((issue) => issue.code === 'invalid_revenge_flip_post_stop_loss_iv_mismatch')
+  );
 });
 
 test('validateActionPlaceOrderConfig rejects revenge PTB-only mode without PTB stop-loss', () => {

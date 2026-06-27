@@ -15,6 +15,9 @@ pub(crate) fn coinbase_product_id(asset: &str) -> Option<&'static str> {
         "eth" => Some("ETH-USD"),
         "sol" => Some("SOL-USD"),
         "xrp" => Some("XRP-USD"),
+        "doge" | "dogecoin" => Some("DOGE-USD"),
+        "bnb" => Some("BNB-USD"),
+        "hype" | "hyperliquid" => Some("HYPE-USD"),
         _ => None,
     }
 }
@@ -63,13 +66,17 @@ pub(crate) fn parse_coinbase_ws_payload(
                     );
                 }
             }
-            "level2" => {
+            "level2" | "l2_data" => {
                 if let Some(updates) = event.get("updates").and_then(Value::as_array) {
-                    parsed.books.extend(
-                        updates.iter().filter_map(|update| {
+                    if event.get("type").and_then(Value::as_str) == Some("snapshot") {
+                        if let Some(book) = parse_coinbase_level2_snapshot(updates, asset, now_ms) {
+                            parsed.books.push(book);
+                        }
+                    } else {
+                        parsed.books.extend(updates.iter().filter_map(|update| {
                             parse_coinbase_level2_update(update, asset, now_ms)
-                        }),
-                    );
+                        }));
+                    }
                 }
             }
             _ => {}
@@ -141,14 +148,64 @@ pub(crate) fn parse_coinbase_ticker(
         bid_size: parse_f64(
             payload
                 .get("best_bid_size")
+                .or_else(|| payload.get("best_bid_quantity"))
                 .or_else(|| payload.get("bid_size")),
         ),
         ask_size: parse_f64(
             payload
                 .get("best_ask_size")
+                .or_else(|| payload.get("best_ask_quantity"))
                 .or_else(|| payload.get("ask_size")),
         ),
         source: "ticker",
+    })
+}
+
+pub(crate) fn parse_coinbase_level2_snapshot(
+    updates: &[Value],
+    asset: &str,
+    now_ms: i64,
+) -> Option<CexBookSample> {
+    let mut best_bid: Option<(f64, f64, i64)> = None;
+    let mut best_ask: Option<(f64, f64, i64)> = None;
+
+    for update in updates {
+        let side = update.get("side")?.as_str()?.trim().to_ascii_lowercase();
+        let price = parse_f64(update.get("price_level").or_else(|| update.get("price")))?;
+        let size = parse_f64(update.get("new_quantity").or_else(|| update.get("size")))?;
+        if price <= 0.0 || size <= 0.0 {
+            continue;
+        }
+        let timestamp_ms = update
+            .get("event_time")
+            .or_else(|| update.get("time"))
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_ms)
+            .unwrap_or(now_ms);
+
+        match side.as_str() {
+            "bid" | "buy" if best_bid.is_none_or(|(best, _, _)| price > best) => {
+                best_bid = Some((price, size, timestamp_ms));
+            }
+            "ask" | "offer" | "sell" if best_ask.is_none_or(|(best, _, _)| price < best) => {
+                best_ask = Some((price, size, timestamp_ms));
+            }
+            _ => {}
+        }
+    }
+
+    let (bid, bid_size, bid_timestamp_ms) = best_bid?;
+    let (ask, ask_size, ask_timestamp_ms) = best_ask?;
+    valid_bid_ask(bid, ask)?;
+    Some(CexBookSample {
+        venue: CexVenue::Coinbase,
+        asset: asset.to_ascii_lowercase(),
+        timestamp_ms: bid_timestamp_ms.max(ask_timestamp_ms),
+        bid,
+        ask,
+        bid_size: Some(bid_size),
+        ask_size: Some(ask_size),
+        source: "level2",
     })
 }
 
@@ -160,7 +217,7 @@ pub(crate) fn parse_coinbase_level2_update(
     let side = payload.get("side")?.as_str()?.trim().to_ascii_lowercase();
     let price = parse_f64(payload.get("price_level").or_else(|| payload.get("price")))?;
     let size = parse_f64(payload.get("new_quantity").or_else(|| payload.get("size")))?;
-    if price <= 0.0 || size < 0.0 {
+    if price <= 0.0 || size <= 0.0 {
         return None;
     }
     let timestamp_ms = payload
@@ -219,6 +276,85 @@ mod tests {
         .expect("trade");
 
         assert_eq!(trade.taker_side, TakerSide::Sell);
+    }
+
+    #[test]
+    fn coinbase_product_supports_bnb_hype_and_doge() {
+        assert_eq!(coinbase_product_id("doge"), Some("DOGE-USD"));
+        assert_eq!(coinbase_product_id("dogecoin"), Some("DOGE-USD"));
+        assert_eq!(coinbase_product_id("bnb"), Some("BNB-USD"));
+        assert_eq!(coinbase_product_id("hype"), Some("HYPE-USD"));
+    }
+
+    #[test]
+    fn coinbase_ticker_parses_quantity_aliases() {
+        let book = parse_coinbase_ticker(
+            &json!({
+                "best_bid": "63570.29",
+                "best_ask": "63570.30",
+                "best_bid_quantity": "1.06010393",
+                "best_ask_quantity": "0.0019254"
+            }),
+            "btc",
+            1_000,
+        )
+        .expect("ticker book");
+
+        assert_eq!(book.bid_size, Some(1.06010393));
+        assert_eq!(book.ask_size, Some(0.0019254));
+        assert_eq!(book.timestamp_ms, 1_000);
+    }
+
+    #[test]
+    fn coinbase_l2_data_snapshot_builds_one_complete_book() {
+        let parsed = parse_coinbase_ws_payload(
+            &json!({
+                "channel": "l2_data",
+                "events": [{
+                    "type": "snapshot",
+                    "updates": [
+                        {"side":"bid","event_time":"2026-06-11T23:45:12.78969Z","price_level":"63570.29","new_quantity":"1.0"},
+                        {"side":"bid","event_time":"2026-06-11T23:45:12.78969Z","price_level":"63569.99","new_quantity":"3.0"},
+                        {"side":"offer","event_time":"2026-06-11T23:45:12.78969Z","price_level":"63570.31","new_quantity":"2.0"},
+                        {"side":"offer","event_time":"2026-06-11T23:45:12.78969Z","price_level":"63570.30","new_quantity":"4.0"}
+                    ]
+                }]
+            }),
+            "btc",
+            1_000,
+        );
+
+        assert_eq!(parsed.books.len(), 1);
+        let book = &parsed.books[0];
+        assert_eq!(book.bid, 63570.29);
+        assert_eq!(book.ask, 63570.30);
+        assert_eq!(book.bid_size, Some(1.0));
+        assert_eq!(book.ask_size, Some(4.0));
+        assert_eq!(book.source, "level2");
+    }
+
+    #[test]
+    fn coinbase_l2_data_update_keeps_partial_update_shape() {
+        let parsed = parse_coinbase_ws_payload(
+            &json!({
+                "channel": "l2_data",
+                "events": [{
+                    "type": "update",
+                    "updates": [
+                        {"side":"bid","event_time":"2026-06-11T23:45:12.78969Z","price_level":"63570.29","new_quantity":"1.0"}
+                    ]
+                }]
+            }),
+            "btc",
+            1_000,
+        );
+
+        assert_eq!(parsed.books.len(), 1);
+        let book = &parsed.books[0];
+        assert_eq!(book.bid, 63570.29);
+        assert_eq!(book.ask, 63570.29);
+        assert!(book.bid_size.is_some());
+        assert!(book.ask_size.is_none());
     }
 
     #[test]

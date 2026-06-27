@@ -1,12 +1,12 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Context, Result};
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use bot_core::{
-    DefaultRiskPolicy, DualSideStrategy, ExecutionMode, LegSide, MarketCycleId,
+    can_transition, DefaultRiskPolicy, DualSideStrategy, ExecutionMode, LegSide, MarketCycleId,
     PriceThresholdStrategy, RiskDecision, RiskInput, RiskLimits, RiskPolicy, Strategy,
-    SymmetricDualDcaStrategy, TradeState, can_transition,
+    SymmetricDualDcaStrategy, TradeState,
 };
 use bot_infra::claim::AutoClaimService;
 use bot_infra::config::{AppConfig, TelegramConfig};
@@ -14,21 +14,21 @@ use bot_infra::contracts::{OrderExecutor, StateRepository};
 use bot_infra::db::{
     ActiveTradeFlowRunOrderPeer, NoReversalAdverseProfileDiagnostics,
     NoReversalAdverseProfileInput, NoReversalAdverseProfileKey,
-    PendingTradeBuilderFirstVisibleInventoryObservation, PostgresRepository,
-    TradeBuilderExchangeFillSummary, TradeBuilderInventoryObservationInput,
+    PendingTradeBuilderFirstVisibleInventoryObservation, PositiveQuantityFlipGridBuyExecutionLock,
+    PostgresRepository, TradeBuilderExchangeFillSummary, TradeBuilderInventoryObservationInput,
     TradeBuilderMarketSecondSnapshot, TradeBuilderOrder, TradeBuilderOrderEventRecord,
     TradeBuilderPairSession, TradeBuilderParentPosition, TradeBuilderParentPositionInput,
     TradeBuilderParentPositionSeed, TradeBuilderPositiveQuantityFlipGridActiveBuy,
-    PositiveQuantityFlipGridBuyExecutionLock,
-    TradeBuilderPriceExitRule, TradeBuilderRevengeFlipFillInput,
-    TradeBuilderRevengeFlipState, TradeBuilderTimeExitRule, TradeBuilderWorkflow,
-    TradeBuilderWorkflowLeg, TradeFlowAutoScopeAnalysisRowInput,
-    TradeFlowAutoScopeTradeDiagnosticInput, TradeFlowDefinitionRuntime, TradeFlowEventRecord,
-    TradeFlowRun, TradeFlowRunStep, TradeFlowVersionRuntime,
+    TradeBuilderPriceExitRule, TradeBuilderRevengeFlipFillInput, TradeBuilderRevengeFlipState,
+    TradeBuilderTimeExitRule, TradeBuilderWorkflow, TradeBuilderWorkflowLeg,
+    TradeFlowAutoScopeAnalysisRowInput, TradeFlowAutoScopeTradeDiagnosticInput,
+    TradeFlowDefinitionRuntime, TradeFlowEventRecord, TradeFlowRun, TradeFlowRunStep,
+    TradeFlowVersionRuntime,
 };
 use bot_infra::exchange::{
-    ClobHttpClient, ClobRestClient, DataApiActivity, FillInfo, GammaClient, GammaHttpClient,
-    GammaMarket, OrderBookSnapshot, OrderInfo, PlaceOrderRequest, PolymarketDataApiClient,
+    ClobHttpClient, ClobRestClient, DataApiActivity, FillInfo, FillPage, GammaClient,
+    GammaHttpClient, GammaMarket, OrderBookSnapshot, OrderInfo, PlaceOrderRequest,
+    PolymarketDataApiClient, TradeQuery,
 };
 use bot_infra::market_data::{MarketDataProvider, MockMarketDataProvider};
 use bot_infra::reconcile::reconcile_tick_and_snapshot;
@@ -42,7 +42,7 @@ use ethers::{
     signers::{LocalWallet, Signer as _},
     types::Address,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     env,
@@ -55,7 +55,7 @@ use std::{
 };
 use tokio::{
     sync::{Notify, RwLock},
-    time::{Duration, sleep},
+    time::{sleep, Duration},
 };
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -74,6 +74,10 @@ const FLOW_HOUSEKEEPING_INTERVAL_MS: u64 = 1_000;
 const FLOW_BOUNDARY_REFRESH_RETRY_MS: u64 = 1_000;
 const FLOW_WS_FAST_PATH_DEBOUNCE_MS: u64 = 1;
 const FLOW_RUNTIME_CACHE_TTL_SECS: u64 = 60;
+const FLOW_STALE_RUNNING_STEP_RECOVERY_INTERVAL_SECS: u64 = 60;
+const FLOW_STALE_RUNNING_STEP_RECOVERY_AGE_MS: i64 = 10 * 60 * 1_000;
+const TRADE_FLOW_EVENTS_RETENTION_DAYS: i64 = 3;
+const TRADE_FLOW_EVENTS_PRUNE_INTERVAL_SECS: u64 = 3_600;
 const TRADE_BUILDER_EXIT_QTY_TOLERANCE: f64 = 0.011;
 const TRADE_BUILDER_EXIT_TP_SLACK: f64 = 0.05;
 const TRADE_BUILDER_EXIT_TRIGGER_BUFFER: f64 = 0.05;
@@ -88,6 +92,8 @@ const TRADE_BUILDER_OBSERVATION_KIND_BASELINE: &str = "buy_inventory_baseline";
 const TRADE_BUILDER_OBSERVATION_KIND_SUBMIT: &str = "buy_submit_dynamic_qty";
 const TRADE_BUILDER_OBSERVATION_KIND_FILL: &str = "buy_fill_resolution";
 const TRADE_BUILDER_OBSERVATION_KIND_FIRST_VISIBLE: &str = "first_visible_inventory";
+const TRADE_BUILDER_OBSERVATION_KIND_FIRST_VISIBLE_TERMINAL_NOT_VISIBLE: &str =
+    "first_visible_inventory_terminal_not_visible";
 const DEFAULT_TRADE_BUILDER_FEE_RATE_BPS: u64 = 1000;
 const TRIGGER_PROTECTION_MODE_OFF: &str = "off";
 const TRIGGER_PROTECTION_MODE_UNDERLYING_CONFIRM: &str = "underlying_confirm";
@@ -149,7 +155,7 @@ const TRIGGER_MARKET_ONCE_SCOPE_VERSION_CURRENT: i64 = 2;
 const FLOW_STATE_PUBLISH_MARKER: &str = "__publish_marker";
 const BOT_RUNNER_LOCK_PATH_DEFAULT: &str = "/tmp/polymarketbot-bot-runner.lock";
 const BOT_RUNNER_DB_LOCK_KEY: i64 = 4_925_982_722_255_244_133;
-const SUPPORTED_UPDOWN_SCOPE_DEFS: [UpdownScopeDef; 8] = [
+const SUPPORTED_UPDOWN_SCOPE_DEFS: [UpdownScopeDef; 11] = [
     UpdownScopeDef {
         scope: "btc_5m_updown",
         asset: "btc",
@@ -197,5 +203,23 @@ const SUPPORTED_UPDOWN_SCOPE_DEFS: [UpdownScopeDef; 8] = [
         asset: "xrp",
         timeframe: "15m",
         slug_prefix: "xrp-updown-15m-",
+    },
+    UpdownScopeDef {
+        scope: "doge_5m_updown",
+        asset: "doge",
+        timeframe: "5m",
+        slug_prefix: "doge-updown-5m-",
+    },
+    UpdownScopeDef {
+        scope: "bnb_5m_updown",
+        asset: "bnb",
+        timeframe: "5m",
+        slug_prefix: "bnb-updown-5m-",
+    },
+    UpdownScopeDef {
+        scope: "hype_5m_updown",
+        asset: "hype",
+        timeframe: "5m",
+        slug_prefix: "hype-updown-5m-",
     },
 ];

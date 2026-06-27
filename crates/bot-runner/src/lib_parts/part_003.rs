@@ -535,6 +535,7 @@ pub(crate) enum LiveMarketSelectionReason {
     NearestFuture,
     LatestBySlugFallback,
     OverrideSlug,
+    TriggerNodeStateCache,
 }
 
 impl LiveMarketSelectionReason {
@@ -544,6 +545,7 @@ impl LiveMarketSelectionReason {
             Self::NearestFuture => "nearest_future",
             Self::LatestBySlugFallback => "latest_by_slug_fallback",
             Self::OverrideSlug => "override_slug",
+            Self::TriggerNodeStateCache => "trigger_node_state_cache",
         }
     }
 }

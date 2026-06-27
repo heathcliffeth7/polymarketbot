@@ -51,6 +51,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         snapshot_rx,
     ));
     tokio::spawn(run_market_trade_volume_recorder(repo.clone(), volume_rx));
+    tokio::spawn(run_trade_flow_events_prune_task(repo.clone()));
     ws.set_tick_callback(build_market_second_snapshot_callback(snapshot_tx))
         .await;
     ws.set_trade_callback(build_market_trade_volume_callback(volume_tx))
@@ -61,7 +62,11 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
 
     let mut waiting_event_emitted = false;
     let selected = loop {
-        if let Err(e) = process_trade_builder_orders(repo, run_id, cfg, &client, &ws).await {
+        let mut builder_order_timing =
+            crate::trade_builder_order_housekeeping_timing::TradeBuilderOrderHousekeepingTimingStats::default();
+        if let Err(e) =
+            process_trade_builder_orders(repo, run_id, cfg, &client, &ws, &mut builder_order_timing).await
+        {
             warn!(run_id, error = %e, "TRADE_BUILDER_PROCESS_FAILED");
         }
         if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await {
@@ -71,6 +76,8 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         {
             warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
         }
+        let mut flow_timing =
+            crate::trade_flow::housekeeping_timing::FlowHousekeepingTimingStats::default();
         if let Err(e) = process_trade_flows(
             repo,
             run_id,
@@ -79,6 +86,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
             &ws,
             &mut flow_runtime_caches,
             &mut auto_claim_runtimes,
+            &mut flow_timing,
         )
         .await
         {
@@ -396,7 +404,11 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
     let mut flow_runtime_caches = FlowRuntimeCaches::default();
 
     for iter in 0..120u32 {
-        if let Err(e) = process_trade_builder_orders(repo, run_id, cfg, &client, &ws).await {
+        let mut builder_order_timing =
+            crate::trade_builder_order_housekeeping_timing::TradeBuilderOrderHousekeepingTimingStats::default();
+        if let Err(e) =
+            process_trade_builder_orders(repo, run_id, cfg, &client, &ws, &mut builder_order_timing).await
+        {
             warn!(run_id, error = %e, "TRADE_BUILDER_PROCESS_FAILED");
         }
         if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await {
@@ -406,6 +418,8 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         {
             warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
         }
+        let mut flow_timing =
+            crate::trade_flow::housekeeping_timing::FlowHousekeepingTimingStats::default();
         if let Err(e) = process_trade_flows(
             repo,
             run_id,
@@ -414,6 +428,7 @@ async fn run_live_dual_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
             &ws,
             &mut flow_runtime_caches,
             &mut auto_claim_runtimes,
+            &mut flow_timing,
         )
         .await
         {

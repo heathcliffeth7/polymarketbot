@@ -115,37 +115,32 @@ export function useDraftSaveQueue({
       payload: DraftPersistPayload,
       { errorMessage, revision, surfaceError = false }: QueueDraftSaveOptions
     ) => {
-      setSaveStatus('pending');
-      setAutoSaveError(null);
+      const isCurrentRevision = () =>
+        selectedDefinitionIdRef.current === definitionId && revisionRef.current === revision;
+      if (isCurrentRevision()) {
+        setSaveStatus('pending');
+        setAutoSaveError(null);
+      }
       return draftSaveQueueRef.current.enqueue({
         run: async () => patchDraft(definitionId, payload),
         onSuccess: (updatedDetail, meta) => {
-          if (
-            !meta.hasPending &&
-            selectedDefinitionIdRef.current === definitionId &&
-            revisionRef.current === revision
-          ) {
+          const isCurrent = isCurrentRevision();
+          if (!meta.hasPending && isCurrent) {
             acknowledgeSuccessRef.current(updatedDetail);
           }
-          if (!meta.hasPending) {
+          if (!meta.hasPending && isCurrent) {
             setSaveStatus('idle');
             setAutoSaveError(null);
           }
         },
         onError: (err) => {
-          setSaveStatus('error');
           const reason = formatClientRequestError(err, errorMessage);
-          if (
-            selectedDefinitionIdRef.current === definitionId &&
-            revisionRef.current === revision
-          ) {
+          const isCurrent = isCurrentRevision();
+          if (isCurrent) {
+            setSaveStatus('error');
             setAutoSaveError(reason);
           }
-          if (
-            surfaceError &&
-            selectedDefinitionIdRef.current === definitionId &&
-            revisionRef.current === revision
-          ) {
+          if (surfaceError && isCurrent) {
             setError(reason);
           }
         },

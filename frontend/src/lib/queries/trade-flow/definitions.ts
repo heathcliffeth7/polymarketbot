@@ -127,6 +127,21 @@ function mapEventRow(row: Record<string, unknown>): TradeFlowEvent {
 
 const FLOW_STOP_REASON = 'flow_stopped_by_user';
 const FLOW_DELETE_REASON = 'definition_deleted';
+const FLOW_DRAFT_REASON = 'flow_drafted_by_user';
+
+export interface DraftPublishedTradeFlowResult {
+  definitionId: number;
+  previousStatus: 'published';
+  nextStatus: 'draft';
+  canceledRunCount: number;
+  canceledDualDcaJobCount: number;
+  canceledBuilderOrderCount: number;
+}
+
+export interface DraftAllPublishedTradeFlowDefinitionsResult {
+  draftedCount: number;
+  results: DraftPublishedTradeFlowResult[];
+}
 
 function formatTelemetryDuration(startedAt: number, endedAt: number): string {
   if (startedAt <= 0 || endedAt <= 0 || endedAt < startedAt) return 'na';
@@ -829,7 +844,7 @@ export async function stopTradeFlowDefinition(
 
     await client.query(
       `UPDATE trade_flow_definitions
-       SET status = 'draft',
+       SET status = 'stopped',
            updated_at = NOW()
        WHERE id = $1
          AND user_id = $2`,
@@ -856,6 +871,95 @@ export async function stopTradeFlowDefinition(
 
     await client.query('COMMIT');
     return (await fetchDefinitionDetailById(client, userId, definitionId)) as TradeFlowDefinitionDetail;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function draftAllPublishedTradeFlowDefinitions(
+  userId: number
+): Promise<DraftAllPublishedTradeFlowDefinitionsResult> {
+  const client = await pool.connect();
+  const results: DraftPublishedTradeFlowResult[] = [];
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL lock_timeout = '5s'");
+
+    const idRes = await client.query(
+      `SELECT id
+       FROM trade_flow_definitions
+       WHERE user_id = $1
+         AND status = 'published'
+       ORDER BY id`,
+      [userId]
+    );
+
+    const eventTimestamp = new Date().toISOString();
+    for (const row of idRes.rows) {
+      const definitionId = Number(row.id);
+      await acquireTradeFlowDefinitionMutationLock(client, definitionId);
+
+      const defRes = await client.query(
+        `SELECT *
+         FROM trade_flow_definitions
+         WHERE id = $1
+           AND user_id = $2
+         LIMIT 1
+         FOR UPDATE`,
+        [definitionId, userId]
+      );
+      if ((defRes.rowCount ?? 0) === 0) continue;
+
+      const definition = defRes.rows[0] as Record<string, unknown>;
+      if (String(definition.status || '') !== 'published') continue;
+
+      const publishedVersionId =
+        definition.published_version_id == null ? null : Number(definition.published_version_id);
+      const cancelResult = await cancelFlowResources(client, userId, definitionId, FLOW_DRAFT_REASON);
+      await recordCancellationEvents(client, definitionId, cancelResult, FLOW_DRAFT_REASON, eventTimestamp);
+
+      await client.query(
+        `UPDATE trade_flow_definitions
+         SET status = 'draft',
+             updated_at = NOW()
+         WHERE id = $1
+           AND user_id = $2`,
+        [definitionId, userId]
+      );
+
+      await client.query(
+        `INSERT INTO trade_flow_events
+          (run_id, definition_id, version_id, event_type, payload_json, created_at)
+         VALUES
+          (NULL, $1, $2, 'flow_drafted_by_user', $3::jsonb, NOW())`,
+        [
+          definitionId,
+          publishedVersionId,
+          JSON.stringify({
+            reason: FLOW_DRAFT_REASON,
+            draftedAt: eventTimestamp,
+            canceledRunCount: cancelResult.affectedRuns.length,
+            canceledDualDcaJobCount: cancelResult.canceledDualDcaJobIds.length,
+            canceledBuilderOrderCount: cancelResult.canceledOrderRows.length,
+          }),
+        ]
+      );
+
+      results.push({
+        definitionId,
+        previousStatus: 'published',
+        nextStatus: 'draft',
+        canceledRunCount: cancelResult.affectedRuns.length,
+        canceledDualDcaJobCount: cancelResult.canceledDualDcaJobIds.length,
+        canceledBuilderOrderCount: cancelResult.canceledOrderRows.length,
+      });
+    }
+
+    await client.query('COMMIT');
+    return { draftedCount: results.length, results };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

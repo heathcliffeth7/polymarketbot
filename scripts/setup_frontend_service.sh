@@ -102,7 +102,7 @@ ensure_frontend_build_permissions() {
     fail "Frontend build output not found at $build_dir"
   fi
 
-  sudo chgrp -R dextrabot "$build_dir"
+  sudo chown -R dextrabot:dextrabot "$build_dir"
   sudo find "$build_dir" -type d -exec chmod 750 {} +
   sudo find "$build_dir" -type f -exec chmod 640 {} +
 }

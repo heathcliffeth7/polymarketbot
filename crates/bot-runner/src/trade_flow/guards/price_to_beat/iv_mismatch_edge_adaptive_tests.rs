@@ -30,6 +30,8 @@ fn market(best_bid: f64, best_ask: f64) -> PriceToBeatSignalFormulaMarketInput {
 
 fn adaptive_config(best_bid: f64, best_ask: f64) -> PriceToBeatIvMismatchEdgeConfig {
     let mut config = PriceToBeatIvMismatchEdgeConfig::crypto_defaults(market(best_bid, best_ask));
+    config.cex_open_gap.decision_gap_enabled = false;
+    config.oracle_tick_jump.enabled = false;
     config.time_rules = vec![PriceToBeatIvMismatchTimeRule {
         start_remaining_secs: 120.0,
         end_remaining_secs: 10.0,

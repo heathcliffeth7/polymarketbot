@@ -12,12 +12,28 @@ export type TemplateKind =
   | 'position_monitor'
   | 'multi_leg_hedge'
   | 'revenge_flip_10_80'
+  | 'confidence_ladder_hedge_lock'
+  | 'avg_rebound_pairlock_rescue_50usdc'
+  | 'avg_rebound_pairlock_rescue_micro_20usdc'
   | 'pairlock_hyperliquid_70_80'
   | 'positive_quantity_flip_grid_1usdc'
   | 'positive_quantity_flip_grid_inventory_balance'
   | 'positive_flip_pairlock_compression';
 
 export type DraftSaveStatus = 'idle' | 'pending' | 'error';
+export type DefinitionSwitchPhase = 'saving_current' | 'loading_detail';
+
+export interface DefinitionSwitchState {
+  targetId: number;
+  phase: DefinitionSwitchPhase;
+  startedAt: number;
+}
+
+export interface DraftSwitchRecovery {
+  currentDefinitionId: number;
+  targetDefinitionId: number;
+  message: string;
+}
 
 export interface FlowEnginePanelProps {
   defaultMarketSlug: string | null;
@@ -45,6 +61,8 @@ export interface FlowEngineControllerState {
   message: string | null;
   error: string | null;
   autoSaveError: string | null;
+  definitionSwitchState: DefinitionSwitchState | null;
+  draftSwitchRecovery: DraftSwitchRecovery | null;
   stoppingFlow: boolean;
   isActionBusy: boolean;
   isEditorReadOnly: boolean;
@@ -79,7 +97,8 @@ export interface FlowEngineControllerActions {
   setContextTab: (tab: 'basic' | 'advanced') => void;
   setHasPendingCanvasNodeDraft: (hasPending: boolean) => void;
   setError: (message: string | null) => void;
-  requestDefinitionSwitch: (definitionId: number) => Promise<boolean>;
+  requestDefinitionSwitch: (definitionId: number, options?: { skipDraftSave?: boolean }) => Promise<boolean>;
+  skipDraftSaveAndSwitch: () => Promise<boolean>;
   createFromTemplate: (kind: TemplateKind) => Promise<void>;
   saveDraft: () => Promise<void>;
   validateGraph: () => Promise<void>;

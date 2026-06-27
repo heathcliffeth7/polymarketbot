@@ -6,13 +6,24 @@ import { isPresetBuySellPlaceOrderMarker, isPresetPlaceOrderMarker, normalizeRes
 import { buildTriggerMarketEntryTimingProfiles, parseTriggerMarketEntryTimingProfileRows } from './entry-timing-profiles';
 import { applyPairLockFormDefaults, normalizePairLockBuildConfig, normalizePairLockStopLossBuildConfig, normalizePairLockTakeProfitBuildConfig, PAIR_LOCK_CONFIG_KEYS } from './pair-lock';
 import { applyPtbStopLossBumpFormDefaults, normalizePrimaryPriceToBeatGuardBuildConfig, parsePtbStopLossBumpLossRuleRows } from './ptb-stop-loss-bump';
-import { normalizePtbIvTimeRuleBuildConfig, parsePtbIvTimeRuleRows } from './ptb-iv-time-rules';
+import { clearPtbIvTimeRuleBuildConfig, copyPtbIvConfigFields, normalizePtbIvTimeRuleBuildConfig, parsePtbIvTimeRuleRows } from './ptb-iv-time-rules';
 import { applyPtbStopLossFormDefaults, buildPtbStopLossRules, normalizePtbStopLossGapUnit, parsePtbStopLossRuleRows, shouldEnablePtbStopLossFromConfig } from './ptb-stop-loss';
 import { normalizeTriggerMarketPriceCycleWindowConfig, readTriggerMarketPriceCycleWindowFields } from './cycle-window';
 import { applyLiveGapCollectorFormDefaults, normalizeLiveGapCollectorBuildConfig } from './live-gap-collector';
 import { applyAutoTuneFormDefaults, normalizeAutoTuneBuildConfig } from './auto-tune';
 import { applyPositiveQuantityFlipGridFormDefaults, normalizePositiveQuantityFlipGridBuildConfig } from './positive-quantity-flip-grid';
 import { applyRevengeFlipFormDefaults, normalizeRevengeFlipBuildConfig, REVENGE_FLIP_BINDING_MODE } from './revenge-flip';
+import {
+  applyConfidenceLadderFormDefaults,
+  CONFIDENCE_LADDER_BINDING_MODE,
+  normalizeConfidenceLadderBuildConfig,
+} from './confidence-ladder';
+import {
+  applyAvgReboundPairlockRescueFormDefaults,
+  AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE,
+  normalizeAvgReboundPairlockRescueBuildConfig,
+} from './avg-rebound-pairlock-rescue';
+import { applyCexEntryConsensusFormDefaults } from './cex-entry-consensus';
 import { TRIGGER_MARKET_ONCE_SCOPE_VERSION } from './constants';
 import { normalizeOptionalPtbStopLossCurrentPriceSource, normalizeOptionalPtbStopLossCurrentPriceSourceConfig, normalizePtbCurrentPriceSource, normalizePtbMode } from './ptb-modes';
 import type { DrawdownRuleRow, EntryTimingProfileRow, ExitLadderRuleRow, NodeConfigFormState, OutcomeConditionRow, PtbIvTimeRuleRow, PtbStopLossBumpLossRuleRow, PtbStopLossRuleRow, TimeExitRuleRow } from './types';
@@ -71,6 +82,8 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
   if (nodeType === 'action.place_order') {
     applyPositiveQuantityFlipGridFormDefaults(fields, cfg);
     applyRevengeFlipFormDefaults(fields, cfg);
+    applyConfidenceLadderFormDefaults(fields, cfg);
+    applyAvgReboundPairlockRescueFormDefaults(fields, cfg);
     if (Array.isArray(cfg.manualSlugs)) {
       fields.manualSlugs = safeJsonStringify(cfg.manualSlugs);
     }
@@ -101,6 +114,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     if ((fields.priceToBeatGuardEnabled ?? '').trim().toLowerCase() === 'true') {
       fields.priceToBeatMode = normalizePtbMode(fields.priceToBeatMode);
       fields.priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(fields.priceToBeatCurrentPriceSource);
+      applyCexEntryConsensusFormDefaults(fields);
     }
     if ((fields.cexDirectionGuardEnabled ?? '').trim().toLowerCase() === 'true') {
       if (!(fields.cexDirectionGuardMode ?? '').trim()) {
@@ -183,6 +197,7 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
     applyPairLockFormDefaults(fields, cfg);
     applyAutoTuneFormDefaults(fields, cfg);
     applyPtbStopLossFormDefaults(fields, cfg);
+    copyPtbIvConfigFields(fields, cfg);
     ptbIvTimeRuleRows.push(...parsePtbIvTimeRuleRows(cfg));
     ptbStopLossBumpLossRuleRows.push(...parsePtbStopLossBumpLossRuleRows(cfg));
     applyPtbStopLossBumpFormDefaults(fields, cfg, ptbStopLossBumpLossRuleRows);
@@ -401,7 +416,9 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
       bindingModeRaw === 'pair_lock_only' ||
       bindingModeRaw === 'dca_live_only' ||
       bindingModeRaw === 'positive_quantity_flip_grid_only' ||
-      bindingModeRaw === REVENGE_FLIP_BINDING_MODE
+      bindingModeRaw === REVENGE_FLIP_BINDING_MODE ||
+      bindingModeRaw === CONFIDENCE_LADDER_BINDING_MODE ||
+      bindingModeRaw === AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE
         ? bindingModeRaw
         : 'standard';
 
@@ -440,7 +457,9 @@ export function parseNodeConfigToForm(nodeType: string, config: unknown): NodeCo
         toStringValue(cfg.bindingMode).trim().toLowerCase() === 'pair_lock_only' ||
         toStringValue(cfg.bindingMode).trim().toLowerCase() === 'dca_live_only' ||
         toStringValue(cfg.bindingMode).trim().toLowerCase() === 'positive_quantity_flip_grid_only' ||
-        toStringValue(cfg.bindingMode).trim().toLowerCase() === REVENGE_FLIP_BINDING_MODE
+        toStringValue(cfg.bindingMode).trim().toLowerCase() === REVENGE_FLIP_BINDING_MODE ||
+        toStringValue(cfg.bindingMode).trim().toLowerCase() === CONFIDENCE_LADDER_BINDING_MODE ||
+        toStringValue(cfg.bindingMode).trim().toLowerCase() === AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE
       );
     if (Array.isArray(cfg.outcomeConditions) && !pairLockOnlyTrigger) {
       for (const item of cfg.outcomeConditions as Record<string, unknown>[]) {
@@ -665,6 +684,8 @@ export function buildNodeConfigFromForm(
     const liveGapCollectorMode = normalizeLiveGapCollectorBuildConfig(config);
     const positiveGridMode = normalizePositiveQuantityFlipGridBuildConfig(config, form.fields);
     const revengeFlipMode = normalizeRevengeFlipBuildConfig(config, form.fields);
+    const confidenceLadderMode = normalizeConfidenceLadderBuildConfig(config, form.fields);
+    const avgReboundPairlockRescueMode = normalizeAvgReboundPairlockRescueBuildConfig(config, form.fields);
     const sideRaw = toStringValue(config.side).trim().toLowerCase();
     const isBuySide = sideRaw === 'buy';
     if (dcaLiveMode) {
@@ -757,7 +778,7 @@ export function buildNodeConfigFromForm(
       }
       normalizePairLockTakeProfitBuildConfig(config);
     } else {
-      if (!dcaLiveMode && !liveGapCollectorMode && !positiveGridMode && !revengeFlipMode) {
+      if (!dcaLiveMode && !liveGapCollectorMode && !positiveGridMode && !revengeFlipMode && !confidenceLadderMode && !avgReboundPairlockRescueMode) {
         delete config.mode;
       }
       for (const key of PAIR_LOCK_CONFIG_KEYS) delete config[key];
@@ -812,68 +833,7 @@ export function buildNodeConfigFromForm(
       delete config.priceToBeatMaxPriceRelaxStepMode;
       delete config.priceToBeatMaxPriceRelaxStepValue;
       delete config.priceToBeatMaxPriceRelaxStepUnit;
-      delete config.priceToBeatIvTimeRules;
-      delete config.priceToBeatIvStalePenaltyMs;
-      delete config.priceToBeatIvStaleGapStrengthPenaltyMs;
-      delete config.priceToBeatIvStaleGapStrengthPenalty;
-      delete config.priceToBeatIvNegativeVelocityGapStrengthPenalty;
-      delete config.priceToBeatIvBinanceMissingAskThresholdCent;
-      delete config.priceToBeatIvBinanceMissingPenalty;
-      delete config.priceToBeatIvMinAdjustedMargin;
-      delete config.priceToBeatIvMinFinalQ;
-      delete config.priceToBeatIvBinanceDisagreementThreshold;
-      delete config.priceToBeatIvBinanceDisagreementPenalty;
-      delete config.priceToBeatIvLargeBinanceDisagreementThreshold;
-      delete config.priceToBeatIvLargeBinanceDisagreementPenalty;
-      delete config.priceToBeatIvProtectionMode;
-      delete config.priceToBeatIvBookLeadGuardEnabled;
-      delete config.priceToBeatIvBookLeadUnderSec;
-      delete config.priceToBeatIvBookLeadMinMidDiff;
-      delete config.priceToBeatIvOppositeMidBlockCent;
-      delete config.priceToBeatIvBlockOnOppositeBookLead;
-      delete config.priceToBeatIvTooGoodToBeTrueGap;
-      delete config.priceToBeatIvModelBookGapWarn;
-      delete config.priceToBeatIvModelBookGapHard;
-      delete config.priceToBeatIvModelBookWarnThresholdPenalty;
-      delete config.priceToBeatIvModelBookWarnGapPenalty;
-      delete config.priceToBeatIvDepthGuardEnabled;
-      delete config.priceToBeatIvDepthMaxSlippage;
-      delete config.priceToBeatIvLateUnconfirmedUnderSec;
-      delete config.priceToBeatIvLateUnconfirmedMinSelectedMid;
-      delete config.priceToBeatIvLateUnconfirmedMinQ;
-      delete config.priceToBeatIvLateHighPriceSoftUnderSec;
-      delete config.priceToBeatIvLateHighPriceAskCent;
-      delete config.priceToBeatIvLateHighPriceSelectedMidSoftCent;
-      delete config.priceToBeatIvLateHighPriceThresholdPenalty;
-      delete config.priceToBeatIvLateHighPriceSelectedMidHardCent;
-      delete config.priceToBeatIvLateHighPriceMinGapUsd;
-      delete config.priceToBeatIvParticipationCreditEnabled;
-      delete config.priceToBeatIvParticipationAfterMinutes;
-      delete config.priceToBeatIvParticipationLongAfterMinutes;
-      delete config.priceToBeatIvParticipationCredit;
-      delete config.priceToBeatIvParticipationLongCredit;
-      delete config.priceToBeatIvParticipationMinThreshold;
-      delete config.priceToBeatIvRequireBinanceFreshUnderSec;
-      delete config.priceToBeatIvBinanceMaxStaleMs;
-      delete config.priceToBeatIvRequireBinanceSameDirection;
-      delete config.priceToBeatIvMomentumProtectionEnabled;
-      delete config.priceToBeatIvDropZBlockThreshold;
-      delete config.priceToBeatIvProtectionSoftThresholdPenalty;
-      delete config.priceToBeatIvProtectionSoftGapStrengthPenalty;
-      delete config.priceToBeatIvVolumeBaselineMode;
-      delete config.priceToBeatIvVolumeBaselineLookbackDays;
-      delete config.priceToBeatIvVolumeWindowSec;
-      delete config.priceToBeatIvVolumeBaselineMinSamples;
-      delete config.priceToBeatIvLowHourlyVolumeRatio;
-      delete config.priceToBeatIvHighHourlyVolumeRatio;
-      delete config.priceToBeatIvExtremeHourlyVolumeRatio;
-      delete config.priceToBeatIvBookReliabilityThreshold;
-      delete config.priceToBeatIvAdaptiveGreenEdgeDelta;
-      delete config.priceToBeatIvAdaptiveGreenGapStrengthDelta;
-      delete config.priceToBeatIvAdaptiveOrangeEdgeDelta;
-      delete config.priceToBeatIvAdaptiveOrangeGapStrengthDelta;
-      delete config.priceToBeatIvAdaptiveOrangeGapUsdMarginDelta;
-      delete config.priceToBeatIvAdaptiveRedBlock;
+      clearPtbIvTimeRuleBuildConfig(config);
       delete config.notifyOnTpHit;
       delete config.notifyOnSlHit;
       delete config.reenterOnSlHit;
@@ -905,7 +865,7 @@ export function buildNodeConfigFromForm(
         delete config.cexDirectionGuardMinMoveUsd;
         delete config.cexDirectionGuardFailClosed;
       } else {
-        config.cexDirectionGuardMode = 'bybit_plus_one';
+        config.cexDirectionGuardMode = toStringValue(form.fields.cexDirectionGuardMode).trim() || 'bybit_plus_one';
         if (config.cexDirectionGuardFailClosed == null) {
           config.cexDirectionGuardFailClosed = true;
         }
@@ -1264,7 +1224,9 @@ export function buildNodeConfigFromForm(
         toStringValue(config.bindingMode).trim().toLowerCase() === 'pair_lock_only' ||
         toStringValue(config.bindingMode).trim().toLowerCase() === 'dca_live_only' ||
         toStringValue(config.bindingMode).trim().toLowerCase() === 'positive_quantity_flip_grid_only' ||
-        toStringValue(config.bindingMode).trim().toLowerCase() === REVENGE_FLIP_BINDING_MODE
+        toStringValue(config.bindingMode).trim().toLowerCase() === REVENGE_FLIP_BINDING_MODE ||
+        toStringValue(config.bindingMode).trim().toLowerCase() === CONFIDENCE_LADDER_BINDING_MODE ||
+        toStringValue(config.bindingMode).trim().toLowerCase() === AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE
       ) {
         delete config.priceToBeatTriggerEnabled;
         delete config.priceToBeatMode;
@@ -1387,7 +1349,9 @@ export function buildNodeConfigFromForm(
         toStringValue(config.bindingMode).trim().toLowerCase() === 'pair_lock_only' ||
         toStringValue(config.bindingMode).trim().toLowerCase() === 'dca_live_only' ||
         toStringValue(config.bindingMode).trim().toLowerCase() === 'positive_quantity_flip_grid_only' ||
-        toStringValue(config.bindingMode).trim().toLowerCase() === REVENGE_FLIP_BINDING_MODE
+        toStringValue(config.bindingMode).trim().toLowerCase() === REVENGE_FLIP_BINDING_MODE ||
+        toStringValue(config.bindingMode).trim().toLowerCase() === CONFIDENCE_LADDER_BINDING_MODE ||
+        toStringValue(config.bindingMode).trim().toLowerCase() === AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE
       )
     )
   ) {

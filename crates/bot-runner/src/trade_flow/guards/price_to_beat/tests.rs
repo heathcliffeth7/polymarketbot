@@ -5,17 +5,22 @@ use super::notification::{
     build_price_to_beat_relax_changed_notification_message,
 };
 use super::notification_state::{
+    PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY, PriceToBeatGuardNotificationPhase,
     price_to_beat_guard_notification_phase, price_to_beat_guard_notification_seed_reason,
     price_to_beat_guard_waiting_state, set_price_to_beat_guard_notification_phase,
     set_price_to_beat_guard_notification_seed, set_price_to_beat_guard_waiting_state,
-    PriceToBeatGuardNotificationPhase, PRICE_TO_BEAT_GUARD_NOTIFICATION_SEED_KEY,
 };
 use super::*;
 
+mod entry_current_asset_auto;
+mod entry_current_hybrid;
+mod own_open_gap_entry_consensus;
 mod shared_eval;
 mod stop_loss_bump;
+mod wait_reprice_guard_tests;
 
 const BTC_MARKET_5M: &str = "btc-updown-5m-1774013100";
+const SOL_MARKET_5M: &str = "sol-updown-5m-1774013100";
 const SUPPORTED_ASSET_MARKETS: [(&str, &str); 4] = [
     ("btc", "btc-updown-5m-1774016400"),
     ("eth", "eth-updown-5m-1774016400"),
@@ -88,6 +93,7 @@ fn default_guard_evaluation() -> PriceToBeatGuardEvaluation {
         iv_mismatch_edge: None,
         early_stale_side: None,
         cex_direction_guard: None,
+        entry_current_source_debug: None,
     }
 }
 fn test_action_place_order_node(config: Value) -> crate::TradeFlowNode {
@@ -1378,7 +1384,8 @@ fn notification_phase_tracks_identity_and_phase() {
             "action_1",
             "btc-updown-5m-1773232500",
             "tok-up"
-        ),
+        )
+        .map(|entry| entry.phase),
         Some(PriceToBeatGuardNotificationPhase::BlockedNotified)
     );
 }
@@ -1413,4 +1420,59 @@ fn notification_phase_is_identity_scoped() {
         ),
         None
     );
+}
+
+#[test]
+fn notification_phase_entry_exposes_reason_code_for_dedup() {
+    let mut context = json!({});
+    set_price_to_beat_guard_notification_phase(
+        &mut context,
+        "action_1",
+        "btc-updown-5m-1773232500",
+        "tok-up",
+        PriceToBeatGuardNotificationPhase::BlockedNotified,
+        "price_to_beat_gap_below_threshold",
+    );
+
+    let entry = price_to_beat_guard_notification_phase(
+        &context,
+        "action_1",
+        "btc-updown-5m-1773232500",
+        "tok-up",
+    )
+    .expect("phase should be set");
+    assert_eq!(
+        entry.phase,
+        PriceToBeatGuardNotificationPhase::BlockedNotified
+    );
+    assert_eq!(entry.reason_code, "price_to_beat_gap_below_threshold");
+}
+
+#[test]
+fn notification_phase_dedup_returns_same_reason_until_changed() {
+    let mut context = json!({});
+    set_price_to_beat_guard_notification_phase(
+        &mut context,
+        "action_1",
+        "btc-updown-5m-1773232500",
+        "tok-up",
+        PriceToBeatGuardNotificationPhase::BlockedNotified,
+        "initial_ask_too_far",
+    );
+
+    let entry = price_to_beat_guard_notification_phase(
+        &context,
+        "action_1",
+        "btc-updown-5m-1773232500",
+        "tok-up",
+    )
+    .expect("phase should be set");
+
+    // Aynı reason_code geldiğinde dedup bildirimi engeller.
+    let same_reason = entry.reason_code == "initial_ask_too_far";
+    assert!(same_reason);
+
+    // Farklı reason_code (terminal wait-reprice) geldiğinde dedup bildirime izin verir.
+    let new_reason = entry.reason_code != "falling_into_cap";
+    assert!(new_reason);
 }

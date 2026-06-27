@@ -96,7 +96,7 @@ export function validateActionPlaceOrderPtbStopLossConfig(
       issues,
       node,
       'invalid_ptb_stop_loss_current_price_source',
-      'action.place_order ptbStopLossCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, binance_hyperliquid, or cex_consensus.'
+      'action.place_order ptbStopLossCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, binance_hyperliquid, cex_consensus, chainlink_cex_consensus, chainlink_cex_consensus_confirmed, or cex_median_fast.'
     );
   }
   if (ptbStopLossCurrentSourceRaw && !ptbStopLossActive) {

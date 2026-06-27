@@ -7,6 +7,14 @@ ENV_FILE="$ENV_DIR/dextrabot.env"
 UNIT_SRC="$ROOT_DIR/deploy/systemd/dextrabot.service"
 UNIT_DST="/etc/systemd/system/dextrabot.service"
 ENV_EXAMPLE="$ROOT_DIR/deploy/systemd/dextrabot.env.example"
+RETENTION_SERVICE_SRC="$ROOT_DIR/deploy/systemd/dextrabot-db-retention.service"
+RETENTION_SERVICE_DST="/etc/systemd/system/dextrabot-db-retention.service"
+RETENTION_TIMER_SRC="$ROOT_DIR/deploy/systemd/dextrabot-db-retention.timer"
+RETENTION_TIMER_DST="/etc/systemd/system/dextrabot-db-retention.timer"
+JOURNALD_SRC="$ROOT_DIR/deploy/systemd/journald-dextrabot.conf"
+JOURNALD_DST="/etc/systemd/journald.conf.d/dextrabot.conf"
+LOGROTATE_SRC="$ROOT_DIR/deploy/logrotate/rsyslog"
+LOGROTATE_DST="/etc/logrotate.d/rsyslog"
 
 step() { echo "[STEP] $*"; }
 ok() { echo "[OK] $*"; }
@@ -23,12 +31,29 @@ ensure_local_config_files() {
   done
 }
 
-install_unit_file() {
+install_template_file() {
+  local src="$1"
+  local dst="$2"
   local tmp_file
   tmp_file="$(mktemp)"
-  sed "s|__DEXTRABOT_ROOT__|$ROOT_DIR|g" "$UNIT_SRC" >"$tmp_file"
-  sudo cp "$tmp_file" "$UNIT_DST"
+  sed "s|__DEXTRABOT_ROOT__|$ROOT_DIR|g" "$src" >"$tmp_file"
+  sudo cp "$tmp_file" "$dst"
   rm -f "$tmp_file"
+}
+
+install_unit_file() {
+  install_template_file "$UNIT_SRC" "$UNIT_DST"
+}
+
+install_retention_units() {
+  install_template_file "$RETENTION_SERVICE_SRC" "$RETENTION_SERVICE_DST"
+  install_template_file "$RETENTION_TIMER_SRC" "$RETENTION_TIMER_DST"
+}
+
+install_log_retention_config() {
+  sudo mkdir -p "$(dirname "$JOURNALD_DST")"
+  sudo cp "$JOURNALD_SRC" "$JOURNALD_DST"
+  sudo cp "$LOGROTATE_SRC" "$LOGROTATE_DST"
 }
 
 command -v sudo >/dev/null 2>&1 || fail "sudo is required"
@@ -74,9 +99,15 @@ ok "System user ready"
 
 step "Ensure dextrabot can execute release binary"
 release_binary="$ROOT_DIR/target/release/bot-runner"
+sudo chgrp dextrabot "$release_binary"
+sudo chmod 750 "$release_binary"
 sudo setfacl -m u:dextrabot:--x "$(dirname "$ROOT_DIR")"
 sudo setfacl -m u:dextrabot:rx "$release_binary"
 ok "Release binary ACL ready"
+
+step "Ensure dextrabot can execute DB retention script"
+sudo chmod 755 "$ROOT_DIR/scripts/prune_high_volume_db_tables.sh"
+ok "DB retention script executable"
 
 step "Install environment file"
 sudo mkdir -p "$ENV_DIR"
@@ -99,15 +130,18 @@ step "Ensure dextrabot can write config directory"
 "$ROOT_DIR/scripts/ensure_config_permissions.sh" "$configured_bot_config_dir"
 ok "Config directory permissions ready at $configured_bot_config_dir"
 
-step "Install systemd service"
+step "Install systemd services"
 install_unit_file
+install_retention_units
+install_log_retention_config
 sudo systemctl daemon-reload
 sudo systemctl enable dextrabot
+sudo systemctl enable --now dextrabot-db-retention.timer
 sudo systemctl restart dextrabot
 if ! sudo systemctl is-active --quiet dextrabot; then
   fail "dextrabot service failed to start after restart"
 fi
-ok "dextrabot service enabled and restarted with latest binary"
+ok "dextrabot service and DB retention timer installed"
 
 step "Print service status"
 sudo systemctl --no-pager -l status dextrabot || true

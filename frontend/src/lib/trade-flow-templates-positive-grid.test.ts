@@ -4,6 +4,9 @@ import test from "node:test";
 import { normalizeTradeFlowGraph } from "@/lib/queries/trade-flow/graph";
 import { validateTradeFlowGraph } from "@/lib/queries/trade-flow/validation";
 import {
+  createAvgReboundPairlockRescueGraph,
+  createAvgReboundPairlockRescueMicro20Graph,
+  createConfidenceLadderHedgeLockGraph,
   createPositiveFlipPairlockCompressionGraph,
   createPositiveQuantityFlipGrid1UsdcGraph,
   createPositiveQuantityFlipGridInventoryBalanceGraph,
@@ -140,11 +143,56 @@ test("revenge flip 10/80 template creates draft-ready scoped graph", () => {
   assert.equal(trigger.marketScope, "btc_5m_updown");
   assert.equal(trigger.repeatMode, "loop");
   assert.equal(action.mode, "revenge_flip_v1");
+  assert.equal(action.priceToBeatMode, "iv_mismatch_edge");
   assert.equal(action.priceToBeatMinDiff, 10);
   assert.equal(action.priceToBeatMinDiffUnit, "usd");
   assert.equal(action.priceToBeatCurrentPriceSource, "chainlink");
+  assert.equal(action.cexDirectionGuardEnabled, true);
+  assert.equal(action.cexDirectionGuardMode, "bybit_plus_one");
+  assert.equal(action.cexDirectionGuardFailClosed, false);
+  assert.equal(action.priceToBeatIvEntryQualityPolicy, true);
+  assert.equal(action.priceToBeatIvNormalMaxPriceCent, 94);
+  assert.equal(action.priceToBeatIvPremiumMaxPriceCent, 96);
+  assert.equal(action.priceToBeatIvMinExpectedMoveBps, 2);
+  assert.equal(action.priceToBeatIvGapStrengthMin25To10, 1.9);
+  assert.equal(action.priceToBeatIvPremiumBufferRetain5s, 0.9);
+  assert.equal(action.priceToBeatIvSpikeMultiplier, 2.5);
+  assert.equal(action.priceToBeatIvCexAlignMaxBps, 5);
+  assert.equal(action.priceToBeatIvCexMagnitudeGuardEnabled, true);
+  assert.equal(action.priceToBeatIvCexMagnitudeShallowRatio, 0.5);
+  assert.equal(action.priceToBeatIvCexMagnitudeModerateRatio, 1);
+  assert.equal(action.priceToBeatIvLowQualityEdgeRecheckEnabled, true);
+  assert.equal(action.priceToBeatIvLowQualityGapMargin, 0.1);
+  assert.equal(action.priceToBeatIvPtbChopGuardEnabled, true);
+  assert.equal(action.priceToBeatIvPtbChopMaxGapStrengthPenalty, 0.35);
+  assert.equal(action.priceToBeatIvEntryQualityChainlinkMaxAgeMs, 2500);
+  assert.deepEqual(action.priceToBeatIvTimeRules, [
+    {
+      startRemainingSec: 45,
+      endRemainingSec: 30,
+      minEdge: 0.03,
+      minGapStrength: 0.5,
+      maxPriceCent: 92,
+    },
+    {
+      startRemainingSec: 30,
+      endRemainingSec: 15,
+      minEdge: 0.05,
+      minGapStrength: 0.75,
+      maxPriceCent: 92,
+    },
+    {
+      startRemainingSec: 15,
+      endRemainingSec: 8,
+      minEdge: 0.07,
+      minGapStrength: 1,
+      maxPriceCent: 92,
+    },
+  ]);
   assert.equal(revenge.reentrySideMode, "rule_match");
   assert.equal(revenge.minReentryShares, 5);
+  assert.equal(revenge.postStopLossIvMismatchEnabled, true);
+  assert.equal(revenge.closeOnlySec, 12);
   assert.deepEqual(entryRules, [
     {
       minFlip: 0,
@@ -152,15 +200,105 @@ test("revenge flip 10/80 template creates draft-ready scoped graph", () => {
       sideMode: "any",
       priceToBeatMinDiff: 10,
       priceToBeatMinDiffUnit: "usd",
-      maxPriceCent: 80,
+      maxPriceCent: 92,
     },
     {
       minFlip: 1,
       sideMode: "any",
-      priceToBeatMinDiff: 4,
-      priceToBeatMinDiffUnit: "cent",
+      priceToBeatMinDiff: 10,
+      priceToBeatMinDiffUnit: "usd",
+      maxPriceCent: 92,
     },
   ]);
+  assert.deepEqual(errorCodes(graph), []);
+});
+
+test("confidence ladder hedge lock template creates draft-ready BTC 5m graph", () => {
+  const graph = normalizeTradeFlowGraph(createConfidenceLadderHedgeLockGraph(null, null));
+  const trigger = nodeConfig(findNode(graph, "trigger_confidence_ladder"));
+  const action = nodeConfig(findNode(graph, "action_confidence_ladder"));
+  const ladder = action.confidenceLadder as Record<string, unknown>;
+
+  assert.equal(trigger.marketMode, "auto_scope");
+  assert.equal(trigger.marketScope, "btc_5m_updown");
+  assert.equal(trigger.bindingMode, "confidence_ladder_only");
+  assert.equal(action.mode, "confidence_ladder_hedge_lock_v1");
+  assert.equal(action.side, "buy");
+  assert.equal(action.executionMode, "market");
+  assert.equal(action.tpEnabled, false);
+  assert.equal(action.slEnabled, false);
+  assert.equal(ladder.profile, "aggressive_loss_capped");
+  assert.equal(ladder.baseProbeShares, 2);
+  assert.equal(ladder.maxLossPerMarketUsdc, 3);
+  assert.equal(ladder.hardNoChaseAbove, 0.93);
+  assert.deepEqual(errorCodes(graph), []);
+});
+
+test("avg rebound pairlock rescue template creates draft-ready BTC 5m graph", () => {
+  const graph = normalizeTradeFlowGraph(createAvgReboundPairlockRescueGraph(null, null));
+  const trigger = nodeConfig(findNode(graph, "trigger_avg_rebound"));
+  const action = nodeConfig(findNode(graph, "action_avg_rebound"));
+  const strategy = action.avgReboundPairlockRescue as Record<string, unknown>;
+
+  assert.equal(trigger.marketMode, "auto_scope");
+  assert.equal(trigger.marketScope, "btc_5m_updown");
+  assert.equal(trigger.bindingMode, "avg_rebound_pairlock_rescue_only");
+  assert.equal(trigger.repeatMode, "loop");
+  assert.equal(action.mode, "avg_rebound_pairlock_rescue_v1");
+  assert.equal(action.side, "buy");
+  assert.equal(action.executionMode, "limit");
+  assert.equal(action.orderType, "FOK");
+  assert.equal(action.tpEnabled, false);
+  assert.equal(action.slEnabled, false);
+  assert.equal(strategy.sessionBudgetUsdc, "50");
+  assert.equal(strategy.reservedBudgetBufferUsdc, "0.75");
+  assert.equal(strategy.extraVwapSafetyBuffer, "0.005");
+  assert.equal(strategy.primaryOutcomeLabel, "auto");
+  assert.equal(strategy.primarySideSelection, "cheapest_eligible");
+  assert.deepEqual(strategy.primaryLadder, [
+    { id: "p50", priceCap: "0.50", qty: "8" },
+    { id: "p30", priceCap: "0.30", qty: "15" },
+    { id: "p10", priceCap: "0.10", qty: "24" },
+  ]);
+  assert.deepEqual(errorCodes(graph), []);
+});
+
+test("avg rebound micro 23 template creates draft-ready BTC 5m graph", () => {
+  const graph = normalizeTradeFlowGraph(createAvgReboundPairlockRescueMicro20Graph(null, null));
+  const trigger = nodeConfig(findNode(graph, "trigger_avg_rebound"));
+  const action = nodeConfig(findNode(graph, "action_avg_rebound"));
+  const strategy = action.avgReboundPairlockRescue as Record<string, unknown>;
+  const rescue = strategy.rescue as Record<string, unknown>;
+  const stages = strategy.stages as Array<Record<string, unknown>>;
+
+  assert.equal(trigger.marketMode, "auto_scope");
+  assert.equal(trigger.marketScope, "btc_5m_updown");
+  assert.equal(trigger.bindingMode, "avg_rebound_pairlock_rescue_only");
+  assert.equal(action.mode, "avg_rebound_pairlock_rescue_v1");
+  assert.equal(action.side, "buy");
+  assert.equal(action.executionMode, "limit");
+  assert.equal(action.orderType, "FOK");
+  assert.equal(strategy.sessionBudgetUsdc, "23");
+  assert.equal(strategy.reservedBudgetBufferUsdc, "0.25");
+  assert.equal(strategy.extraVwapSafetyBuffer, "0.005");
+  assert.equal(strategy.targetProfitUsdc, "0.10");
+  assert.equal(strategy.primaryOutcomeLabel, "auto");
+  assert.equal(strategy.oppositeOutcomeLabel, "opposite");
+  assert.equal(strategy.primarySideSelection, "cheapest_eligible");
+  assert.deepEqual(strategy.primaryLadder, [
+    { id: "p50", priceCap: "0.50", qty: "4" },
+    { id: "p30", priceCap: "0.30", qty: "5" },
+    { id: "p10", priceCap: "0.10", qty: "10" },
+  ]);
+  assert.deepEqual((stages[2].profitLegs as unknown[])[0], {
+    id: "full_profit_10c",
+    oppositeVwapCap: "0.763",
+    qty: "19",
+  });
+  assert.equal(rescue.normalVwapCap, "0.770");
+  assert.equal(rescue.emergencyVwapCap, "0.800");
+  assert.equal(rescue.hardMaxVwapCap, "0.800");
+  assert.equal(rescue.lastChanceVwapCap, "0.850");
   assert.deepEqual(errorCodes(graph), []);
 });
 

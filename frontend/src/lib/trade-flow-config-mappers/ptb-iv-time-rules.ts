@@ -1,6 +1,6 @@
 import type { NodeConfigFormState, PtbIvTimeRuleRow } from './types';
 import { createEmptyPtbIvTimeRuleRow } from './drafts';
-import { isRecord, toCentStringValue, toStringValue } from './utils';
+import { isRecord, safeJsonStringify, toCentStringValue, toStringValue } from './utils';
 
 interface SerializedPtbIvTimeRule {
   startRemainingSec: number;
@@ -40,6 +40,10 @@ const REVENGE_FLIP_DEFAULT_IV_TIME_RULES: SerializedPtbIvTimeRule[] = [
 
 const PTB_IV_CONFIG_KEYS = [
   'priceToBeatIvTimeRules',
+  'priceToBeatIvPriceBandGuardEnabled',
+  'priceToBeatIvPriceBandSource',
+  'priceToBeatIvPriceBandCombineMode',
+  'priceToBeatIvPriceBands',
   'priceToBeatIvEntryQualityPolicy',
   'priceToBeatIvNormalMaxPriceCent',
   'priceToBeatIvPremiumMaxPriceCent',
@@ -70,6 +74,7 @@ const PTB_IV_CONFIG_KEYS = [
   'priceToBeatIvSpikeRetraceRatio',
   'priceToBeatIvPremiumMaxSpreadCent',
   'priceToBeatIvPremiumMaxChainlinkAgeMs',
+  'priceToBeatIvChainlinkStaleMs',
   'priceToBeatIvCexAlignMaxUsd',
   'priceToBeatIvCexAlignMaxBps',
   'priceToBeatIvCexOpenGapConsensusGuardEnabled',
@@ -77,8 +82,19 @@ const PTB_IV_CONFIG_KEYS = [
   'priceToBeatIvCexOpenGapMinZ',
   'priceToBeatIvCexOpenGapMaxStaleMs',
   'priceToBeatIvCexOpenGapApplyNegativeConservativeCap',
+  'priceToBeatIvCexMagnitudeGuardEnabled',
+  'priceToBeatIvCexMagnitudeShallowRatio',
+  'priceToBeatIvCexMagnitudeModerateRatio',
+  'priceToBeatIvChainlinkStaleStrongGapExceptionEnabled',
+  'priceToBeatIvChainlinkStaleStrongGapMinGapStrength',
+  'priceToBeatIvChainlinkStaleStrongGapMaxOracleAgeMs',
+  'priceToBeatIvChainlinkStaleStrongGapRequireCexConfirmed',
+  'priceToBeatIvChainlinkStaleStrongGapRequireBybitHit',
+  'priceToBeatIvChainlinkStaleStrongGapRequireSecondaryCex',
   'priceToBeatIvChainlinkCexLagGuardEnabled',
   'priceToBeatIvChainlinkCexDiffZBlock',
+  'priceToBeatIvOracleCexDivergenceBlockZ',
+  'priceToBeatIvOracleTickJumpCooldownMs',
   'priceToBeatIvChainlinkCexMaxDiffUsd',
   'priceToBeatIvChainlinkCexMaxDiffBps',
   'priceToBeatIvChainlinkCexBookMismatchDislocationCent',
@@ -104,6 +120,9 @@ const PTB_IV_CONFIG_KEYS = [
   'priceToBeatIvOddsMaxSpreadCent',
   'priceToBeatIvCexUnconfirmedRiskPoints',
   'priceToBeatIvCexConflictRiskPoints',
+  'priceToBeatIvLowQualityEdgeRecheckEnabled',
+  'priceToBeatIvLowQualityGapMargin',
+  'priceToBeatIvLowQualityEdgeMarginCent',
   'priceToBeatIvPassiveBidEnabled',
   'priceToBeatIvPassiveBidTtlMs',
   'priceToBeatIvWaitRepriceGuardEnabled',
@@ -175,6 +194,23 @@ const PTB_IV_CONFIG_KEYS = [
   'priceToBeatIvBinanceMissingAskThresholdCent',
   'priceToBeatIvBinanceMissingPenalty',
   'priceToBeatIvMinAdjustedMargin',
+  'priceToBeatIvMediumChopMinAdjMargin',
+  'priceToBeatIvMediumChopHighPriceMinAdjMargin',
+  'priceToBeatIvMediumChopHighPriceRefCent',
+  'priceToBeatIvMediumChopBinanceFailOpenMarginAdd',
+  'priceToBeatIvMediumChopStaleMs',
+  'priceToBeatIvMediumChopStaleMarginAdd',
+  'priceToBeatIvHighPriceEarlyReversalGuardEnabled',
+  'priceToBeatIvHighPriceEarlyRefCent',
+  'priceToBeatIvHighPriceEarlyRemainingSec',
+  'priceToBeatIvHighPriceEarlyMaxStaleMs',
+  'priceToBeatIvHighPriceEarlyStaleGapAdd',
+  'priceToBeatIvHighPriceEarlyBinanceMissingGapAdd',
+  'priceToBeatIvHighPriceEarlyQExtremeCent',
+  'priceToBeatIvHighPriceEarlyQExtremeMinGapStrength',
+  'priceToBeatIvHighPriceEarlyQExtremeMaxStaleMs',
+  'priceToBeatIvHighPriceEarlyQExtremeRequireBinanceQ',
+  'priceToBeatIvHighPriceEarlyQExtremeRequireCleanStrongCex',
   'priceToBeatIvMinFinalQ',
   'priceToBeatIvBinanceDisagreementThreshold',
   'priceToBeatIvBinanceDisagreementPenalty',
@@ -262,6 +298,10 @@ export function copyPtbIvConfigFields(
 ): void {
   for (const key of PTB_IV_CONFIG_KEYS) {
     if (key === 'priceToBeatIvTimeRules') continue;
+    if (key === 'priceToBeatIvPriceBands') {
+      if (Array.isArray(cfg[key])) fields[key] = safeJsonStringify(cfg[key]);
+      continue;
+    }
     if (cfg[key] != null) fields[key] = toStringValue(cfg[key]);
   }
 }
@@ -339,7 +379,7 @@ export function normalizePtbIvTimeRuleBuildConfig(
   }
 
   for (const key of PTB_IV_CONFIG_KEYS) {
-    if (key === 'priceToBeatIvTimeRules') continue;
+    if (key === 'priceToBeatIvTimeRules' || key === 'priceToBeatIvPriceBands') continue;
     const raw = toStringValue(form.fields[key]).trim();
     if (raw) config[key] = raw;
   }
@@ -354,6 +394,8 @@ export function normalizePtbIvTimeRuleBuildConfig(
   } else {
     delete config.priceToBeatIvTimeRules;
   }
+
+  normalizePriceBandGuardConfig(config, form);
 
   const staleMs = Number(toStringValue(config.priceToBeatIvStalePenaltyMs).trim());
   if (Number.isInteger(staleMs) && staleMs >= 0) {
@@ -401,6 +443,23 @@ export function normalizePtbIvTimeRuleBuildConfig(
   }
 
   normalizeOptionalProbability(config, 'priceToBeatIvMinAdjustedMargin', true);
+  normalizeOptionalProbability(config, 'priceToBeatIvMediumChopMinAdjMargin', true);
+  normalizeOptionalProbability(config, 'priceToBeatIvMediumChopHighPriceMinAdjMargin', true);
+  normalizeOptionalCent(config, 'priceToBeatIvMediumChopHighPriceRefCent');
+  normalizeOptionalProbability(config, 'priceToBeatIvMediumChopBinanceFailOpenMarginAdd', true);
+  normalizeOptionalNumber(config, 'priceToBeatIvMediumChopStaleMs', 0);
+  normalizeOptionalProbability(config, 'priceToBeatIvMediumChopStaleMarginAdd', true);
+  normalizeOptionalBoolean(config, 'priceToBeatIvHighPriceEarlyReversalGuardEnabled');
+  normalizeOptionalCent(config, 'priceToBeatIvHighPriceEarlyRefCent');
+  normalizeOptionalNumber(config, 'priceToBeatIvHighPriceEarlyRemainingSec', 0);
+  normalizeOptionalInteger(config, 'priceToBeatIvHighPriceEarlyMaxStaleMs', 0);
+  normalizeOptionalNumber(config, 'priceToBeatIvHighPriceEarlyStaleGapAdd', 0);
+  normalizeOptionalNumber(config, 'priceToBeatIvHighPriceEarlyBinanceMissingGapAdd', 0);
+  normalizeOptionalCent(config, 'priceToBeatIvHighPriceEarlyQExtremeCent');
+  normalizeOptionalNumber(config, 'priceToBeatIvHighPriceEarlyQExtremeMinGapStrength', 0);
+  normalizeOptionalInteger(config, 'priceToBeatIvHighPriceEarlyQExtremeMaxStaleMs', 0);
+  normalizeOptionalBoolean(config, 'priceToBeatIvHighPriceEarlyQExtremeRequireBinanceQ');
+  normalizeOptionalBoolean(config, 'priceToBeatIvHighPriceEarlyQExtremeRequireCleanStrongCex');
   normalizeOptionalProbability(config, 'priceToBeatIvMinFinalQ', false);
   normalizeOptionalProbability(config, 'priceToBeatIvBinanceDisagreementThreshold', false);
   normalizeOptionalProbability(config, 'priceToBeatIvBinanceDisagreementPenalty', true);
@@ -502,6 +561,7 @@ export function normalizePtbIvTimeRuleBuildConfig(
   normalizeOptionalProbability(config, 'priceToBeatIvSpikeRetraceRatio', true);
   normalizeOptionalCentAllowZero(config, 'priceToBeatIvPremiumMaxSpreadCent');
   normalizeOptionalInteger(config, 'priceToBeatIvPremiumMaxChainlinkAgeMs', 1);
+  normalizeOptionalInteger(config, 'priceToBeatIvChainlinkStaleMs', 0);
   normalizeOptionalNumber(config, 'priceToBeatIvCexAlignMaxUsd', 0);
   normalizeOptionalNumber(config, 'priceToBeatIvCexAlignMaxBps', 0);
   normalizeOptionalBoolean(config, 'priceToBeatIvCexOpenGapConsensusGuardEnabled');
@@ -509,8 +569,19 @@ export function normalizePtbIvTimeRuleBuildConfig(
   normalizeOptionalNumber(config, 'priceToBeatIvCexOpenGapMinZ', 0);
   normalizeOptionalInteger(config, 'priceToBeatIvCexOpenGapMaxStaleMs', 0);
   normalizeOptionalBoolean(config, 'priceToBeatIvCexOpenGapApplyNegativeConservativeCap');
+  normalizeOptionalBoolean(config, 'priceToBeatIvCexMagnitudeGuardEnabled');
+  normalizeOptionalNumber(config, 'priceToBeatIvCexMagnitudeShallowRatio', 0);
+  normalizeOptionalNumber(config, 'priceToBeatIvCexMagnitudeModerateRatio', 0);
+  normalizeOptionalBoolean(config, 'priceToBeatIvChainlinkStaleStrongGapExceptionEnabled');
+  normalizeOptionalNumber(config, 'priceToBeatIvChainlinkStaleStrongGapMinGapStrength', 0);
+  normalizeOptionalInteger(config, 'priceToBeatIvChainlinkStaleStrongGapMaxOracleAgeMs', 0);
+  normalizeOptionalBoolean(config, 'priceToBeatIvChainlinkStaleStrongGapRequireCexConfirmed');
+  normalizeOptionalBoolean(config, 'priceToBeatIvChainlinkStaleStrongGapRequireBybitHit');
+  normalizeOptionalBoolean(config, 'priceToBeatIvChainlinkStaleStrongGapRequireSecondaryCex');
   normalizeOptionalBoolean(config, 'priceToBeatIvChainlinkCexLagGuardEnabled');
   normalizeOptionalNumber(config, 'priceToBeatIvChainlinkCexDiffZBlock', 0);
+  normalizeOptionalNumber(config, 'priceToBeatIvOracleCexDivergenceBlockZ', 0);
+  normalizeOptionalInteger(config, 'priceToBeatIvOracleTickJumpCooldownMs', 0);
   normalizeOptionalNumber(config, 'priceToBeatIvChainlinkCexMaxDiffUsd', 0);
   normalizeOptionalNumber(config, 'priceToBeatIvChainlinkCexMaxDiffBps', 0);
   normalizeOptionalCentAllowZero(config, 'priceToBeatIvChainlinkCexBookMismatchDislocationCent');
@@ -536,6 +607,9 @@ export function normalizePtbIvTimeRuleBuildConfig(
   normalizeOptionalCentAllowZero(config, 'priceToBeatIvOddsMaxSpreadCent');
   normalizeOptionalNumber(config, 'priceToBeatIvCexUnconfirmedRiskPoints', 0);
   normalizeOptionalNumber(config, 'priceToBeatIvCexConflictRiskPoints', 0);
+  normalizeOptionalBoolean(config, 'priceToBeatIvLowQualityEdgeRecheckEnabled');
+  normalizeOptionalNumber(config, 'priceToBeatIvLowQualityGapMargin', 0);
+  normalizeOptionalNumber(config, 'priceToBeatIvLowQualityEdgeMarginCent', 0);
   normalizeOptionalBoolean(config, 'priceToBeatIvPassiveBidEnabled');
   normalizeOptionalInteger(config, 'priceToBeatIvPassiveBidTtlMs', 1);
   normalizeOptionalBoolean(config, 'priceToBeatIvWaitRepriceGuardEnabled');
@@ -621,6 +695,51 @@ function normalizeMinExpectedMoveMode(config: Record<string, unknown>): void {
     config.priceToBeatIvMinExpectedMoveMode = value;
   } else {
     delete config.priceToBeatIvMinExpectedMoveMode;
+  }
+}
+
+function normalizePriceBandGuardConfig(
+  config: Record<string, unknown>,
+  form: NodeConfigFormState
+): void {
+  normalizeOptionalBoolean(config, 'priceToBeatIvPriceBandGuardEnabled');
+  normalizePriceBandSource(config);
+  normalizePriceBandCombineMode(config);
+
+  const bands = parsePriceBandJson(form.fields.priceToBeatIvPriceBands);
+  if (bands) {
+    config.priceToBeatIvPriceBands = bands;
+  } else {
+    delete config.priceToBeatIvPriceBands;
+  }
+}
+
+function parsePriceBandJson(value: unknown): unknown[] | null {
+  const raw = toStringValue(value).trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizePriceBandSource(config: Record<string, unknown>): void {
+  const value = toStringValue(config.priceToBeatIvPriceBandSource).trim().toLowerCase();
+  if (value === 'execution_vwap') {
+    config.priceToBeatIvPriceBandSource = value;
+  } else {
+    delete config.priceToBeatIvPriceBandSource;
+  }
+}
+
+function normalizePriceBandCombineMode(config: Record<string, unknown>): void {
+  const value = toStringValue(config.priceToBeatIvPriceBandCombineMode).trim().toLowerCase();
+  if (value === 'strictest') {
+    config.priceToBeatIvPriceBandCombineMode = value;
+  } else {
+    delete config.priceToBeatIvPriceBandCombineMode;
   }
 }
 

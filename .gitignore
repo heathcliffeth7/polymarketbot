@@ -10,14 +10,18 @@ frontend/.env.local
 
 # Build artifacts
 /target/
+.venv-ml-entry-quality/
 frontend/node_modules/
 frontend/.next/
+frontend/.next-local/
 frontend/dist/
 frontend/out/
 
 # Runtime
 *.pid
 dev.pid
+analysis/
+artifacts/ml_entry_quality/
 
 # Backups
 *.bak.*

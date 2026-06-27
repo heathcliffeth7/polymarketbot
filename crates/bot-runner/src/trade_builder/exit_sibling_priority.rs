@@ -29,7 +29,10 @@ fn plan_trade_builder_preempted_stop_loss_inventory(
             && trade_builder_is_hard_exit_child(sibling)
             && !trade_builder_is_terminal_status(&sibling.status)
     }) {
-        sibling_remaining_qtys.push((sibling.id, round_trade_builder_share_qty(current_parent_qty)));
+        sibling_remaining_qtys.push((
+            sibling.id,
+            round_trade_builder_share_qty(current_parent_qty),
+        ));
     }
 
     let live_staged_stop_loss_siblings = siblings
@@ -308,12 +311,8 @@ async fn maybe_preempt_trade_builder_take_profit_for_stop_loss(
             }
             repo.set_trade_builder_order_trigger_latched(sibling.id, true, Some("stop_loss"))
                 .await?;
-            repo.append_trade_builder_order_event(
-                sibling.id,
-                "sl_latched",
-                &sl_latched_payload,
-            )
-            .await?;
+            repo.append_trade_builder_order_event(sibling.id, "sl_latched", &sl_latched_payload)
+                .await?;
         }
     }
 
@@ -477,6 +476,7 @@ async fn maybe_latch_trade_builder_stop_loss(
     current_price: f64,
     ptb_stop_loss_evaluation: Option<&TradeBuilderPtbStopLossEvaluation>,
     live_gap_stop_loss_evaluation: Option<&TradeBuilderLiveGapStopLossEvaluation>,
+    oracle_lag_stop_evaluation: Option<&PtbOracleLagBookLeadStopEvaluation>,
 ) -> Result<()> {
     if !trade_builder_is_stop_loss_child(order) || trade_builder_stop_loss_latched(order) {
         return Ok(());
@@ -497,22 +497,25 @@ async fn maybe_latch_trade_builder_stop_loss(
     {
         append_trade_builder_ptb_stop_loss_payload(payload, evaluation);
     }
-    if let (Some(payload), Some(evaluation)) =
-        (sl_latched_payload.as_object_mut(), live_gap_stop_loss_evaluation)
-    {
+    if let (Some(payload), Some(evaluation)) = (
+        sl_latched_payload.as_object_mut(),
+        live_gap_stop_loss_evaluation,
+    ) {
         append_trade_builder_live_gap_stop_loss_payload(payload, evaluation);
+    }
+    if let (Some(payload), Some(evaluation)) = (
+        sl_latched_payload.as_object_mut(),
+        oracle_lag_stop_evaluation,
+    ) {
+        append_trade_builder_ptb_oracle_lag_stop_payload(payload, evaluation);
     }
     repo.set_trade_builder_order_trigger_latched(order.id, true, Some("stop_loss"))
         .await?;
     order.trigger_latched = true;
     order.trigger_latched_reason = Some("stop_loss".to_string());
     order.trigger_latched_at = Some(Utc::now());
-    repo.append_trade_builder_order_event(
-        order.id,
-        "sl_latched",
-        &sl_latched_payload,
-    )
-    .await?;
+    repo.append_trade_builder_order_event(order.id, "sl_latched", &sl_latched_payload)
+        .await?;
     if !trade_builder_is_hard_exit_child(order) {
         return Ok(());
     }
@@ -527,9 +530,10 @@ async fn maybe_latch_trade_builder_stop_loss(
             "exit_mode": trade_builder_exit_mode(order),
             "sibling_policy": trade_builder_exit_sibling_policy(order),
         });
-        if let (Some(payload), Some(evaluation)) =
-            (tp_preempted_payload.as_object_mut(), ptb_stop_loss_evaluation)
-        {
+        if let (Some(payload), Some(evaluation)) = (
+            tp_preempted_payload.as_object_mut(),
+            ptb_stop_loss_evaluation,
+        ) {
             append_trade_builder_ptb_stop_loss_payload(payload, evaluation);
         }
         repo.append_trade_builder_order_event(

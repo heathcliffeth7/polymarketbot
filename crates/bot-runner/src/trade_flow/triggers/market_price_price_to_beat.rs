@@ -144,6 +144,38 @@ fn evaluate_trigger_market_price_ptb_gate_for_node(
     ))
 }
 
+fn unsupported_price_to_beat_trigger_gate(
+) -> crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
+    crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
+        passed: false,
+        reason: "unsupported_outcome_label",
+        directional_gap: None,
+        price_to_beat: None,
+        price_to_beat_status: None,
+        current_price: None,
+        threshold_mode: "manual".to_string(),
+        min_gap: 0.0,
+        max_gap: None,
+        auto_threshold_usd: None,
+        lookback_windows_used: None,
+        current_windows_used: None,
+        avg_up_excursion_usd: None,
+        avg_down_excursion_usd: None,
+        lookback_market_slugs: None,
+        lookback_window_snapshots: None,
+        baseline_pct: None,
+        current_pct: None,
+        vol_factor: None,
+        threshold_pct: None,
+        base_pct: None,
+        floor_usd: None,
+        ceiling_usd: None,
+        threshold_was_clamped: None,
+        signal_formula: None,
+        iv_mismatch_edge: None,
+    }
+}
+
 fn append_trigger_market_price_ptb_gate(target: &mut Value, gate: &Value) {
     let Some(target_obj) = target.as_object_mut() else {
         return;

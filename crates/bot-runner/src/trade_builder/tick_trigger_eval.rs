@@ -196,6 +196,8 @@ mod tick_trigger_eval_tests {
         let snapshot = MarketDataSnapshot {
             best_bid: Some(0.70),
             best_ask: Some(0.74),
+            best_bid_size: None,
+            best_ask_size: None,
             last_trade_price: Some(0.60),
             updated_at_ms: 1,
             last_source: "book".to_string(),
@@ -220,6 +222,8 @@ mod tick_trigger_eval_tests {
         let snapshot = MarketDataSnapshot {
             best_bid: Some(0.76),
             best_ask: Some(0.79),
+            best_bid_size: None,
+            best_ask_size: None,
             last_trade_price: Some(0.78),
             updated_at_ms: 1,
             last_source: "book".to_string(),
@@ -255,6 +259,8 @@ mod tick_trigger_eval_tests {
         let tp_snapshot = MarketDataSnapshot {
             best_bid: Some(0.81),
             best_ask: Some(0.83),
+            best_bid_size: None,
+            best_ask_size: None,
             last_trade_price: Some(0.82),
             updated_at_ms: 1,
             last_source: "book".to_string(),
@@ -262,6 +268,8 @@ mod tick_trigger_eval_tests {
         let sl_snapshot = MarketDataSnapshot {
             best_bid: Some(0.59),
             best_ask: Some(0.61),
+            best_bid_size: None,
+            best_ask_size: None,
             last_trade_price: Some(0.58),
             updated_at_ms: 2,
             last_source: "last_trade_price".to_string(),
@@ -295,6 +303,8 @@ mod tick_trigger_eval_tests {
         let stale_ws_snapshot = MarketDataSnapshot {
             best_bid: Some(0.47),
             best_ask: Some(0.49),
+            best_bid_size: None,
+            best_ask_size: None,
             last_trade_price: Some(0.46),
             updated_at_ms: 1,
             last_source: "ws".to_string(),
@@ -306,6 +316,8 @@ mod tick_trigger_eval_tests {
         let book_snapshot = MarketDataSnapshot {
             best_bid: Some(0.43),
             best_ask: Some(0.45),
+            best_bid_size: None,
+            best_ask_size: None,
             last_trade_price: Some(0.46),
             updated_at_ms: 2,
             last_source: "orderbook_snapshot".to_string(),
@@ -330,6 +342,8 @@ mod tick_trigger_eval_tests {
         let snapshot = MarketDataSnapshot {
             best_bid: Some(0.81),
             best_ask: Some(0.83),
+            best_bid_size: None,
+            best_ask_size: None,
             last_trade_price: Some(0.82),
             updated_at_ms: 1,
             last_source: "book".to_string(),

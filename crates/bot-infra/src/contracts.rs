@@ -1,7 +1,9 @@
 use crate::db::PostgresRepository;
+use crate::exchange::TradeQuery;
 use crate::exchange::{
-    ClobMarketInfo, ClobRestClient, FillInfo, OrderAck, OrderBookSnapshot, OrderInfo,
-    PlaceOrderRequest, PriceHistoryPoint, PriceSnapshot,
+    ClobMarketInfo, ClobRestClient, FillInfo, FillPage, OrderAck, OrderBookFetchResult,
+    OrderBookSnapshot, OrderInfo, PlaceOrderRequest, PriceHistoryPoint, PriceSnapshot,
+    TokenInventorySnapshot,
 };
 pub use crate::market_data::MarketDataProvider;
 use anyhow::Result;
@@ -13,6 +15,11 @@ pub trait OrderExecutor: Send + Sync {
     async fn midpoint(&self, market: &str) -> Result<PriceSnapshot>;
     async fn order_book(&self, _token_id: &str) -> Result<Option<OrderBookSnapshot>> {
         Ok(None)
+    }
+    async fn order_book_with_diagnostics(&self, token_id: &str) -> Result<OrderBookFetchResult> {
+        self.order_book(token_id)
+            .await
+            .map(OrderBookFetchResult::ok)
     }
     async fn best_bid_ask(&self, _token_id: &str) -> Result<(Option<f64>, Option<f64>)> {
         Ok((None, None))
@@ -38,7 +45,15 @@ pub trait OrderExecutor: Send + Sync {
     async fn status(&self, exchange_order_id: &str) -> Result<OrderInfo>;
     async fn list_open(&self, market: Option<&str>) -> Result<Vec<OrderInfo>>;
     async fn list_fills(&self, next_cursor: Option<&str>) -> Result<Vec<FillInfo>>;
+    async fn list_fills_page(&self, query: TradeQuery) -> Result<FillPage> {
+        Ok(FillPage::from_fills(
+            self.list_fills(query.next_cursor.as_deref()).await?,
+        ))
+    }
     async fn available_token_qty(&self, token_id: &str) -> Result<Option<f64>>;
+    async fn available_token_inventory_snapshot(&self) -> Result<Option<TokenInventorySnapshot>> {
+        Ok(None)
+    }
     async fn available_collateral_usdc(&self) -> Result<Option<f64>> {
         Ok(None)
     }
@@ -67,6 +82,10 @@ where
 
     async fn order_book(&self, token_id: &str) -> Result<Option<OrderBookSnapshot>> {
         ClobRestClient::get_order_book(self, token_id).await
+    }
+
+    async fn order_book_with_diagnostics(&self, token_id: &str) -> Result<OrderBookFetchResult> {
+        ClobRestClient::get_order_book_with_diagnostics(self, token_id).await
     }
 
     async fn last_trade_price(&self, token_id: &str) -> Result<Option<f64>> {
@@ -111,8 +130,16 @@ where
         ClobRestClient::list_fills(self, next_cursor).await
     }
 
+    async fn list_fills_page(&self, query: TradeQuery) -> Result<FillPage> {
+        ClobRestClient::list_fills_page(self, query).await
+    }
+
     async fn available_token_qty(&self, token_id: &str) -> Result<Option<f64>> {
         ClobRestClient::get_token_inventory(self, token_id).await
+    }
+
+    async fn available_token_inventory_snapshot(&self) -> Result<Option<TokenInventorySnapshot>> {
+        ClobRestClient::get_token_inventory_snapshot(self).await
     }
 
     async fn available_collateral_usdc(&self) -> Result<Option<f64>> {

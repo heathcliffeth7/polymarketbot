@@ -47,7 +47,8 @@ fn submitted_notification_reports_vwap_model_book_and_scenario() {
         "submitted_vwap_slippage": 0.03,
         "submitted_estimated_notional": 3.05,
         "submitted_effective_cost_per_share": 0.6321,
-        "submitted_depth_guard_result": "PASS",
+        "submitted_depth_guard_result": "block",
+        "submitted_depth_guard_reason": "blocked_depth_qty_insufficient",
         "submitted_depth_levels_used": 3,
         "submitted_q_final": 0.9474,
         "submitted_selected_mid": 0.575,
@@ -71,9 +72,22 @@ fn submitted_notification_reports_vwap_model_book_and_scenario() {
     let flow_payload = json!({
         "price_to_beat_guard": {
             "iv_mismatch_edge": {
+                "ask": 0.58,
+                "protection_result": "off",
                 "selected_side": "Down",
                 "seconds_left": 56.7,
-                "selected_time_rule": {"start_remaining_secs": 60, "end_remaining_secs": 30}
+                "selected_time_rule": {"start_remaining_secs": 60, "end_remaining_secs": 30},
+                "cex_open_gap_enabled": true,
+                "cex_open_gap_consensus": "strong",
+                "cex_open_gap_clean_lane": true,
+                "cex_consensus_q_cap_applied": true,
+                "binance_state": "supporting",
+                "bybit_state": "supporting",
+                "q_final_before_cex_consensus": 0.97,
+                "q_final_after_cex_consensus": 0.82,
+                "expected_vwap_cent": 61.0,
+                "submit_limit_price_cent": 63.0,
+                "execution_limit_by_vwap_action": "clamp"
             }
         }
     });
@@ -85,10 +99,18 @@ fn submitted_notification_reports_vwap_model_book_and_scenario() {
     );
 
     assert!(message.contains("Emir Gonderildi - Guard Gecti"));
-    assert!(message.contains("Estimated VWAP Fill: 0.6100"));
+    assert!(message.contains("Model Ask: 0.5800"));
+    assert!(message.contains("Execution Best Ask: 0.5800"));
+    assert!(message.contains("Execution VWAP Fill: 0.6100"));
+    assert!(message.contains("Execution vs Model Ask: +0.0300"));
+    assert!(message.contains("Protection Result: off"));
+    assert!(message.contains("Depth Guard: block reason=blocked_depth_qty_insufficient"));
     assert!(message.contains("Model-Book Zone: WARNING"));
     assert!(message.contains("Participation Credit: 0.0100"));
     assert!(message.contains("EV ROI: +49.9"));
+    assert!(message.contains("CEX Open Gap:"));
+    assert!(message.contains("q consensus: before=97.00c after=82.00c"));
+    assert!(message.contains("Expected VWAP: 61.00c | Submit Limit: 63.00c | Limit Action: clamp"));
 }
 
 #[test]
@@ -236,19 +258,30 @@ fn fill_notification_includes_successful_iv_mismatch_formula_block() {
         json!("fresh_conservative_min"),
     );
 
-    let (notification_type, message) =
-        build_trade_builder_fill_notification(&order, 0.56, 7.5, Some(&payload), None, None)
-            .expect("notification");
+    let submitted_payload = json!({"submitted_estimated_avg_fill": 0.7100});
+    let (notification_type, message) = build_trade_builder_fill_notification(
+        &order,
+        0.56,
+        7.5,
+        Some(&payload),
+        Some(&submitted_payload),
+        None,
+    )
+    .expect("notification");
 
     assert_eq!(notification_type, "order_filled");
     assert!(message.contains("IV Mismatch Edge Basarili"));
     assert!(message.contains("Karar: selected_edge_passed"));
-    assert!(message.contains("Fill: 0.5600 | Ask: 0.5600"));
-    assert!(message.contains("Cost: 0.5817 = ask 0.5600 + fee 0.0167 + buffer 0.0050"));
-    assert!(message
-        .contains("Edge raw: 0.1483 = q - cost | Base threshold: 0.0600 | Raw margin: 0.0883"));
+    assert!(message.contains("Fill: 0.5600 | Model Ask: 0.5600 | Execution VWAP: 0.7100"));
+    assert!(message.contains("Execution vs Model Ask: 0.1500"));
     assert!(message.contains(
-        "Edge adjusted: 0.1383 = q_final - cost | Dynamic threshold: 0.0800 | Adj margin: 0.0583"
+        "Decision Cost: 0.5817 = model ask fallback 0.5600 + fee 0.0167 + buffer 0.0050"
+    ));
+    assert!(message.contains(
+        "Edge raw: 0.1483 = q - decision cost | Base threshold: 0.0600 | Raw margin: 0.0883"
+    ));
+    assert!(message.contains(
+        "Edge adjusted: 0.1383 = q_final - decision cost | Dynamic threshold: 0.0800 | Adj margin: 0.0583"
     ));
     assert!(message.contains(
         "q floor: before N/A | after N/A | final 0.7200 | q_chain_adj 0.7200 | q_binance 0.7000"
@@ -575,7 +608,13 @@ fn order_not_filled_notification_includes_latest_max_price_guard() {
         created_at: Utc::now(),
     }];
 
-    let summary = build_order_not_filled_guard_summary(&order, &events).expect("summary");
+    let summary = build_order_not_filled_guard_summary(
+        &order,
+        &events,
+        "outside_cycle_window",
+        "Eligible penceresi kapandigi icin emir icra edilemeden expire oldu.",
+    )
+    .expect("summary");
     let message = build_order_not_filled_notification_message_with_guard(
         &order,
         "outside_cycle_window",
@@ -613,7 +652,13 @@ fn order_not_filled_notification_includes_execution_floor_guard() {
         created_at: Utc::now(),
     }];
 
-    let summary = build_order_not_filled_guard_summary(&order, &events).expect("summary");
+    let summary = build_order_not_filled_guard_summary(
+        &order,
+        &events,
+        "outside_cycle_window",
+        "Eligible penceresi kapandigi icin emir icra edilemeden expire oldu.",
+    )
+    .expect("summary");
     let message = build_order_not_filled_notification_message_with_guard(
         &order,
         "outside_cycle_window",
@@ -647,7 +692,13 @@ fn order_not_filled_notification_includes_price_to_beat_guard() {
         created_at: Utc::now(),
     }];
 
-    let summary = build_order_not_filled_guard_summary(&order, &events).expect("summary");
+    let summary = build_order_not_filled_guard_summary(
+        &order,
+        &events,
+        "outside_cycle_window",
+        "Eligible penceresi kapandigi icin emir icra edilemeden expire oldu.",
+    )
+    .expect("summary");
     let message = build_order_not_filled_notification_message_with_guard(
         &order,
         "outside_cycle_window",
@@ -660,6 +711,111 @@ fn order_not_filled_notification_includes_price_to_beat_guard() {
     assert!(message.contains("Price to Beat: 76130.01578425"));
     assert!(message.contains("Yonsel Fark: 1.10000000"));
     assert!(message.contains("Limit: 2.50000000"));
+}
+
+#[test]
+fn fak_no_match_notification_uses_submit_liquidity_instead_of_stale_ptb_guard() {
+    let order = test_builder_order("buy", None);
+    let events = vec![
+        TradeBuilderOrderEventRecord {
+            builder_order_id: order.id,
+            event_type: "flow_created".to_string(),
+            payload_json: json!({
+                "price_to_beat_guard": {
+                    "passed": false,
+                    "reason_code": "blocked_entry_quality_gap_strength_low",
+                    "price_to_beat": 60871.0,
+                    "current_price": 60800.0,
+                    "directional_gap": 70.0,
+                    "threshold_usd": 2.5
+                }
+            }),
+            created_at: Utc::now(),
+        },
+        TradeBuilderOrderEventRecord {
+            builder_order_id: order.id,
+            event_type: "guard_evaluated".to_string(),
+            payload_json: json!({
+                "effective_decision": "passed",
+                "effective_reason_code": "guards_passed",
+                "current_price": 0.62,
+                "best_ask": 0.61,
+                "desired_price": 0.61,
+                "max_price_guard": {
+                    "configured": true,
+                    "decision": "passed",
+                    "reason_code": "passed",
+                    "details": {"max_price": 0.77}
+                }
+            }),
+            created_at: Utc::now(),
+        },
+    ];
+    let reason_message = "HTTP status 400 Bad Request for POST /order | body: {\"error\":\"no orders found to match with FAK order\"}";
+
+    let summary =
+        build_order_not_filled_guard_summary(&order, &events, "processing_error", reason_message)
+            .expect("summary");
+    let message = build_order_not_filled_notification_message_with_guard(
+        &order,
+        "processing_error",
+        reason_message,
+        Some(&summary),
+    );
+
+    assert!(message.contains("Submit Sonucu: FAK no-match"));
+    assert!(message.contains("Son Guard: passed"));
+    assert!(message.contains("Best Ask: 0.6100"));
+    assert!(message.contains("Desired: 0.6100"));
+    assert!(message.contains("Max: 0.7700"));
+    assert!(!message.contains("Son Engel: Price to Beat"));
+    assert!(!message.contains("blocked_entry_quality_gap_strength_low"));
+}
+
+#[test]
+fn fak_no_match_notification_uses_submit_liquidity_instead_of_stale_trigger_guard() {
+    let order = test_builder_order("buy", None);
+    let events = vec![
+        TradeBuilderOrderEventRecord {
+            builder_order_id: order.id,
+            event_type: "trigger_price_waiting".to_string(),
+            payload_json: json!({
+                "reason_code": "below_trigger_price_guard",
+                "price": 0.38,
+                "guard_trigger_price": 0.50
+            }),
+            created_at: Utc::now(),
+        },
+        TradeBuilderOrderEventRecord {
+            builder_order_id: order.id,
+            event_type: "guard_evaluated".to_string(),
+            payload_json: json!({
+                "effective_decision": "passed",
+                "effective_reason_code": "guards_passed",
+                "current_price": 0.48,
+                "best_ask": 0.53,
+                "desired_price": 0.53
+            }),
+            created_at: Utc::now(),
+        },
+    ];
+    let reason_message = "HTTP 400 Bad Request: no orders found to match with FAK order";
+
+    let summary =
+        build_order_not_filled_guard_summary(&order, &events, "processing_error", reason_message)
+            .expect("summary");
+    let message = build_order_not_filled_notification_message_with_guard(
+        &order,
+        "processing_error",
+        reason_message,
+        Some(&summary),
+    );
+
+    assert!(message.contains("Submit Sonucu: FAK no-match"));
+    assert!(message.contains("Son Guard: passed"));
+    assert!(message.contains("Best Ask: 0.5300"));
+    assert!(!message.contains("Son Engel: Tetik Fiyat"));
+    assert!(!message.contains("below_trigger_price_guard"));
 }
 
 #[test]

@@ -115,6 +115,59 @@ class DiagnosePtbCexDriftTest(unittest.TestCase):
         self.assertEqual(event.classification, "data_suspect")
         self.assertIn("chainlink_cex_diff_bps=8.20", event.classification_notes)
 
+    def test_depth_slippage_deferred_is_separate_class(self) -> None:
+        row = {
+            "id": 4,
+            "event_type": "price_to_beat_iv_mismatch_edge_decision",
+            "created_at": "2026-06-17T15:37:00.000000+00:00",
+            "payload": {
+                "market_slug": "sol-updown-5m-1781710500",
+                "outcome_label": "Up",
+                "reason_code": "passed",
+                "iv_mismatch_edge": {
+                    "depth_guard_reason": "blocked_depth_slippage_too_high",
+                    "depth_block_kind": "slippage_too_high",
+                    "depth_slippage_deferred_to_execution_vwap": True,
+                    "vwap_slippage": 0.12,
+                    "intended_qty": 6.0,
+                    "visible_ask_qty": 15802.74,
+                },
+            },
+        }
+
+        event = diag.normalize_event(row, default_args())
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.classification, "depth_slippage_deferred")
+        self.assertEqual(event.depth_block_kind, "slippage_too_high")
+        self.assertTrue(event.depth_slippage_deferred)
+
+    def test_depth_qty_insufficient_is_separate_class(self) -> None:
+        row = {
+            "id": 5,
+            "event_type": "price_to_beat_iv_mismatch_edge_decision",
+            "created_at": "2026-06-17T15:37:00.000000+00:00",
+            "payload": {
+                "market_slug": "btc-updown-5m-1781710500",
+                "outcome_label": "Up",
+                "reason_code": "blocked_depth_qty_insufficient",
+                "iv_mismatch_edge": {
+                    "depth_guard_reason": "blocked_depth_qty_insufficient",
+                    "depth_block_kind": "qty_insufficient",
+                    "intended_qty": 6.0,
+                    "visible_ask_qty": 2.0,
+                },
+            },
+        }
+
+        event = diag.normalize_event(row, default_args())
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.classification, "real_depth_insufficient")
+        self.assertEqual(event.depth_block_kind, "qty_insufficient")
+
 
 if __name__ == "__main__":
     unittest.main()

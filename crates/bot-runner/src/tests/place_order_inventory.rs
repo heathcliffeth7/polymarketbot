@@ -135,6 +135,61 @@ fn canonical_entry_qty_uses_submitted_dynamic_qty_for_parent_buy() {
 }
 
 #[test]
+fn fill_backfill_quantities_prefer_aggregate_for_parent_buy() {
+    let mut order = test_builder_order("buy", None);
+    order.tp_enabled = true;
+    order.submitted_dynamic_qty = Some(11.63);
+    let backfill = TradeBuilderFillBackfillOutcome {
+        aggregate_fill_qty: Some(11.57),
+        order_info_filled_size: Some(11.60),
+        ..TradeBuilderFillBackfillOutcome::default()
+    };
+
+    let (canonical_qty, canonical_source, actual_qty, actual_source) =
+        resolve_trade_builder_immediate_fill_quantities(&order, 11.63, &backfill).unwrap();
+
+    assert_eq!(canonical_qty, 11.57);
+    assert_eq!(canonical_source, "actual_fill_qty");
+    assert_eq!(actual_qty, Some(11.57));
+    assert_eq!(actual_source, Some("fills_aggregate"));
+}
+
+#[test]
+fn fill_backfill_quantities_use_order_status_when_aggregate_missing() {
+    let mut order = test_builder_order("buy", None);
+    order.tp_enabled = true;
+    order.submitted_dynamic_qty = Some(11.63);
+    let backfill = TradeBuilderFillBackfillOutcome {
+        order_info_filled_size: Some(11.60),
+        ..TradeBuilderFillBackfillOutcome::default()
+    };
+
+    let (canonical_qty, canonical_source, actual_qty, actual_source) =
+        resolve_trade_builder_immediate_fill_quantities(&order, 11.63, &backfill).unwrap();
+
+    assert_eq!(canonical_qty, 11.60);
+    assert_eq!(canonical_source, "actual_fill_qty");
+    assert_eq!(actual_qty, Some(11.60));
+    assert_eq!(actual_source, Some("order_status_size_matched"));
+}
+
+#[test]
+fn fill_backfill_quantities_fall_back_to_submitted_dynamic_qty() {
+    let mut order = test_builder_order("buy", None);
+    order.tp_enabled = true;
+    order.submitted_dynamic_qty = Some(11.63);
+    let backfill = TradeBuilderFillBackfillOutcome::default();
+
+    let (canonical_qty, canonical_source, actual_qty, actual_source) =
+        resolve_trade_builder_immediate_fill_quantities(&order, 11.63, &backfill).unwrap();
+
+    assert_eq!(canonical_qty, 11.63);
+    assert_eq!(canonical_source, "submitted_dynamic_qty");
+    assert_eq!(actual_qty, None);
+    assert_eq!(actual_source, None);
+}
+
+#[test]
 fn canonical_entry_qty_uses_cumulative_fill_qty_for_parent_buy() {
     let mut order = test_builder_order("buy", None);
     order.tp_enabled = true;
@@ -673,6 +728,8 @@ fn ws_fast_path_snapshot_last_seen_uses_exit_sell_runtime_price() {
     let snapshot = MarketDataSnapshot {
         best_bid: Some(0.76),
         best_ask: Some(0.79),
+        best_bid_size: None,
+        best_ask_size: None,
         last_trade_price: Some(0.77),
         updated_at_ms: 123,
         last_source: "book".to_string(),

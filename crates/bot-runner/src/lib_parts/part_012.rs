@@ -303,6 +303,53 @@ async fn seed_trade_flow_trigger_steps(
     Ok(())
 }
 
+const STEP_LATENCY_INFO_TOTAL_MS: i64 = 500;
+const STEP_LATENCY_INFO_STAGE_MS: i64 = 250;
+
+macro_rules! log_step_latency_trace {
+    (
+        $log:ident,
+        $run_id:expr,
+        $flow_run_id:expr,
+        $step_id:expr,
+        $node_key:expr,
+        $node_type:expr,
+        $outcome:expr,
+        $claim_to_start_ms:expr,
+        $execute_ms:expr,
+        $completion_ms:expr,
+        $total_ms:expr
+        $(, error = %$error:expr)?
+    ) => {
+        $log!(
+            run_id = $run_id,
+            flow_run_id = $flow_run_id,
+            step_id = $step_id,
+            node_key = %$node_key,
+            node_type = %$node_type,
+            outcome = $outcome,
+            claim_to_start_ms = $claim_to_start_ms,
+            execute_ms = $execute_ms,
+            completion_ms = $completion_ms,
+            total_ms = $total_ms,
+            $(error = %$error,)?
+            "STEP_LATENCY_TRACE"
+        );
+    };
+}
+
+fn step_latency_trace_is_info(
+    claim_to_start_ms: i64,
+    execute_ms: i64,
+    completion_ms: i64,
+    total_ms: i64,
+) -> bool {
+    total_ms >= STEP_LATENCY_INFO_TOTAL_MS
+        || claim_to_start_ms >= STEP_LATENCY_INFO_STAGE_MS
+        || execute_ms >= STEP_LATENCY_INFO_STAGE_MS
+        || completion_ms >= STEP_LATENCY_INFO_STAGE_MS
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_trade_flow_step(
     repo: &PostgresRepository,
@@ -313,6 +360,8 @@ async fn process_trade_flow_step(
     client: Option<SharedOrderExecutor>,
     ws: &ClobWsClient,
     step: &TradeFlowRunStep,
+    step_processing_context: &FlowStepProcessingContext,
+    step_processing_stats: &mut FlowStepProcessingStats,
 ) -> Result<()> {
     let step_started = Instant::now();
     let processing_started_at = Utc::now();
@@ -383,6 +432,7 @@ async fn process_trade_flow_step(
         .ok_or_else(|| anyhow::anyhow!("flow node not found for step"))?;
 
     let mut context = normalize_trade_flow_context(run.context_json.clone(), &graph.context);
+    reconcile_trade_flow_deferred_once_locks_for_run(repo, &run, &mut context).await?;
     let execute_started = Instant::now();
     let result = execute_trade_flow_node(
         repo,
@@ -402,7 +452,7 @@ async fn process_trade_flow_step(
     let execute_ms = execute_started.elapsed().as_millis() as i64;
 
     match result {
-        Ok(execution) => {
+        Ok(mut execution) => {
             let completion_started = Instant::now();
             let latest_run = repo.get_trade_flow_run(run.id).await?;
             let run_still_running = matches!(
@@ -419,22 +469,54 @@ async fn process_trade_flow_step(
                     node_key = %node.key,
                     "TRADE_FLOW_STEP_ABORTED_RUN_STOPPED"
                 );
-                info!(
-                    run_id,
-                    flow_run_id = run.id,
-                    step_id = step.id,
-                    node_key = %node.key,
-                    node_type = %node.node_type,
-                    outcome = "aborted_run_stopped",
+                let completion_ms = completion_started.elapsed().as_millis() as i64;
+                let total_ms = step_started.elapsed().as_millis() as i64;
+                if step_latency_trace_is_info(
                     claim_to_start_ms,
                     execute_ms,
-                    completion_ms = completion_started.elapsed().as_millis() as i64,
-                    total_ms = step_started.elapsed().as_millis() as i64,
-                    "STEP_LATENCY_TRACE"
-                );
+                    completion_ms,
+                    total_ms,
+                ) {
+                    log_step_latency_trace!(
+                        info,
+                        run_id,
+                        run.id,
+                        step.id,
+                        &node.key,
+                        &node.node_type,
+                        "aborted_run_stopped",
+                        claim_to_start_ms,
+                        execute_ms,
+                        completion_ms,
+                        total_ms
+                    );
+                } else {
+                    log_step_latency_trace!(
+                        debug,
+                        run_id,
+                        run.id,
+                        step.id,
+                        &node.key,
+                        &node.node_type,
+                        "aborted_run_stopped",
+                        claim_to_start_ms,
+                        execute_ms,
+                        completion_ms,
+                        total_ms
+                    );
+                }
                 return Ok(());
             }
 
+            apply_deferred_once_after_node_execution(
+                repo,
+                &run,
+                node,
+                step,
+                &mut execution,
+                &mut context,
+            )
+            .await?;
             repo.update_trade_flow_run_context(run.id, &context).await?;
             spawn_trade_flow_immediate_submit_if_needed(
                 repo,
@@ -483,7 +565,16 @@ async fn process_trade_flow_step(
             }
 
             if let Some(repeat_at) = execution.repeat_at {
-                let repeat_input = build_trade_flow_repeat_step_input(step, &execution.output);
+                let is_ptb_guard_retry =
+                    output_is_retrying_price_to_beat_guard_block(&execution.output);
+                if is_ptb_guard_retry {
+                    step_processing_stats.ptb_retry_blocked_count += 1;
+                }
+                let repeat_input = build_trade_flow_repeat_step_input(
+                    step,
+                    &execution.output,
+                    step_processing_context,
+                );
                 let enqueued = repo
                     .enqueue_trade_flow_step(
                         run.id,
@@ -496,31 +587,61 @@ async fn process_trade_flow_step(
                         execution.repeat_idempotency_key.as_deref(),
                     )
                     .await?;
+                if is_ptb_guard_retry && enqueued.is_some() {
+                    step_processing_stats.ptb_retry_created_count += 1;
+                }
                 if enqueued.is_some() {
                     schedule_flow_process_notify_at(repeat_at);
                 }
             }
-            info!(
-                run_id,
-                flow_run_id = run.id,
-                step_id = step.id,
-                node_key = %node.key,
-                node_type = %node.node_type,
-                outcome = "completed",
-                claim_to_start_ms,
-                execute_ms,
-                completion_ms = completion_started.elapsed().as_millis() as i64,
-                total_ms = step_started.elapsed().as_millis() as i64,
-                "STEP_LATENCY_TRACE"
-            );
+            let completion_ms = completion_started.elapsed().as_millis() as i64;
+            let total_ms = step_started.elapsed().as_millis() as i64;
+            if step_latency_trace_is_info(claim_to_start_ms, execute_ms, completion_ms, total_ms) {
+                log_step_latency_trace!(
+                    info,
+                    run_id,
+                    run.id,
+                    step.id,
+                    &node.key,
+                    &node.node_type,
+                    "completed",
+                    claim_to_start_ms,
+                    execute_ms,
+                    completion_ms,
+                    total_ms
+                );
+            } else {
+                log_step_latency_trace!(
+                    debug,
+                    run_id,
+                    run.id,
+                    step.id,
+                    &node.key,
+                    &node.node_type,
+                    "completed",
+                    claim_to_start_ms,
+                    execute_ms,
+                    completion_ms,
+                    total_ms
+                );
+            }
         }
         Err(err) => {
             let completion_started = Instant::now();
-            let output_json = json!({
+            let mut output_json = json!({
                 "error": err.to_string(),
                 "node_key": node.key,
                 "node_type": node.node_type
             });
+            release_deferred_once_after_step_error(
+                repo,
+                &run,
+                node,
+                step.input_json.as_ref(),
+                &mut output_json,
+                &err.to_string(),
+            )
+            .await?;
             repo.mark_trade_flow_step_failed(step.id, Some(&output_json), &err.to_string())
                 .await?;
             repo.append_trade_flow_event(
@@ -547,20 +668,39 @@ async fn process_trade_flow_step(
                 &context,
             )
             .await?;
-            info!(
-                run_id,
-                flow_run_id = run.id,
-                step_id = step.id,
-                node_key = %node.key,
-                node_type = %node.node_type,
-                outcome = "failed",
-                claim_to_start_ms,
-                execute_ms,
-                completion_ms = completion_started.elapsed().as_millis() as i64,
-                total_ms = step_started.elapsed().as_millis() as i64,
-                error = %err,
-                "STEP_LATENCY_TRACE"
-            );
+            let completion_ms = completion_started.elapsed().as_millis() as i64;
+            let total_ms = step_started.elapsed().as_millis() as i64;
+            if step_latency_trace_is_info(claim_to_start_ms, execute_ms, completion_ms, total_ms) {
+                log_step_latency_trace!(
+                    info,
+                    run_id,
+                    run.id,
+                    step.id,
+                    &node.key,
+                    &node.node_type,
+                    "failed",
+                    claim_to_start_ms,
+                    execute_ms,
+                    completion_ms,
+                    total_ms,
+                    error = %err
+                );
+            } else {
+                log_step_latency_trace!(
+                    debug,
+                    run_id,
+                    run.id,
+                    step.id,
+                    &node.key,
+                    &node.node_type,
+                    "failed",
+                    claim_to_start_ms,
+                    execute_ms,
+                    completion_ms,
+                    total_ms,
+                    error = %err
+                );
+            }
         }
     }
 
@@ -775,7 +915,7 @@ fn resolve_trade_flow_candidate_edges<'a>(
         .filter(|edge| edge.source == source_key && edge.edge_type == edge_type)
         .collect::<Vec<_>>();
 
-    if edges.is_empty() && edge_type != "default" {
+    if edges.is_empty() && !matches!(edge_type, "default" | "on_error") {
         edges = graph
             .edges
             .iter()
@@ -834,13 +974,26 @@ async fn enqueue_trade_flow_edges(
             1
         };
 
+        let Some(target_input) = maybe_attach_deferred_once_lock_to_action_input(
+            repo,
+            run,
+            graph,
+            source_key,
+            target_node,
+            input_json,
+        )
+        .await?
+        else {
+            continue;
+        };
+
         let enqueued = repo
             .enqueue_trade_flow_step(
                 run.id,
                 &target_node.key,
                 &target_node.node_type,
                 attempt,
-                Some(input_json),
+                Some(&target_input),
                 available_at,
                 Some(parent_step_id),
                 None,
@@ -915,6 +1068,13 @@ mod part_012_tests {
         }
     }
 
+    fn test_processing_context() -> FlowStepProcessingContext {
+        FlowStepProcessingContext {
+            id: "processing-run-1".to_string(),
+            started_at: Utc::now(),
+        }
+    }
+
     #[test]
     fn trade_flow_repeat_step_input_preserves_original_payload() {
         let input_json = json!({
@@ -925,7 +1085,11 @@ mod part_012_tests {
         let step = test_repeat_step(Some(input_json.clone()));
 
         assert_eq!(
-            build_trade_flow_repeat_step_input(&step, &json!({ "reason": "other" })),
+            build_trade_flow_repeat_step_input(
+                &step,
+                &json!({ "reason": "other" }),
+                &test_processing_context()
+            ),
             Some(input_json)
         );
     }
@@ -935,8 +1099,32 @@ mod part_012_tests {
         let step = test_repeat_step(None);
 
         assert_eq!(
-            build_trade_flow_repeat_step_input(&step, &json!({ "reason": "other" })),
+            build_trade_flow_repeat_step_input(
+                &step,
+                &json!({ "reason": "other" }),
+                &test_processing_context()
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn on_error_edges_do_not_fall_back_to_default_edges() {
+        let graph = TradeFlowGraphRuntime {
+            context: json!({}),
+            nodes: Vec::new(),
+            edges: vec![TradeFlowEdge {
+                source: "trigger".to_string(),
+                target: "action".to_string(),
+                edge_type: "default".to_string(),
+                condition: None,
+            }],
+        };
+
+        assert!(resolve_trade_flow_candidate_edges(&graph, "trigger", "on_error").is_empty());
+        assert_eq!(
+            resolve_trade_flow_candidate_edges(&graph, "trigger", "on_success")[0].target,
+            "action"
         );
     }
 

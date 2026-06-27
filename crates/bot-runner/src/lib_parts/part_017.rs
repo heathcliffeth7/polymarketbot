@@ -15,7 +15,7 @@ async fn execute_action_resolve_market(
         .unwrap_or_else(|| "5m".to_string());
     let scope_def = find_updown_scope_by_asset_timeframe(&asset, &timeframe).ok_or_else(|| {
         anyhow::anyhow!(
-            "action.resolve_market unsupported asset/timeframe ({asset}/{timeframe}); supported assets: btc, eth, sol, xrp; timeframes: 5m, 15m"
+            "action.resolve_market unsupported asset/timeframe ({asset}/{timeframe}); supported assets: btc, eth, sol, xrp, doge, bnb, hype; timeframes: 5m, 15m"
         )
     })?;
     let market_scope = scope_def.scope.to_string();

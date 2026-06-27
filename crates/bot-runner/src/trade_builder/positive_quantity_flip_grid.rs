@@ -204,6 +204,9 @@ fn positive_quantity_flip_grid_exit_side(
     state: &TradeBuilderPositiveQuantityFlipGridState,
     quotes: &[PositiveQuantityFlipGridQuote],
 ) -> Option<(&'static str, f64, f64, f64)> {
+    if !config.direct_exit_enabled {
+        return None;
+    }
     quotes
         .iter()
         .filter_map(|quote| {

@@ -99,10 +99,24 @@ async function parseHttpErrorMessage(res: Response): Promise<ParsedHttpError> {
     const err = body.error;
     const message =
       typeof err === 'string' && err.trim().length > 0 ? err.trim() : `HTTP ${res.status}`;
+    if (res.status === 401) {
+      return {
+        message: 'Oturumun suresi doldu veya giris yapilmamis. Lutfen tekrar login ol.',
+        apiCode: 'auth_unauthorized',
+        retryable: false,
+      };
+    }
     return {
       message,
       apiCode: typeof body.code === 'string' && body.code.trim().length > 0 ? body.code.trim() : undefined,
       retryable: typeof body.retryable === 'boolean' ? body.retryable : undefined,
+    };
+  }
+  if (res.status === 401) {
+    return {
+      message: 'Oturumun suresi doldu veya giris yapilmamis. Lutfen tekrar login ol.',
+      apiCode: 'auth_unauthorized',
+      retryable: false,
     };
   }
   return { message: `HTTP ${res.status}` };
@@ -121,7 +135,11 @@ export async function requestJson<T>(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(endpoint, { ...init, signal: controller.signal });
+      const res = await fetch(endpoint, {
+        ...init,
+        credentials: init.credentials ?? 'same-origin',
+        signal: controller.signal,
+      });
       clearTimeout(timeoutId);
 
       if (!res.ok) {

@@ -1,0 +1,27 @@
+[Unit]
+Description=Dextrabot ML Entry Quality scheduled training
+After=network-online.target postgresql.service
+Wants=network-online.target
+OnFailure=dextrabot-ml-entry-quality-train-failure@%n.service
+
+[Service]
+Type=oneshot
+User=dextrabot
+Group=dextrabot
+WorkingDirectory=/home/heathcliff/polymarketbot
+EnvironmentFile=/etc/dextrabot/dextrabot.env
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=NUMEXPR_NUM_THREADS=1
+ExecStart=/home/heathcliff/polymarketbot/.venv-ml-entry-quality/bin/python scripts/ml_entry_quality/run_scheduled_training.py --asset btc --timeframe 5m --lookback-days 45 --model-dir artifacts/ml_entry_quality/v1 --min-rows 1000 --auc-floor 0.60 --auc-regression-tolerance 0.02 --sample-every-sec 3 --telegram --telegram-user-id 1
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

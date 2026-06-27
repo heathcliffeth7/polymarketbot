@@ -30,6 +30,8 @@ fn market(best_bid: f64, best_ask: f64) -> PriceToBeatSignalFormulaMarketInput {
 
 fn config(best_bid: f64, best_ask: f64) -> PriceToBeatIvMismatchEdgeConfig {
     let mut config = PriceToBeatIvMismatchEdgeConfig::crypto_defaults(market(best_bid, best_ask));
+    config.cex_open_gap.decision_gap_enabled = false;
+    config.oracle_tick_jump.enabled = false;
     config.time_rules = vec![PriceToBeatIvMismatchTimeRule {
         start_remaining_secs: 120.0,
         end_remaining_secs: 10.0,
@@ -60,7 +62,7 @@ async fn iv_mismatch_protection_blocks_opposite_book_lead() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     clear_binance_price_test_state();
-    seed_ticks(&[100.0, 99.8, 99.5, 99.2, 99.0, 98.8, 98.5, 98.2]);
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
     let mut config = config(0.24, 0.26);
     config.book_lead_guard_enabled = true;
     config.book_quotes = Some(opposite_book_quotes());
@@ -89,7 +91,7 @@ async fn iv_mismatch_protection_allows_neutral_book_when_gap_threshold_is_not_hi
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     clear_binance_price_test_state();
-    seed_ticks(&[100.0, 99.8, 99.5, 99.2, 99.0, 98.8, 98.5, 98.2]);
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
     let mut config = config(0.44, 0.46);
     config.book_lead_guard_enabled = true;
     config.model_book_gap_warn = Some(0.90);
@@ -147,7 +149,7 @@ async fn iv_mismatch_protection_blocks_binance_direction_mismatch() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     clear_binance_price_test_state();
-    seed_ticks(&[100.0, 99.8, 99.5, 99.2, 99.0, 98.8, 98.5, 98.2]);
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
     let now_ms = Utc::now().timestamp_millis();
     seed_binance_price_test_ticks("btc", &[(now_ms - 300, 101.0)]).expect("seed binance ticks");
     let mut config = config(0.09, 0.10);
@@ -200,7 +202,7 @@ async fn iv_mismatch_protection_blocks_too_good_to_be_true() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     clear_binance_price_test_state();
-    seed_ticks(&[100.0, 99.8, 99.5, 99.2, 99.0, 98.8, 98.5, 98.2]);
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
     let mut config = config(0.24, 0.26);
     config.book_lead_guard_enabled = true;
     config.block_on_opposite_book_lead = false;
@@ -228,7 +230,7 @@ async fn iv_mismatch_protection_blocks_neutral_book_model_gap() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     clear_binance_price_test_state();
-    seed_ticks(&[100.0, 99.8, 99.5, 99.2, 99.0, 98.8, 98.5, 98.2]);
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
     let mut config = config(0.49, 0.50);
     config.book_lead_guard_enabled = true;
     config.book_quotes = Some(PriceToBeatIvBookQuotes {
@@ -260,7 +262,7 @@ async fn iv_mismatch_model_book_warning_adds_penalty_without_blocking() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     clear_binance_price_test_state();
-    seed_ticks(&[100.0, 99.8, 99.5, 99.2, 99.0, 98.8, 98.5, 98.2]);
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
     let mut config = config(0.59, 0.61);
     config.book_lead_guard_enabled = true;
     config.book_quotes = Some(PriceToBeatIvBookQuotes {
@@ -297,7 +299,7 @@ async fn iv_mismatch_adaptive_protection_blocks_model_book_gap() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     clear_binance_price_test_state();
-    seed_ticks(&[100.0, 99.8, 99.5, 99.2, 99.0, 98.8, 98.5, 98.2]);
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
     let mut config = config(0.49, 0.50);
     config.protection_mode = PriceToBeatIvProtectionMode::Adaptive;
     config.book_lead_guard_enabled = true;
@@ -329,7 +331,7 @@ async fn iv_mismatch_model_book_gap_blocks_outside_book_lead_window() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     clear_binance_price_test_state();
-    seed_ticks(&[100.0, 99.8, 99.5, 99.2, 99.0, 98.8, 98.5, 98.2]);
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
     let mut config = config(0.49, 0.50);
     config.time_rules[0].start_remaining_secs = 180.0;
     config.book_lead_guard_enabled = true;
@@ -388,14 +390,15 @@ async fn iv_mismatch_late_high_price_compound_risk_blocks() {
 }
 
 #[tokio::test]
-async fn iv_mismatch_depth_guard_uses_vwap_cost_and_blocks_slippage() {
+async fn iv_mismatch_depth_guard_uses_vwap_cost_and_defers_slippage_only_block() {
     let _guard = IV_MISMATCH_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     clear_binance_price_test_state();
-    seed_ticks(&[100.0, 99.8, 99.5, 99.2, 99.0, 98.8, 98.5, 98.2]);
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
     let mut config = config(0.49, 0.50);
     config.depth_guard_enabled = true;
+    config.depth_guard_hard_block_enabled = true;
     config.depth_intended_qty = Some(5.0);
     config.depth_order_book = Some(OrderBookSnapshot {
         bids: vec![OrderBookLevel {
@@ -423,16 +426,143 @@ async fn iv_mismatch_depth_guard_uses_vwap_cost_and_blocks_slippage() {
         config,
     );
 
-    assert!(!evaluation.passed, "{evaluation:?}");
-    assert_eq!(evaluation.reason, "blocked_insufficient_depth");
+    assert!(evaluation.passed, "{evaluation:?}");
+    assert_eq!(
+        evaluation.depth.block_reason,
+        Some("blocked_depth_slippage_too_high")
+    );
+    assert_eq!(evaluation.depth.block_kind, Some("slippage_too_high"));
+    assert!(evaluation.depth.slippage_deferred_to_execution_vwap);
+    assert!(!evaluation.depth.slippage_hard_blocked);
     assert_eq!(evaluation.depth.estimated_avg_fill, Some(0.67));
     assert!(evaluation.depth.vwap_slippage.expect("slippage") > 0.03);
     assert_eq!(evaluation.depth.depth_levels_used, Some(2));
     assert!(evaluation.cost.expect("cost") > 0.69);
 }
 
+#[tokio::test]
+async fn iv_mismatch_depth_guard_hard_block_still_blocks_insufficient_qty() {
+    let _guard = IV_MISMATCH_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    clear_binance_price_test_state();
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
+    let mut config = config(0.49, 0.50);
+    config.protection_mode = PriceToBeatIvProtectionMode::Off;
+    config.depth_guard_enabled = true;
+    config.depth_guard_hard_block_enabled = true;
+    config.depth_intended_qty = Some(5.0);
+    config.depth_order_book = Some(OrderBookSnapshot {
+        bids: vec![OrderBookLevel {
+            price: 0.49,
+            size: 10.0,
+        }],
+        asks: vec![OrderBookLevel {
+            price: 0.50,
+            size: 1.0,
+        }],
+    });
+
+    let evaluation = evaluate_price_to_beat_iv_mismatch_edge(
+        &active_market_slug(80),
+        "Down",
+        "btc",
+        98.2,
+        100.0,
+        config,
+    );
+
+    assert!(!evaluation.passed, "{evaluation:?}");
+    assert_eq!(evaluation.reason, "blocked_depth_qty_insufficient");
+    assert_eq!(evaluation.protection_result, Some("off"));
+    assert_eq!(
+        evaluation.depth.block_reason,
+        Some("blocked_depth_qty_insufficient")
+    );
+    assert_eq!(evaluation.depth.block_kind, Some("qty_insufficient"));
+    assert_eq!(evaluation.depth.depth_levels_used, Some(1));
+    assert_eq!(evaluation.depth.visible_ask_qty, Some(1.0));
+}
+
+#[tokio::test]
+async fn iv_mismatch_depth_guard_hard_block_flag_false_preserves_protection_off() {
+    let _guard = IV_MISMATCH_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    clear_binance_price_test_state();
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
+    let mut config = config(0.49, 0.50);
+    config.protection_mode = PriceToBeatIvProtectionMode::Off;
+    config.depth_guard_enabled = true;
+    config.depth_guard_hard_block_enabled = false;
+    config.depth_intended_qty = Some(5.0);
+    config.depth_order_book = Some(OrderBookSnapshot {
+        bids: vec![OrderBookLevel {
+            price: 0.49,
+            size: 10.0,
+        }],
+        asks: vec![
+            OrderBookLevel {
+                price: 0.50,
+                size: 1.0,
+            },
+            OrderBookLevel {
+                price: 0.7125,
+                size: 4.0,
+            },
+        ],
+    });
+
+    let evaluation = evaluate_price_to_beat_iv_mismatch_edge(
+        &active_market_slug(80),
+        "Down",
+        "btc",
+        98.2,
+        100.0,
+        config,
+    );
+
+    assert!(evaluation.passed, "{evaluation:?}");
+    assert_eq!(evaluation.protection_result, Some("off"));
+    assert_eq!(
+        evaluation.depth.block_reason,
+        Some("blocked_depth_slippage_too_high")
+    );
+    assert_eq!(evaluation.depth.block_kind, Some("slippage_too_high"));
+    assert!(!evaluation.depth.slippage_deferred_to_execution_vwap);
+}
+
 #[test]
 fn iv_mismatch_depth_guard_allows_exact_slippage_boundary() {
+    let order_book = OrderBookSnapshot {
+        bids: Vec::new(),
+        asks: vec![
+            OrderBookLevel {
+                price: 0.50,
+                size: 1.0,
+            },
+            OrderBookLevel {
+                price: 0.5375,
+                size: 4.0,
+            },
+        ],
+    };
+
+    let evaluation = super::super::iv_mismatch_depth::evaluate_price_to_beat_iv_depth(
+        Some(&order_book),
+        0.50,
+        Some(5.0),
+        0.03,
+        true,
+    );
+
+    assert_eq!(evaluation.result, "pass");
+    assert_eq!(evaluation.block_reason, None);
+    assert!((evaluation.vwap_slippage.expect("slippage") - 0.03).abs() < 0.000001);
+}
+
+#[test]
+fn iv_mismatch_depth_guard_zero_slippage_when_book_best_ask_matches_fill() {
     let order_book = OrderBookSnapshot {
         bids: Vec::new(),
         asks: vec![OrderBookLevel {
@@ -451,7 +581,7 @@ fn iv_mismatch_depth_guard_allows_exact_slippage_boundary() {
 
     assert_eq!(evaluation.result, "pass");
     assert_eq!(evaluation.block_reason, None);
-    assert!((evaluation.vwap_slippage.expect("slippage") - 0.03).abs() < 0.000001);
+    assert!((evaluation.vwap_slippage.expect("slippage") - 0.0).abs() < 0.000001);
 }
 
 #[tokio::test]
@@ -460,7 +590,7 @@ async fn iv_mismatch_protection_soft_mode_adds_penalties() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     clear_binance_price_test_state();
-    seed_ticks(&[100.0, 99.8, 99.5, 99.2, 99.0, 98.8, 98.5, 98.2]);
+    seed_ticks(&[98.25, 98.2, 98.22, 98.18, 98.21, 98.2, 98.19, 98.2]);
     let mut config = config(0.24, 0.26);
     config.protection_mode = PriceToBeatIvProtectionMode::Soft;
     config.book_lead_guard_enabled = true;

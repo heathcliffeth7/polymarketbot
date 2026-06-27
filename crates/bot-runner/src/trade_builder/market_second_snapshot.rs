@@ -215,6 +215,8 @@ fn emit_book_backed_tick_triggers(
     let snapshot = MarketDataSnapshot {
         best_bid,
         best_ask,
+        best_bid_size: None,
+        best_ask_size: None,
         last_trade_price: tick_snapshot.last_trade_price,
         updated_at_ms: tick_snapshot.updated_at_ms,
         last_source: "orderbook_snapshot".to_string(),

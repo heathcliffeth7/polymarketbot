@@ -7,6 +7,7 @@ impl PostgresRepository {
             "trigger_ws_price_enqueued"
                 | "trigger_once_fired"
                 | "trigger_once_blocked"
+                | "deferred_once_lock"
                 | "telegram_notify"
                 | "step_completed"
         )
@@ -20,6 +21,150 @@ impl PostgresRepository {
             .execute(self.pool())
             .await?;
         Ok(())
+    }
+
+    fn deferred_once_lock_from_row(row: sqlx::postgres::PgRow) -> TradeFlowDeferredOnceLockRecord {
+        TradeFlowDeferredOnceLockRecord {
+            lock_key: row.get("lock_key"),
+            state: row.get("state"),
+            run_id: row.get("run_id"),
+            trigger_node_key: row.get("trigger_node_key"),
+            action_node_key: row.get("action_node_key"),
+            market_slug: row.get("market_slug"),
+            token_id: row.get("token_id"),
+            outcome_label: row.get("outcome_label"),
+            once_scope_market: row.get("once_scope_market"),
+            expires_at: row.get("expires_at"),
+            builder_order_id: row.get("builder_order_id"),
+        }
+    }
+
+    pub async fn expire_trade_flow_deferred_once_locks_for_run(&self, run_id: i64) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE trade_flow_deferred_once_locks \
+             SET state = 'expired', release_reason = 'ttl_expired', released_at = NOW(), updated_at = NOW() \
+             WHERE run_id = $1 AND state = 'pending' AND expires_at <= NOW()",
+        )
+        .bind(run_id)
+        .execute(self.pool())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn acquire_trade_flow_deferred_once_lock(
+        &self,
+        input: &TradeFlowDeferredOnceLockInput,
+    ) -> Result<TradeFlowDeferredOnceLockAcquireResult> {
+        let expired = sqlx::query(
+            "UPDATE trade_flow_deferred_once_locks \
+             SET state = 'expired', release_reason = 'ttl_expired', released_at = NOW(), updated_at = NOW() \
+             WHERE lock_key = $1 AND state = 'pending' AND expires_at <= NOW()",
+        )
+        .bind(&input.lock_key)
+        .execute(self.pool())
+        .await?
+        .rows_affected();
+
+        let inserted = sqlx::query(
+            "INSERT INTO trade_flow_deferred_once_locks \
+              (run_id, definition_id, version_id, trigger_node_key, action_node_key, market_slug, token_id, outcome_label, once_scope_market, lock_key, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             ON CONFLICT (lock_key) WHERE state = 'pending' DO NOTHING \
+             RETURNING lock_key, state, run_id, trigger_node_key, action_node_key, market_slug, token_id, outcome_label, once_scope_market, expires_at, builder_order_id",
+        )
+        .bind(input.run_id)
+        .bind(input.definition_id)
+        .bind(input.version_id)
+        .bind(&input.trigger_node_key)
+        .bind(&input.action_node_key)
+        .bind(&input.market_slug)
+        .bind(&input.token_id)
+        .bind(&input.outcome_label)
+        .bind(input.once_scope_market)
+        .bind(&input.lock_key)
+        .bind(input.expires_at)
+        .fetch_optional(self.pool())
+        .await?;
+
+        if let Some(row) = inserted {
+            return Ok(TradeFlowDeferredOnceLockAcquireResult {
+                created: true,
+                record: Some(Self::deferred_once_lock_from_row(row)),
+                expired_count: expired,
+            });
+        }
+
+        let held = sqlx::query(
+            "SELECT lock_key, state, run_id, trigger_node_key, action_node_key, market_slug, token_id, outcome_label, once_scope_market, expires_at, builder_order_id \
+             FROM trade_flow_deferred_once_locks \
+             WHERE lock_key = $1 AND state = 'pending' \
+             ORDER BY id DESC \
+             LIMIT 1",
+        )
+        .bind(&input.lock_key)
+        .fetch_optional(self.pool())
+        .await?;
+
+        Ok(TradeFlowDeferredOnceLockAcquireResult {
+            created: false,
+            record: held.map(Self::deferred_once_lock_from_row),
+            expired_count: expired,
+        })
+    }
+
+    pub async fn release_trade_flow_deferred_once_lock(
+        &self,
+        lock_key: &str,
+        release_reason: &str,
+    ) -> Result<Option<TradeFlowDeferredOnceLockRecord>> {
+        let row = sqlx::query(
+            "UPDATE trade_flow_deferred_once_locks \
+             SET state = 'released', release_reason = $2, released_at = NOW(), updated_at = NOW() \
+             WHERE lock_key = $1 AND state = 'pending' \
+             RETURNING lock_key, state, run_id, trigger_node_key, action_node_key, market_slug, token_id, outcome_label, once_scope_market, expires_at, builder_order_id",
+        )
+        .bind(lock_key)
+        .bind(release_reason)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row.map(Self::deferred_once_lock_from_row))
+    }
+
+    pub async fn consume_trade_flow_deferred_once_lock(
+        &self,
+        lock_key: &str,
+        builder_order_id: i64,
+    ) -> Result<Option<TradeFlowDeferredOnceLockRecord>> {
+        let row = sqlx::query(
+            "UPDATE trade_flow_deferred_once_locks \
+             SET state = 'consumed', builder_order_id = $2, consumed_at = NOW(), updated_at = NOW() \
+             WHERE lock_key = $1 AND state = 'pending' \
+             RETURNING lock_key, state, run_id, trigger_node_key, action_node_key, market_slug, token_id, outcome_label, once_scope_market, expires_at, builder_order_id",
+        )
+        .bind(lock_key)
+        .bind(builder_order_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row.map(Self::deferred_once_lock_from_row))
+    }
+
+    pub async fn list_consumed_trade_flow_deferred_once_locks(
+        &self,
+        run_id: i64,
+    ) -> Result<Vec<TradeFlowDeferredOnceLockRecord>> {
+        let rows = sqlx::query(
+            "SELECT lock_key, state, run_id, trigger_node_key, action_node_key, market_slug, token_id, outcome_label, once_scope_market, expires_at, builder_order_id \
+             FROM trade_flow_deferred_once_locks \
+             WHERE run_id = $1 AND state = 'consumed' \
+             ORDER BY consumed_at ASC, id ASC",
+        )
+        .bind(run_id)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(Self::deferred_once_lock_from_row)
+            .collect())
     }
 
     pub async fn list_published_trade_flow_definitions(
@@ -346,6 +491,17 @@ impl PostgresRepository {
         Ok(())
     }
 
+    pub async fn delete_old_trade_flow_events(&self, retention_days: i64) -> Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM trade_flow_events \
+             WHERE created_at < now() - ($1::BIGINT * INTERVAL '1 day')",
+        )
+        .bind(retention_days)
+        .execute(self.pool())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue_trade_flow_step(
         &self,
@@ -416,11 +572,29 @@ impl PostgresRepository {
     }
 
     pub async fn claim_ready_trade_flow_steps(&self, limit: i64) -> Result<Vec<TradeFlowRunStep>> {
+        self.claim_ready_trade_flow_steps_for_processing_run(limit, None)
+            .await
+    }
+
+    pub async fn claim_ready_trade_flow_steps_for_processing_run(
+        &self,
+        limit: i64,
+        step_processing_run_id: Option<&str>,
+    ) -> Result<Vec<TradeFlowRunStep>> {
         let rows = sqlx::query(
             "WITH claimable AS (
                SELECT id
                FROM trade_flow_run_steps
-               WHERE status = 'queued' AND available_at <= NOW()
+               WHERE status = 'queued'
+                 AND available_at <= NOW()
+                 AND (
+                   $2::TEXT IS NULL
+                   OR NOT COALESCE((
+                     node_type = 'action.place_order'
+                     AND input_json #>> '{__flow_runtime,repeat_kind}' = 'ptb_guard_retry'
+                     AND input_json #>> '{__flow_runtime,created_by_step_processing_run_id}' = $2
+                   ), false)
+                 )
                ORDER BY available_at ASC, id ASC
                LIMIT $1
                FOR UPDATE SKIP LOCKED
@@ -432,6 +606,7 @@ impl PostgresRepository {
              RETURNING s.id, s.run_id, s.node_key, s.node_type, s.status, s.attempt, s.input_json, s.output_json, s.error_text, s.started_at, s.ended_at, s.available_at, s.parent_step_id, s.idempotency_key, s.created_at",
         )
         .bind(limit)
+        .bind(step_processing_run_id)
         .fetch_all(self.pool())
         .await?;
 
@@ -457,6 +632,41 @@ impl PostgresRepository {
             .collect())
     }
 
+    pub async fn count_ready_trade_flow_step_backlog_for_processing_run(
+        &self,
+        step_processing_run_id: Option<&str>,
+    ) -> Result<TradeFlowReadyStepBacklogCounts> {
+        let row = sqlx::query(
+            "SELECT \
+                COUNT(*)::BIGINT AS ready_total, \
+                COUNT(*) FILTER (WHERE COALESCE(( \
+                  node_type = 'action.place_order' \
+                  AND input_json #>> '{__flow_runtime,repeat_kind}' = 'ptb_guard_retry' \
+                ), false))::BIGINT AS ready_ptb_retry, \
+                COUNT(*) FILTER (WHERE COALESCE(( \
+                  node_type = 'action.place_order' \
+                  AND input_json #>> '{__flow_runtime,repeat_kind}' = 'ptb_guard_retry' \
+                  AND input_json #>> '{__flow_runtime,created_by_step_processing_run_id}' = $1 \
+                ), false))::BIGINT AS ready_same_run_ptb_retry, \
+                COUNT(*) FILTER (WHERE NOT COALESCE(( \
+                  node_type = 'action.place_order' \
+                  AND input_json #>> '{__flow_runtime,repeat_kind}' = 'ptb_guard_retry' \
+                ), false))::BIGINT AS ready_non_retry \
+             FROM trade_flow_run_steps \
+             WHERE status = 'queued' AND available_at <= NOW()",
+        )
+        .bind(step_processing_run_id)
+        .fetch_one(self.pool())
+        .await?;
+
+        Ok(TradeFlowReadyStepBacklogCounts {
+            ready_total: row.get("ready_total"),
+            ready_ptb_retry: row.get("ready_ptb_retry"),
+            ready_same_run_ptb_retry: row.get("ready_same_run_ptb_retry"),
+            ready_non_retry: row.get("ready_non_retry"),
+        })
+    }
+
     pub async fn mark_trade_flow_step_running(&self, step_id: i64) -> Result<()> {
         sqlx::query(
             "UPDATE trade_flow_run_steps \
@@ -467,6 +677,64 @@ impl PostgresRepository {
         .execute(self.pool())
         .await?;
         Ok(())
+    }
+
+    pub async fn recover_stale_running_trade_flow_steps(
+        &self,
+        stale_after_ms: i64,
+        limit: i64,
+    ) -> Result<u64> {
+        let recovered: i64 = sqlx::query_scalar(
+            "WITH candidates AS (
+               SELECT s.id
+               FROM trade_flow_run_steps s
+               WHERE s.status = 'running'
+                 AND COALESCE(s.started_at, s.created_at) <= NOW() - ($1::BIGINT * INTERVAL '1 millisecond')
+               ORDER BY COALESCE(s.started_at, s.created_at), s.id
+               LIMIT $2
+             ),
+             recovered AS (
+               UPDATE trade_flow_run_steps s
+               SET status = 'canceled',
+                   output_json = COALESCE(s.output_json, '{}'::jsonb) || jsonb_build_object(
+                     'reason', 'stale_running_recovered',
+                     'recovery_action', 'canceled',
+                     'recovered_at', NOW(),
+                     'stale_running_started_at', s.started_at
+                   ),
+                   error_text = 'stale_running_recovered',
+                   ended_at = NOW()
+               FROM candidates
+               WHERE s.id = candidates.id
+               RETURNING s.id, s.run_id, s.node_key, s.node_type, s.started_at
+             ),
+             event_rows AS (
+               INSERT INTO trade_flow_events
+                 (run_id, definition_id, version_id, event_type, payload_json, created_at)
+               SELECT r.id,
+                      r.definition_id,
+                      r.version_id,
+                      'step_stale_running_recovered',
+                      jsonb_build_object(
+                        'step_id', recovered.id,
+                        'node_key', recovered.node_key,
+                        'node_type', recovered.node_type,
+                        'status_after', 'canceled',
+                        'reason', 'stale_running_recovered',
+                        'started_at', recovered.started_at
+                      ),
+                      NOW()
+               FROM recovered
+               JOIN trade_flow_runs r ON r.id = recovered.run_id
+               RETURNING id
+             )
+             SELECT COUNT(*)::BIGINT FROM recovered",
+        )
+        .bind(stale_after_ms)
+        .bind(limit)
+        .fetch_one(self.pool())
+        .await?;
+        Ok(recovered.max(0) as u64)
     }
 
     pub async fn mark_trade_flow_step_completed(

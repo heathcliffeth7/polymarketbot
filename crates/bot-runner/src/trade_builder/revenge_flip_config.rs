@@ -60,6 +60,9 @@ struct RevengeFlipConfig {
     reentry_side_mode: String,
     max_flip: i64,
     min_reentry_shares: f64,
+    post_stop_loss_iv_mismatch_enabled: bool,
+    post_stop_loss_mid_chop_guard: RevengeFlipPostStopLossMidChopGuardConfig,
+    post_stop_loss_strong_trend_flip: RevengeFlipPostStopLossStrongTrendFlipConfig,
     lot_limit_pct: f64,
     close_only_sec: i64,
     order_type: String,
@@ -74,6 +77,21 @@ struct RevengeFlipTriggerPriceConfig {
     enabled: bool,
     min_cent: f64,
     max_cent: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RevengeFlipPostStopLossMidChopGuardConfig {
+    enabled: bool,
+    chop_mid_low: f64,
+    chop_mid_high: f64,
+    fail_closed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RevengeFlipPostStopLossStrongTrendFlipConfig {
+    enabled: bool,
+    strong_trend_mid: f64,
+    max_price_cent: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +178,15 @@ fn revenge_flip_nested_value<'a>(
         .get(object_key)
         .and_then(Value::as_object)
         .and_then(|object| object.get(key))
+}
+
+fn revenge_flip_nested_object<'a>(
+    node: &'a TradeFlowNode,
+    object_key: &str,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    revenge_flip_object(node)
+        .and_then(|object| object.get(object_key))
+        .and_then(Value::as_object)
 }
 
 fn revenge_flip_value<'a>(
@@ -278,8 +305,9 @@ fn revenge_flip_ptb_stop_loss_current_price_source(value: Option<String>) -> Res
         "hyperliquid" => Ok("hyperliquid".to_string()),
         "binance_hyperliquid" => Ok("binance_hyperliquid".to_string()),
         "cex_consensus" => Ok("cex_consensus".to_string()),
+        "chainlink_cex_consensus" => Ok("chainlink_cex_consensus".to_string()),
         _ => anyhow::bail!(
-            "revenge_flip_v1 ptbStopLossCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, binance_hyperliquid, or cex_consensus"
+            "revenge_flip_v1 ptbStopLossCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, binance_hyperliquid, cex_consensus, or chainlink_cex_consensus"
         ),
     }
 }
@@ -314,19 +342,11 @@ fn revenge_flip_ptb_stop_loss_time_decay_mode(value: Option<String>) -> Result<S
 }
 
 fn revenge_flip_value_to_usd(value: f64, unit: &str) -> f64 {
-    if unit == "cent" {
-        value / 100.0
-    } else {
-        value
-    }
+    if unit == "cent" { value / 100.0 } else { value }
 }
 
 fn revenge_flip_usd_to_unit(value: f64, unit: &str) -> f64 {
-    if unit == "cent" {
-        value * 100.0
-    } else {
-        value
-    }
+    if unit == "cent" { value * 100.0 } else { value }
 }
 
 fn revenge_flip_time_rule_from_value(value: &Value) -> Option<RevengeFlipTimeRule> {
@@ -609,6 +629,73 @@ fn revenge_flip_entry_ptb_rule_json(rule: &RevengeFlipEntryPtbRule) -> Value {
     })
 }
 
+fn revenge_flip_post_stop_loss_mid_chop_guard_config(
+    node: &TradeFlowNode,
+) -> Result<RevengeFlipPostStopLossMidChopGuardConfig> {
+    let object = revenge_flip_nested_object(node, "postStopLossMidChopGuard");
+    let enabled = object
+        .and_then(|object| object.get("enabled"))
+        .and_then(revenge_flip_value_as_bool)
+        .unwrap_or(false);
+    let chop_mid_low = object
+        .and_then(|object| object.get("chopMidLow"))
+        .and_then(value_as_f64)
+        .unwrap_or(0.45);
+    let chop_mid_high = object
+        .and_then(|object| object.get("chopMidHigh"))
+        .and_then(value_as_f64)
+        .unwrap_or(0.56);
+    let fail_closed = object
+        .and_then(|object| object.get("failClosed"))
+        .and_then(revenge_flip_value_as_bool)
+        .unwrap_or(true);
+    anyhow::ensure!(
+        chop_mid_low.is_finite()
+            && chop_mid_high.is_finite()
+            && chop_mid_low >= 0.0
+            && chop_mid_low < chop_mid_high
+            && chop_mid_high <= 1.0,
+        "revenge_flip_v1 postStopLossMidChopGuard requires 0 <= chopMidLow < chopMidHigh <= 1"
+    );
+    Ok(RevengeFlipPostStopLossMidChopGuardConfig {
+        enabled,
+        chop_mid_low,
+        chop_mid_high,
+        fail_closed,
+    })
+}
+
+fn revenge_flip_post_stop_loss_strong_trend_flip_config(
+    node: &TradeFlowNode,
+) -> Result<RevengeFlipPostStopLossStrongTrendFlipConfig> {
+    let object = revenge_flip_nested_object(node, "postStopLossStrongTrendFlip");
+    let enabled = object
+        .and_then(|object| object.get("enabled"))
+        .and_then(revenge_flip_value_as_bool)
+        .unwrap_or(false);
+    let strong_trend_mid = object
+        .and_then(|object| object.get("strongTrendMid"))
+        .and_then(value_as_f64)
+        .unwrap_or(0.68);
+    let max_price_cent = object
+        .and_then(|object| object.get("maxPriceCent"))
+        .and_then(value_as_f64)
+        .unwrap_or(85.0);
+    anyhow::ensure!(
+        strong_trend_mid.is_finite() && strong_trend_mid > 0.0 && strong_trend_mid <= 1.0,
+        "revenge_flip_v1 postStopLossStrongTrendFlip strongTrendMid must be > 0 and <= 1"
+    );
+    anyhow::ensure!(
+        max_price_cent.is_finite() && max_price_cent > 0.0 && max_price_cent <= 100.0,
+        "revenge_flip_v1 postStopLossStrongTrendFlip maxPriceCent must be > 0 and <= 100"
+    );
+    Ok(RevengeFlipPostStopLossStrongTrendFlipConfig {
+        enabled,
+        strong_trend_mid,
+        max_price_cent,
+    })
+}
+
 fn resolve_revenge_flip_config(node: &TradeFlowNode) -> Result<RevengeFlipConfig> {
     let initial_order_usdc =
         revenge_flip_f64(node, "initialOrderUsdc", &["initialOrderUsdc"]).unwrap_or(5.0);
@@ -619,8 +706,7 @@ fn resolve_revenge_flip_config(node: &TradeFlowNode) -> Result<RevengeFlipConfig
             .unwrap_or(true);
     let stop_loss_pct = revenge_flip_f64(node, "stopLossPct", &["stopLossPct"]).unwrap_or(0.20);
     let token_stop_loss_enabled =
-        revenge_flip_bool(node, "tokenStopLossEnabled", &["tokenStopLossEnabled"])
-            .unwrap_or(false);
+        revenge_flip_bool(node, "tokenStopLossEnabled", &["tokenStopLossEnabled"]).unwrap_or(false);
     let token_stop_loss_pct =
         revenge_flip_f64(node, "tokenStopLossPct", &["tokenStopLossPct"]).unwrap_or(0.15);
     let max_flip = revenge_flip_i64(node, "maxFlip", &["maxFlip"])
@@ -628,9 +714,15 @@ fn resolve_revenge_flip_config(node: &TradeFlowNode) -> Result<RevengeFlipConfig
         .max(0);
     let min_reentry_shares =
         revenge_flip_f64(node, "minReentryShares", &["minReentryShares"]).unwrap_or(0.0);
+    let post_stop_loss_iv_mismatch_enabled = revenge_flip_bool(
+        node,
+        "postStopLossIvMismatchEnabled",
+        &["postStopLossIvMismatchEnabled"],
+    )
+    .unwrap_or(true);
     let lot_limit_pct = revenge_flip_f64(node, "lotLimitPct", &["lotLimitPct"]).unwrap_or(0.98);
     let close_only_sec = revenge_flip_i64(node, "closeOnlySec", &["closeOnlySec"])
-        .unwrap_or(10)
+        .unwrap_or(12)
         .max(0);
     let order_type = node_config_string(node, "orderType").unwrap_or_else(|| "FAK".to_string());
     let reentry_side_mode = revenge_flip_reentry_side_mode(revenge_flip_string(
@@ -644,8 +736,8 @@ fn resolve_revenge_flip_config(node: &TradeFlowNode) -> Result<RevengeFlipConfig
         "revenge_flip_v1 initialOrderUsdc must be > 0"
     );
     anyhow::ensure!(
-        profit_target_usdc.is_finite() && profit_target_usdc >= 0.0,
-        "revenge_flip_v1 profitTargetUsdc must be >= 0"
+        profit_target_usdc.is_finite(),
+        "revenge_flip_v1 profitTargetUsdc must be finite"
     );
     anyhow::ensure!(
         min_reentry_shares.is_finite() && min_reentry_shares >= 0.0,
@@ -695,7 +787,8 @@ fn resolve_revenge_flip_config(node: &TradeFlowNode) -> Result<RevengeFlipConfig
         enabled: node_config_bool(node, "priceToBeatGuardEnabled")
             .or_else(|| node_config_bool(node, "priceToBeatGuard"))
             .unwrap_or(true),
-        mode: node_config_string(node, "priceToBeatMode").unwrap_or_else(|| "manual".to_string()),
+        mode: node_config_string(node, "priceToBeatMode")
+            .unwrap_or_else(|| "iv_mismatch_edge".to_string()),
         max_diff: node_config_f64(node, "priceToBeatMinDiff")
             .or_else(|| node_config_f64(node, "priceToBeatMaxDiff"))
             .unwrap_or(0.01)
@@ -778,6 +871,9 @@ fn resolve_revenge_flip_config(node: &TradeFlowNode) -> Result<RevengeFlipConfig
         )
         .or_else(|| node_config_string(node, "priceToBeatCurrentPriceSource")),
     )?;
+    let post_stop_loss_mid_chop_guard = revenge_flip_post_stop_loss_mid_chop_guard_config(node)?;
+    let post_stop_loss_strong_trend_flip =
+        revenge_flip_post_stop_loss_strong_trend_flip_config(node)?;
 
     Ok(RevengeFlipConfig {
         initial_order_usdc,
@@ -795,6 +891,9 @@ fn resolve_revenge_flip_config(node: &TradeFlowNode) -> Result<RevengeFlipConfig
         reentry_side_mode,
         max_flip,
         min_reentry_shares,
+        post_stop_loss_iv_mismatch_enabled,
+        post_stop_loss_mid_chop_guard,
+        post_stop_loss_strong_trend_flip,
         lot_limit_pct,
         close_only_sec,
         order_type,

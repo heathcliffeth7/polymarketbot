@@ -63,6 +63,9 @@ async fn shared_guard_evaluation_sets_relax_tracking_on_first_market() {
         1,
         None,
         BTC_MARKET_5M,
+        None,
+        None,
+        None,
         "Up",
         None,
     )
@@ -150,6 +153,9 @@ async fn shared_guard_evaluation_relaxes_after_tracked_fill_less_markets() {
         1,
         None,
         current_market_slug,
+        None,
+        None,
+        None,
         "Up",
         None,
     )
@@ -182,9 +188,11 @@ async fn shared_guard_evaluation_relaxes_after_tracked_fill_less_markets() {
             .and_then(Value::as_bool),
         Some(false)
     );
-    assert!(context
-        .pointer("/nodeState/action_1/ptb_current_effective_threshold_usd")
-        .is_none());
+    assert!(
+        context
+            .pointer("/nodeState/action_1/ptb_current_effective_threshold_usd")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -204,6 +212,9 @@ async fn shared_guard_evaluation_skips_relax_preview_for_non_gap_reason() {
         1,
         None,
         "unsupported-market",
+        None,
+        None,
+        None,
         "Up",
         None,
     )
@@ -295,6 +306,9 @@ async fn shared_guard_evaluation_preview_persists_relaxed_effective_threshold() 
         1,
         None,
         current_market_slug,
+        None,
+        None,
+        None,
         "Up",
         None,
     )

@@ -1,12 +1,24 @@
 use super::*;
 
 impl PostgresRepository {
-    pub async fn record_run_start(&self, mode: &str, version: &str) -> Result<i64> {
+    pub async fn record_run_start(
+        &self,
+        mode: &str,
+        version: &str,
+        metadata: &BotRunStartMetadata,
+    ) -> Result<i64> {
         let id: i64 = sqlx::query_scalar(
-            "INSERT INTO bot_runs (mode, version, started_at) VALUES ($1, $2, NOW()) RETURNING id",
+            "INSERT INTO bot_runs \
+             (mode, version, package_version, git_sha, build_time, process_start_time, config_hash, started_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) RETURNING id",
         )
         .bind(mode)
         .bind(version)
+        .bind(&metadata.package_version)
+        .bind(&metadata.git_sha)
+        .bind(&metadata.build_time)
+        .bind(metadata.process_start_time)
+        .bind(&metadata.config_hash)
         .fetch_one(self.pool())
         .await?;
         Ok(id)

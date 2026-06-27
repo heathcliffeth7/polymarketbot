@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+const CURRENT_PRICE_UNAVAILABLE_MIN_RETRY_DELAY_MS: i64 = 1_000;
+
 pub(super) fn price_to_beat_guard_retry_delay_ms(node: &crate::TradeFlowNode) -> i64 {
     if crate::node_config_bool(node, "priceToBeatEarlyStaleSideEnabled").unwrap_or(false) {
         return crate::node_config_i64(node, "priceToBeatEarlyStaleRetryCooldownMs")
@@ -7,6 +9,17 @@ pub(super) fn price_to_beat_guard_retry_delay_ms(node: &crate::TradeFlowNode) ->
             .clamp(100, 60_000);
     }
     crate::PRICE_TO_BEAT_GUARD_RETRY_DELAY_MS
+}
+
+pub(super) fn price_to_beat_guard_retry_delay_ms_for_reason(
+    node: &crate::TradeFlowNode,
+    reason: &str,
+) -> i64 {
+    let delay_ms = price_to_beat_guard_retry_delay_ms(node);
+    if reason == "current_price_unavailable" {
+        return delay_ms.max(CURRENT_PRICE_UNAVAILABLE_MIN_RETRY_DELAY_MS);
+    }
+    delay_ms
 }
 
 pub(super) fn early_stale_side_guard_retry_limit_reached(
@@ -75,6 +88,43 @@ pub(super) fn early_stale_side_retry_limit_execution(
         }],
         repeat_at: None,
         repeat_idempotency_key: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_node(config: Value) -> crate::TradeFlowNode {
+        crate::TradeFlowNode {
+            key: "action".to_string(),
+            node_type: "action.place_order".to_string(),
+            config,
+        }
+    }
+
+    #[test]
+    fn current_price_unavailable_retry_delay_has_one_second_floor() {
+        let node = test_node(json!({}));
+
+        assert_eq!(
+            price_to_beat_guard_retry_delay_ms_for_reason(&node, "current_price_unavailable"),
+            1_000
+        );
+        assert_eq!(
+            price_to_beat_guard_retry_delay_ms_for_reason(
+                &node,
+                "price_to_beat_gap_below_threshold"
+            ),
+            crate::PRICE_TO_BEAT_GUARD_RETRY_DELAY_MS
+        );
+    }
+
+    #[test]
+    fn default_price_to_beat_retry_delay_stays_150ms() {
+        let node = test_node(json!({}));
+
+        assert_eq!(price_to_beat_guard_retry_delay_ms(&node), 150);
     }
 }
 

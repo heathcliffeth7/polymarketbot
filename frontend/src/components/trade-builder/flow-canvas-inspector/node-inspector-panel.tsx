@@ -33,6 +33,7 @@ import {
   POSITIVE_GRID_QUANTITY_SIZING_MODE_FIELD,
 } from '@/lib/trade-flow-config-mappers/positive-quantity-flip-grid';
 import { REVENGE_FLIP_BINDING_MODE, REVENGE_FLIP_MODE } from '@/lib/trade-flow-config-mappers/revenge-flip';
+import { CONFIDENCE_LADDER_BINDING_MODE, CONFIDENCE_LADDER_MODE } from '@/lib/trade-flow-config-mappers/confidence-ladder';
 import { TriggerMarketFiringModeSection } from './trigger-market-firing-mode-section';
 import {
   isPairLockField,
@@ -82,6 +83,8 @@ export function NodeInspectorPanel({
       placeOrderModeValue === 'positive_flip_pairlock_compression_v1');
   const placeOrderRevengeFlipEnabled =
     nodeTypeDraft === 'action.place_order' && placeOrderModeValue === REVENGE_FLIP_MODE;
+  const placeOrderConfidenceLadderEnabled =
+    nodeTypeDraft === 'action.place_order' && placeOrderModeValue === CONFIDENCE_LADDER_MODE;
   const placeOrderSizeMode = (form.fields.sizeMode ?? '').trim().toLowerCase();
   const dualDcaBaseSizing = (form.fields.baseSizing ?? '').trim().toLowerCase();
   const triggerMarketMode = (form.fields.marketMode ?? '').trim().toLowerCase();
@@ -91,7 +94,8 @@ export function NodeInspectorPanel({
     triggerBindingMode === 'pair_lock_only' ||
     triggerBindingMode === 'dca_live_only' ||
     triggerBindingMode === 'positive_quantity_flip_grid_only' ||
-    triggerBindingMode === REVENGE_FLIP_BINDING_MODE;
+    triggerBindingMode === REVENGE_FLIP_BINDING_MODE ||
+    triggerBindingMode === CONFIDENCE_LADDER_BINDING_MODE;
   const triggerRepeatMode = (form.fields.repeatMode ?? '').trim().toLowerCase();
   const triggerCycleWindowMode = (form.fields.cycleWindowMode ?? '').trim().toLowerCase();
   const triggerPriceToBeatEnabled = (form.fields.priceToBeatTriggerEnabled ?? '').toString().trim().toLowerCase() === 'true';
@@ -162,6 +166,7 @@ export function NodeInspectorPanel({
     nodeTypeDraft === 'action.place_order' &&
     placeOrderSide === 'buy' &&
     !placeOrderPositiveGridEnabled &&
+    !placeOrderConfidenceLadderEnabled &&
     (placeOrderTpEnabled || placeOrderTpRuleRows.length > 0);
   const showCounterTpLadderSection =
     nodeTypeDraft === 'action.place_order' &&
@@ -406,14 +411,14 @@ export function NodeInspectorPanel({
         return false;
       }
       if (field.key === 'tpEnabled') {
-        return placeOrderSide === 'buy' && !placeOrderPositiveGridEnabled;
+        return placeOrderSide === 'buy' && !placeOrderPositiveGridEnabled && !placeOrderConfidenceLadderEnabled;
       }
       if (field.key === 'tpPriceCent') {
         const tpEnabled = (form.fields.tpEnabled ?? '').toString().trim().toLowerCase();
-        return placeOrderSide === 'buy' && !placeOrderPositiveGridEnabled && tpEnabled === 'true';
+        return placeOrderSide === 'buy' && !placeOrderPositiveGridEnabled && !placeOrderConfidenceLadderEnabled && tpEnabled === 'true';
       }
       if (field.key === 'slEnabled') {
-        return placeOrderSide === 'buy';
+        return placeOrderSide === 'buy' && !placeOrderConfidenceLadderEnabled;
       }
       if (field.key === 'slPriceCent') {
         const slEnabled = (form.fields.slEnabled ?? '').toString().trim().toLowerCase();
@@ -453,7 +458,7 @@ export function NodeInspectorPanel({
       }
       if (field.key === 'notifyOnTpHit') {
         const tpEnabled = (form.fields.tpEnabled ?? '').toString().trim().toLowerCase();
-        return placeOrderSide === 'buy' && !placeOrderPositiveGridEnabled && tpEnabled === 'true';
+        return placeOrderSide === 'buy' && !placeOrderPositiveGridEnabled && !placeOrderConfidenceLadderEnabled && tpEnabled === 'true';
       }
       if (field.key === 'notifyOnSlHit') {
         return placeOrderHasAnyStopLossProtection;
@@ -917,10 +922,10 @@ export function NodeInspectorPanel({
                   marketOutcomes={marketOutcomes}
                   marketOutcomesLoading={marketOutcomesLoading}
                 />
-                {field.key === 'executionMode' && showDedicatedTriggerGuard && (
-                  <>
-                    {!placeOrderPositiveGridEnabled && (
-                      <PriceToBeatGuardSection
+	                {field.key === 'executionMode' && showDedicatedTriggerGuard && (
+	                  <>
+	                    {!placeOrderPositiveGridEnabled && !placeOrderConfidenceLadderEnabled && (
+	                      <PriceToBeatGuardSection
                         checked={priceToBeatGuardChecked}
                         retryChecked={priceToBeatRetryChecked}
                         mode={priceToBeatGuardMode}

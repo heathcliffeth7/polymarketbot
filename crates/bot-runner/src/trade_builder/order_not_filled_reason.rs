@@ -29,6 +29,7 @@ fn no_fill_scope_label(scope: &str) -> &'static str {
         "max_price" => "Max Fiyat",
         "execution_floor" => "Execution Floor",
         "trigger_price" => "Tetik Fiyat",
+        "submit_liquidity" => "Submit Likiditesi",
         "runtime_price" => "Runtime Fiyat",
         "trigger_condition" => "Trigger Condition",
         "action_failed" => "Action Failed",
@@ -82,6 +83,13 @@ fn parse_namespaced_guard_reason(reason: &str) -> Option<TradeBuilderNoFillReaso
     ))
 }
 
+fn no_fill_is_fak_no_match(reason_code: &str, reason_message: &str) -> bool {
+    reason_code == "processing_error"
+        && reason_message
+            .to_ascii_lowercase()
+            .contains("no orders found to match with fak order")
+}
+
 fn guard_eval_payload_for_scope(payload: &Value, scope: &str) -> Value {
     let key = match scope {
         "trigger_price" => "trigger_price_guard",
@@ -117,6 +125,21 @@ fn no_fill_summary_from_guard_evaluated(
         Some(decision),
         guard_eval_payload_for_scope(payload, scope),
         Some(source_event),
+    ))
+}
+
+fn no_fill_summary_from_passed_submit_guard(
+    payload: &Value,
+) -> Option<TradeBuilderNoFillReasonSummary> {
+    if payload.get("effective_decision").and_then(Value::as_str) != Some("passed") {
+        return None;
+    }
+    Some(no_fill_summary(
+        "submit_liquidity",
+        "fak_no_match",
+        Some("passed"),
+        payload.clone(),
+        Some("latest_guard_passed_before_submit"),
     ))
 }
 
@@ -321,7 +344,17 @@ fn no_fill_summary_from_simple_order_event(
 fn build_order_not_filled_guard_summary(
     order: &TradeBuilderOrder,
     events: &[TradeBuilderOrderEventRecord],
+    reason_code: &str,
+    reason_message: &str,
 ) -> Option<TradeBuilderNoFillReasonSummary> {
+    if no_fill_is_fak_no_match(reason_code, reason_message) {
+        return events
+            .iter()
+            .rev()
+            .filter(|event| event.event_type == "guard_evaluated")
+            .find_map(|event| no_fill_summary_from_passed_submit_guard(&event.payload_json));
+    }
+
     for event in events.iter().rev() {
         let summary = match event.event_type.as_str() {
             "guard_evaluated" => {
@@ -529,8 +562,42 @@ fn append_trigger_price_no_fill_lines(lines: &mut Vec<String>, payload: &Value) 
     ));
 }
 
+fn append_submit_liquidity_no_fill_lines(lines: &mut Vec<String>, payload: &Value) {
+    lines.push("Submit Sonucu: FAK no-match".to_string());
+    lines.push("Son Guard: passed".to_string());
+    lines.push(
+        "Detay: Submit aninda CLOB'da eslesecek resting ask bulunamadi.".to_string(),
+    );
+    lines.push(format!(
+        "Best Ask: {}",
+        no_fill_format_price(no_fill_optional_f64(payload, &["best_ask"]))
+    ));
+    lines.push(format!(
+        "Desired: {}",
+        no_fill_format_price(no_fill_optional_f64(payload, &["desired_price"]))
+    ));
+    lines.push(format!(
+        "Max: {}",
+        no_fill_format_price(
+            no_fill_optional_f64(payload, &["max_price_guard", "details", "max_price"])
+                .or_else(|| no_fill_optional_f64(payload, &["max_price"]))
+        )
+    ));
+    lines.push(format!(
+        "Current: {}",
+        no_fill_format_price(no_fill_optional_f64(payload, &["current_price"]))
+    ));
+}
+
 fn build_no_fill_guard_summary_block(summary: &TradeBuilderNoFillReasonSummary) -> String {
     let mut lines = Vec::new();
+    if summary.scope == "submit_liquidity" {
+        append_submit_liquidity_no_fill_lines(&mut lines, &summary.payload);
+        if let Some(source_event) = summary.source_event.as_deref() {
+            lines.push(format!("Kaynak Event: {source_event}"));
+        }
+        return format!("\n{}", lines.join("\n"));
+    }
     lines.push(format!(
         "Son Engel: {}",
         no_fill_scope_label(&summary.scope)

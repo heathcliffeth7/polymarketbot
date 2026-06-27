@@ -586,6 +586,33 @@ fn candidate_slugs_cover_prev_current_and_future_5m_windows() {
     );
 }
 
+#[test]
+fn candidate_slugs_support_bnb_hype_and_doge_5m_windows() {
+    let now = DateTime::parse_from_rfc3339("2026-02-23T14:55:18Z")
+        .expect("valid datetime")
+        .with_timezone(&Utc);
+
+    for (scope, prefix, asset) in [
+        ("bnb_5m_updown", "bnb-updown-5m-", "bnb"),
+        ("hype_5m_updown", "hype-updown-5m-", "hype"),
+        ("doge_5m_updown", "doge-updown-5m-", "doge"),
+    ] {
+        let scope_def = find_updown_scope_by_scope(scope).expect("scope should exist");
+        assert_eq!(scope_def.asset, asset);
+
+        let slugs = updown_scope_candidate_slugs(scope_def, now);
+        assert_eq!(
+            slugs,
+            vec![
+                format!("{prefix}1771858200"),
+                format!("{prefix}1771858500"),
+                format!("{prefix}1771858800"),
+                format!("{prefix}1771859100"),
+            ]
+        );
+    }
+}
+
 fn gamma_market_for_test(slug: &str) -> GammaMarket {
     GammaMarket {
         slug: slug.to_string(),

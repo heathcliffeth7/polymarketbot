@@ -172,9 +172,9 @@ export function validateTradeFlowGraph(graphJson: unknown): TradeFlowValidationR
   for (const node of graph.nodes) {
     if (node.type !== 'trigger.market_price') continue;
     const config = isRecord(node.config) ? node.config : {};
-    const hasOutcomeConditions =
-      Array.isArray(config.outcomeConditions) && config.outcomeConditions.length > 0;
-    if (!hasOutcomeConditions) continue;
+    const isMultiOutcome =
+      Array.isArray(config.outcomeConditions) && config.outcomeConditions.length > 1;
+    if (!isMultiOutcome) continue;
 
     const defaultOutgoing = graph.edges.filter(
       (edge) => edge.source === node.key && edge.type === 'default'

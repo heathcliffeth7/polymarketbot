@@ -83,7 +83,7 @@ pub(crate) fn validate(
             SUPPORTED_MARKET_SCOPE_SLUG_PREFIXES
                 .iter()
                 .any(|(_, slug_prefix)| override_lower.contains(slug_prefix)),
-            "market_slug_override must contain a supported slug prefix (e.g. btc-updown-5m-, eth-updown-15m-)"
+            "market_slug_override must contain a supported slug prefix (e.g. btc-updown-5m-, doge-updown-5m-)"
         );
     }
     anyhow::ensure!(

@@ -489,7 +489,17 @@ async fn process_trade_builder_order(
     let persisted_last_seen_price =
         trade_builder_last_seen_price_for_order(&order, trigger_eval_price, execution_price);
     let ptb_stop_loss_evaluation = trade_builder_evaluate_ptb_stop_loss(&order);
-    let live_gap_stop_loss_evaluation = trade_builder_evaluate_live_gap_stop_loss(repo, &order).await?;
+    let ptb_oracle_lag_stop_evaluation = evaluate_trade_builder_ptb_oracle_lag_book_lead_stop(
+        repo,
+        cfg,
+        client,
+        &order,
+        &runtime_price,
+        ptb_stop_loss_evaluation.as_ref(),
+    )
+    .await?;
+    let live_gap_stop_loss_evaluation =
+        trade_builder_evaluate_live_gap_stop_loss(repo, &order).await?;
     if let Some(reference_price) = ptb_stop_loss_evaluation.as_ref().and_then(|evaluation| {
         trade_builder_ptb_reference_price_persist_candidate(&order, evaluation)
     }) {
@@ -500,7 +510,11 @@ async fn process_trade_builder_order(
     let effective_trigger_current_price = live_gap_stop_loss_evaluation
         .as_ref()
         .and_then(|evaluation| evaluation.current_price)
-        .or_else(|| ptb_stop_loss_evaluation.as_ref().and_then(|evaluation| evaluation.current_price))
+        .or_else(|| {
+            ptb_stop_loss_evaluation
+                .as_ref()
+                .and_then(|evaluation| evaluation.current_price)
+        })
         .unwrap_or(trigger_eval_price);
     if let Some(runtime_warning) = runtime_price.runtime_warning.as_deref() {
         repo.append_trade_builder_order_event(
@@ -626,6 +640,14 @@ async fn process_trade_builder_order(
     }
 
     let trigger_evaluation = if let Some(evaluation) = live_gap_stop_loss_evaluation.as_ref() {
+        TradeBuilderTriggerEvaluation {
+            should_trigger: evaluation.should_trigger,
+            first_tick_threshold_used: false,
+        }
+    } else if let Some(evaluation) = ptb_oracle_lag_stop_evaluation
+        .as_ref()
+        .filter(|evaluation| evaluation.should_trigger)
+    {
         TradeBuilderTriggerEvaluation {
             should_trigger: evaluation.should_trigger,
             first_tick_threshold_used: false,
@@ -763,6 +785,12 @@ async fn process_trade_builder_order(
             ) {
                 append_trade_builder_live_gap_stop_loss_payload(payload, evaluation);
             }
+            if let (Some(payload), Some(evaluation)) = (
+                trigger_not_met_payload.as_object_mut(),
+                ptb_oracle_lag_stop_evaluation.as_ref(),
+            ) {
+                append_trade_builder_ptb_oracle_lag_stop_payload(payload, evaluation);
+            }
             repo.set_trade_builder_order_status(order.id, "armed", None)
                 .await?;
             repo.append_trade_builder_order_event(
@@ -804,7 +832,13 @@ async fn process_trade_builder_order(
         .filter(|evaluation| evaluation.should_trigger)
     {
         repo.append_trade_builder_order_event(order.id, "live_gap_stop_loss_triggered", &json!({"current_price": effective_trigger_current_price, "execution_price": execution_price})).await?;
-        trade_builder_spawn_decision_log(repo, &order, "LIVE_GAP_STOP_LOSS_TRIGGERED", json!({"live_gap_stop_loss": {"directional_gap": evaluation.directional_gap, "threshold_gap_usd": evaluation.threshold_gap_usd, "remaining_sec": evaluation.remaining_sec}}), TradeBuilderDecisionLogOptions::default());
+        trade_builder_spawn_decision_log(
+            repo,
+            &order,
+            "LIVE_GAP_STOP_LOSS_TRIGGERED",
+            json!({"live_gap_stop_loss": {"directional_gap": evaluation.directional_gap, "threshold_gap_usd": evaluation.threshold_gap_usd, "remaining_sec": evaluation.remaining_sec}}),
+            TradeBuilderDecisionLogOptions::default(),
+        );
     }
     info!(
         run_id,
@@ -886,6 +920,7 @@ async fn process_trade_builder_order(
         effective_trigger_current_price,
         ptb_stop_loss_evaluation.as_ref(),
         live_gap_stop_loss_evaluation.as_ref(),
+        ptb_oracle_lag_stop_evaluation.as_ref(),
     )
     .await?;
     if let Some(evaluation) = ptb_stop_loss_evaluation
@@ -893,6 +928,17 @@ async fn process_trade_builder_order(
         .filter(|evaluation| evaluation.should_trigger)
     {
         trade_builder_spawn_ptb_stop_loss_triggered_log(repo, &order, evaluation, execution_price);
+    }
+    if let Some(evaluation) = ptb_oracle_lag_stop_evaluation
+        .as_ref()
+        .filter(|evaluation| evaluation.should_trigger)
+    {
+        repo.append_trade_builder_order_event(
+            order.id,
+            "ptb_oracle_lag_book_lead_stop_triggered",
+            &json!({"execution_price": execution_price, "evaluation": evaluation.payload}),
+        )
+        .await?;
     }
     if order.active_exchange_order_id.is_none() {
         let _ = maybe_dispatch_trade_builder_parallel_exit_batch(

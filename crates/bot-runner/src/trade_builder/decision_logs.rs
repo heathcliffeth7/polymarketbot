@@ -80,6 +80,7 @@ fn trade_builder_decision_log_payload(
     obj.insert("side".to_string(), json!(&order.side));
     obj.insert("kind".to_string(), json!(&order.kind));
     obj.insert("status_at_event".to_string(), json!(&order.status));
+    obj.insert("run_id".to_string(), json!(order.origin_flow_run_id));
     obj.insert("flow_run_id".to_string(), json!(order.origin_flow_run_id));
     obj.insert(
         "flow_definition_id".to_string(),
@@ -95,7 +96,40 @@ fn trade_builder_decision_log_payload(
     if let Some(fill_event_id) = options.fill_event_id.as_ref() {
         obj.insert("fill_event_id".to_string(), json!(fill_event_id));
     }
+    insert_trade_builder_decision_drift_metadata(&mut obj);
     Value::Object(obj)
+}
+
+fn insert_trade_builder_decision_drift_metadata(obj: &mut serde_json::Map<String, Value>) {
+    let payload = Value::Object(obj.clone());
+    let node_config_hash = payload
+        .pointer("/node_snapshot/node_config_hash")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let strategy_config_hash = payload
+        .pointer("/config/workflow_config_hash")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| node_config_hash.clone());
+    let feature_flags_hash = payload
+        .pointer("/node_snapshot/action_node/config")
+        .map(bot_runtime_config_hash);
+    obj.insert("package_version".to_string(), json!(env!("CARGO_PKG_VERSION")));
+    obj.insert("git_sha".to_string(), json!(bot_build_git_sha()));
+    obj.insert("build_time".to_string(), json!(bot_build_time()));
+    obj.insert(
+        "config_hash".to_string(),
+        json!(bot_runtime_run_config_hash()),
+    );
+    obj.insert(
+        "strategy_config_hash".to_string(),
+        json!(strategy_config_hash),
+    );
+    obj.insert("node_config_hash".to_string(), json!(node_config_hash));
+    obj.insert(
+        "feature_flags_hash".to_string(),
+        json!(feature_flags_hash),
+    );
 }
 
 fn trade_builder_spawn_decision_log(
@@ -720,6 +754,7 @@ fn trade_builder_spawn_entry_evaluated_decision_log(
                 "underlying_volume_age_ms": Value::Null
             }
         });
+        let payload = maybe_score_ml_entry_quality_shadow(payload).await;
         trade_builder_spawn_decision_log(
             &repo,
             &order,

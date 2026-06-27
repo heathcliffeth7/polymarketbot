@@ -710,7 +710,7 @@ test('action.place_order staged ptb stop-loss round-trips through mapper form st
     tokenId: 'eth-up-token',
     outcomeLabel: 'Up',
     priceToBeatCurrentPriceSource: 'hyperliquid',
-    ptbStopLossCurrentPriceSource: 'binance_hyperliquid',
+    ptbStopLossCurrentPriceSource: 'cex_median_fast',
     ptbStopLossRules: [
       { gapUsd: 12.5, sizePct: 25 },
       { gapUsd: 3, sizePct: 75 },
@@ -722,7 +722,7 @@ test('action.place_order staged ptb stop-loss round-trips through mapper form st
   assert.equal(form.fields.ptbStopLossEnabled, 'true');
   assert.equal(form.fields.ptbStopLossGapUnit, 'usd');
   assert.equal(form.fields.priceToBeatCurrentPriceSource, 'hyperliquid');
-  assert.equal(form.fields.ptbStopLossCurrentPriceSource, 'binance_hyperliquid');
+  assert.equal(form.fields.ptbStopLossCurrentPriceSource, 'cex_median_fast');
   assert.equal(form.ptbStopLossRuleRows.length, 2);
   assert.equal(form.ptbStopLossRuleRows[0]?.gapUsd, '12.5');
   assert.equal(form.ptbStopLossRuleRows[1]?.sizePct, '75');
@@ -735,7 +735,7 @@ test('action.place_order staged ptb stop-loss round-trips through mapper form st
   ]);
   assert.equal(rebuilt.ptbStopLossEnabled, true);
   assert.equal(rebuilt.priceToBeatCurrentPriceSource, 'hyperliquid');
-  assert.equal(rebuilt.ptbStopLossCurrentPriceSource, 'binance_hyperliquid');
+  assert.equal(rebuilt.ptbStopLossCurrentPriceSource, 'cex_median_fast');
   assert.equal(rebuilt.stagedSlReentryOnlyAfterAllStages, true);
 });
 

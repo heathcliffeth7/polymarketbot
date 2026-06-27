@@ -5,23 +5,50 @@ use super::polymarket_price_to_beat::{
 };
 use anyhow::Result;
 use serde_json::{json, Value};
-
 mod auto_threshold;
+mod block_event_coalescing;
 mod cex_direction_guard;
 mod current_price;
 mod early_stale_side;
+mod entry_current_hybrid;
+mod entry_quality_policy;
+mod evaluation_entrypoints;
+mod iv_borderline_pump_book_lead;
+mod iv_cex_open_gap;
+mod iv_cex_sigma;
+mod iv_chainlink_stale_strong_gap_exception;
+mod iv_depth_diagnostics;
+mod iv_entry_quality;
+mod iv_execution_vwap;
+mod iv_gap_fail_cex_book_guard;
+mod iv_gap_gate;
+mod iv_high_price_early_reversal;
 mod iv_mismatch_adaptive;
+mod iv_mismatch_binance;
+mod iv_mismatch_book;
+mod iv_mismatch_decision_summary;
 mod iv_mismatch_depth;
 mod iv_mismatch_edge;
+mod iv_mismatch_edge_config;
+mod iv_mismatch_edge_helpers;
+mod iv_mismatch_expected_move;
 mod iv_mismatch_math;
 mod iv_mismatch_participation;
 mod iv_mismatch_protection;
+mod iv_mismatch_ptb_chop;
 mod iv_mismatch_runtime_config;
+mod iv_mismatch_time_rule;
+mod iv_oracle_lag_book_lead;
+mod iv_oracle_tick_jump;
+mod iv_price_band_guard;
+mod iv_pump_shock;
+mod iv_token_crash_cooldown;
 mod max_price_relax;
 mod notification;
 mod notification_state;
 #[cfg(test)]
 mod notification_tests;
+mod own_open_gap_consensus;
 mod resolution;
 mod retry_policy;
 mod runtime;
@@ -29,9 +56,14 @@ mod signal_formula;
 #[cfg(test)]
 mod tests;
 mod threshold_math;
+mod wait_reprice_guard;
 use self::auto_threshold::{
     resolve_auto_price_to_beat_threshold, AutoPriceToBeatThresholdResolution,
     AutoPriceToBeatThresholdStrategy,
+};
+pub(crate) use self::block_event_coalescing::{
+    price_to_beat_block_event_coalescing_pass_stats,
+    with_price_to_beat_block_event_coalescing_pass_stats,
 };
 pub(crate) use self::cex_direction_guard::CexDirectionGuardConfig;
 use self::current_price::resolve_price_to_beat_current_price;
@@ -43,11 +75,18 @@ pub(crate) use self::current_price::{
     resolve_price_to_beat_current_price_snapshot, PriceToBeatCurrentPriceSource,
 };
 use self::early_stale_side::apply_action_place_order_early_stale_side_guard;
+#[allow(unused_imports)]
+pub(crate) use self::evaluation_entrypoints::{
+    evaluate_price_to_beat_guard, evaluate_price_to_beat_guard_with_iv_mismatch_config,
+};
+pub(crate) use self::iv_depth_diagnostics::{
+    price_to_beat_iv_depth_order_book_pass_stats, with_price_to_beat_iv_depth_order_book_pass_cache,
+};
 pub(crate) use self::iv_mismatch_depth::evaluate_price_to_beat_iv_depth;
 use self::iv_mismatch_edge::{
     evaluate_price_to_beat_iv_mismatch_edge, PriceToBeatIvMismatchEdgeConfig,
-    PriceToBeatIvMismatchTimeRule,
 };
+use self::iv_mismatch_time_rule::PriceToBeatIvMismatchTimeRule;
 pub(crate) use self::max_price_relax::note_max_price_relax_fill_market;
 pub(crate) use self::notification::{
     build_price_to_beat_bump_increased_notification_message,
@@ -67,6 +106,9 @@ pub(crate) use self::signal_formula::{
 pub(crate) use self::threshold_math::{
     apply_price_to_beat_risk_penalty, normalize_price_to_beat_threshold_usd,
 };
+pub(crate) fn run_price_to_beat_iv_gap_gate_startup_self_check() -> Result<()> {
+    self::iv_gap_gate::run_gap_gate_startup_self_check().map_err(|reason| anyhow::anyhow!(reason))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PriceToBeatMode {
@@ -196,6 +238,7 @@ pub(crate) struct PriceToBeatGuardEvaluation {
     pub(crate) iv_mismatch_edge: Option<Value>,
     pub(crate) early_stale_side: Option<Value>,
     pub(crate) cex_direction_guard: Option<Value>,
+    pub(crate) entry_current_source_debug: Option<Value>,
 }
 
 impl PriceToBeatGuardEvaluation {
@@ -253,6 +296,22 @@ impl PriceToBeatGuardEvaluation {
             insert_value!("iv_mismatch_edge", self.iv_mismatch_edge);
             insert_value!("early_stale_side", self.early_stale_side);
             insert_value!("cex_direction_guard", self.cex_direction_guard);
+            if let Some(debug) = self
+                .entry_current_source_debug
+                .as_ref()
+                .and_then(Value::as_object)
+            {
+                for key in [
+                    "entry_current_source_evaluations",
+                    "selected_entry_current_source",
+                    "hybrid_mode",
+                    "cex_entry_consensus_result",
+                ] {
+                    if let Some(value) = debug.get(key) {
+                        obj.insert(key.to_string(), value.clone());
+                    }
+                }
+            }
             obj.insert(
                 "base_threshold_value".to_string(),
                 json!(self.base_threshold_value),
@@ -657,48 +716,6 @@ pub(crate) fn evaluate_price_to_beat_trigger_gate(
     )
 }
 
-pub(crate) async fn evaluate_price_to_beat_guard(
-    market_slug: &str,
-    mode: PriceToBeatMode,
-    threshold_value: Option<f64>,
-    threshold_unit: PriceToBeatDiffUnit,
-    outcome_label: &str,
-    signal_config: Option<PriceToBeatSignalFormulaConfig>,
-) -> PriceToBeatGuardEvaluation {
-    evaluate_price_to_beat_guard_with_iv_mismatch_config(
-        market_slug,
-        mode,
-        threshold_value,
-        threshold_unit,
-        outcome_label,
-        signal_config,
-        None,
-    )
-    .await
-}
-
-pub(crate) async fn evaluate_price_to_beat_guard_with_iv_mismatch_config(
-    market_slug: &str,
-    mode: PriceToBeatMode,
-    threshold_value: Option<f64>,
-    threshold_unit: PriceToBeatDiffUnit,
-    outcome_label: &str,
-    signal_config: Option<PriceToBeatSignalFormulaConfig>,
-    iv_mismatch_config: Option<PriceToBeatIvMismatchEdgeConfig>,
-) -> PriceToBeatGuardEvaluation {
-    evaluate_price_to_beat_guard_with_current_source(
-        market_slug,
-        mode,
-        threshold_value,
-        threshold_unit,
-        outcome_label,
-        signal_config,
-        PriceToBeatCurrentPriceSource::Chainlink,
-        iv_mismatch_config,
-    )
-    .await
-}
-
 pub(crate) async fn evaluate_price_to_beat_guard_with_current_source(
     market_slug: &str,
     mode: PriceToBeatMode,
@@ -707,6 +724,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_current_source(
     outcome_label: &str,
     signal_config: Option<PriceToBeatSignalFormulaConfig>,
     current_price_source: PriceToBeatCurrentPriceSource,
+    cex_entry_consensus_config: entry_current_hybrid::CexEntryConsensusConfig,
     iv_mismatch_config: Option<PriceToBeatIvMismatchEdgeConfig>,
 ) -> PriceToBeatGuardEvaluation {
     let mut resolved_threshold_value = threshold_value.unwrap_or_default();
@@ -1003,6 +1021,36 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_current_source(
         }
     }
 
+    if current_price_source == PriceToBeatCurrentPriceSource::ChainlinkCexConsensus {
+        return entry_current_hybrid::build_chainlink_cex_consensus_guard_evaluation(
+            market_slug,
+            outcome_label,
+            snapshot,
+            resolved_threshold_value,
+            resolved_threshold_unit,
+            threshold_usd,
+            mode,
+            cex_entry_consensus_config,
+            signal_config,
+            iv_mismatch_config,
+            auto_threshold_usd,
+            lookback_windows_used,
+            current_windows_used,
+            avg_up_excursion_usd,
+            avg_down_excursion_usd,
+            lookback_market_slugs,
+            lookback_window_snapshots,
+            baseline_pct,
+            current_pct,
+            vol_factor,
+            threshold_pct,
+            base_pct,
+            floor_usd,
+            ceiling_usd,
+            threshold_was_clamped,
+        );
+    }
+
     let (current_price, current_price_source) = match resolve_price_to_beat_current_price(
         current_price_source,
         snapshot.source,
@@ -1270,6 +1318,7 @@ pub(crate) async fn evaluate_price_to_beat_guard_with_current_source(
         iv_mismatch_edge: iv_mismatch_evaluation.map(|evaluation| evaluation.to_value()),
         early_stale_side: None,
         cex_direction_guard: None,
+        entry_current_source_debug: None,
     }
 }
 
@@ -1368,6 +1417,7 @@ fn blocked_price_to_beat_guard_evaluation(
         iv_mismatch_edge: None,
         early_stale_side: None,
         cex_direction_guard: None,
+        entry_current_source_debug: None,
     }
 }
 

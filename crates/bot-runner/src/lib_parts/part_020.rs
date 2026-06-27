@@ -797,16 +797,43 @@ async fn process_trade_builder_orders(
     _cfg: &AppConfig,
     _client: &dyn OrderExecutor,
     ws: &ClobWsClient,
+    builder_timing: &mut crate::trade_builder_order_housekeeping_timing::TradeBuilderOrderHousekeepingTimingStats,
 ) -> Result<()> {
-    let orders = repo
-        .list_trade_builder_orders_for_processing(MANUAL_ORDER_PROCESS_LIMIT)
-        .await?;
+    use crate::trade_builder_inventory_observation_due_gate::{
+        filter_due_inventory_observations, record_inventory_observation_due_result,
+        InventoryObservationDueResult,
+    };
+    use crate::trade_builder_inventory_observation_terminal::{
+        stale_not_visible_terminal_reason, zero_fill_terminal_reason,
+    };
+    use crate::trade_builder_inventory_observation_timing::{
+        InventoryObservationCacheKey, InventoryObservationPhase, InventoryObservationReadResult,
+        InventoryObservationRecordTiming, InventoryObservationTimer,
+        InventoryPositionsSnapshotCacheEntry,
+    };
+    use crate::trade_builder_order_housekeeping_timing::{
+        measure_trade_builder_orders_phase, millis_u64, TradeBuilderOrdersPhase,
+    };
+
+    let orders_result = measure_trade_builder_orders_phase(
+        builder_timing,
+        TradeBuilderOrdersPhase::LoadOrders,
+        repo.list_trade_builder_orders_for_processing(MANUAL_ORDER_PROCESS_LIMIT),
+    )
+    .await;
+    let orders = orders_result?;
+    builder_timing.loaded_count = orders.len() as u64;
     let orders_empty = orders.is_empty();
-    let pending_inventory_observations = repo
-        .list_pending_trade_builder_first_visible_inventory_observations(
+    let pending_inventory_observations_result = measure_trade_builder_orders_phase(
+        builder_timing,
+        TradeBuilderOrdersPhase::LoadPendingInventory,
+        repo.list_pending_trade_builder_first_visible_inventory_observations(
             TRADE_BUILDER_INVENTORY_OBSERVATION_LIMIT,
-        )
-        .await?;
+        ),
+    )
+    .await;
+    let pending_inventory_observations = pending_inventory_observations_result?;
+    builder_timing.pending_inventory_count = pending_inventory_observations.len() as u64;
     let pending_inventory_observations_empty = pending_inventory_observations.is_empty();
 
     let policy = DefaultRiskPolicy;
@@ -814,8 +841,12 @@ async fn process_trade_builder_orders(
     let mut user_executor_cache: HashMap<i64, SharedOrderExecutor> = HashMap::new();
     let mut user_gamma_cache: HashMap<i64, GammaHttpClient> = HashMap::new();
     let mut synced_user_ids: HashSet<i64> = HashSet::new();
+    let mut final_fill_sync_required_user_ids: HashSet<i64> = HashSet::new();
+    let mut initial_fill_sync_throttled_user_ids: HashSet<i64> = HashSet::new();
 
+    let process_loop_started = Instant::now();
     for order in orders {
+        let order_eval_started = Instant::now();
         let result: Result<()> = async {
             let user_cfg =
                 load_user_app_config_cached(repo, order.user_id, &mut user_cfg_cache).await?;
@@ -831,10 +862,21 @@ async fn process_trade_builder_orders(
             )
             .await?;
             if synced_user_ids.insert(order.user_id) {
-                sync_recent_trade_builder_fills(repo, client.as_ref()).await?;
+                builder_timing.fill_sync_user_count =
+                    builder_timing.fill_sync_user_count.saturating_add(1);
+                builder_timing.fill_sync_call_count =
+                    builder_timing.fill_sync_call_count.saturating_add(1);
+                let sync_result = sync_recent_trade_builder_fills(repo, client.as_ref()).await;
+                if sync_result.is_err() {
+                    builder_timing.fill_sync_error_count =
+                        builder_timing.fill_sync_error_count.saturating_add(1);
+                    final_fill_sync_required_user_ids.insert(order.user_id);
+                }
+                sync_result?;
             }
+            final_fill_sync_required_user_ids.insert(order.user_id);
             let limits = to_risk_limits(&user_cfg);
-            let _ = try_process_trade_builder_order(
+            let processed = try_process_trade_builder_order(
                 repo,
                 run_id,
                 &user_cfg,
@@ -846,10 +888,21 @@ async fn process_trade_builder_orders(
                 &order,
             )
             .await?;
+            if processed {
+                builder_timing.processed_count = builder_timing.processed_count.saturating_add(1);
+            }
             Ok(())
         }
         .await;
+        builder_timing.record_order_eval(
+            millis_u64(order_eval_started.elapsed()),
+            order.id,
+            &order.market_slug,
+            &order.status,
+        );
         if let Err(err) = result {
+            builder_timing.processing_error_count =
+                builder_timing.processing_error_count.saturating_add(1);
             let err_text = format!("{err:#}");
             let latest_order = repo.get_trade_builder_order(order.id).await.ok().flatten();
             if latest_order
@@ -903,11 +956,59 @@ async fn process_trade_builder_orders(
             }
         }
     }
+    builder_timing.set_phase_ms(
+        TradeBuilderOrdersPhase::ProcessLoop,
+        millis_u64(process_loop_started.elapsed()),
+    );
 
+    let pending_inventory_observation_count = pending_inventory_observations.len();
+    let (pending_inventory_observations, due_gate_snapshot) =
+        filter_due_inventory_observations(pending_inventory_observations, Instant::now());
+    builder_timing
+        .inventory_observation
+        .record_due_gate_snapshot(due_gate_snapshot);
+    if pending_inventory_observation_count > 0 && pending_inventory_observations.is_empty() {
+        builder_timing
+            .inventory_observation
+            .record_initial_fill_sync_skipped_no_due();
+    }
+
+    let inventory_loop_started = Instant::now();
+    let mut inventory_observation_cache: HashMap<
+        InventoryObservationCacheKey,
+        InventoryObservationReadResult,
+    > = HashMap::new();
+    let mut inventory_positions_snapshot_cache: HashMap<i64, InventoryPositionsSnapshotCacheEntry> =
+        HashMap::new();
     for observation in pending_inventory_observations {
-        let result = async {
+        builder_timing
+            .inventory_observation
+            .record_attempt(observation.user_id, &observation.token_id);
+        let observation_timer = InventoryObservationTimer::start();
+        let mut record_timing = InventoryObservationRecordTiming::default();
+        let result: Result<InventoryObservationDueResult> = async {
+            if let Some(reason) = zero_fill_terminal_reason(&observation) {
+                return record_trade_builder_terminal_not_visible_inventory_result(
+                    repo,
+                    &observation,
+                    reason,
+                    None,
+                    &mut builder_timing.inventory_observation,
+                    &mut record_timing,
+                )
+                .await;
+            }
+
+            let config_timer = InventoryObservationTimer::start();
             let _user_cfg =
                 load_user_app_config_cached(repo, observation.user_id, &mut user_cfg_cache).await?;
+            let config_lookup_ms = config_timer.elapsed_ms();
+            builder_timing
+                .inventory_observation
+                .record_config_lookup(config_lookup_ms);
+            record_timing.add_phase_ms(InventoryObservationPhase::ConfigLookup, config_lookup_ms);
+
+            let executor_timer = InventoryObservationTimer::start();
             let client = load_user_order_executor_cached(
                 repo,
                 observation.user_id,
@@ -915,52 +1016,414 @@ async fn process_trade_builder_orders(
                 &mut user_executor_cache,
             )
             .await?;
-            if synced_user_ids.insert(observation.user_id) {
-                sync_recent_trade_builder_fills(repo, client.as_ref()).await?;
-            }
-            observe_trade_builder_first_visible_inventory(
+            let executor_lookup_ms = executor_timer.elapsed_ms();
+            builder_timing
+                .inventory_observation
+                .record_executor_lookup(executor_lookup_ms);
+            record_timing.add_phase_ms(
+                InventoryObservationPhase::ExecutorLookup,
+                executor_lookup_ms,
+            );
+
+            maybe_sync_trade_builder_inventory_initial_fills(
                 repo,
-                run_id,
                 client.as_ref(),
-                &observation,
+                observation.user_id,
+                builder_timing,
+                &mut record_timing,
+                &mut synced_user_ids,
+                &mut final_fill_sync_required_user_ids,
+                &mut initial_fill_sync_throttled_user_ids,
             )
-            .await
+            .await?;
+            let read_result = if let Some(cache_key) =
+                InventoryObservationCacheKey::new(observation.user_id, &observation.token_id)
+            {
+                let token_cache_timer = InventoryObservationTimer::start();
+                let cached_token_result = inventory_observation_cache.get(&cache_key).copied();
+                let token_cache_ms = token_cache_timer.elapsed_ms();
+                builder_timing
+                    .inventory_observation
+                    .record_token_result_cache_ms(token_cache_ms);
+                record_timing
+                    .add_phase_ms(InventoryObservationPhase::TokenResultCache, token_cache_ms);
+
+                if let Some(cached_result) = cached_token_result {
+                    builder_timing
+                        .inventory_observation
+                        .record_cache_hit(&cache_key);
+                    if matches!(cached_result, InventoryObservationReadResult::ReadError) {
+                        builder_timing.inventory_observation.record_cached_error();
+                    }
+                    cached_result
+                } else {
+                    builder_timing
+                        .inventory_observation
+                        .record_cache_miss(&cache_key);
+                    let snapshot_cache_timer = InventoryObservationTimer::start();
+                    let cached_snapshot = inventory_positions_snapshot_cache
+                        .get(&observation.user_id)
+                        .cloned();
+                    let snapshot_cache_ms = snapshot_cache_timer.elapsed_ms();
+                    builder_timing
+                        .inventory_observation
+                        .record_snapshot_cache_ms(snapshot_cache_ms);
+                    record_timing
+                        .add_phase_ms(InventoryObservationPhase::SnapshotCache, snapshot_cache_ms);
+
+                    let snapshot_entry = if let Some(cached_snapshot) = cached_snapshot {
+                        builder_timing
+                            .inventory_observation
+                            .record_positions_snapshot_record_hit();
+                        if matches!(
+                            cached_snapshot,
+                            InventoryPositionsSnapshotCacheEntry::ReadError
+                        ) {
+                            builder_timing
+                                .inventory_observation
+                                .record_positions_snapshot_cached_error();
+                            builder_timing.inventory_observation.record_cached_error();
+                        }
+                        cached_snapshot
+                    } else {
+                        builder_timing
+                            .inventory_observation
+                            .record_positions_snapshot_record_miss();
+                        let snapshot_timer = InventoryObservationTimer::start();
+                        let snapshot_result = client.available_token_inventory_snapshot().await;
+                        let snapshot_elapsed_ms = snapshot_timer.elapsed_ms();
+                        record_timing.add_phase_ms(
+                            InventoryObservationPhase::ExternalLookup,
+                            snapshot_elapsed_ms,
+                        );
+                        let snapshot_entry = match snapshot_result {
+                            Ok(Some(snapshot)) => {
+                                builder_timing
+                                    .inventory_observation
+                                    .record_positions_snapshot_fetch(
+                                        snapshot_elapsed_ms,
+                                        snapshot.row_count(),
+                                        snapshot.alias_count(),
+                                    );
+                                InventoryPositionsSnapshotCacheEntry::Snapshot(snapshot)
+                            }
+                            Ok(None) => {
+                                builder_timing
+                                    .inventory_observation
+                                    .record_positions_snapshot_unsupported();
+                                InventoryPositionsSnapshotCacheEntry::Unsupported
+                            }
+                            Err(err) => {
+                                builder_timing
+                                    .inventory_observation
+                                    .record_positions_snapshot_fetch(snapshot_elapsed_ms, 0, 0);
+                                builder_timing
+                                    .inventory_observation
+                                    .record_positions_snapshot_error();
+                                builder_timing.inventory_observation.record_external_error();
+                                warn!(
+                                    run_id,
+                                    builder_order_id = observation.parent_builder_order_id,
+                                    token_id = %observation.token_id,
+                                    error = %err,
+                                    "TRADE_BUILDER_POSITIONS_SNAPSHOT_READ_FAILED"
+                                );
+                                InventoryPositionsSnapshotCacheEntry::ReadError
+                            }
+                        };
+                        let snapshot_cache_insert_timer = InventoryObservationTimer::start();
+                        inventory_positions_snapshot_cache
+                            .insert(observation.user_id, snapshot_entry.clone());
+                        let snapshot_cache_insert_ms = snapshot_cache_insert_timer.elapsed_ms();
+                        builder_timing
+                            .inventory_observation
+                            .record_snapshot_cache_ms(snapshot_cache_insert_ms);
+                        record_timing.add_phase_ms(
+                            InventoryObservationPhase::SnapshotCache,
+                            snapshot_cache_insert_ms,
+                        );
+                        snapshot_entry
+                    };
+
+                    let read_result = match snapshot_entry {
+                        InventoryPositionsSnapshotCacheEntry::Snapshot(snapshot) => {
+                            let token_lookup_timer = InventoryObservationTimer::start();
+                            let read_result = trade_builder_first_visible_inventory_read_result(
+                                snapshot.token_qty(&observation.token_id),
+                            );
+                            let token_lookup_ms = token_lookup_timer.elapsed_ms();
+                            builder_timing
+                                .inventory_observation
+                                .record_token_lookup(token_lookup_ms, read_result);
+                            record_timing.add_phase_ms(
+                                InventoryObservationPhase::ExternalLookup,
+                                token_lookup_ms,
+                            );
+                            read_result
+                        }
+                        InventoryPositionsSnapshotCacheEntry::Unsupported => {
+                            let fallback_timer = InventoryObservationTimer::start();
+                            let read_result = read_trade_builder_first_visible_inventory(
+                                client.as_ref(),
+                                &observation,
+                            )
+                            .await;
+                            let fallback_ms = fallback_timer.elapsed_ms();
+                            builder_timing
+                                .inventory_observation
+                                .record_fallback_available_token_qty_ms(fallback_ms);
+                            record_timing.add_phase_ms(
+                                InventoryObservationPhase::ExternalLookup,
+                                fallback_ms,
+                            );
+                            match read_result {
+                                Ok(InventoryObservationReadResult::ReadError) => {
+                                    builder_timing.inventory_observation.record_external_error();
+                                    InventoryObservationReadResult::ReadError
+                                }
+                                Ok(read_result) => read_result,
+                                Err(err) => {
+                                    builder_timing.inventory_observation.record_external_error();
+                                    warn!(
+                                        run_id,
+                                        builder_order_id = observation.parent_builder_order_id,
+                                        token_id = %observation.token_id,
+                                        error = %err,
+                                        "TRADE_BUILDER_FIRST_VISIBLE_INVENTORY_READ_FAILED"
+                                    );
+                                    InventoryObservationReadResult::ReadError
+                                }
+                            }
+                        }
+                        InventoryPositionsSnapshotCacheEntry::ReadError => {
+                            InventoryObservationReadResult::ReadError
+                        }
+                    };
+
+                    let token_cache_insert_timer = InventoryObservationTimer::start();
+                    inventory_observation_cache.insert(cache_key, read_result);
+                    let token_cache_insert_ms = token_cache_insert_timer.elapsed_ms();
+                    builder_timing
+                        .inventory_observation
+                        .record_token_result_cache_ms(token_cache_insert_ms);
+                    record_timing.add_phase_ms(
+                        InventoryObservationPhase::TokenResultCache,
+                        token_cache_insert_ms,
+                    );
+                    read_result
+                }
+            } else {
+                builder_timing.inventory_observation.record_uncacheable();
+                InventoryObservationReadResult::NotVisible
+            };
+
+            match read_result {
+                InventoryObservationReadResult::Visible { qty } => {
+                    let apply_timer = InventoryObservationTimer::start();
+                    let apply_result = apply_trade_builder_first_visible_inventory(
+                        repo,
+                        &observation,
+                        qty,
+                        &mut builder_timing.inventory_observation,
+                    )
+                    .await;
+                    let apply_total_ms = apply_timer.elapsed_ms();
+                    builder_timing
+                        .inventory_observation
+                        .record_apply_total_ms(apply_total_ms);
+                    record_timing
+                        .add_phase_ms(InventoryObservationPhase::ApplyTotal, apply_total_ms);
+                    match apply_result? {
+                        TradeBuilderFirstVisibleInventoryApplyOutcome::Applied => {
+                            builder_timing.inventory_observation.record_success();
+                            Ok(InventoryObservationDueResult::Visible)
+                        }
+                        TradeBuilderFirstVisibleInventoryApplyOutcome::NotVisible => {
+                            builder_timing.inventory_observation.record_not_visible();
+                            Ok(InventoryObservationDueResult::NotVisible)
+                        }
+                    }
+                }
+                InventoryObservationReadResult::NotVisible => {
+                    if let Some(reason) =
+                        stale_not_visible_terminal_reason(&observation, Utc::now())
+                    {
+                        record_trade_builder_terminal_not_visible_inventory_result(
+                            repo,
+                            &observation,
+                            reason,
+                            Some(0.0),
+                            &mut builder_timing.inventory_observation,
+                            &mut record_timing,
+                        )
+                        .await?;
+                    } else {
+                        builder_timing.inventory_observation.record_not_visible();
+                    }
+                    Ok(InventoryObservationDueResult::NotVisible)
+                }
+                InventoryObservationReadResult::ReadError => {
+                    Ok(InventoryObservationDueResult::ReadError)
+                }
+            }
         }
         .await;
-        if let Err(err) = result {
-            warn!(
-                run_id,
-                builder_order_id = observation.parent_builder_order_id,
-                error = %err,
-                "TRADE_BUILDER_FIRST_VISIBLE_INVENTORY_OBSERVATION_FAILED"
-            );
-        }
+        let record_finalize_timer = InventoryObservationTimer::start();
+        let due_result = match result {
+            Ok(due_result) => {
+                builder_timing.inventory_observed_count =
+                    builder_timing.inventory_observed_count.saturating_add(1);
+                due_result
+            }
+            Err(err) => {
+                builder_timing.inventory_error_count =
+                    builder_timing.inventory_error_count.saturating_add(1);
+                warn!(
+                    run_id,
+                    builder_order_id = observation.parent_builder_order_id,
+                    error = %err,
+                    "TRADE_BUILDER_FIRST_VISIBLE_INVENTORY_OBSERVATION_FAILED"
+                );
+                InventoryObservationDueResult::ReadError
+            }
+        };
+        let due_gate_update =
+            record_inventory_observation_due_result(&observation, due_result, Instant::now());
+        builder_timing
+            .inventory_observation
+            .record_due_gate_update(due_gate_update);
+        let record_finalize_ms = record_finalize_timer.elapsed_ms();
+        builder_timing
+            .inventory_observation
+            .record_record_finalize_ms(record_finalize_ms);
+        record_timing.add_phase_ms(
+            InventoryObservationPhase::RecordFinalize,
+            record_finalize_ms,
+        );
+        let record_elapsed_ms = observation_timer.elapsed_ms();
+        let record_max_phase = record_timing.slowest_phase(record_elapsed_ms);
+        builder_timing.inventory_observation.record_latency(
+            record_elapsed_ms,
+            observation.parent_builder_order_id,
+            &observation.market_slug,
+            &observation.token_id,
+            observation.user_id,
+            record_max_phase.phase,
+        );
     }
+    builder_timing.inventory_observation.total_ms = millis_u64(inventory_loop_started.elapsed());
+    builder_timing.set_phase_ms(
+        TradeBuilderOrdersPhase::InventoryObservationLoop,
+        builder_timing.inventory_observation.total_ms,
+    );
 
+    let final_fill_sync_started = Instant::now();
+    let mut final_fill_sync_stats =
+        crate::trade_builder_fill_sync_timing::FinalFillSyncTimingStats::default();
     for user_id in synced_user_ids {
         let Some(client) = user_executor_cache.get(&user_id) else {
             continue;
         };
-        if let Err(err) = sync_recent_trade_builder_fills(repo, client.as_ref()).await {
-            let err_text = format!("{err:#}");
-            warn!(
-                run_id,
-                user_id,
-                error = %err_text,
-                "TRADE_BUILDER_FILL_SYNC_ERROR"
+        if !final_fill_sync_required_user_ids.contains(&user_id) {
+            final_fill_sync_stats.record_skipped_fresh(user_id);
+            continue;
+        }
+        final_fill_sync_stats.record_required();
+        builder_timing.fill_sync_call_count = builder_timing.fill_sync_call_count.saturating_add(1);
+        final_fill_sync_stats.record_call(user_id);
+        let user_sync_timer = crate::trade_builder_fill_sync_timing::FinalFillSyncTimer::start();
+        let sync_result = sync_recent_trade_builder_fills_with_timing(
+            repo,
+            client.as_ref(),
+            &mut final_fill_sync_stats,
+        )
+        .await;
+        let user_sync_ms = user_sync_timer.elapsed_ms();
+        final_fill_sync_stats.record_user_ms(user_id, user_sync_ms);
+        match sync_result {
+            Ok(_) => final_fill_sync_stats.record_success(),
+            Err(err) => {
+                final_fill_sync_stats.record_error();
+                builder_timing.fill_sync_error_count =
+                    builder_timing.fill_sync_error_count.saturating_add(1);
+                let err_text = format!("{err:#}");
+                warn!(
+                    run_id,
+                    user_id,
+                    error = %err_text,
+                    "TRADE_BUILDER_FILL_SYNC_ERROR"
+                );
+            }
+        }
+    }
+    final_fill_sync_stats.total_ms = millis_u64(final_fill_sync_started.elapsed());
+    builder_timing.final_fill_sync = final_fill_sync_stats;
+    builder_timing.set_phase_ms(
+        TradeBuilderOrdersPhase::FinalFillSync,
+        millis_u64(final_fill_sync_started.elapsed()),
+    );
+
+    let armed_cache_started = Instant::now();
+    let armed_orders_result = repo.list_armed_tp_sl_child_builder_orders().await;
+    match armed_orders_result {
+        Ok(armed_orders) => {
+            builder_timing.armed_cache_count = armed_orders.len() as u64;
+            refresh_armed_builder_order_cache(armed_orders).await;
+            builder_timing.set_phase_ms(
+                TradeBuilderOrdersPhase::RefreshArmedCache,
+                millis_u64(armed_cache_started.elapsed()),
             );
+        }
+        Err(err) => {
+            builder_timing.set_phase_ms(
+                TradeBuilderOrdersPhase::RefreshArmedCache,
+                millis_u64(armed_cache_started.elapsed()),
+            );
+            return Err(err);
         }
     }
 
-    let armed_orders = repo.list_armed_tp_sl_child_builder_orders().await?;
-    refresh_armed_builder_order_cache(armed_orders).await;
-    let guarded_buy_orders = repo.list_guard_blocked_immediate_buy_builder_orders().await?;
-    refresh_guarded_buy_order_cache(guarded_buy_orders).await;
-    if let Err(err) = ensure_fast_path_market_stream_union(ws).await {
+    let guarded_cache_started = Instant::now();
+    let guarded_buy_orders_result = repo.list_guard_blocked_immediate_buy_builder_orders().await;
+    match guarded_buy_orders_result {
+        Ok(guarded_buy_orders) => {
+            builder_timing.guarded_buy_cache_count = guarded_buy_orders.len() as u64;
+            refresh_guarded_buy_order_cache(guarded_buy_orders).await;
+            builder_timing.set_phase_ms(
+                TradeBuilderOrdersPhase::RefreshGuardedBuyCache,
+                millis_u64(guarded_cache_started.elapsed()),
+            );
+        }
+        Err(err) => {
+            builder_timing.set_phase_ms(
+                TradeBuilderOrdersPhase::RefreshGuardedBuyCache,
+                millis_u64(guarded_cache_started.elapsed()),
+            );
+            return Err(err);
+        }
+    }
+
+    let market_stream_union_started = Instant::now();
+    let market_stream_union_result = ensure_fast_path_market_stream_union(ws).await;
+    builder_timing.set_phase_ms(
+        TradeBuilderOrdersPhase::MarketStreamUnion,
+        millis_u64(market_stream_union_started.elapsed()),
+    );
+    if let Err(err) = market_stream_union_result {
         warn!(run_id, error = %err, "ARMED_ORDER_WS_STREAM_UNION_REFRESH_FAILED");
     }
 
-    if let Err(err) = maybe_backfill_trade_builder_auto_scope_analysis_snapshots(repo).await {
+    let auto_scope_backfill_started = Instant::now();
+    let auto_scope_backfill_result =
+        maybe_backfill_trade_builder_auto_scope_analysis_snapshots(repo).await;
+    builder_timing.set_phase_ms(
+        TradeBuilderOrdersPhase::AutoScopeBackfill,
+        millis_u64(auto_scope_backfill_started.elapsed()),
+    );
+    if let Err(err) = auto_scope_backfill_result {
+        builder_timing.auto_scope_backfill_error_count = builder_timing
+            .auto_scope_backfill_error_count
+            .saturating_add(1);
         warn!(run_id, error = %err, "AUTO_SCOPE_ANALYSIS_BACKFILL_CYCLE_FAILED");
     }
 

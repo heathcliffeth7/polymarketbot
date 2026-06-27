@@ -143,7 +143,9 @@ impl PostgresRepository {
                 fill_obs.reference_price AS fill_reference_price, \
                 fill_obs.qty_source AS fill_qty_source, \
                 COALESCE(fill_obs.fee_rate_bps, submit.fee_rate_bps, o.fee_rate_bps, 0) AS fee_rate_bps, \
-                fill_obs.created_at AS fill_observed_at \
+                fill_obs.created_at AS fill_observed_at, \
+                o.status AS parent_order_status, \
+                o.filled_qty AS parent_order_filled_qty \
              FROM trade_builder_inventory_observations fill_obs \
              JOIN trade_builder_orders o \
                ON o.id = fill_obs.parent_builder_order_id \
@@ -156,8 +158,12 @@ impl PostgresRepository {
              LEFT JOIN trade_builder_inventory_observations first_visible \
                ON first_visible.parent_builder_order_id = fill_obs.parent_builder_order_id \
               AND first_visible.observation_kind = 'first_visible_inventory' \
+             LEFT JOIN trade_builder_inventory_observations terminal_not_visible \
+               ON terminal_not_visible.parent_builder_order_id = fill_obs.parent_builder_order_id \
+              AND terminal_not_visible.observation_kind = 'first_visible_inventory_terminal_not_visible' \
              WHERE fill_obs.observation_kind = 'buy_fill_resolution' \
                AND first_visible.id IS NULL \
+               AND terminal_not_visible.id IS NULL \
              ORDER BY fill_obs.updated_at ASC \
              LIMIT $1",
         )
@@ -183,6 +189,8 @@ impl PostgresRepository {
                 fill_qty_source: row.get("fill_qty_source"),
                 fee_rate_bps: row.get("fee_rate_bps"),
                 fill_observed_at: row.get("fill_observed_at"),
+                parent_order_status: row.get("parent_order_status"),
+                parent_order_filled_qty: row.get("parent_order_filled_qty"),
             })
             .collect())
     }

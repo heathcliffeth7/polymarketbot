@@ -1,7 +1,9 @@
 use super::{
     PolymarketPriceToBeatService, PolymarketPriceToBeatSnapshot, POLYMARKET_PRICE_TO_BEAT_SERVICE,
+    PTB_REQUEST_MIN_INTERVAL_MS,
 };
-use std::collections::HashSet;
+use chrono::Utc;
+use std::{collections::HashSet, sync::atomic::Ordering};
 
 impl PolymarketPriceToBeatService {
     pub(super) fn mark_dirty_market_slug(&self, market_slug: &str) {
@@ -53,6 +55,70 @@ impl PolymarketPriceToBeatService {
         self.mark_dirty_market_slug(market_slug);
         previous
     }
+
+    pub(super) fn cached_previous_close(&self, previous_market_slug: &str) -> Option<f64> {
+        self.previous_close_cache
+            .lock()
+            .get(previous_market_slug)
+            .copied()
+    }
+
+    pub(super) fn store_previous_close(&self, previous_market_slug: &str, close_price: f64) {
+        self.previous_close_cache
+            .lock()
+            .entry(previous_market_slug.to_string())
+            .or_insert(close_price);
+    }
+
+    pub(super) fn arm_rate_limit_cooldown(&self, cooldown_ms: u64) {
+        let until_ms = Utc::now()
+            .timestamp_millis()
+            .saturating_add(cooldown_ms as i64);
+        let mut current = self.rate_limit_until_ms.load(Ordering::Relaxed);
+        while until_ms > current {
+            match self.rate_limit_until_ms.compare_exchange(
+                current,
+                until_ms,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    pub(super) fn rate_limit_cooldown_remaining_ms(&self) -> Option<u64> {
+        let until_ms = self.rate_limit_until_ms.load(Ordering::Relaxed);
+        let now_ms = Utc::now().timestamp_millis();
+        (until_ms > now_ms).then(|| (until_ms - now_ms) as u64)
+    }
+
+    pub(super) async fn pace_crypto_price_request(&self) {
+        let now_ms = Utc::now().timestamp_millis();
+        let slot_ms;
+        loop {
+            let previous_ms = self.next_request_at_ms.load(Ordering::Relaxed);
+            let candidate_ms = previous_ms.max(now_ms);
+            let next_ms = candidate_ms.saturating_add(PTB_REQUEST_MIN_INTERVAL_MS);
+            match self.next_request_at_ms.compare_exchange(
+                previous_ms,
+                next_ms,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    slot_ms = candidate_ms;
+                    break;
+                }
+                Err(_) => continue,
+            }
+        }
+        let wait_ms = slot_ms.saturating_sub(now_ms);
+        if wait_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms as u64)).await;
+        }
+    }
 }
 
 pub(crate) async fn wait_for_price_to_beat_dirty_market_update() {
@@ -75,6 +141,7 @@ mod tests {
     use super::*;
     use crate::trade_flow::guards::polymarket_price_to_beat::PriceToBeatSource;
     use chrono::Utc;
+    use std::sync::atomic::Ordering;
 
     fn test_snapshot(
         market_slug: &str,
@@ -131,5 +198,56 @@ mod tests {
         let dirty = service.take_dirty_market_slugs();
         assert!(dirty.contains(&market_slug.to_string()));
         service.clear_dirty_market_slugs(&dirty);
+    }
+
+    #[test]
+    fn previous_close_cache_is_write_once() {
+        let service = PolymarketPriceToBeatService::new();
+        service.store_previous_close("btc-updown-5m-2774013100", 70_010.0);
+        service.store_previous_close("btc-updown-5m-2774013100", 70_020.0);
+
+        assert_eq!(
+            service.cached_previous_close("btc-updown-5m-2774013100"),
+            Some(70_010.0)
+        );
+    }
+
+    #[test]
+    fn rate_limit_cooldown_reports_remaining_time() {
+        let service = PolymarketPriceToBeatService::new();
+
+        service.arm_rate_limit_cooldown(30_000);
+
+        let remaining = service
+            .rate_limit_cooldown_remaining_ms()
+            .expect("cooldown");
+        assert!(remaining > 0);
+        assert!(remaining <= 30_000);
+    }
+
+    #[test]
+    fn rate_limit_cooldown_keeps_monotonic_max() {
+        let service = PolymarketPriceToBeatService::new();
+        service.arm_rate_limit_cooldown(60_000);
+        let first_until = service.rate_limit_until_ms.load(Ordering::Relaxed);
+
+        service.arm_rate_limit_cooldown(1_000);
+
+        assert_eq!(
+            service.rate_limit_until_ms.load(Ordering::Relaxed),
+            first_until
+        );
+    }
+
+    #[tokio::test]
+    async fn crypto_price_pacer_reserves_monotonic_slots() {
+        let service = PolymarketPriceToBeatService::new();
+
+        service.pace_crypto_price_request().await;
+        let first_next = service.next_request_at_ms.load(Ordering::Relaxed);
+        service.pace_crypto_price_request().await;
+        let second_next = service.next_request_at_ms.load(Ordering::Relaxed);
+
+        assert!(second_next - first_next >= PTB_REQUEST_MIN_INTERVAL_MS);
     }
 }

@@ -8,11 +8,49 @@ struct FlowAutoClaimRuntime {
 
 type SharedOrderExecutor = Arc<dyn OrderExecutor>;
 
+#[derive(Debug, Clone)]
+struct FlowStepProcessingContext {
+    id: String,
+    started_at: DateTime<Utc>,
+}
+
+impl FlowStepProcessingContext {
+    fn new() -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            started_at: Utc::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct FlowStepProcessingStats {
+    processing_run_id: String,
+    claim_passes: u8,
+    claimed_step_count: usize,
+    last_pass_claimed_steps: usize,
+    ptb_retry_blocked_count: u64,
+    ptb_retry_created_count: u64,
+    ptb_retry_same_run_excluded_count: i64,
+    ready_remaining_total_count: i64,
+    ready_remaining_ptb_retry_count: i64,
+    runnable_non_retry_ready_count: i64,
+    clob_book_fetch_hit_count: u64,
+    clob_book_fetch_pass_cache_hit_count: u64,
+    clob_book_fetch_process_ttl_hit_count: u64,
+    clob_book_fetch_miss_count: u64,
+    clob_book_fetch_error_count: u64,
+    unique_book_tokens_fetched: usize,
+    coalesced_event_suppressed_count: u64,
+}
+
 #[derive(Default)]
 struct FlowRuntimeCaches {
     user_cfg: HashMap<i64, AppConfig>,
     user_executor: HashMap<i64, SharedOrderExecutor>,
     last_used: HashMap<i64, Instant>,
+    last_step_processing_stats: FlowStepProcessingStats,
+    last_stale_running_step_recovery_at: Option<Instant>,
 }
 
 impl FlowRuntimeCaches {

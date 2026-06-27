@@ -37,6 +37,7 @@ export const PTB_CURRENT_PRICE_SOURCE_VALUES = [
   'coinbase',
   'hyperliquid',
   'bybit',
+  'chainlink_cex_consensus',
 ] as const;
 
 export type PtbCurrentPriceSource = (typeof PTB_CURRENT_PRICE_SOURCE_VALUES)[number];
@@ -50,12 +51,15 @@ export const PTB_CURRENT_PRICE_SOURCE_OPTIONS: Array<{
   { label: 'Coinbase', value: 'coinbase' },
   { label: 'Hyperliquid', value: 'hyperliquid' },
   { label: 'Bybit', value: 'bybit' },
+  { label: 'Chainlink + CEX consensus', value: 'chainlink_cex_consensus' },
 ];
 
 export const PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_VALUES = [
   ...PTB_CURRENT_PRICE_SOURCE_VALUES,
   'binance_hyperliquid',
   'cex_consensus',
+  'chainlink_cex_consensus_confirmed',
+  'cex_median_fast',
 ] as const;
 
 export type PtbStopLossCurrentPriceSource =
@@ -68,6 +72,11 @@ export const PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_OPTIONS: Array<{
   ...PTB_CURRENT_PRICE_SOURCE_OPTIONS,
   { label: 'Binance + Hyperliquid', value: 'binance_hyperliquid' },
   { label: 'CEX consensus (Bybit + 1)', value: 'cex_consensus' },
+  {
+    label: 'Chainlink + confirmed CEX stop',
+    value: 'chainlink_cex_consensus_confirmed',
+  },
+  { label: 'CEX median fast', value: 'cex_median_fast' },
 ];
 
 const PTB_CURRENT_PRICE_SOURCE_VALUE_SET = new Set<string>(PTB_CURRENT_PRICE_SOURCE_VALUES);

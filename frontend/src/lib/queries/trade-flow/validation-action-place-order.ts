@@ -29,12 +29,21 @@ import {
   isDcaLivePlaceOrderConfig,
   validateActionPlaceOrderDcaLiveConfig,
 } from './validation-action-place-order-dca';
+import {
+  isConfidenceLadderPlaceOrderConfig,
+  validateActionPlaceOrderConfidenceLadderConfig,
+} from './validation-action-place-order-confidence-ladder';
+import {
+  isAvgReboundPairlockRescuePlaceOrderConfig,
+  validateActionPlaceOrderAvgReboundPairlockRescueConfig,
+} from './validation-action-place-order-avg-rebound';
 import { validateActionPlaceOrderPairLockConfig } from './validation-action-place-order-pair';
 import { validateActionPlaceOrderPtbStopLossBumpConfig } from './validation-action-place-order-ptb-bump';
 import { validateActionPlaceOrderPtbIvTimeRulesConfig } from './validation-action-place-order-ptb-iv-time-rules';
 import { parsePtbStopLossRules, validateActionPlaceOrderPtbStopLossConfig } from './validation-action-place-order-ptb-stop-loss';
 import { validateActionPlaceOrderPtbV2Config } from './validation-action-place-order-ptb-v2';
 import { validateActionPlaceOrderRevengeFlipConfig } from './validation-action-place-order-revenge-flip';
+import { validateActionPlaceOrderCexEntryConsensusConfig } from './validation-action-place-order-cex-entry-consensus';
 import { pushNodeError } from './validation-core';
 
 interface ParsedExitLadderRule {
@@ -178,6 +187,8 @@ export function validateActionPlaceOrderConfig(
   const config = isRecord(node.config) ? node.config : {};
   const mode = toTrimmedString(config.mode).toLowerCase();
   const isDcaLiveMode = isDcaLivePlaceOrderConfig(config);
+  const isConfidenceLadderMode = isConfidenceLadderPlaceOrderConfig(config);
+  const isAvgReboundPairlockRescueMode = isAvgReboundPairlockRescuePlaceOrderConfig(config);
   const isPositiveQuantityFlipGridMode =
     mode === 'positive_quantity_flip_grid_v1' ||
     mode === 'positive_flip_pairlock_compression_v1';
@@ -229,7 +240,8 @@ export function validateActionPlaceOrderConfig(
     !String(config.marketSlug ?? graphMarketSlug).trim() &&
     !hasResolveMarketNode &&
     !(side === 'buy' && hasUpstreamMarketPriceAutoScope) &&
-    !isDcaLiveMode
+    !isDcaLiveMode &&
+    !isAvgReboundPairlockRescueMode
   ) {
     pushNodeError(
       issues,
@@ -242,7 +254,8 @@ export function validateActionPlaceOrderConfig(
     !String(config.tokenId ?? graphTokenId).trim() &&
     !hasResolveMarketNode &&
     !(side === 'buy' && hasUpstreamMarketPriceAutoScope) &&
-    !isDcaLiveMode
+    !isDcaLiveMode &&
+    !isAvgReboundPairlockRescueMode
   ) {
     pushNodeError(
       issues,
@@ -272,6 +285,28 @@ export function validateActionPlaceOrderConfig(
       'invalid_execution_mode',
       'action.place_order executionMode must be market or limit.'
     );
+  }
+  if (isConfidenceLadderMode) {
+    validateActionPlaceOrderConfidenceLadderConfig(
+      issues,
+      node,
+      graph,
+      config,
+      side,
+      executionMode
+    );
+    return;
+  }
+  if (isAvgReboundPairlockRescueMode) {
+    validateActionPlaceOrderAvgReboundPairlockRescueConfig(
+      issues,
+      node,
+      graph,
+      config,
+      side,
+      executionMode
+    );
+    return;
   }
   validateActionPlaceOrderPairLockConfig(issues, node, graph, config, side, executionMode);
   validateActionPlaceOrderDcaLiveConfig(issues, node, graph, config, side, executionMode);
@@ -379,7 +414,7 @@ export function validateActionPlaceOrderConfig(
           'action.place_order targetQty must be > 0 when sizeMode is shares.'
         );
       }
-    } else if (!isDcaLiveMode && !isPositiveQuantityFlipGridMode && (sizeUsdc == null || sizeUsdc <= 0)) {
+    } else if (!isDcaLiveMode && !isPositiveQuantityFlipGridMode && !isConfidenceLadderMode && (sizeUsdc == null || sizeUsdc <= 0)) {
       pushNodeError(
         issues,
         node,
@@ -1071,7 +1106,7 @@ export function validateActionPlaceOrderConfig(
       issues,
       node,
       'invalid_price_to_beat_current_price_source',
-      'action.place_order priceToBeatCurrentPriceSource must be chainlink, binance, coinbase, or hyperliquid.'
+      'action.place_order priceToBeatCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, bybit, or chainlink_cex_consensus.'
     );
   }
   if (config.priceToBeatCurrentPriceSource != null && !ptbCurrentPriceSourceActive) {
@@ -1082,6 +1117,7 @@ export function validateActionPlaceOrderConfig(
       'action.place_order priceToBeatCurrentPriceSource requires priceToBeatGuardEnabled=true, ptbStopLossEnabled=true, or ptbStopLossRules.'
     );
   }
+  validateActionPlaceOrderCexEntryConsensusConfig(issues, node, config);
   if (config.reentryPriceToBeatMaxDiff != null && priceToBeatGuardEnabled !== true) {
     pushNodeError(
       issues,

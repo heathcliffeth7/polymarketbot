@@ -3,9 +3,15 @@ mod positive_quantity_flip_grid_exit_depth_tests {
     use super::*;
     use super::positive_quantity_flip_grid_test_helpers::*;
 
+    fn direct_exit_config() -> PositiveQuantityFlipGridConfig {
+        let mut cfg = test_config();
+        cfg.direct_exit_enabled = true;
+        cfg
+    }
+
     #[test]
     fn sell_side_requires_bid_and_positive_total_net() {
-        let cfg = test_config();
+        let cfg = direct_exit_config();
         let quote = PositiveQuantityFlipGridQuote {
             grid_side: "up",
             token_id: "up".to_string(),
@@ -32,7 +38,7 @@ mod positive_quantity_flip_grid_exit_depth_tests {
 
     #[test]
     fn sell_side_requires_configured_quarter_usdc_profit_target() {
-        let mut cfg = test_config();
+        let mut cfg = direct_exit_config();
         cfg.min_sell_net_profit_usdc = 0.25;
         let quote = PositiveQuantityFlipGridQuote {
             grid_side: "up",
@@ -64,7 +70,7 @@ mod positive_quantity_flip_grid_exit_depth_tests {
 
     #[test]
     fn sell_side_accepts_down_bid_at_take_profit_level() {
-        let cfg = test_config();
+        let cfg = direct_exit_config();
         let quote = quote_with_side_bid("down", 0.98);
         let state = TradeBuilderPositiveQuantityFlipGridState {
             down_qty: 3.8,
@@ -79,7 +85,7 @@ mod positive_quantity_flip_grid_exit_depth_tests {
 
     #[test]
     fn sell_side_chooses_highest_projected_profit_when_both_sides_hit_take_profit() {
-        let cfg = test_config();
+        let cfg = direct_exit_config();
         let state = TradeBuilderPositiveQuantityFlipGridState {
             up_qty: 4.0,
             down_qty: 5.0,
@@ -98,6 +104,21 @@ mod positive_quantity_flip_grid_exit_depth_tests {
         .expect("exit");
         assert_eq!(exit.0, "down");
         assert!((exit.2 - 1.4).abs() < 0.000001);
+    }
+
+    #[test]
+    fn sell_side_is_disabled_when_direct_exit_is_off() {
+        let cfg = test_config();
+        let state = TradeBuilderPositiveQuantityFlipGridState {
+            up_qty: 4.0,
+            net_cost: 3.5,
+            ..TradeBuilderPositiveQuantityFlipGridState::default()
+        };
+
+        assert!(
+            positive_quantity_flip_grid_exit_side(&cfg, &state, &[quote_with_side_bid("up", 0.98)])
+                .is_none()
+        );
     }
 
     #[test]

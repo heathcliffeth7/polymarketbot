@@ -8,6 +8,8 @@ import {
   REVENGE_FLIP_INITIAL_ORDER_USDC_FIELD,
   REVENGE_FLIP_MODE,
   REVENGE_FLIP_MIN_REENTRY_SHARES_FIELD,
+  REVENGE_FLIP_POST_STOP_LOSS_IV_MISMATCH_ENABLED_FIELD,
+  REVENGE_FLIP_PROFIT_TARGET_USDC_FIELD,
   REVENGE_FLIP_PTB_STOP_LOSS_CURRENT_SOURCE_FIELD,
   REVENGE_FLIP_PTB_STOP_LOSS_ENABLED_FIELD,
   REVENGE_FLIP_PTB_STOP_LOSS_GAP_FIELD,
@@ -46,41 +48,87 @@ test('action.place_order revenge_flip_v1 mapper round-trips nested config', () =
       ],
       maxFlip: 3,
       minReentryShares: 5,
+      postStopLossIvMismatchEnabled: false,
       lotLimitPct: 0.7,
       closeOnlySec: 12,
       timeRules: [{ minRemainingSec: 20, maxRemainingSec: 80, priceToBeatMaxDiff: 1, priceToBeatMaxDiffUnit: 'cent' }],
       ptbStopLossEnabled: true,
       ptbStopLossGapUsd: -4,
       ptbStopLossGapUnit: 'cent',
-      ptbStopLossCurrentPriceSource: 'binance_hyperliquid',
+      ptbStopLossCurrentPriceSource: 'chainlink_cex_consensus',
       ptbStopLossTimeDecayMode: 'none',
     },
     triggerPrice: { enabled: true, minCent: 45, maxCent: 60 },
     priceToBeatGuardEnabled: true,
-    priceToBeatCurrentPriceSource: 'binance',
+    priceToBeatMode: 'iv_mismatch_edge',
+    priceToBeatCurrentPriceSource: 'chainlink',
+    priceToBeatIvTimeRules: [
+      {
+        startRemainingSec: 45,
+        endRemainingSec: 30,
+        minEdge: 0.03,
+        minGapStrength: 0.5,
+        maxPriceCent: 92,
+      },
+      {
+        startRemainingSec: 30,
+        endRemainingSec: 15,
+        minEdge: 0.05,
+        minGapStrength: 0.75,
+        maxPriceCent: 92,
+      },
+      {
+        startRemainingSec: 15,
+        endRemainingSec: 8,
+        minEdge: 0.07,
+        minGapStrength: 1,
+        maxPriceCent: 92,
+      },
+    ],
+    priceToBeatIvEntryQualityPolicy: true,
+    priceToBeatIvEntryQualityChainlinkMaxAgeMs: 2500,
+    priceToBeatIvEntryQualityHighRiskAskCent: 85,
+    cexDirectionGuardEnabled: true,
+    cexDirectionGuardMode: 'bybit_plus_one',
+    cexDirectionGuardFailClosed: false,
     priceToBeatMaxDiff: 0.02,
     priceToBeatMaxDiffUnit: 'usd',
   });
 
   assert.equal(form.fields.mode, REVENGE_FLIP_MODE);
   assert.equal(form.fields[REVENGE_FLIP_INITIAL_ORDER_USDC_FIELD], '9');
+  assert.equal(form.fields[REVENGE_FLIP_PROFIT_TARGET_USDC_FIELD], '0.6');
   assert.equal(form.fields[REVENGE_FLIP_CLASSIC_STOP_LOSS_ENABLED_FIELD], 'true');
   assert.match(form.fields[REVENGE_FLIP_STOP_LOSS_RULES_FIELD], /stopLossPct/);
   assert.match(form.fields[REVENGE_FLIP_ENTRY_PTB_RULES_FIELD], /priceToBeatMinDiff/);
   assert.match(form.fields[REVENGE_FLIP_TIME_RULES_FIELD], /minRemainingSec/);
   assert.equal(form.fields[REVENGE_FLIP_REENTRY_SIDE_MODE_FIELD], 'rule_match');
   assert.equal(form.fields[REVENGE_FLIP_MIN_REENTRY_SHARES_FIELD], '5');
+  assert.equal(form.fields[REVENGE_FLIP_POST_STOP_LOSS_IV_MISMATCH_ENABLED_FIELD], 'false');
   assert.equal(form.fields[REVENGE_FLIP_PTB_STOP_LOSS_ENABLED_FIELD], 'true');
   assert.equal(form.fields[REVENGE_FLIP_PTB_STOP_LOSS_GAP_FIELD], '-4');
-  assert.equal(form.fields[REVENGE_FLIP_PTB_STOP_LOSS_CURRENT_SOURCE_FIELD], 'binance_hyperliquid');
-  assert.equal(form.fields.priceToBeatCurrentPriceSource, 'binance');
+  assert.equal(form.fields[REVENGE_FLIP_PTB_STOP_LOSS_CURRENT_SOURCE_FIELD], 'chainlink_cex_consensus');
+  assert.equal(form.fields.priceToBeatMode, 'iv_mismatch_edge');
+  assert.equal(form.fields.priceToBeatCurrentPriceSource, 'chainlink');
+  assert.equal(form.fields.cexDirectionGuardEnabled, 'true');
+  assert.equal(form.fields.cexDirectionGuardMode, 'bybit_plus_one');
+  assert.equal(form.fields.cexDirectionGuardFailClosed, 'false');
+  assert.equal(form.fields.priceToBeatIvEntryQualityPolicy, 'true');
+  assert.equal(form.fields.priceToBeatIvNormalMaxPriceCent, '94');
+  assert.equal(form.fields.priceToBeatIvPremiumMaxPriceCent, '96');
+  assert.equal(form.fields.priceToBeatIvMinExpectedMoveBps, '2');
+  assert.equal(form.fields.priceToBeatIvPremiumBufferRetain5s, '0.9');
+  assert.equal(form.fields.priceToBeatIvCexAlignMaxBps, '5');
+  assert.equal(form.fields.priceToBeatIvEntryQualityChainlinkMaxAgeMs, '2500');
+  assert.equal(form.ptbIvTimeRuleRows?.length, 3);
 
   form.fields[REVENGE_FLIP_INITIAL_ORDER_USDC_FIELD] = '11';
+  form.fields[REVENGE_FLIP_PROFIT_TARGET_USDC_FIELD] = '-1';
   form.fields[REVENGE_FLIP_MIN_REENTRY_SHARES_FIELD] = '6.5';
-  form.fields.priceToBeatCurrentPriceSource = 'hyperliquid';
   const rebuilt = buildNodeConfigFromForm('action.place_order', form) as Record<string, unknown>;
   assert.equal(rebuilt.mode, REVENGE_FLIP_MODE);
   assert.equal((rebuilt.revengeFlip as Record<string, unknown>).initialOrderUsdc, 11);
+  assert.equal((rebuilt.revengeFlip as Record<string, unknown>).profitTargetUsdc, -1);
   assert.equal((rebuilt.revengeFlip as Record<string, unknown>).classicStopLossEnabled, true);
   assert.deepEqual((rebuilt.revengeFlip as Record<string, unknown>).stopLossRules, [
     { minFlip: 0, maxFlip: 0, stopLossPct: 0.2 },
@@ -101,15 +149,54 @@ test('action.place_order revenge_flip_v1 mapper round-trips nested config', () =
   ]);
   assert.equal((rebuilt.revengeFlip as Record<string, unknown>).reentrySideMode, 'rule_match');
   assert.equal((rebuilt.revengeFlip as Record<string, unknown>).minReentryShares, 6.5);
+  assert.equal(
+    (rebuilt.revengeFlip as Record<string, unknown>).postStopLossIvMismatchEnabled,
+    false
+  );
   assert.equal((rebuilt.revengeFlip as Record<string, unknown>).ptbStopLossEnabled, true);
   assert.equal((rebuilt.revengeFlip as Record<string, unknown>).ptbStopLossGapUsd, -4);
   assert.equal(
     (rebuilt.revengeFlip as Record<string, unknown>).ptbStopLossCurrentPriceSource,
-    'binance_hyperliquid'
+    'chainlink_cex_consensus'
   );
   assert.equal((rebuilt.triggerPrice as Record<string, unknown>).enabled, true);
   assert.equal(rebuilt.priceToBeatGuardEnabled, true);
-  assert.equal(rebuilt.priceToBeatCurrentPriceSource, 'hyperliquid');
+  assert.equal(rebuilt.priceToBeatMode, 'iv_mismatch_edge');
+  assert.equal(rebuilt.priceToBeatCurrentPriceSource, 'chainlink');
+  assert.equal(rebuilt.cexDirectionGuardEnabled, true);
+  assert.equal(rebuilt.cexDirectionGuardMode, 'bybit_plus_one');
+  assert.equal(rebuilt.cexDirectionGuardFailClosed, false);
+  assert.equal(rebuilt.priceToBeatIvEntryQualityPolicy, true);
+  assert.equal(rebuilt.priceToBeatIvNormalMaxPriceCent, 94);
+  assert.equal(rebuilt.priceToBeatIvPremiumMaxPriceCent, 96);
+  assert.equal(rebuilt.priceToBeatIvMinExpectedMoveBps, 2);
+  assert.equal(rebuilt.priceToBeatIvPremiumBufferRetain5s, 0.9);
+  assert.equal(rebuilt.priceToBeatIvCexAlignMaxBps, 5);
+  assert.equal(rebuilt.priceToBeatIvEntryQualityChainlinkMaxAgeMs, 2500);
+  assert.equal(rebuilt.priceToBeatIvEntryQualityHighRiskAskCent, 85);
+  assert.deepEqual(rebuilt.priceToBeatIvTimeRules, [
+    {
+      startRemainingSec: 45,
+      endRemainingSec: 30,
+      maxPriceCent: 92,
+      minEdge: 0.03,
+      minGapStrength: 0.5,
+    },
+    {
+      startRemainingSec: 30,
+      endRemainingSec: 15,
+      maxPriceCent: 92,
+      minEdge: 0.05,
+      minGapStrength: 0.75,
+    },
+    {
+      startRemainingSec: 15,
+      endRemainingSec: 8,
+      maxPriceCent: 92,
+      minEdge: 0.07,
+      minGapStrength: 1,
+    },
+  ]);
 });
 
 test('action.place_order revenge_flip_v1 mapper round-trips PTB-only stop-loss', () => {
@@ -138,6 +225,7 @@ test('action.place_order revenge_flip_v1 mapper round-trips PTB-only stop-loss',
   assert.equal(revenge.ptbStopLossGapUsd, 1);
   assert.equal(revenge.ptbStopLossGapUnit, 'usd');
   assert.equal(revenge.ptbStopLossTimeDecayMode, 'none');
+  assert.equal(revenge.postStopLossIvMismatchEnabled, true);
 });
 
 test('trigger.market_price revenge_flip_only binding round-trips and strips trigger rows', () => {

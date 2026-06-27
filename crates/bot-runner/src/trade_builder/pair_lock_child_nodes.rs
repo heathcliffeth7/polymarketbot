@@ -141,6 +141,7 @@ fn normalize_child_ptb_stop_loss_current_price_source(config: &mut serde_json::M
                         | "hyperliquid"
                         | "binance_hyperliquid"
                         | "cex_consensus"
+                        | "chainlink_cex_consensus"
                 )
             })
     };
@@ -153,7 +154,12 @@ fn normalize_child_ptb_stop_loss_current_price_source(config: &mut serde_json::M
             .filter(|value| {
                 matches!(
                     value.as_str(),
-                    "chainlink" | "binance" | "coinbase" | "hyperliquid"
+                    "chainlink"
+                        | "binance"
+                        | "coinbase"
+                        | "hyperliquid"
+                        | "bybit"
+                        | "chainlink_cex_consensus"
                 )
             })
     };

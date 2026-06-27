@@ -326,7 +326,7 @@ export function validateNodeConfig(
         issues,
         node,
         'invalid_asset',
-        'action.resolve_market asset must be one of: btc, eth, sol, xrp.'
+        'action.resolve_market asset must be one of: btc, eth, sol, xrp, doge, bnb, hype.'
       );
     }
     if (timeframe && !RESOLVE_MARKET_ALLOWED_TIMEFRAMES.has(timeframe)) {

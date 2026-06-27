@@ -5,6 +5,10 @@ import type {
   PtbStopLossBumpMode,
 } from './types';
 import { normalizePtbCurrentPriceSource, normalizePtbMode } from './ptb-modes';
+import {
+  clearCexEntryConsensusBuildConfig,
+  normalizeCexEntryConsensusBuildConfig,
+} from './cex-entry-consensus';
 import { isRecord, toStringValue } from './utils';
 
 interface SerializedPtbStopLossBumpLossRule {
@@ -153,6 +157,7 @@ function clearPrimaryPriceToBeatGuardBuildConfig(config: Record<string, unknown>
   delete config.priceToBeatMode;
   delete config.priceToBeatMaxDiff;
   delete config.priceToBeatMaxDiffUnit;
+  clearCexEntryConsensusBuildConfig(config);
   clearPtbStopLossBumpBuildConfig(config);
   delete config.priceToBeatMaxPriceRelaxEnabled;
   delete config.priceToBeatMaxPriceRelaxMissCount;
@@ -254,6 +259,7 @@ export function normalizePrimaryPriceToBeatGuardBuildConfig(
   config.priceToBeatCurrentPriceSource = normalizePtbCurrentPriceSource(
     config.priceToBeatCurrentPriceSource
   );
+  normalizeCexEntryConsensusBuildConfig(config);
   if (config.priceToBeatMode === 'manual') {
     const priceToBeatUnitRaw = toStringValue(config.priceToBeatMaxDiffUnit).trim().toLowerCase();
     config.priceToBeatMaxDiffUnit = priceToBeatUnitRaw === 'cent' ? 'cent' : 'usd';

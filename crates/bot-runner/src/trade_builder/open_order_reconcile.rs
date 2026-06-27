@@ -982,6 +982,7 @@ async fn reconcile_trade_builder_open_order(
         size,
         intent: "manual_reprice".to_string(),
         order_type: order_type.to_string(),
+        post_only: false,
         client_order_id: format!("tb-reprice-{}", Uuid::new_v4()),
         leg_side: None,
         fee_rate_bps,

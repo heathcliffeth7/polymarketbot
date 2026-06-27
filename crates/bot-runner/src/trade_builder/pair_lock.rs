@@ -1,7 +1,3 @@
-const ACTION_PLACE_ORDER_MODE_SINGLE: &str = "single";
-const ACTION_PLACE_ORDER_MODE_PAIR_LOCK: &str = "pair_lock";
-const ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1: &str = "dca_live_v1";
-const ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1: &str = "live_gap_collector_v1";
 const TRADE_BUILDER_PAIR_STATUS_WORKING: &str = "working";
 const TRADE_BUILDER_PAIR_STATUS_LOCKED: &str = "locked";
 const TRADE_BUILDER_PAIR_STATUS_UNWINDING: &str = "unwinding";
@@ -32,41 +28,6 @@ struct ActionPlaceOrderPairLockConfig {
 struct ActionPlaceOrderPairResolvedCounterLeg {
     token_id: String,
     outcome_label: String,
-}
-
-fn action_place_order_mode(node: &TradeFlowNode) -> &'static str {
-    match node_config_string(node, "mode")
-        .unwrap_or_else(|| ACTION_PLACE_ORDER_MODE_SINGLE.to_string())
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        ACTION_PLACE_ORDER_MODE_PAIR_LOCK => ACTION_PLACE_ORDER_MODE_PAIR_LOCK,
-        ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1 => ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1,
-        ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1 => {
-            ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1
-        }
-        ACTION_PLACE_ORDER_MODE_POSITIVE_QUANTITY_FLIP_GRID_V1 => {
-            ACTION_PLACE_ORDER_MODE_POSITIVE_QUANTITY_FLIP_GRID_V1
-        }
-        ACTION_PLACE_ORDER_MODE_POSITIVE_FLIP_PAIRLOCK_COMPRESSION_V1 => {
-            ACTION_PLACE_ORDER_MODE_POSITIVE_FLIP_PAIRLOCK_COMPRESSION_V1
-        }
-        ACTION_PLACE_ORDER_MODE_REVENGE_FLIP_V1 => ACTION_PLACE_ORDER_MODE_REVENGE_FLIP_V1,
-        _ => ACTION_PLACE_ORDER_MODE_SINGLE,
-    }
-}
-
-fn action_place_order_uses_pair_lock(node: &TradeFlowNode) -> bool {
-    action_place_order_mode(node) == ACTION_PLACE_ORDER_MODE_PAIR_LOCK
-}
-
-fn action_place_order_uses_dca_live(node: &TradeFlowNode) -> bool {
-    action_place_order_mode(node) == ACTION_PLACE_ORDER_MODE_DCA_LIVE_V1
-}
-
-fn action_place_order_uses_live_gap_collector(node: &TradeFlowNode) -> bool {
-    action_place_order_mode(node) == ACTION_PLACE_ORDER_MODE_LIVE_GAP_COLLECTOR_V1
 }
 
 fn trade_builder_order_uses_pair_lock(order: &TradeBuilderOrder) -> bool {
@@ -903,7 +864,18 @@ async fn execute_action_place_order_dispatch(
         )
         .await;
     }
-
+    if action_place_order_uses_avg_rebound_pairlock_rescue(node) {
+        return execute_action_place_order_avg_rebound_pairlock_rescue(
+            repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
+        )
+        .await;
+    }
+    if action_place_order_uses_confidence_ladder(node) {
+        return execute_action_place_order_confidence_ladder(
+            repo, run_id, cfg, limits, policy, client, ws, run, step, node, graph, context,
+        )
+        .await;
+    }
     if action_place_order_uses_pair_lock(node) {
         let (
             side,
@@ -934,7 +906,6 @@ async fn execute_action_place_order_dispatch(
         )
         .await;
     }
-
     execute_action_place_order(
         repo, run_id, cfg, limits, policy, client, run, step, node, graph, context,
     )

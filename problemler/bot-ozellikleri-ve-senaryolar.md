@@ -1,5 +1,7 @@
 # Bot Ozellikleri — Ornek Senaryolarla Aciklama
 
+> **Not (2026-05-25):** Bu dosya eski formattadir ve guncel tutulmaz. Guncel bot ozellikleri dokumantasyonu: [nedenkaredemiyorum/botunözellikleri/README.md](../../nedenkaredemiyorum/botunözellikleri/README.md)
+
 Her ozellik icin 3 farkli senaryo var. Underlying Protection haric.
 
 ---

@@ -1,10 +1,13 @@
 use super::{
+    active_venues::active_spot_venues_for_asset,
     binance::{binance_stream_url, parse_binance_ws_payload},
     bybit::{bybit_subscription_message, bybit_ws_url, parse_bybit_ws_payload},
     coinbase::{coinbase_subscription_messages, coinbase_ws_url, parse_coinbase_ws_payload},
+    gateio::{gateio_subscription_message, gateio_ws_url, parse_gateio_ws_payload},
     hyperliquid::{
         hyperliquid_subscription_message, hyperliquid_ws_url, parse_hyperliquid_ws_payload,
     },
+    okx::{okx_subscription_message, okx_ws_url, parse_okx_ws_payload},
     open_backfill::fetch_cex_window_open_book,
     types::{
         CexBookSample, CexConsensusSnapshot, CexCurrentPriceSnapshot, CexImpulseSnapshot,
@@ -15,14 +18,23 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::{Mutex, RwLock};
+use reqwest::Url;
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::LazyLock,
     time::Duration,
 };
-use tokio::sync::Notify;
-use tokio_tungstenite::tungstenite::Message;
+use tokio::{net::TcpStream, sync::Notify};
+use tokio_tungstenite::{
+    client_async_tls_with_config,
+    tungstenite::{
+        client::IntoClientRequest,
+        handshake::client::Response,
+        Message,
+    },
+    MaybeTlsStream, WebSocketStream,
+};
 
 const MAX_SAMPLE_AGE_MS: i64 = 5 * 60 * 1_000;
 const MAX_BOOK_SAMPLES: usize = 4_000;
@@ -31,7 +43,7 @@ const MAX_SKEW_SAMPLES: usize = 4_000;
 const MAX_WINDOW_OPEN_BOOK_AGE_MS: i64 = 10_000;
 const OPEN_BACKFILL_FAIL_COOLDOWN_MS: i64 = 30_000;
 const RECONNECT_DELAY_MS: u64 = 500;
-const WS_IDLE_TIMEOUT_SECS: u64 = 20;
+const WS_IDLE_TIMEOUT_SECS: u64 = 45;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CexMicrostructureSnapshotConfig {
@@ -75,6 +87,8 @@ struct AssetState {
     coinbase: VenueState,
     hyperliquid: VenueState,
     bybit: VenueState,
+    okx: VenueState,
+    gateio: VenueState,
     skew_samples: VecDeque<(i64, f64)>,
 }
 
@@ -110,7 +124,15 @@ impl CexMicrostructureService {
         let start_coinbase = coinbase_subscription_messages(&asset).is_some();
         let start_hyperliquid = hyperliquid_subscription_message(&asset).is_some();
         let start_bybit = bybit_subscription_message(&asset).is_some();
-        if !start_binance && !start_coinbase && !start_hyperliquid && !start_bybit {
+        let start_okx = okx_subscription_message(&asset).is_some();
+        let start_gateio = gateio_subscription_message(&asset).is_some();
+        if !start_binance
+            && !start_coinbase
+            && !start_hyperliquid
+            && !start_bybit
+            && !start_okx
+            && !start_gateio
+        {
             return;
         }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -132,7 +154,13 @@ impl CexMicrostructureService {
             handle.spawn(hyperliquid_loop(asset.clone()));
         }
         if start_bybit {
-            handle.spawn(bybit_loop(asset));
+            handle.spawn(bybit_loop(asset.clone()));
+        }
+        if start_okx {
+            handle.spawn(okx_loop(asset.clone()));
+        }
+        if start_gateio {
+            handle.spawn(gateio_loop(asset));
         }
     }
 
@@ -141,10 +169,17 @@ impl CexMicrostructureService {
         let mut state = self.state.write();
         let entry = state.entry(asset.clone()).or_default();
         let venue = venue_state_mut(entry, book.venue);
-        let book = merge_book_update(venue.latest_book.as_ref(), book);
+        let previous_book = venue.latest_book.as_ref();
+        if unseeded_partial_level2_update(previous_book, &book) {
+            return;
+        }
+        if non_improving_partial_level2_update(previous_book, &book) {
+            return;
+        }
+        let book = merge_book_update(previous_book, book);
         venue.latest_ticker_timestamp_ms = if matches!(
             book.source,
-            "bookTicker" | "ticker" | "l2Book" | "orderbook.1"
+            "bookTicker" | "ticker" | "l2Book" | "orderbook.1" | "books5" | "book_ticker"
         ) {
             Some(book.timestamp_ms)
         } else {
@@ -291,6 +326,39 @@ impl CexMicrostructureService {
         result
     }
 
+    fn book_samples(
+        &self,
+        asset: &str,
+        venue: CexVenue,
+        window_ms: i64,
+        now_ms: i64,
+        max_book_stale_ms: i64,
+    ) -> Result<Vec<CexBookSample>> {
+        let normalized_asset = asset.trim().to_ascii_lowercase();
+        let state = self.state.read();
+        let entry = state
+            .get(&normalized_asset)
+            .ok_or_else(|| anyhow!("cex source missing for asset={normalized_asset}"))?;
+        let venue_state = venue_state(entry, venue);
+        let latest = venue_state
+            .latest_book
+            .as_ref()
+            .ok_or_else(|| anyhow!("{} book missing", venue.as_str()))?;
+        ensure_stale(
+            venue.as_str(),
+            "book",
+            now_ms.saturating_sub(latest.timestamp_ms),
+            max_book_stale_ms,
+        )?;
+        let cutoff_ms = now_ms.saturating_sub(window_ms.max(1));
+        Ok(venue_state
+            .books
+            .iter()
+            .filter(|sample| sample.timestamp_ms >= cutoff_ms && sample.timestamp_ms <= now_ms)
+            .cloned()
+            .collect())
+    }
+
     fn has_pinned_rest_window_open(
         &self,
         asset: &str,
@@ -346,7 +414,9 @@ impl CexMicrostructureService {
         result: Result<CexBookSample>,
     ) {
         self.open_backfill_inflight.lock().remove(&key);
-        self.open_backfill_fail_cooldown_until_ms.lock().remove(&key);
+        self.open_backfill_fail_cooldown_until_ms
+            .lock()
+            .remove(&key);
         match result {
             Ok(book) => {
                 let open_mid = book.mid();
@@ -398,7 +468,7 @@ pub(crate) fn prefetch_cex_window_opens(asset: &str, window_start_ms: i64) {
         return;
     }
     SERVICE.ensure_started(&normalized_asset);
-    for venue in [CexVenue::Bybit, CexVenue::Binance, CexVenue::Coinbase] {
+    for venue in active_spot_venues_for_asset(&normalized_asset) {
         SERVICE.schedule_window_open_backfill(normalized_asset.clone(), venue, window_start_ms);
     }
 }
@@ -437,6 +507,22 @@ pub(crate) fn get_cex_venue_delta_snapshot(
     )
 }
 
+pub(crate) fn get_cex_book_samples(
+    asset: &str,
+    venue: CexVenue,
+    window_ms: i64,
+    max_book_stale_ms: i64,
+) -> Result<Vec<CexBookSample>> {
+    SERVICE.ensure_started(asset);
+    SERVICE.book_samples(
+        asset,
+        venue,
+        window_ms,
+        Utc::now().timestamp_millis(),
+        max_book_stale_ms,
+    )
+}
+
 pub(crate) async fn wait_for_cex_microstructure_dirty_asset_update() {
     SERVICE.wait_for_dirty_asset_update().await;
 }
@@ -455,6 +541,8 @@ fn venue_state(entry: &AssetState, venue: CexVenue) -> &VenueState {
         CexVenue::Coinbase => &entry.coinbase,
         CexVenue::Hyperliquid => &entry.hyperliquid,
         CexVenue::Bybit => &entry.bybit,
+        CexVenue::Okx => &entry.okx,
+        CexVenue::Gateio => &entry.gateio,
     }
 }
 
@@ -464,6 +552,8 @@ fn venue_state_mut(entry: &mut AssetState, venue: CexVenue) -> &mut VenueState {
         CexVenue::Coinbase => &mut entry.coinbase,
         CexVenue::Hyperliquid => &mut entry.hyperliquid,
         CexVenue::Bybit => &mut entry.bybit,
+        CexVenue::Okx => &mut entry.okx,
+        CexVenue::Gateio => &mut entry.gateio,
     }
 }
 
@@ -491,6 +581,36 @@ fn merge_book_update(previous: Option<&CexBookSample>, incoming: CexBookSample) 
         };
     }
     incoming
+}
+
+fn unseeded_partial_level2_update(
+    previous: Option<&CexBookSample>,
+    incoming: &CexBookSample,
+) -> bool {
+    incoming.source == "level2"
+        && previous.is_none()
+        && (incoming.bid_size.is_none() || incoming.ask_size.is_none())
+}
+
+// L2 update'leri book'un herhangi bir seviyesinden gelebilir; best'i sadece
+// iyilestiren/esitleyen ve qty>0 olan partial'lar kabul edilir, gerisi yok sayilir.
+fn non_improving_partial_level2_update(
+    previous: Option<&CexBookSample>,
+    incoming: &CexBookSample,
+) -> bool {
+    if incoming.source != "level2" {
+        return false;
+    }
+    let Some(previous) = previous else {
+        return false;
+    };
+    if let (Some(bid_size), None) = (incoming.bid_size, incoming.ask_size) {
+        return bid_size <= 0.0 || incoming.bid < previous.bid;
+    }
+    if let (Some(ask_size), None) = (incoming.ask_size, incoming.bid_size) {
+        return ask_size <= 0.0 || incoming.ask > previous.ask;
+    }
+    false
 }
 
 fn source_snapshot(
@@ -550,18 +670,12 @@ fn current_price_snapshot(
         .latest_book
         .as_ref()
         .ok_or_else(|| anyhow!("{label} book missing"))?;
+    let book_staleness_ms = now_ms.saturating_sub(book.timestamp_ms);
     let ticker_timestamp = state
         .latest_ticker_timestamp_ms
-        .ok_or_else(|| anyhow!("{label} ticker missing"))?;
-    let book_staleness_ms = now_ms.saturating_sub(book.timestamp_ms);
+        .unwrap_or(book.timestamp_ms);
     let ticker_staleness_ms = now_ms.saturating_sub(ticker_timestamp);
     ensure_stale(label, "book", book_staleness_ms, config.max_book_stale_ms)?;
-    ensure_stale(
-        label,
-        "ticker",
-        ticker_staleness_ms,
-        config.max_ticker_stale_ms,
-    )?;
     Ok(CexCurrentPriceSnapshot {
         venue,
         mid: book.mid(),
@@ -636,7 +750,7 @@ fn window_open_book(
 fn venue_requires_rest_open(venue: CexVenue) -> bool {
     matches!(
         venue,
-        CexVenue::Binance | CexVenue::Bybit | CexVenue::Coinbase
+        CexVenue::Binance | CexVenue::Bybit | CexVenue::Coinbase | CexVenue::Okx | CexVenue::Gateio
     )
 }
 
@@ -800,6 +914,54 @@ fn trim_by_timestamp<T>(
     }
 }
 
+async fn connect_microstructure_ws(
+    url: &str,
+    venue: &'static str,
+) -> Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, Response)> {
+    let parsed = Url::parse(url).with_context(|| format!("parsing {venue} websocket url"))?;
+    let target_host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("{venue} websocket url missing host"))?
+        .to_string();
+    let target_port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("{venue} websocket url missing port"))?;
+    let request = url
+        .into_client_request()
+        .with_context(|| format!("building {venue} websocket request"))?;
+    let (stream, proxy_info) =
+        bot_infra::proxy::connect_tcp_with_optional_socks5_proxy(&target_host, target_port)
+            .await
+            .with_context(|| {
+                format!(
+                    "connecting {venue} microstructure websocket target_host={target_host} target_port={target_port}"
+                )
+            })?;
+    stream
+        .set_nodelay(true)
+        .with_context(|| format!("setting {venue} websocket TCP_NODELAY"))?;
+    let result = client_async_tls_with_config(request, stream, None, None)
+        .await
+        .with_context(|| {
+            format!(
+                "handshaking {venue} microstructure websocket proxy_mode={} target_host={target_host} target_port={target_port}",
+                proxy_info.proxy_mode
+            )
+        });
+    if result.is_ok() {
+        tracing::info!(
+            venue,
+            proxy_mode = proxy_info.proxy_mode,
+            proxy_configured = proxy_info.proxy_configured,
+            proxy = proxy_info.proxy_redacted.as_deref().unwrap_or("direct"),
+            target_host = %target_host,
+            target_port,
+            "CEX_MICROSTRUCTURE_WS_CONNECTED"
+        );
+    }
+    result
+}
+
 async fn binance_loop(asset: String) {
     loop {
         if let Err(err) = binance_once(&asset).await {
@@ -811,10 +973,10 @@ async fn binance_loop(asset: String) {
 
 async fn binance_once(asset: &str) -> Result<()> {
     let url = binance_stream_url(asset).ok_or_else(|| anyhow!("unsupported binance asset"))?;
-    let (ws, _) = tokio_tungstenite::connect_async(&url)
+    let (ws, _) = connect_microstructure_ws(&url, "binance")
         .await
         .with_context(|| format!("connecting binance microstructure websocket: {url}"))?;
-    let (_, mut stream) = ws.split();
+    let (mut sink, mut stream) = ws.split();
     loop {
         match tokio::time::timeout(Duration::from_secs(WS_IDLE_TIMEOUT_SECS), stream.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => {
@@ -828,6 +990,9 @@ async fn binance_once(asset: &str) -> Result<()> {
                         SERVICE.update_trade(trade);
                     }
                 }
+            }
+            Ok(Some(Ok(Message::Ping(payload)))) => {
+                let _ = sink.send(Message::Pong(payload)).await;
             }
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return Ok(()),
             Ok(Some(Ok(_))) => {}
@@ -850,7 +1015,7 @@ async fn coinbase_once(asset: &str) -> Result<()> {
     let url = coinbase_ws_url();
     let messages = coinbase_subscription_messages(asset)
         .ok_or_else(|| anyhow!("unsupported coinbase asset"))?;
-    let (ws, _) = tokio_tungstenite::connect_async(&url)
+    let (ws, _) = connect_microstructure_ws(&url, "coinbase")
         .await
         .with_context(|| format!("connecting coinbase microstructure websocket: {url}"))?;
     let (mut sink, mut stream) = ws.split();
@@ -863,6 +1028,14 @@ async fn coinbase_once(asset: &str) -> Result<()> {
         match tokio::time::timeout(Duration::from_secs(WS_IDLE_TIMEOUT_SECS), stream.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => {
                 if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+                    if let Some(error) = coinbase_error_summary(&payload) {
+                        tracing::warn!(
+                            asset,
+                            error = %error,
+                            payload = %payload,
+                            "EARLY_STALE_COINBASE_WS_PAYLOAD_ERROR"
+                        );
+                    }
                     let parsed =
                         parse_coinbase_ws_payload(&payload, asset, Utc::now().timestamp_millis());
                     for book in parsed.books {
@@ -884,6 +1057,48 @@ async fn coinbase_once(asset: &str) -> Result<()> {
     }
 }
 
+fn coinbase_error_summary(payload: &Value) -> Option<String> {
+    if coinbase_value_is_error(payload) {
+        return Some(format_coinbase_error(payload));
+    }
+    payload
+        .get("events")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|event| coinbase_value_is_error(event))
+        .map(format_coinbase_error)
+}
+
+fn coinbase_value_is_error(value: &Value) -> bool {
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("error"))
+        || value
+            .get("channel")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("error"))
+        || value.get("error").is_some()
+}
+
+fn format_coinbase_error(value: &Value) -> String {
+    let message = value
+        .get("message")
+        .or_else(|| value.get("reason"))
+        .or_else(|| value.get("error"))
+        .and_then(Value::as_str)
+        .unwrap_or("coinbase websocket error payload");
+    let channel = value
+        .get("channel")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let message_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    format!("type={message_type} channel={channel} message={message}")
+}
+
 async fn hyperliquid_loop(asset: String) {
     loop {
         if let Err(err) = hyperliquid_once(&asset).await {
@@ -897,7 +1112,7 @@ async fn hyperliquid_once(asset: &str) -> Result<()> {
     let url = hyperliquid_ws_url();
     let message = hyperliquid_subscription_message(asset)
         .ok_or_else(|| anyhow!("unsupported hyperliquid asset"))?;
-    let (ws, _) = tokio_tungstenite::connect_async(&url)
+    let (ws, _) = connect_microstructure_ws(&url, "hyperliquid")
         .await
         .with_context(|| format!("connecting hyperliquid microstructure websocket: {url}"))?;
     let (mut sink, mut stream) = ws.split();
@@ -939,7 +1154,7 @@ async fn bybit_once(asset: &str) -> Result<()> {
     let url = bybit_ws_url();
     let message =
         bybit_subscription_message(asset).ok_or_else(|| anyhow!("unsupported bybit asset"))?;
-    let (ws, _) = tokio_tungstenite::connect_async(&url)
+    let (ws, _) = connect_microstructure_ws(&url, "bybit")
         .await
         .with_context(|| format!("connecting bybit microstructure websocket: {url}"))?;
     let (mut sink, mut stream) = ws.split();
@@ -968,6 +1183,89 @@ async fn bybit_once(asset: &str) -> Result<()> {
     }
 }
 
+async fn okx_loop(asset: String) {
+    loop {
+        if let Err(err) = okx_once(&asset).await {
+            tracing::warn!(asset = %asset, error = %err, "EARLY_STALE_OKX_WS_ERROR");
+        }
+        tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
+    }
+}
+
+async fn okx_once(asset: &str) -> Result<()> {
+    let url = okx_ws_url();
+    let message =
+        okx_subscription_message(asset).ok_or_else(|| anyhow!("unsupported okx asset"))?;
+    let (ws, _) = connect_microstructure_ws(&url, "okx")
+        .await
+        .with_context(|| format!("connecting okx microstructure websocket: {url}"))?;
+    let (mut sink, mut stream) = ws.split();
+    sink.send(Message::Text(message.to_string().into()))
+        .await
+        .context("sending okx microstructure subscription")?;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(WS_IDLE_TIMEOUT_SECS), stream.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+                    for book in parse_okx_ws_payload(&payload, asset, Utc::now().timestamp_millis())
+                    {
+                        SERVICE.update_book(book);
+                    }
+                }
+            }
+            Ok(Some(Ok(Message::Ping(payload)))) => {
+                let _ = sink.send(Message::Pong(payload)).await;
+            }
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return Ok(()),
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(err))) => return Err(err.into()),
+            Err(_) => return Err(anyhow!("okx microstructure websocket idle timeout")),
+        }
+    }
+}
+
+async fn gateio_loop(asset: String) {
+    loop {
+        if let Err(err) = gateio_once(&asset).await {
+            tracing::warn!(asset = %asset, error = %err, "EARLY_STALE_GATEIO_WS_ERROR");
+        }
+        tokio::time::sleep(Duration::from_millis(RECONNECT_DELAY_MS)).await;
+    }
+}
+
+async fn gateio_once(asset: &str) -> Result<()> {
+    let url = gateio_ws_url();
+    let message =
+        gateio_subscription_message(asset).ok_or_else(|| anyhow!("unsupported gateio asset"))?;
+    let (ws, _) = connect_microstructure_ws(&url, "gateio")
+        .await
+        .with_context(|| format!("connecting gateio microstructure websocket: {url}"))?;
+    let (mut sink, mut stream) = ws.split();
+    sink.send(Message::Text(message.to_string().into()))
+        .await
+        .context("sending gateio microstructure subscription")?;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(WS_IDLE_TIMEOUT_SECS), stream.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+                    if let Some(book) =
+                        parse_gateio_ws_payload(&payload, asset, Utc::now().timestamp_millis())
+                    {
+                        SERVICE.update_book(book);
+                    }
+                }
+            }
+            Ok(Some(Ok(Message::Ping(payload)))) => {
+                let _ = sink.send(Message::Pong(payload)).await;
+            }
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return Ok(()),
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(err))) => return Err(err.into()),
+            Err(_) => return Err(anyhow!("gateio microstructure websocket idle timeout")),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn clear_cex_microstructure_test_state() {
     SERVICE.state.write().clear();
@@ -975,6 +1273,17 @@ pub(crate) fn clear_cex_microstructure_test_state() {
     SERVICE.open_backfill_inflight.lock().clear();
     SERVICE.open_backfill_fail_cooldown_until_ms.lock().clear();
     SERVICE.dirty_assets.lock().clear();
+}
+
+#[cfg(test)]
+static CEX_MICROSTRUCTURE_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+#[cfg(test)]
+pub(crate) fn lock_cex_microstructure_test_state() -> std::sync::MutexGuard<'static, ()> {
+    CEX_MICROSTRUCTURE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -988,13 +1297,20 @@ pub(crate) fn seed_cex_book_test_sample(sample: CexBookSample) {
 
 #[cfg(test)]
 pub(crate) fn seed_cex_open_test_sample(sample: CexBookSample) {
+    seed_cex_open_test_sample_for_window(sample.timestamp_ms, sample);
+}
+
+#[cfg(test)]
+pub(crate) fn seed_cex_open_test_sample_for_window(window_start_ms: i64, sample: CexBookSample) {
     let asset = sample.asset.clone();
     let mut state = SERVICE.state.write();
     let entry = state.entry(asset).or_default();
     let venue = venue_state_mut(entry, sample.venue);
     venue
         .pinned_window_opens
-        .insert(sample.timestamp_ms, sample);
+        .insert(window_start_ms, sample.clone());
+    drop(state);
+    SERVICE.update_book(sample);
 }
 
 #[cfg(test)]
@@ -1003,231 +1319,5 @@ pub(crate) fn seed_cex_trade_test_sample(sample: CexTradeSample) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::{Mutex, MutexGuard};
-
-    static CEX_MICROSTRUCTURE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn lock_cex_microstructure_test_state() -> MutexGuard<'static, ()> {
-        CEX_MICROSTRUCTURE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn book(venue: CexVenue, ts: i64, bid: f64, ask: f64) -> CexBookSample {
-        CexBookSample {
-            venue,
-            asset: "btc".to_string(),
-            timestamp_ms: ts,
-            bid,
-            ask,
-            bid_size: Some(1.0),
-            ask_size: Some(1.0),
-            source: "ticker",
-        }
-    }
-
-    fn trade(venue: CexVenue, ts: i64, price: f64, side: TakerSide) -> CexTradeSample {
-        CexTradeSample {
-            venue,
-            asset: "btc".to_string(),
-            timestamp_ms: ts,
-            price,
-            size: 1.0,
-            taker_side: side,
-        }
-    }
-
-    #[test]
-    fn cex_snapshot_requires_matching_consensus_side() {
-        let _guard = lock_cex_microstructure_test_state();
-        clear_cex_microstructure_test_state();
-        seed_cex_book_test_sample(book(CexVenue::Binance, 20_000, 67_519.0, 67_521.0));
-        seed_cex_book_test_sample(book(CexVenue::Coinbase, 20_000, 67_518.0, 67_522.0));
-        for venue in [CexVenue::Binance, CexVenue::Coinbase] {
-            seed_cex_trade_test_sample(trade(venue, 6_000, 67_500.0, TakerSide::Buy));
-            seed_cex_trade_test_sample(trade(venue, 20_000, 67_520.0, TakerSide::Buy));
-        }
-
-        let snapshot = SERVICE
-            .snapshot("btc", 20_100, &CexMicrostructureSnapshotConfig::default())
-            .expect("snapshot");
-
-        assert_eq!(snapshot.consensus_side, Some("up"));
-        assert!(snapshot.normalized_source_skew_usd.abs() <= 0.001);
-    }
-
-    #[tokio::test]
-    async fn schedule_window_open_backfill_skips_when_rest_open_already_pinned() {
-        let _guard = lock_cex_microstructure_test_state();
-        clear_cex_microstructure_test_state();
-        let window_start_ms = 1780291200000_i64;
-        seed_cex_open_test_sample(CexBookSample {
-            venue: CexVenue::Bybit,
-            asset: "btc".to_string(),
-            timestamp_ms: window_start_ms,
-            bid: 73_460.4,
-            ask: 73_460.4,
-            bid_size: None,
-            ask_size: None,
-            source: "rest_open",
-        });
-        seed_cex_book_test_sample(book(CexVenue::Bybit, window_start_ms + 30_000, 73_500.0, 73_502.0));
-
-        SERVICE.schedule_window_open_backfill("btc".to_string(), CexVenue::Bybit, window_start_ms);
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let key = format!("btc:bybit:{window_start_ms}");
-        assert!(!SERVICE.open_backfill_inflight.lock().contains(&key));
-    }
-
-    #[test]
-    fn venue_delta_snapshot_rejects_bybit_pre_window_ws_book_without_rest_open() {
-        let _guard = lock_cex_microstructure_test_state();
-        clear_cex_microstructure_test_state();
-        seed_cex_book_test_sample(book(CexVenue::Bybit, 10_000, 99.0, 101.0));
-        seed_cex_book_test_sample(book(CexVenue::Bybit, 20_000, 109.0, 111.0));
-
-        let error = SERVICE
-            .venue_delta_snapshot("btc", CexVenue::Bybit, 10_000, 20_100, 1.0, 500)
-            .expect_err("bybit ws book must not become window open");
-
-        assert!(error.to_string().contains("window open book missing"));
-    }
-
-    #[test]
-    fn venue_delta_snapshot_rejects_late_first_book_as_window_open() {
-        let _guard = lock_cex_microstructure_test_state();
-        clear_cex_microstructure_test_state();
-        seed_cex_book_test_sample(book(CexVenue::Bybit, 190_000, 99.0, 101.0));
-        seed_cex_book_test_sample(book(CexVenue::Bybit, 200_000, 89.0, 91.0));
-
-        let error = SERVICE
-            .venue_delta_snapshot("btc", CexVenue::Bybit, 0, 200_100, 1.0, 500)
-            .expect_err("late service-start book must not become window open");
-
-        assert!(error.to_string().contains("window open book missing"));
-    }
-
-    #[test]
-    fn venue_delta_snapshot_rejects_binance_late_book_as_window_open() {
-        let _guard = lock_cex_microstructure_test_state();
-        clear_cex_microstructure_test_state();
-        seed_cex_book_test_sample(book(CexVenue::Binance, 41_201, 73_838.97, 73_839.02));
-
-        let error = SERVICE
-            .venue_delta_snapshot("btc", CexVenue::Binance, 0, 41_301, 1.0, 500)
-            .expect_err("binance late book must not become window open");
-
-        assert!(error.to_string().contains("window open book missing"));
-    }
-
-    #[test]
-    fn venue_delta_snapshot_rejects_binance_pre_window_ws_book_without_rest_open() {
-        let _guard = lock_cex_microstructure_test_state();
-        clear_cex_microstructure_test_state();
-        seed_cex_book_test_sample(book(CexVenue::Binance, 9_800, 73_821.98, 73_822.00));
-        seed_cex_book_test_sample(book(CexVenue::Binance, 20_000, 73_838.97, 73_839.02));
-
-        let error = SERVICE
-            .venue_delta_snapshot("btc", CexVenue::Binance, 10_000, 20_100, 1.0, 500)
-            .expect_err("binance ws book must not become window open");
-
-        assert!(error.to_string().contains("window open book missing"));
-    }
-
-    #[test]
-    fn venue_delta_snapshot_prefers_pinned_rest_open() {
-        let _guard = lock_cex_microstructure_test_state();
-        clear_cex_microstructure_test_state();
-        seed_cex_open_test_sample(CexBookSample {
-            venue: CexVenue::Bybit,
-            asset: "btc".to_string(),
-            timestamp_ms: 0,
-            bid: 100.0,
-            ask: 100.0,
-            bid_size: None,
-            ask_size: None,
-            source: "rest_open",
-        });
-        seed_cex_book_test_sample(book(CexVenue::Bybit, 190_000, 89.0, 91.0));
-
-        let snapshot = SERVICE
-            .venue_delta_snapshot("btc", CexVenue::Bybit, 0, 190_100, 1.0, 500)
-            .expect("delta snapshot");
-
-        assert_eq!(snapshot.open_mid, 100.0);
-        assert_eq!(snapshot.current_mid, 90.0);
-        assert_eq!(snapshot.delta_usd, -10.0);
-        assert_eq!(snapshot.open_source, "rest_kline_open");
-    }
-
-    #[test]
-    fn venue_delta_snapshot_uses_coinbase_pinned_rest_open() {
-        let _guard = lock_cex_microstructure_test_state();
-        clear_cex_microstructure_test_state();
-        seed_cex_open_test_sample(CexBookSample {
-            venue: CexVenue::Coinbase,
-            asset: "btc".to_string(),
-            timestamp_ms: 0,
-            bid: 100.0,
-            ask: 100.0,
-            bid_size: None,
-            ask_size: None,
-            source: "rest_open",
-        });
-        seed_cex_book_test_sample(book(CexVenue::Coinbase, 190_000, 110.0, 112.0));
-
-        let snapshot = SERVICE
-            .venue_delta_snapshot("btc", CexVenue::Coinbase, 0, 190_100, 1.0, 500)
-            .expect("delta snapshot");
-
-        assert_eq!(snapshot.open_mid, 100.0);
-        assert_eq!(snapshot.current_mid, 111.0);
-        assert_eq!(snapshot.delta_usd, 11.0);
-        assert_eq!(snapshot.open_lag_ms, 0);
-        assert_eq!(snapshot.open_source, "rest_kline_open");
-    }
-
-    #[test]
-    fn venue_delta_snapshot_rejects_coinbase_pre_window_ws_book_without_rest_open() {
-        let _guard = lock_cex_microstructure_test_state();
-        clear_cex_microstructure_test_state();
-        seed_cex_book_test_sample(book(CexVenue::Coinbase, 9_800, 99.0, 101.0));
-        seed_cex_book_test_sample(book(CexVenue::Coinbase, 20_000, 109.0, 111.0));
-
-        let error = SERVICE
-            .venue_delta_snapshot("btc", CexVenue::Coinbase, 10_000, 20_100, 1.0, 500)
-            .expect_err("coinbase ws book must not become window open");
-
-        assert!(error.to_string().contains("window open book missing"));
-    }
-
-    #[test]
-    fn venue_delta_snapshot_uses_binance_pinned_rest_open() {
-        let _guard = lock_cex_microstructure_test_state();
-        clear_cex_microstructure_test_state();
-        seed_cex_open_test_sample(CexBookSample {
-            venue: CexVenue::Binance,
-            asset: "btc".to_string(),
-            timestamp_ms: 0,
-            bid: 73_821.99,
-            ask: 73_821.99,
-            bid_size: None,
-            ask_size: None,
-            source: "rest_open",
-        });
-        seed_cex_book_test_sample(book(CexVenue::Binance, 41_201, 73_838.97, 73_839.02));
-
-        let snapshot = SERVICE
-            .venue_delta_snapshot("btc", CexVenue::Binance, 0, 41_301, 1.0, 500)
-            .expect("delta snapshot");
-
-        assert_eq!(snapshot.open_mid, 73_821.99);
-        assert_eq!(snapshot.current_mid, 73_838.995);
-        assert!((snapshot.delta_usd - 17.005).abs() < 0.000_000_1);
-        assert_eq!(snapshot.open_lag_ms, 0);
-        assert_eq!(snapshot.open_source, "rest_kline_open");
-    }
-}
+#[path = "service_tests.rs"]
+mod service_tests;

@@ -359,9 +359,9 @@ fn biased_hedge_primary_block_reason(
             "below_best_ask_floor" | "best_ask_unavailable" | "pair_primary_best_ask_unavailable" => {
                 Some("primary_floor_fail")
             }
-            "blocked_insufficient_depth" | "blocked_depth_guard_unavailable" => {
-                Some("primary_depth_fail")
-            }
+            "blocked_insufficient_depth"
+            | "blocked_depth_qty_insufficient"
+            | "blocked_depth_guard_unavailable" => Some("primary_depth_fail"),
             "above_max_price" => Some("high_price_confidence_fail"),
             _ => Some("no_primary_edge"),
         };

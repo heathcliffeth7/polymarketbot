@@ -188,17 +188,45 @@ pub(crate) async fn list_markets_for_scope(
         Err(gamma_err) => {
             let synthetic = build_synthetic_markets_from_cache(scope_def, Utc::now());
             if synthetic.is_empty() {
-                return Err(gamma_err.context(
-                    "Gamma API failed and no cached token IDs available for fallback",
-                ));
+                let mut direct = Vec::new();
+                for slug in updown_scope_candidate_slugs(scope_def, Utc::now()) {
+                    let fetched = match gamma.get_market_by_slug(&slug).await {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
+                    let Some(market) = fetched else {
+                        continue;
+                    };
+                    if !market.slug.starts_with(scope_def.slug_prefix) {
+                        continue;
+                    }
+                    if !market.active || market.closed {
+                        continue;
+                    }
+                    direct.push(market);
+                }
+                if direct.is_empty() {
+                    return Err(gamma_err.context(
+                        "Gamma API failed and no cached token IDs available for fallback",
+                    ));
+                }
+                populate_token_id_cache(&direct);
+                tracing::warn!(
+                    scope,
+                    direct_count = direct.len(),
+                    error = %gamma_err,
+                    "AUTO_SCOPE_GAMMA_FALLBACK_DIRECT_SLUG_MARKETS"
+                );
+                direct
+            } else {
+                tracing::warn!(
+                    scope,
+                    synthetic_count = synthetic.len(),
+                    error = %gamma_err,
+                    "AUTO_SCOPE_GAMMA_FALLBACK_SYNTHETIC_MARKETS"
+                );
+                synthetic
             }
-            tracing::warn!(
-                scope,
-                synthetic_count = synthetic.len(),
-                error = %gamma_err,
-                "AUTO_SCOPE_GAMMA_FALLBACK_SYNTHETIC_MARKETS"
-            );
-            synthetic
         }
     };
 

@@ -22,3 +22,22 @@ test('formatClientRequestError preserves server busy message for http errors', (
   );
   assert.equal(hasClientRequestErrorCode(error, 'flow_definition_busy'), true);
 });
+
+test('formatClientRequestError surfaces auth failures as a login prompt', () => {
+  const error = new ClientRequestError(
+    'Oturumun suresi doldu veya giris yapilmamis. Lutfen tekrar login ol.',
+    {
+      kind: 'http',
+      endpoint: '/api/trade-flow/definitions/4331',
+      status: 401,
+      apiCode: 'auth_unauthorized',
+      retryable: false,
+    }
+  );
+
+  assert.equal(
+    formatClientRequestError(error, 'Workflow yuklenemedi.'),
+    'Oturumun suresi doldu veya giris yapilmamis. Lutfen tekrar login ol. (HTTP 401)'
+  );
+  assert.equal(hasClientRequestErrorCode(error, 'auth_unauthorized'), true);
+});

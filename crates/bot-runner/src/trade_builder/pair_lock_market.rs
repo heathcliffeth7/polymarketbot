@@ -402,6 +402,23 @@ fn pair_lock_trigger_node_state_token_pair(
     }
 }
 
+fn pair_lock_flow_context_token_pair(
+    context: &Value,
+    trigger_node_market_slug: Option<String>,
+    market_slug: &str,
+) -> Option<PairLockResolvedTokenPair> {
+    let context_market_slug = flow_context_string(context, "marketSlug")?;
+    if context_market_slug != market_slug {
+        return None;
+    }
+    Some(PairLockResolvedTokenPair {
+        yes_token_id: flow_context_string(context, "yesTokenId")?,
+        no_token_id: flow_context_string(context, "noTokenId")?,
+        token_resolution_source: "flow_context",
+        trigger_node_market_slug,
+    })
+}
+
 async fn resolve_pair_lock_trigger_scoped_token_pair(
     cfg: &AppConfig,
     market_slug: &str,
@@ -416,6 +433,11 @@ async fn resolve_pair_lock_trigger_scoped_token_pair(
     .or_else(|| flow_node_state_string(context, trigger_node_key, "last_ws_market_slug"));
     if let Some(resolved) =
         pair_lock_trigger_node_state_token_pair(context, trigger_node_key, market_slug)
+    {
+        return Ok(resolved);
+    }
+    if let Some(resolved) =
+        pair_lock_flow_context_token_pair(context, trigger_node_market_slug.clone(), market_slug)
     {
         return Ok(resolved);
     }
@@ -1065,5 +1087,35 @@ mod pair_lock_market_tests {
             resolved.trigger_node_market_slug.as_deref(),
             Some("btc-updown-5m-1776518700")
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_pair_lock_trigger_scoped_token_pair_uses_flow_context_tokens_before_gamma() {
+        let mut cfg = AppConfig::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config"
+        )))
+        .expect("app config");
+        cfg.exchange.gamma_base_url = "http://127.0.0.1:1".to_string();
+        let context = json!({
+            "flowContext": {
+                "marketSlug": "btc-updown-5m-1776521100",
+                "yesTokenId": "context-yes",
+                "noTokenId": "context-no"
+            }
+        });
+
+        let resolved = resolve_pair_lock_trigger_scoped_token_pair(
+            &cfg,
+            "btc-updown-5m-1776521100",
+            "trigger_market",
+            &context,
+        )
+        .await
+        .expect("flow context resolution");
+
+        assert_eq!(resolved.yes_token_id, "context-yes");
+        assert_eq!(resolved.no_token_id, "context-no");
+        assert_eq!(resolved.token_resolution_source, "flow_context");
     }
 }

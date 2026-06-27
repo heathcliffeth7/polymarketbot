@@ -157,6 +157,7 @@ fn fast_sl_request(order: &TradeBuilderOrder, price: f64) -> PlaceOrderRequest {
         size: 5.0,
         intent: "exit".to_string(),
         order_type: "FAK".to_string(),
+        post_only: false,
         client_order_id: "base-client-order".to_string(),
         leg_side: None,
         fee_rate_bps: 0,

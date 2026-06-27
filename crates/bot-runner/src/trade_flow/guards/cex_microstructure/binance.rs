@@ -10,6 +10,8 @@ pub(crate) fn binance_asset_symbol(asset: &str) -> Option<&'static str> {
         "eth" => Some("ethusdt"),
         "sol" => Some("solusdt"),
         "xrp" => Some("xrpusdt"),
+        "doge" | "dogecoin" => Some("dogeusdt"),
+        "bnb" => Some("bnbusdt"),
         _ => None,
     }
 }
@@ -183,6 +185,14 @@ pub(crate) fn binance_subscription_hint(asset: &str) -> Option<Value> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn binance_symbol_supports_bnb_and_doge_but_not_hype() {
+        assert_eq!(binance_asset_symbol("doge"), Some("dogeusdt"));
+        assert_eq!(binance_asset_symbol("dogecoin"), Some("dogeusdt"));
+        assert_eq!(binance_asset_symbol("bnb"), Some("bnbusdt"));
+        assert_eq!(binance_asset_symbol("hype"), None);
+    }
 
     #[test]
     fn binance_aggtrade_m_true_counts_as_taker_sell() {

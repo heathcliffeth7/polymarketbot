@@ -1,7 +1,7 @@
 import type { TradeFlowGraph } from '@/lib/types';
 import { isRecord } from './flow-engine-utils';
 
-const DUAL_DCA_ALLOWED_ASSETS = new Set(['btc', 'eth', 'sol', 'xrp']);
+const DUAL_DCA_ALLOWED_ASSETS = new Set(['btc', 'eth', 'sol', 'xrp', 'doge', 'bnb', 'hype']);
 const DUAL_DCA_ALLOWED_TIMEFRAMES = new Set(['5m', '15m']);
 
 export function toPositiveNumber(value: unknown): number | null {
@@ -17,12 +17,12 @@ export function toPositiveNumber(value: unknown): number | null {
 
 export function normalizeDualDcaAsset(
   config: Record<string, unknown>
-): 'btc' | 'eth' | 'sol' | 'xrp' | null {
+): 'btc' | 'eth' | 'sol' | 'xrp' | 'doge' | 'bnb' | 'hype' | null {
   const raw = String(config.asset ?? config.coin ?? '')
     .trim()
     .toLowerCase();
   if (!DUAL_DCA_ALLOWED_ASSETS.has(raw)) return null;
-  return raw as 'btc' | 'eth' | 'sol' | 'xrp';
+  return raw as 'btc' | 'eth' | 'sol' | 'xrp' | 'doge' | 'bnb' | 'hype';
 }
 
 export function normalizeDualDcaTimeframe(
@@ -108,7 +108,7 @@ export function applyDualDcaSourceTradeId(
 }
 
 export interface EnsureDualDcaSourceTradeInput {
-  asset: 'btc' | 'eth' | 'sol' | 'xrp';
+  asset: 'btc' | 'eth' | 'sol' | 'xrp' | 'doge' | 'bnb' | 'hype';
   timeframe: '5m' | '15m';
   definitionId: number;
   nodeKey: string;

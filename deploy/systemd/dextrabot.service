@@ -15,6 +15,10 @@ ExecStart=__DEXTRABOT_ROOT__/target/release/bot-runner
 Restart=always
 RestartSec=3
 TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=20000
 
 # Hardening
 NoNewPrivileges=true

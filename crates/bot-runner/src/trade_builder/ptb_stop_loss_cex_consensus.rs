@@ -32,9 +32,12 @@ fn evaluate_cex_consensus_ptb_stop_loss(
         crate::trade_flow::guards::price_to_beat::CexDirectionGuardConfig::consensus_stop_loss_defaults(
         );
     let window_start_ms = window_start.timestamp_millis();
-    let bybit = load_cex_consensus_delta(
+    let anchor_venue =
+        crate::trade_flow::guards::cex_microstructure::active_anchor_venue_for_asset(scope.asset);
+    let anchor_name = anchor_venue.as_str();
+    let anchor = load_cex_consensus_delta(
         scope.asset,
-        crate::trade_flow::guards::cex_microstructure::CexVenue::Bybit,
+        anchor_venue,
         window_start_ms,
         config.min_move_usd,
         config.max_book_stale_ms,
@@ -54,10 +57,9 @@ fn evaluate_cex_consensus_ptb_stop_loss(
         config.max_book_stale_ms,
     );
 
-    let bybit_snapshot = bybit
-        .snapshot
-        .as_ref()
-        .map(|snapshot| cex_consensus_decorated_delta(snapshot, direction, threshold_gap_usd, "lead"));
+    let anchor_snapshot = anchor.snapshot.as_ref().map(|snapshot| {
+        cex_consensus_decorated_delta(snapshot, direction, threshold_gap_usd, "lead")
+    });
     let binance_snapshot = binance.snapshot.as_ref().map(|snapshot| {
         cex_consensus_decorated_delta(snapshot, direction, threshold_gap_usd, "confirm_candidate")
     });
@@ -65,7 +67,7 @@ fn evaluate_cex_consensus_ptb_stop_loss(
         cex_consensus_decorated_delta(snapshot, direction, threshold_gap_usd, "confirm_candidate")
     });
 
-    let bybit_hit = bybit_snapshot
+    let anchor_hit = anchor_snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.threshold_hit)
         .unwrap_or(false);
@@ -74,6 +76,7 @@ fn evaluate_cex_consensus_ptb_stop_loss(
         ("coinbase", coinbase_snapshot.as_ref()),
     ]
     .into_iter()
+    .filter(|(venue, _)| *venue != anchor_name)
     .filter_map(|(venue, snapshot)| {
         snapshot
             .and_then(|snapshot| snapshot.threshold_hit)
@@ -81,11 +84,11 @@ fn evaluate_cex_consensus_ptb_stop_loss(
             .then_some(venue)
     })
     .collect::<Vec<_>>();
-    let should_trigger = bybit_hit && !confirming_venues.is_empty();
-    let current_price = bybit_snapshot
+    let should_trigger = anchor_hit && !confirming_venues.is_empty();
+    let current_price = anchor_snapshot
         .as_ref()
         .map(|snapshot| ptb_reference_price + snapshot.delta_usd);
-    let directional_gap = bybit_snapshot
+    let directional_gap = anchor_snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.directional_gap);
     let metadata = cex_consensus_metadata(
@@ -93,15 +96,17 @@ fn evaluate_cex_consensus_ptb_stop_loss(
         scope.asset,
         scope.timeframe,
         window_start_ms,
-        bybit_snapshot.as_ref(),
+        anchor_name,
+        anchor_snapshot.as_ref(),
         binance_snapshot.as_ref(),
         coinbase_snapshot.as_ref(),
-        &bybit,
+        &anchor,
         &binance,
         &coinbase,
         &confirming_venues,
     );
-    let (error_code, error_detail) = cex_consensus_error(&bybit, bybit_hit, &confirming_venues);
+    let (error_code, error_detail) =
+        cex_consensus_error(anchor_name, &anchor, anchor_hit, &confirming_venues);
 
     TradeBuilderPtbStopLossSourceEvaluation {
         config_source: source.as_config_str(),
@@ -113,6 +118,128 @@ fn evaluate_cex_consensus_ptb_stop_loss(
         error_code,
         error_detail,
         metadata: Some(metadata),
+    }
+}
+
+fn trade_builder_ptb_stop_loss_final_should_trigger(
+    current_price_source: PriceToBeatCurrentPriceSource,
+    selected_source: &TradeBuilderPtbStopLossSourceEvaluation,
+    source_evaluations: &[TradeBuilderPtbStopLossSourceEvaluation],
+    threshold_gap_usd: f64,
+) -> bool {
+    if current_price_source == PriceToBeatCurrentPriceSource::CexMedianFast {
+        return source_evaluations.iter().any(|evaluation| {
+            evaluation.config_source == "cex_median_fast"
+                && evaluation.current_price.is_some()
+                && evaluation.should_trigger
+        }) || confirmed_cex_backstop_should_trigger(source_evaluations, threshold_gap_usd);
+    }
+    if current_price_source != PriceToBeatCurrentPriceSource::ChainlinkCexConsensusConfirmed {
+        return selected_source.should_trigger;
+    }
+    confirmed_cex_backstop_should_trigger(source_evaluations, threshold_gap_usd)
+}
+
+fn confirmed_cex_backstop_should_trigger(
+    source_evaluations: &[TradeBuilderPtbStopLossSourceEvaluation],
+    threshold_gap_usd: f64,
+) -> bool {
+    let chainlink = source_evaluations
+        .iter()
+        .find(|evaluation| evaluation.config_source == "chainlink");
+    if chainlink
+        .is_some_and(|evaluation| evaluation.current_price.is_some() && evaluation.should_trigger)
+    {
+        return true;
+    }
+    if chainlink.is_some_and(|evaluation| evaluation.current_price.is_some()) {
+        return false;
+    }
+    source_evaluations
+        .iter()
+        .find(|evaluation| evaluation.config_source == "cex_consensus")
+        .is_some_and(|evaluation| {
+            evaluation.current_price.is_some()
+                && evaluation.should_trigger
+                && evaluation
+                    .directional_gap
+                    .is_some_and(|gap| confirmed_cex_fallback_overshot(gap, threshold_gap_usd))
+        })
+}
+
+fn trade_builder_ptb_stop_loss_select_source(
+    source_evaluations: &[TradeBuilderPtbStopLossSourceEvaluation],
+) -> Option<&TradeBuilderPtbStopLossSourceEvaluation> {
+    source_evaluations
+        .iter()
+        .find(|evaluation| {
+            evaluation.config_source == "cex_median_fast"
+                && evaluation.current_price.is_some()
+                && evaluation.should_trigger
+        })
+        .or_else(|| {
+            source_evaluations.iter().find(|evaluation| {
+                evaluation.config_source == "chainlink"
+                    && evaluation.current_price.is_some()
+                    && evaluation.should_trigger
+            })
+        })
+        .or_else(|| {
+            let has_triggering_source = source_evaluations
+                .iter()
+                .any(|evaluation| evaluation.current_price.is_some() && evaluation.should_trigger);
+            source_evaluations
+                .iter()
+                .filter(|evaluation| evaluation.current_price.is_some())
+                .filter(|evaluation| !has_triggering_source || evaluation.should_trigger)
+                .min_by(|left, right| {
+                    left.directional_gap
+                        .unwrap_or(f64::INFINITY)
+                        .total_cmp(&right.directional_gap.unwrap_or(f64::INFINITY))
+                })
+        })
+}
+
+fn trade_builder_ptb_stop_loss_final_reason_code(
+    current_price_source: PriceToBeatCurrentPriceSource,
+    source_evaluations: &[TradeBuilderPtbStopLossSourceEvaluation],
+    should_trigger: bool,
+) -> &'static str {
+    if should_trigger {
+        return "ptb_gap_threshold_hit";
+    }
+    if matches!(
+        current_price_source,
+        PriceToBeatCurrentPriceSource::ChainlinkCexConsensusConfirmed
+            | PriceToBeatCurrentPriceSource::CexMedianFast
+    ) {
+        let chainlink = source_evaluations
+            .iter()
+            .find(|evaluation| evaluation.config_source == "chainlink");
+        let cex_triggered = source_evaluations.iter().any(|evaluation| {
+            evaluation.config_source == "cex_consensus"
+                && evaluation.current_price.is_some()
+                && evaluation.should_trigger
+        });
+        if cex_triggered
+            && chainlink
+                .and_then(|evaluation| evaluation.directional_gap)
+                .is_some_and(|gap| gap > 0.0)
+        {
+            return "cex_trigger_chainlink_conflict";
+        }
+        if cex_triggered {
+            return "cex_trigger_chainlink_unconfirmed";
+        }
+    }
+    "ptb_gap_threshold_not_met"
+}
+
+fn confirmed_cex_fallback_overshot(directional_gap: f64, threshold_gap_usd: f64) -> bool {
+    if threshold_gap_usd < 0.0 {
+        directional_gap <= threshold_gap_usd * 1.25
+    } else {
+        directional_gap <= threshold_gap_usd
     }
 }
 
@@ -165,27 +292,45 @@ fn cex_consensus_metadata(
     asset: &str,
     timeframe: &str,
     window_start_ms: i64,
-    bybit_snapshot: Option<&crate::trade_flow::guards::cex_microstructure::CexVenueDeltaSnapshot>,
+    anchor_name: &str,
+    anchor_snapshot: Option<&crate::trade_flow::guards::cex_microstructure::CexVenueDeltaSnapshot>,
     binance_snapshot: Option<&crate::trade_flow::guards::cex_microstructure::CexVenueDeltaSnapshot>,
-    coinbase_snapshot: Option<&crate::trade_flow::guards::cex_microstructure::CexVenueDeltaSnapshot>,
-    bybit: &TradeBuilderCexConsensusDelta,
+    coinbase_snapshot: Option<
+        &crate::trade_flow::guards::cex_microstructure::CexVenueDeltaSnapshot,
+    >,
+    anchor: &TradeBuilderCexConsensusDelta,
     binance: &TradeBuilderCexConsensusDelta,
     coinbase: &TradeBuilderCexConsensusDelta,
     confirming_venues: &[&str],
 ) -> Value {
+    let mode = format!("{anchor_name}_plus_one");
+    let mut venue_deltas = serde_json::Map::new();
+    venue_deltas.insert(
+        "anchor".to_string(),
+        cex_consensus_delta_value(anchor_snapshot, anchor),
+    );
+    venue_deltas.insert(
+        anchor_name.to_string(),
+        cex_consensus_delta_value(anchor_snapshot, anchor),
+    );
+    venue_deltas.insert(
+        "binance".to_string(),
+        cex_consensus_delta_value(binance_snapshot, binance),
+    );
+    venue_deltas.insert(
+        "coinbase".to_string(),
+        cex_consensus_delta_value(coinbase_snapshot, coinbase),
+    );
     serde_json::json!({
-        "consensus_mode": "bybit_plus_one",
-        "feed_study_mode": "bybit_plus_one",
+        "consensus_mode": mode,
+        "feed_study_mode": mode,
+        "anchor_venue": anchor_name,
         "market_slug": market_slug,
         "asset": asset,
         "timeframe": timeframe,
         "window_start_ms": window_start_ms,
         "confirming_venues": confirming_venues,
-        "venue_deltas": {
-            "bybit": cex_consensus_delta_value(bybit_snapshot, bybit),
-            "binance": cex_consensus_delta_value(binance_snapshot, binance),
-            "coinbase": cex_consensus_delta_value(coinbase_snapshot, coinbase),
-        }
+        "venue_deltas": venue_deltas,
     })
 }
 
@@ -199,20 +344,25 @@ fn cex_consensus_delta_value(
 }
 
 fn cex_consensus_error(
-    bybit: &TradeBuilderCexConsensusDelta,
-    bybit_hit: bool,
+    anchor_name: &'static str,
+    anchor: &TradeBuilderCexConsensusDelta,
+    anchor_hit: bool,
     confirming_venues: &[&str],
 ) -> (Option<&'static str>, Option<String>) {
-    if bybit.snapshot.is_none() {
-        return (
-            Some("cex_consensus_bybit_unavailable"),
-            bybit.error.clone(),
-        );
+    if anchor.snapshot.is_none() {
+        let code = match anchor_name {
+            "gateio" => "cex_consensus_gateio_unavailable",
+            "okx" => "cex_consensus_okx_unavailable",
+            _ => "cex_consensus_anchor_unavailable",
+        };
+        return (Some(code), anchor.error.clone());
     }
-    if bybit_hit && confirming_venues.is_empty() {
+    if anchor_hit && confirming_venues.is_empty() {
         return (
             Some("cex_consensus_unconfirmed"),
-            Some("bybit threshold hit but binance/coinbase did not confirm".to_string()),
+            Some(format!(
+                "{anchor_name} threshold hit but binance/coinbase did not confirm"
+            )),
         );
     }
     (None, None)
@@ -239,21 +389,31 @@ fn cex_consensus_unavailable_source(
 
 #[cfg(test)]
 mod cex_consensus_tests {
-    use super::*;
     use super::trade_builder_ptb_stop_loss_tests::{
         current_5m_market_slug, lock_ptb_stop_loss_test_state, seed_ptb_stop_loss_current_price,
         test_ptb_stop_loss_order,
     };
+    use super::*;
     use crate::trade_flow::guards::cex_microstructure::{
-        clear_cex_microstructure_test_state, seed_cex_book_test_sample, seed_cex_open_test_sample,
-        CexBookSample, CexVenue,
+        CexBookSample, CexVenue, clear_cex_microstructure_test_state,
+        lock_cex_microstructure_test_state, seed_cex_book_test_sample, seed_cex_open_test_sample,
     };
     use chrono::Utc;
 
     fn sample(venue: CexVenue, timestamp_ms: i64, mid: f64, source: &'static str) -> CexBookSample {
+        sample_for("btc", venue, timestamp_ms, mid, source)
+    }
+
+    fn sample_for(
+        asset: &str,
+        venue: CexVenue,
+        timestamp_ms: i64,
+        mid: f64,
+        source: &'static str,
+    ) -> CexBookSample {
         CexBookSample {
             venue,
-            asset: "btc".to_string(),
+            asset: asset.to_string(),
             timestamp_ms,
             bid: mid - 0.5,
             ask: mid + 0.5,
@@ -265,6 +425,12 @@ mod cex_consensus_tests {
 
     fn consensus_order(market_slug: &str) -> TradeBuilderOrder {
         consensus_order_for(market_slug, "Up", -5.0, 100.0)
+    }
+
+    fn confirmed_order(market_slug: &str) -> TradeBuilderOrder {
+        let mut order = consensus_order(market_slug);
+        order.ptb_current_price_source = "chainlink_cex_consensus_confirmed".to_string();
+        order
     }
 
     fn consensus_order_for(
@@ -293,14 +459,17 @@ mod cex_consensus_tests {
         seed_ptb_stop_loss_current_price("btc", 120.0);
         let (market_slug, start_ms) = current_5m_market_slug("btc");
         let now_ms = Utc::now().timestamp_millis();
-        seed_cex_open_test_sample(sample(CexVenue::Bybit, start_ms, 100.0, "rest_open"));
-        seed_cex_book_test_sample(sample(CexVenue::Bybit, now_ms, 90.0, "ticker"));
+        seed_cex_open_test_sample(sample(CexVenue::Okx, start_ms, 100.0, "rest_open"));
+        seed_cex_book_test_sample(sample(CexVenue::Okx, now_ms, 90.0, "ticker"));
         seed_cex_book_test_sample(sample(CexVenue::Binance, now_ms, 90.0, "bookTicker"));
 
-        let evaluation = trade_builder_evaluate_ptb_stop_loss(&consensus_order(&market_slug))
-            .expect("ptb eval");
+        let evaluation =
+            trade_builder_evaluate_ptb_stop_loss(&consensus_order(&market_slug)).expect("ptb eval");
 
-        assert_eq!(evaluation.current_price_source, "cex_consensus_bybit_plus_one");
+        assert_eq!(
+            evaluation.current_price_source,
+            "cex_consensus_bybit_plus_one"
+        );
         assert_eq!(
             evaluation.source_evaluations[1].error_code,
             Some("cex_consensus_unconfirmed")
@@ -310,10 +479,12 @@ mod cex_consensus_tests {
             .metadata
             .as_ref()
             .expect("cex metadata");
-        assert!(metadata["venue_deltas"]["binance"]["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("window open book missing"));
+        assert!(
+            metadata["venue_deltas"]["binance"]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("window open book missing")
+        );
     }
 
     #[tokio::test]
@@ -323,26 +494,146 @@ mod cex_consensus_tests {
         seed_ptb_stop_loss_current_price("btc", 120.0);
         let (market_slug, start_ms) = current_5m_market_slug("btc");
         let now_ms = Utc::now().timestamp_millis();
-        seed_cex_open_test_sample(sample(CexVenue::Bybit, start_ms, 100.0, "rest_open"));
-        seed_cex_book_test_sample(sample(CexVenue::Bybit, now_ms, 90.0, "ticker"));
+        seed_cex_open_test_sample(sample(CexVenue::Okx, start_ms, 100.0, "rest_open"));
+        seed_cex_book_test_sample(sample(CexVenue::Okx, now_ms, 90.0, "ticker"));
         seed_cex_open_test_sample(sample(CexVenue::Binance, start_ms, 200.0, "rest_open"));
         seed_cex_book_test_sample(sample(CexVenue::Binance, now_ms, 190.0, "bookTicker"));
 
-        let evaluation = trade_builder_evaluate_ptb_stop_loss(&consensus_order(&market_slug))
-            .expect("ptb eval");
+        let evaluation =
+            trade_builder_evaluate_ptb_stop_loss(&consensus_order(&market_slug)).expect("ptb eval");
 
-        assert_eq!(evaluation.current_price_source, "cex_consensus_bybit_plus_one");
+        assert_eq!(
+            evaluation.current_price_source,
+            "cex_consensus_bybit_plus_one"
+        );
         assert!(evaluation.should_trigger);
         let metadata = evaluation.source_evaluations[1]
             .metadata
             .as_ref()
             .expect("cex metadata");
-        assert_eq!(metadata["confirming_venues"], serde_json::json!(["binance"]));
+        assert_eq!(
+            metadata["confirming_venues"],
+            serde_json::json!(["binance"])
+        );
         assert_eq!(
             metadata["venue_deltas"]["binance"]["open_source"],
             serde_json::json!("rest_kline_open")
         );
-        assert_eq!(metadata["venue_deltas"]["binance"]["open_lag_ms"], serde_json::json!(0));
+        assert_eq!(
+            metadata["venue_deltas"]["binance"]["open_lag_ms"],
+            serde_json::json!(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn sol_ptb_stop_loss_cex_consensus_uses_gateio_anchor() {
+        let _cex_guard = lock_cex_microstructure_test_state();
+        let _guard = lock_ptb_stop_loss_test_state();
+        clear_cex_microstructure_test_state();
+        seed_ptb_stop_loss_current_price("sol", 120.0);
+        let (market_slug, start_ms) = current_5m_market_slug("sol");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_cex_open_test_sample(sample_for("sol", CexVenue::Gateio, start_ms, 100.0, "rest_open"));
+        seed_cex_book_test_sample(sample_for("sol", CexVenue::Gateio, now_ms, 90.0, "book_ticker"));
+        seed_cex_open_test_sample(sample_for("sol", CexVenue::Binance, start_ms, 200.0, "rest_open"));
+        seed_cex_book_test_sample(sample_for("sol", CexVenue::Binance, now_ms, 190.0, "bookTicker"));
+
+        let evaluation =
+            trade_builder_evaluate_ptb_stop_loss(&consensus_order(&market_slug)).expect("ptb eval");
+
+        assert!(evaluation.should_trigger);
+        let metadata = evaluation.source_evaluations[1]
+            .metadata
+            .as_ref()
+            .expect("cex metadata");
+        assert_eq!(metadata["anchor_venue"], serde_json::json!("gateio"));
+        assert_eq!(
+            metadata["venue_deltas"]["gateio"]["threshold_hit"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            metadata["confirming_venues"],
+            serde_json::json!(["binance"])
+        );
+    }
+
+    #[tokio::test]
+    async fn ptb_stop_loss_confirmed_blocks_cex_trigger_when_chainlink_positive() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        clear_cex_microstructure_test_state();
+        seed_ptb_stop_loss_current_price("btc", 120.0);
+        let (market_slug, start_ms) = current_5m_market_slug("btc");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_cex_open_test_sample(sample(CexVenue::Okx, start_ms, 100.0, "rest_open"));
+        seed_cex_book_test_sample(sample(CexVenue::Okx, now_ms, 90.0, "ticker"));
+        seed_cex_open_test_sample(sample(CexVenue::Binance, start_ms, 200.0, "rest_open"));
+        seed_cex_book_test_sample(sample(CexVenue::Binance, now_ms, 190.0, "bookTicker"));
+
+        let evaluation =
+            trade_builder_evaluate_ptb_stop_loss(&confirmed_order(&market_slug)).expect("ptb eval");
+
+        assert!(!evaluation.should_trigger);
+        assert_eq!(evaluation.reason_code, "cex_trigger_chainlink_conflict");
+        assert_eq!(evaluation.current_chainlink_price, Some(120.0));
+        assert!(evaluation.source_evaluations[1].should_trigger);
+    }
+
+    #[tokio::test]
+    async fn ptb_stop_loss_confirmed_allows_chainlink_trigger() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        clear_cex_microstructure_test_state();
+        seed_ptb_stop_loss_current_price("btc", 90.0);
+        let (market_slug, start_ms) = current_5m_market_slug("btc");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_cex_open_test_sample(sample(CexVenue::Okx, start_ms, 100.0, "rest_open"));
+        seed_cex_book_test_sample(sample(CexVenue::Okx, now_ms, 101.0, "ticker"));
+
+        let evaluation =
+            trade_builder_evaluate_ptb_stop_loss(&confirmed_order(&market_slug)).expect("ptb eval");
+
+        assert!(evaluation.should_trigger);
+        assert_eq!(evaluation.reason_code, "ptb_gap_threshold_hit");
+        assert_eq!(evaluation.current_price_source, "chainlink_live_data_ws");
+    }
+
+    #[tokio::test]
+    async fn ptb_stop_loss_confirmed_allows_cex_fallback_when_chainlink_unavailable_and_overshot() {
+        let _guard = lock_ptb_stop_loss_test_state();
+        clear_cex_microstructure_test_state();
+        let (market_slug, start_ms) = current_5m_market_slug("xrp");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_cex_open_test_sample(sample_for(
+            "xrp",
+            CexVenue::Okx,
+            start_ms,
+            100.0,
+            "rest_open",
+        ));
+        seed_cex_book_test_sample(sample_for("xrp", CexVenue::Okx, now_ms, 90.0, "ticker"));
+        seed_cex_open_test_sample(sample_for(
+            "xrp",
+            CexVenue::Binance,
+            start_ms,
+            200.0,
+            "rest_open",
+        ));
+        seed_cex_book_test_sample(sample_for(
+            "xrp",
+            CexVenue::Binance,
+            now_ms,
+            190.0,
+            "bookTicker",
+        ));
+
+        let evaluation =
+            trade_builder_evaluate_ptb_stop_loss(&confirmed_order(&market_slug)).expect("ptb eval");
+
+        assert!(evaluation.should_trigger);
+        assert_eq!(evaluation.current_chainlink_price, None);
+        assert_eq!(
+            evaluation.current_price_source,
+            "cex_consensus_bybit_plus_one"
+        );
     }
 
     #[tokio::test]
@@ -352,12 +643,12 @@ mod cex_consensus_tests {
         seed_ptb_stop_loss_current_price("btc", 90.0);
         let (market_slug, start_ms) = current_5m_market_slug("btc");
         let now_ms = Utc::now().timestamp_millis();
-        seed_cex_open_test_sample(sample(CexVenue::Bybit, start_ms, 100.0, "rest_open"));
-        seed_cex_book_test_sample(sample(CexVenue::Bybit, now_ms, 90.0, "ticker"));
+        seed_cex_open_test_sample(sample(CexVenue::Okx, start_ms, 100.0, "rest_open"));
+        seed_cex_book_test_sample(sample(CexVenue::Okx, now_ms, 90.0, "ticker"));
         seed_cex_book_test_sample(sample(CexVenue::Binance, now_ms, 90.0, "bookTicker"));
 
-        let evaluation = trade_builder_evaluate_ptb_stop_loss(&consensus_order(&market_slug))
-            .expect("ptb eval");
+        let evaluation =
+            trade_builder_evaluate_ptb_stop_loss(&consensus_order(&market_slug)).expect("ptb eval");
 
         assert_eq!(evaluation.current_price_source, "chainlink_live_data_ws");
         assert!(evaluation.should_trigger);
@@ -374,40 +665,46 @@ mod cex_consensus_tests {
         seed_ptb_stop_loss_current_price("btc", 73_790.0);
         let (market_slug, start_ms) = current_5m_market_slug("btc");
         let now_ms = Utc::now().timestamp_millis();
-        seed_cex_book_test_sample(sample(CexVenue::Bybit, start_ms - 22, 73_891.15, "ticker"));
-        seed_cex_open_test_sample(sample(CexVenue::Bybit, start_ms, 73_895.20, "rest_open"));
-        seed_cex_book_test_sample(sample(CexVenue::Bybit, now_ms, 73_892.35, "ticker"));
+        seed_cex_book_test_sample(sample(CexVenue::Okx, start_ms - 22, 73_891.15, "ticker"));
+        seed_cex_open_test_sample(sample(CexVenue::Okx, start_ms, 73_895.20, "rest_open"));
+        seed_cex_book_test_sample(sample(CexVenue::Okx, now_ms, 73_892.35, "ticker"));
         seed_cex_open_test_sample(sample(CexVenue::Binance, start_ms, 73_897.98, "rest_open"));
         seed_cex_book_test_sample(sample(CexVenue::Binance, now_ms, 73_898.005, "bookTicker"));
         let order = consensus_order_for(&market_slug, "Down", 1.0, 73_799.02121662606);
 
         let evaluation = trade_builder_evaluate_ptb_stop_loss(&order).expect("ptb eval");
 
-        assert_eq!(evaluation.current_price_source, "cex_consensus_bybit_plus_one");
+        assert_eq!(
+            evaluation.current_price_source,
+            "cex_consensus_bybit_plus_one"
+        );
         assert!(!evaluation.should_trigger);
         let cex_evaluation = &evaluation.source_evaluations[1];
         assert!(!cex_evaluation.should_trigger);
         assert_eq!(cex_evaluation.error_code, None);
         let metadata = cex_evaluation.metadata.as_ref().expect("cex metadata");
-        assert_eq!(metadata["confirming_venues"], serde_json::json!(["binance"]));
         assert_eq!(
-            metadata["venue_deltas"]["bybit"]["open_source"],
+            metadata["confirming_venues"],
+            serde_json::json!(["binance"])
+        );
+        assert_eq!(
+            metadata["venue_deltas"]["okx"]["open_source"],
             serde_json::json!("rest_kline_open")
         );
         assert_eq!(
-            metadata["venue_deltas"]["bybit"]["threshold_hit"],
+            metadata["venue_deltas"]["okx"]["threshold_hit"],
             serde_json::json!(false)
         );
         assert_f64_close(
-            metadata["venue_deltas"]["bybit"]["open_mid"]
+            metadata["venue_deltas"]["okx"]["open_mid"]
                 .as_f64()
-                .expect("bybit open mid"),
+                .expect("okx open mid"),
             73_895.20,
         );
         assert_f64_close(
-            metadata["venue_deltas"]["bybit"]["delta_usd"]
+            metadata["venue_deltas"]["okx"]["delta_usd"]
                 .as_f64()
-                .expect("bybit delta"),
+                .expect("okx delta"),
             -2.85,
         );
     }

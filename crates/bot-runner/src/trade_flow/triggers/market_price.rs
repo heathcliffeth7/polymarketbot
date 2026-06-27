@@ -40,8 +40,12 @@ async fn execute_trigger_market_price(
         .to_ascii_lowercase();
     let pair_lock_only_mode = binding_mode == "pair_lock_only";
     let dca_live_only_mode = binding_mode == "dca_live_only";
-    let positive_quantity_flip_grid_only_mode = binding_mode == POSITIVE_QUANTITY_FLIP_GRID_BINDING_MODE;
+    let positive_quantity_flip_grid_only_mode =
+        binding_mode == POSITIVE_QUANTITY_FLIP_GRID_BINDING_MODE;
     let revenge_flip_only_mode = binding_mode == REVENGE_FLIP_BINDING_MODE;
+    let confidence_ladder_only_mode = binding_mode == CONFIDENCE_LADDER_BINDING_MODE;
+    let avg_rebound_pairlock_rescue_only_mode =
+        binding_mode == AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE;
     // --- Early WS-sourced detection for auto_scope guard ---
     let ws_sourced = step
         .input_json
@@ -339,11 +343,8 @@ async fn execute_trigger_market_price(
     } else {
         None
     };
-    let selected_entry_timing_profile = resolve_trigger_market_entry_timing_profile(
-        node,
-        &market_slug,
-        entry_timing_evaluated_at,
-    );
+    let selected_entry_timing_profile =
+        resolve_trigger_market_entry_timing_profile(node, &market_slug, entry_timing_evaluated_at);
     if entry_timing_profiles_enabled && selected_entry_timing_profile.is_none() {
         let selected_entry_remaining_sec = entry_timing_remaining_ms.map(|remaining_ms| {
             if remaining_ms <= 0 {
@@ -386,8 +387,16 @@ async fn execute_trigger_market_price(
         .get("outcomeConditions")
         .and_then(|v| v.as_array())
         .cloned();
-    let binding_only_path = (pair_lock_only_mode || dca_live_only_mode || positive_quantity_flip_grid_only_mode || revenge_flip_only_mode)
-        && outcome_conditions.as_ref().map(|rows| rows.is_empty()).unwrap_or(true);
+    let binding_only_path = (pair_lock_only_mode
+        || dca_live_only_mode
+        || positive_quantity_flip_grid_only_mode
+        || revenge_flip_only_mode
+        || confidence_ladder_only_mode
+        || avg_rebound_pairlock_rescue_only_mode)
+        && outcome_conditions
+            .as_ref()
+            .map(|rows| rows.is_empty())
+            .unwrap_or(true);
     let mut triggered_token_id = String::new();
     let mut triggered_outcome_label = String::new();
     let mut triggered_condition = String::new();
@@ -438,7 +447,12 @@ async fn execute_trigger_market_price(
         "dca_live_only"
     } else if positive_quantity_flip_grid_only_mode && binding_only_path {
         POSITIVE_QUANTITY_FLIP_GRID_BINDING_MODE
-    } else if revenge_flip_only_mode && binding_only_path { REVENGE_FLIP_BINDING_MODE
+    } else if revenge_flip_only_mode && binding_only_path {
+        REVENGE_FLIP_BINDING_MODE
+    } else if confidence_ladder_only_mode && binding_only_path {
+        CONFIDENCE_LADDER_BINDING_MODE
+    } else if avg_rebound_pairlock_rescue_only_mode && binding_only_path {
+        AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE
     } else if outcome_conditions.is_some() {
         "multi_outcome"
     } else {
@@ -468,8 +482,7 @@ async fn execute_trigger_market_price(
             .or_else(|| flow_context_string(context, "yesTokenId"));
         pair_lock_no_token_id = node_auto_scope_no_token_id(context, &node.key)
             .or_else(|| flow_context_string(context, "noTokenId"));
-        if !auto_scope_mode || pair_lock_yes_token_id.is_none() || pair_lock_no_token_id.is_none()
-        {
+        if !auto_scope_mode || pair_lock_yes_token_id.is_none() || pair_lock_no_token_id.is_none() {
             let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
             if let Ok(Some(market)) = gamma.get_market_spec_by_slug(&market_slug).await {
                 if pair_lock_yes_token_id.is_none() {
@@ -483,7 +496,19 @@ async fn execute_trigger_market_price(
         pass = ws_hard_ignore_reason.is_none();
         current_price = ws_price_from_step;
         triggered_max_price = selected_entry_max_price;
-        trigger_evaluation_mode = if dca_live_only_mode { "dca_live_only" } else if positive_quantity_flip_grid_only_mode { POSITIVE_QUANTITY_FLIP_GRID_BINDING_MODE } else if revenge_flip_only_mode { REVENGE_FLIP_BINDING_MODE } else { "pair_lock_only" };
+        trigger_evaluation_mode = if dca_live_only_mode {
+            "dca_live_only"
+        } else if positive_quantity_flip_grid_only_mode {
+            POSITIVE_QUANTITY_FLIP_GRID_BINDING_MODE
+        } else if revenge_flip_only_mode {
+            REVENGE_FLIP_BINDING_MODE
+        } else if confidence_ladder_only_mode {
+            CONFIDENCE_LADDER_BINDING_MODE
+        } else if avg_rebound_pairlock_rescue_only_mode {
+            AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE
+        } else {
+            "pair_lock_only"
+        };
     } else if ws_execution_path == "cross_confirm_short_circuit" {
         let conf_token_id = ws_token_id_from_step.clone().unwrap_or_default();
         let conf_price = ws_price_from_step;
@@ -1262,11 +1287,19 @@ async fn execute_trigger_market_price(
         }
         if let Some(yes_token_id) = pair_lock_yes_token_id.as_deref() {
             set_flow_context(context, "yesTokenId", json!(yes_token_id));
-            set_flow_var(context, &format!("{var_key}_yes_token_id"), json!(yes_token_id));
+            set_flow_var(
+                context,
+                &format!("{var_key}_yes_token_id"),
+                json!(yes_token_id),
+            );
         }
         if let Some(no_token_id) = pair_lock_no_token_id.as_deref() {
             set_flow_context(context, "noTokenId", json!(no_token_id));
-            set_flow_var(context, &format!("{var_key}_no_token_id"), json!(no_token_id));
+            set_flow_var(
+                context,
+                &format!("{var_key}_no_token_id"),
+                json!(no_token_id),
+            );
         }
     }
 
@@ -1325,7 +1358,7 @@ async fn execute_trigger_market_price(
             }
         }
     }
-    if once_mode && pass {
+    if once_mode && pass && !trade_flow_defer_once_until_order_accepted(node) {
         let once_fire_key = trade_flow_market_price_once_idempotency_key(
             run.id,
             &node.key,
@@ -1459,36 +1492,4 @@ async fn execute_trigger_market_price(
         cycle_window_end_at,
         interval_ms,
     ))
-}
-
-fn unsupported_price_to_beat_trigger_gate(
-) -> crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
-    crate::trade_flow::guards::price_to_beat::PriceToBeatTriggerGateResult {
-        passed: false,
-        reason: "unsupported_outcome_label",
-        directional_gap: None,
-        price_to_beat: None,
-        price_to_beat_status: None,
-        current_price: None,
-        threshold_mode: "manual".to_string(),
-        min_gap: 0.0,
-        max_gap: None,
-        auto_threshold_usd: None,
-        lookback_windows_used: None,
-        current_windows_used: None,
-        avg_up_excursion_usd: None,
-        avg_down_excursion_usd: None,
-        lookback_market_slugs: None,
-        lookback_window_snapshots: None,
-        baseline_pct: None,
-        current_pct: None,
-        vol_factor: None,
-        threshold_pct: None,
-        base_pct: None,
-        floor_usd: None,
-        ceiling_usd: None,
-        threshold_was_clamped: None,
-        signal_formula: None,
-        iv_mismatch_edge: None,
-    }
 }

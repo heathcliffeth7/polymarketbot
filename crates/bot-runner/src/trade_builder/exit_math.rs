@@ -505,6 +505,18 @@ fn trade_builder_submit_desired_price(order: &TradeBuilderOrder, current_price: 
     trade_builder_cap_exit_sell_price(order, uncapped_desired_price)
 }
 
+fn trade_builder_clamp_buy_limit_price(order: &TradeBuilderOrder, desired_price: f64) -> f64 {
+    if order.side == "buy" {
+        order
+            .max_price
+            .filter(|max_price| max_price.is_finite() && *max_price > 0.0 && *max_price <= 1.0)
+            .map(|max_price| desired_price.min(max_price))
+            .unwrap_or(desired_price)
+    } else {
+        desired_price
+    }
+}
+
 fn trade_builder_price_exceeds_max_price(order: &TradeBuilderOrder, desired_price: f64) -> bool {
     order
         .max_price

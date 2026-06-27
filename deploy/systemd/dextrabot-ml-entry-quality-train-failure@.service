@@ -1,0 +1,20 @@
+[Unit]
+Description=Notify Dextrabot ML Entry Quality training failure for %i
+
+[Service]
+Type=oneshot
+User=dextrabot
+Group=dextrabot
+WorkingDirectory=/home/heathcliff/polymarketbot
+EnvironmentFile=/etc/dextrabot/dextrabot.env
+ExecStart=/home/heathcliff/polymarketbot/.venv-ml-entry-quality/bin/python scripts/ml_entry_quality/notify_training_failure.py --unit %i --telegram-user-id 1
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

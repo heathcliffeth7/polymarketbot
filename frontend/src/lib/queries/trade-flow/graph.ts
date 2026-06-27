@@ -1,6 +1,8 @@
 import type { TradeFlowEdge, TradeFlowGraph, TradeFlowNode } from '@/lib/types';
 import { DEFAULT_GRAPH, isRecord, toTrimmedString } from './shared';
 import { normalizeTriggerMarketPriceCycleWindowConfig } from '@/lib/trade-flow-config-mappers/cycle-window';
+import { CONFIDENCE_LADDER_BINDING_MODE } from '@/lib/trade-flow-config-mappers/confidence-ladder';
+import { AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE } from '@/lib/trade-flow-config-mappers/avg-rebound-pairlock-rescue';
 
 export interface FixedTriggerMarketResolution {
   kind: 'none' | 'single' | 'multiple';
@@ -265,7 +267,9 @@ function normalizeNodeConfig(
       bindingModeRaw === 'pair_lock_only' ||
       bindingModeRaw === 'dca_live_only' ||
       bindingModeRaw === 'positive_quantity_flip_grid_only' ||
-      bindingModeRaw === 'revenge_flip_only'
+      bindingModeRaw === 'revenge_flip_only' ||
+      bindingModeRaw === CONFIDENCE_LADDER_BINDING_MODE ||
+      bindingModeRaw === AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE
         ? bindingModeRaw
         : 'standard',
   };

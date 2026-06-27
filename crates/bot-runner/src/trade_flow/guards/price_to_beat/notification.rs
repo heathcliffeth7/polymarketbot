@@ -1,6 +1,9 @@
 use super::current_price::format_current_price_label;
 use super::*;
 
+#[path = "notification_iv_depth_diagnostics.rs"]
+mod notification_iv_depth_diagnostics;
+
 fn format_optional_direction(value: Option<&str>) -> String {
     match value {
         Some("up") => "Up".to_string(),
@@ -15,25 +18,21 @@ fn format_optional_guard_number(value: Option<f64>) -> String {
         .map(|value| format!("{value:.8}"))
         .unwrap_or_else(|| "N/A".to_string())
 }
-
 fn format_optional_guard_cent(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.2}c"))
         .unwrap_or_else(|| "N/A".to_string())
 }
-
 fn format_optional_guard_bool(value: Option<bool>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "N/A".to_string())
 }
-
 fn format_optional_guard_i64(value: Option<i64>) -> String {
     value
         .map(|value| value.to_string())
         .unwrap_or_else(|| "N/A".to_string())
 }
-
 fn format_optional_guard_text(value: Option<&str>) -> String {
     value.unwrap_or("N/A").to_string()
 }
@@ -289,12 +288,23 @@ fn build_iv_mismatch_execution_summary(evaluation: &PriceToBeatGuardEvaluation) 
             format_optional_guard_number(number("depth_levels_used"))
         ));
         lines.push(format!("Result: {}", text("depth_guard_result")));
+        notification_iv_depth_diagnostics::append_depth_diagnostics(iv, &mut lines);
     }
     if iv.contains_key("execution_vwap_guard_enabled") {
         let execution_vs_model = number("execution_vwap_cent")
             .zip(number("model_ask_cent"))
             .map(|(vwap, model)| vwap - model);
+        let depth_off = iv
+            .get("depth_guard_result")
+            .and_then(Value::as_str)
+            .map(|result| result == "off")
+            .unwrap_or(false);
+        let vwap_disabled =
+            json_child_bool(Some(iv), "execution_vwap_guard_enabled") == Some(false);
         lines.push("Execution VWAP Guard:".to_string());
+        if depth_off && vwap_disabled {
+            lines.push("Execution Ref: not requested (depth/vwap guard off)".to_string());
+        }
         lines.push(format!(
             "Model Ask: {} | Execution Best Ask: {} | Execution VWAP: {}",
             format_optional_guard_cent(number("model_ask_cent")),
@@ -327,6 +337,8 @@ fn build_iv_mismatch_execution_summary(evaluation: &PriceToBeatGuardEvaluation) 
         ));
     }
     append_iv_cex_open_gap_summary(iv, &mut lines);
+    append_iv_medium_chop_margin_summary(iv, &mut lines);
+    append_iv_high_price_early_summary(iv, &mut lines);
     if let Some(wait_reprice) = iv.get("wait_reprice_guard").and_then(Value::as_object) {
         let wait_number = |key: &str| wait_reprice.get(key).and_then(Value::as_f64);
         let wait_i64 = |key: &str| wait_reprice.get(key).and_then(Value::as_i64);
@@ -456,6 +468,97 @@ fn build_iv_mismatch_execution_summary(evaluation: &PriceToBeatGuardEvaluation) 
     }
 }
 
+fn append_iv_medium_chop_margin_summary(
+    iv: &serde_json::Map<String, Value>,
+    lines: &mut Vec<String>,
+) {
+    let result = iv
+        .get("medium_chop_margin_result")
+        .and_then(Value::as_str)
+        .unwrap_or("N/A");
+    if matches!(result, "N/A" | "off") {
+        return;
+    }
+
+    let number = |key: &str| iv.get(key).and_then(Value::as_f64);
+    let text = |key: &str| iv.get(key).and_then(Value::as_str);
+    lines.push("Medium Chop Margin Guard:".to_string());
+    lines.push(format!(
+        "mode={} decision_ref={} adjusted_margin={} required_margin={}",
+        format_optional_guard_text(text("medium_chop_margin_mode")),
+        format_optional_guard_cent(number("medium_chop_margin_decision_ref_cent")),
+        format_optional_guard_number(number("medium_chop_margin_adjusted_margin")),
+        format_optional_guard_number(number("medium_chop_margin_required_margin"))
+    ));
+    lines.push(format!(
+        "components: base={} high_price={} binance_fail_open={} stale={} result={}",
+        format_optional_guard_number(number("medium_chop_margin_base")),
+        format_optional_guard_number(number("medium_chop_margin_high_price_add")),
+        format_optional_guard_number(number("medium_chop_margin_binance_fail_open_add")),
+        format_optional_guard_number(number("medium_chop_margin_stale_add")),
+        result
+    ));
+}
+
+fn append_iv_high_price_early_summary(
+    iv: &serde_json::Map<String, Value>,
+    lines: &mut Vec<String>,
+) {
+    let result = iv
+        .get("high_price_early_guard_result")
+        .and_then(Value::as_str)
+        .unwrap_or("N/A");
+    if matches!(result, "N/A" | "off" | "not_applicable") {
+        return;
+    }
+
+    let number = |key: &str| iv.get(key).and_then(Value::as_f64);
+    let bool_value = |key: &str| iv.get(key).and_then(Value::as_bool);
+    let text = |key: &str| iv.get(key).and_then(Value::as_str);
+    let reasons = iv
+        .get("high_price_early_guard_reasons")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "N/A".to_string());
+
+    lines.push("High Price Early Reversal Guard:".to_string());
+    lines.push(format!(
+        "enabled={} applies={} result={} reasons={}",
+        format_optional_guard_bool(bool_value("high_price_early_guard_enabled")),
+        format_optional_guard_bool(bool_value("high_price_early_applies")),
+        result,
+        reasons
+    ));
+    lines.push(format!(
+        "decision_ref={} seconds={} q_final={} q_extreme={}",
+        format_optional_guard_cent(number("high_price_early_decision_ref_cent")),
+        format_optional_guard_number(number("high_price_early_seconds_left")),
+        format_optional_guard_q_cent(number("high_price_early_q_final")),
+        format_optional_guard_bool(bool_value("high_price_early_q_extreme"))
+    ));
+    lines.push(format!(
+        "gap: base={} stale_add={} binance_add={} effective={}",
+        format_optional_guard_number(number("high_price_early_base_required_gap_strength")),
+        format_optional_guard_number(number("high_price_early_stale_gap_add_applied")),
+        format_optional_guard_number(number("high_price_early_binance_missing_gap_add_applied")),
+        format_optional_guard_number(number("high_price_early_effective_required_gap_strength"))
+    ));
+    lines.push(format!(
+        "confirm: q_binance_available={} stale_ms={} cex={} clean={}",
+        format_optional_guard_bool(bool_value("high_price_early_q_binance_available")),
+        format_optional_guard_number(number("high_price_early_chainlink_staleness_ms")),
+        format_optional_guard_text(text("high_price_early_cex_consensus")),
+        format_optional_guard_bool(bool_value("high_price_early_cex_clean"))
+    ));
+}
+
 fn append_iv_cex_open_gap_summary(iv: &serde_json::Map<String, Value>, lines: &mut Vec<String>) {
     if !should_show_cex_open_gap(iv) {
         return;
@@ -465,6 +568,7 @@ fn append_iv_cex_open_gap_summary(iv: &serde_json::Map<String, Value>, lines: &m
     let bool_value = |key: &str| iv.get(key).and_then(Value::as_bool);
     let text = |key: &str| iv.get(key).and_then(Value::as_str);
     let reason = text("cex_open_gap_block_reason")
+        .or_else(|| text("cex_magnitude_block_reason"))
         .or_else(|| text("gap_fail_cex_book_block_reason"))
         .or_else(|| text("chainlink_cex_book_mismatch_reason"));
 
@@ -505,6 +609,31 @@ fn append_iv_cex_open_gap_summary(iv: &serde_json::Map<String, Value>, lines: &m
         format_optional_guard_q_cent(number("q_final_before_cex_consensus")),
         format_optional_guard_q_cent(number("q_final_after_cex_consensus"))
     ));
+    if should_show_cex_magnitude(iv) {
+        lines.push("CEX Magnitude:".to_string());
+        lines.push(format!(
+            "ratio={} classification={} conservative={} required={} clean={} reason={}",
+            format_optional_guard_number(number("cex_magnitude_ratio")),
+            format_optional_guard_text(text("cex_magnitude_consensus")),
+            format_optional_guard_number(number("conservative_cex_gap")),
+            format_optional_guard_number(number("cex_magnitude_required_gap_usd")),
+            format_optional_guard_bool(bool_value("cex_magnitude_clean_lane")),
+            format_optional_guard_text(text("cex_magnitude_block_reason"))
+        ));
+        lines.push(format!(
+            "Gap Gate: gap={} required={} fail={}",
+            format_optional_guard_number(number("gap_strength")),
+            format_optional_guard_number(number("required_gap_strength")),
+            format_optional_guard_bool(bool_value("gap_fail"))
+        ));
+        lines.push(format!(
+            "EQ77 override: requested={} effective={} suppressed={} blockedBy={}",
+            format_optional_guard_bool(bool_value("eq77_gap_override_requested")),
+            format_optional_guard_bool(bool_value("eq77_gap_override_effective")),
+            format_optional_guard_bool(bool_value("eq77_gap_override_suppressed_by_cex_magnitude")),
+            format_optional_guard_text(text("override_blocked_by"))
+        ));
+    }
     if bool_value("gap_fail_mixed_cex_guard_enabled").unwrap_or(false)
         || bool_value("late_expensive_mixed_cex_guard_enabled").unwrap_or(false)
         || bool_value("chainlink_cex_lag_no_book_guard_enabled").unwrap_or(false)
@@ -557,13 +686,38 @@ fn should_show_cex_open_gap(iv: &serde_json::Map<String, Value>) -> bool {
         .get("cex_consensus_q_cap_applied")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let magnitude_enabled = iv
+        .get("cex_magnitude_guard_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let magnitude_consensus = iv
+        .get("cex_magnitude_consensus")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
 
     enabled
         || cap_applied
+        || magnitude_enabled
         || !matches!(consensus, "" | "unavailable" | "disabled")
+        || !matches!(magnitude_consensus, "" | "unavailable" | "disabled")
         || json_child_has_non_null(iv, "cex_open_gap_block_reason")
+        || json_child_has_non_null(iv, "cex_magnitude_block_reason")
         || json_child_has_non_null(iv, "gap_fail_cex_book_block_reason")
         || json_child_has_non_null(iv, "chainlink_cex_book_mismatch_reason")
+}
+
+fn should_show_cex_magnitude(iv: &serde_json::Map<String, Value>) -> bool {
+    let enabled = iv
+        .get("cex_magnitude_guard_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let consensus = iv
+        .get("cex_magnitude_consensus")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    enabled
+        || !matches!(consensus, "" | "unavailable" | "disabled")
+        || json_child_has_non_null(iv, "cex_magnitude_block_reason")
 }
 
 fn should_show_pump_shock(iv: &serde_json::Map<String, Value>) -> bool {
@@ -750,13 +904,143 @@ fn append_eq77_risk_cap_summary(debug: &serde_json::Map<String, Value>, lines: &
     }
 }
 
-fn build_iv_entry_quality_debug_summary(evaluation: &PriceToBeatGuardEvaluation) -> String {
+fn build_entry_current_source_debug_summary(evaluation: &PriceToBeatGuardEvaluation) -> String {
     let Some(debug) = evaluation
+        .entry_current_source_debug
+        .as_ref()
+        .and_then(Value::as_object)
+    else {
+        return String::new();
+    };
+    let Some(evaluations) = json_child_array(Some(debug), "entry_current_source_evaluations")
+    else {
+        return String::new();
+    };
+    let mut lines = Vec::new();
+    lines.push("Entry Current Source:".to_string());
+    lines.push(format!(
+        "Selected: {} hybrid={}",
+        format_optional_guard_text(json_child_text(
+            Some(debug),
+            "selected_entry_current_source"
+        )),
+        format_optional_guard_text(json_child_text(Some(debug), "hybrid_mode"))
+    ));
+
+    if let Some(chainlink) = entry_current_candidate(evaluations, "chainlink") {
+        lines.push(format!(
+            "Chainlink Candidate: passed={} reason={} current={}",
+            format_optional_guard_bool(json_child_bool(Some(chainlink), "passed")),
+            format_optional_guard_text(json_child_text(Some(chainlink), "reason_code")),
+            format_optional_guard_number(json_child_number(Some(chainlink), "current_price"))
+        ));
+    }
+
+    if let Some(cex) = entry_current_candidate(evaluations, "cex_consensus_bybit_plus_one") {
+        let confirming = cex
+            .get("confirming_venues")
+            .and_then(Value::as_array)
+            .map(|values| format_string_array(values))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "N/A".to_string());
+        lines.push(format!(
+            "CEX Consensus: passed={} confirmed={} reason={} confirming={}",
+            format_optional_guard_bool(json_child_bool(Some(cex), "passed")),
+            format_optional_guard_bool(json_child_bool(Some(cex), "confirmed")),
+            format_optional_guard_text(json_child_text(Some(cex), "reason_code")),
+            confirming
+        ));
+        let anchor_venue = json_child_text(Some(cex), "anchor_venue").unwrap_or("bybit");
+        if let Some(anchor) = json_child_object(cex, anchor_venue) {
+            append_anchor_threshold_summary(
+                anchor_venue,
+                anchor,
+                evaluation.threshold_usd,
+                &mut lines,
+            );
+        }
+        for venue in [anchor_venue, "binance", "coinbase"] {
+            if let Some(leg) = json_child_object(cex, venue) {
+                lines.push(format_cex_entry_leg(venue, leg));
+            }
+        }
+    }
+
+    format!("\n{}", lines.join("\n"))
+}
+
+fn entry_current_candidate<'a>(
+    evaluations: &'a [Value],
+    source: &str,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    evaluations.iter().find_map(|value| {
+        let object = value.as_object()?;
+        (json_child_text(Some(object), "source") == Some(source)).then_some(object)
+    })
+}
+
+fn format_string_array(values: &[Value]) -> String {
+    values
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn append_anchor_threshold_summary(
+    anchor_venue: &str,
+    anchor: &serde_json::Map<String, Value>,
+    required_threshold_usd: f64,
+    lines: &mut Vec<String>,
+) {
+    let anchor_gap = json_child_number(Some(anchor), "directional_gap");
+    let margin = anchor_gap.map(|gap| gap - required_threshold_usd);
+    let label = match anchor_venue {
+        "okx" => "OKX",
+        "gateio" => "Gate.io",
+        "bybit" => "Bybit",
+        _ => "Anchor",
+    };
+    let gap_label = if anchor_venue == "bybit" {
+        "bybit_gap"
+    } else {
+        "anchor_gap"
+    };
+    lines.push(format!(
+        "{} Threshold: {}={} required_threshold_usd={} margin={} hit={}",
+        label,
+        gap_label,
+        format_optional_guard_number(anchor_gap),
+        format_optional_guard_number(Some(required_threshold_usd)),
+        format_optional_guard_number(margin),
+        format_optional_guard_bool(json_child_bool(Some(anchor), "threshold_hit"))
+    ));
+}
+
+fn format_cex_entry_leg(venue: &str, leg: &serde_json::Map<String, Value>) -> String {
+    format!(
+        "{}: current={} bid={} ask={} gap={} hit={} book_age_ms={} ticker_age_ms={} error={}",
+        venue,
+        format_optional_guard_number(json_child_number(Some(leg), "current_price")),
+        format_optional_guard_number(json_child_number(Some(leg), "bid")),
+        format_optional_guard_number(json_child_number(Some(leg), "ask")),
+        format_optional_guard_number(json_child_number(Some(leg), "directional_gap")),
+        format_optional_guard_bool(json_child_bool(Some(leg), "threshold_hit")),
+        format_optional_guard_i64(json_child_i64(Some(leg), "book_staleness_ms")),
+        format_optional_guard_i64(json_child_i64(Some(leg), "ticker_staleness_ms")),
+        format_optional_guard_text(json_child_text(Some(leg), "error"))
+    )
+}
+
+fn build_iv_entry_quality_debug_summary(evaluation: &PriceToBeatGuardEvaluation) -> String {
+    let Some(iv) = evaluation
         .iv_mismatch_edge
         .as_ref()
         .and_then(Value::as_object)
-        .and_then(|iv| json_child_object(iv, "entry_quality_debug"))
     else {
+        return String::new();
+    };
+    let Some(debug) = json_child_object(iv, "entry_quality_debug") else {
         return String::new();
     };
 
@@ -764,6 +1048,8 @@ fn build_iv_entry_quality_debug_summary(evaluation: &PriceToBeatGuardEvaluation)
     let iv_edge = json_child_object(debug, "iv_edge");
     let cex = json_child_object(debug, "cex_direction_guard");
     let source = json_child_object(debug, "source");
+    let stale_policy = json_child_object(debug, "chainlink_stale_policy");
+    let stale_exception = json_child_object(iv, "chainlink_stale_strong_gap_exception");
     let mut lines = Vec::new();
 
     lines.push("IV Entry Quality:".to_string());
@@ -773,31 +1059,76 @@ fn build_iv_entry_quality_debug_summary(evaluation: &PriceToBeatGuardEvaluation)
     });
     let reason = json_child_text(Some(debug), "reason")
         .or_else(|| json_child_text(Some(debug), "primary_reason"));
+    let insufficient_vol_samples = matches!(
+        reason.or_else(|| json_child_text(Some(iv), "decision_reason")),
+        Some("blocked_insufficient_vol_samples")
+    );
     lines.push(format!(
         "Decision: {}",
         format_optional_guard_text(decision)
     ));
     lines.push(format!("Reason: {}", format_optional_guard_text(reason)));
+    if insufficient_vol_samples {
+        lines.push(format!(
+            "IV Model Readiness: blocked before q/edge; status={} samples={} min={} deltas={}",
+            format_optional_guard_text(json_child_text(Some(iv), "vol_sample_status")),
+            format_optional_guard_number(json_child_number(Some(iv), "sample_count")),
+            format_optional_guard_number(json_child_number(Some(iv), "min_vol_samples")),
+            format_optional_guard_number(json_child_number(Some(iv), "delta_count"))
+        ));
+        lines.push(format!(
+            "Chainlink Samples: symbol={} window={}s error={}",
+            format_optional_guard_text(json_child_text(Some(iv), "chainlink_symbol")),
+            format_optional_guard_number(json_child_number(Some(iv), "sample_window_secs")),
+            format_optional_guard_text(json_child_text(Some(iv), "vol_sample_error"))
+        ));
+        lines.push(format!(
+            "Chainlink Ages: last_symbol_tick_age_ms={} last_symbol_received_age_ms={} ws_error={} proxy={}",
+            format_optional_guard_number(json_child_number(Some(iv), "last_symbol_tick_age_ms")),
+            format_optional_guard_number(json_child_number(
+                Some(iv),
+                "last_symbol_received_age_ms"
+            )),
+            format_optional_guard_text(json_child_text(Some(iv), "last_ws_error_class")),
+            format_optional_guard_text(json_child_text(Some(iv), "live_data_ws_proxy_mode"))
+        ));
+        lines.push("q_final/cost/edge not computed".to_string());
+    }
     lines.push(format!(
         "PTB Gate: passed={} gap={} required={}",
         format_optional_guard_bool(json_child_bool(ptb_gate, "passed")),
         format_optional_guard_number(json_child_number(ptb_gate, "gapUsd")),
         format_optional_guard_number(json_child_number(ptb_gate, "requiredGapUsd"))
     ));
-    lines.push(format!(
-        "IV Edge: passed={} edge={} required={} margin={}",
-        format_optional_guard_bool(json_child_bool(iv_edge, "passed")),
-        format_optional_guard_number(json_child_number(iv_edge, "edge")),
-        format_optional_guard_number(json_child_number(iv_edge, "requiredEdge")),
-        format_optional_guard_number(json_child_number(iv_edge, "adjustedMargin"))
-    ));
-    lines.push(format!(
-        "Gap Strength: value={} required={} margin={} rule={}",
-        format_optional_guard_number(json_child_number(iv_edge, "gapStrength")),
-        format_optional_guard_number(json_child_number(iv_edge, "requiredGapStrength")),
-        format_optional_guard_number(json_child_number(iv_edge, "gapStrengthMargin")),
-        format_optional_guard_text(json_child_text(iv_edge, "matchedRule"))
-    ));
+    if insufficient_vol_samples {
+        lines.push(format!(
+            "IV Edge: not computed required={} margin=N/A",
+            format_optional_guard_number(json_child_number(iv_edge, "requiredEdge"))
+        ));
+        lines.push(format!(
+            "Gap Summary: PTB passed={} gap_strength actual={} required={} margin={} rule={}",
+            format_optional_guard_bool(json_child_bool(ptb_gate, "passed")),
+            format_optional_guard_number(json_child_number(iv_edge, "gapStrength")),
+            format_optional_guard_number(json_child_number(iv_edge, "requiredGapStrength")),
+            format_optional_guard_number(json_child_number(iv_edge, "gapStrengthMargin")),
+            format_optional_guard_text(json_child_text(iv_edge, "matchedRule"))
+        ));
+    } else {
+        lines.push(format!(
+            "IV Edge: passed={} edge={} required={} margin={}",
+            format_optional_guard_bool(json_child_bool(iv_edge, "passed")),
+            format_optional_guard_number(json_child_number(iv_edge, "edge")),
+            format_optional_guard_number(json_child_number(iv_edge, "requiredEdge")),
+            format_optional_guard_number(json_child_number(iv_edge, "adjustedMargin"))
+        ));
+        lines.push(format!(
+            "Gap Strength: value={} required={} margin={} rule={}",
+            format_optional_guard_number(json_child_number(iv_edge, "gapStrength")),
+            format_optional_guard_number(json_child_number(iv_edge, "requiredGapStrength")),
+            format_optional_guard_number(json_child_number(iv_edge, "gapStrengthMargin")),
+            format_optional_guard_text(json_child_text(iv_edge, "matchedRule"))
+        ));
+    }
     lines.push(format!(
         "CEX Direction Guard: enabled={} mode={} status={} blocking={} reason={}",
         format_optional_guard_bool(json_child_bool(cex, "enabled")),
@@ -810,6 +1141,49 @@ fn build_iv_entry_quality_debug_summary(evaluation: &PriceToBeatGuardEvaluation)
         "Source: {} age_ms={}",
         format_optional_guard_text(json_child_text(source, "ptbCurrentPriceSource")),
         format_optional_guard_i64(json_child_i64(source, "chainlinkAgeMs"))
+    ));
+    lines.push(format!(
+        "Chainlink Freshness: oracle_price_age_ms={} ws_receipt_age_ms={} receipt_scope={} stale_limit_ms={} entry_quality_max_age_ms={} override_source={} result={}",
+        format_optional_guard_i64(json_child_i64(Some(iv), "chainlink_oracle_price_age_ms")),
+        format_optional_guard_i64(json_child_i64(Some(iv), "chainlink_ws_receipt_age_ms")),
+        format_optional_guard_text(json_child_text(Some(iv), "chainlink_ws_receipt_age_scope")),
+        format_optional_guard_i64(json_child_i64(Some(iv), "chainlink_stale_ms_effective")),
+        format_optional_guard_i64(json_child_i64(
+            Some(iv),
+            "entry_quality_chainlink_max_age_ms_effective"
+        )),
+        format_optional_guard_text(json_child_text(Some(iv), "chainlink_stale_override_source")),
+        format_optional_guard_text(json_child_text(Some(iv), "chainlink_stale_tolerance_result"))
+    ));
+    lines.push(format!(
+        "Chainlink Refresh: requested={} interval_ms={} global_min_ws_receipt_age_ms={} last_request_age_ms={}",
+        format_optional_guard_bool(json_child_bool(Some(iv), "chainlink_refresh_requested")),
+        format_optional_guard_i64(json_child_i64(Some(iv), "chainlink_refresh_interval_ms")),
+        format_optional_guard_i64(json_child_i64(Some(iv), "chainlink_global_min_ws_receipt_age_ms")),
+        format_optional_guard_i64(json_child_i64(Some(iv), "chainlink_refresh_last_request_age_ms"))
+    ));
+    lines.push(format!(
+        "Chainlink Stale Strong Gap Exception: result={} gap_source={} entry_quality_gap_strength={} iv_gap_strength={} required={} cex_confirmed={} anchor_venue={} anchor_hit={} bybit_hit={} secondary_confirmed={} cex_clean={}",
+        format_optional_guard_text(json_child_text(stale_exception, "result")),
+        format_optional_guard_text(json_child_text(stale_exception, "gap_source")),
+        format_optional_guard_number(json_child_number(stale_exception, "entry_quality_gap_strength")),
+        format_optional_guard_number(json_child_number(stale_exception, "iv_gap_strength")),
+        format_optional_guard_number(json_child_number(stale_exception, "required_gap_strength")),
+        format_optional_guard_bool(json_child_bool(stale_exception, "cex_confirmed")),
+        format_optional_guard_text(json_child_text(stale_exception, "anchor_venue")),
+        format_optional_guard_bool(json_child_bool(stale_exception, "anchor_hit")),
+        format_optional_guard_bool(json_child_bool(stale_exception, "bybit_hit")),
+        format_optional_guard_bool(json_child_bool(stale_exception, "secondary_confirmed")),
+        format_optional_guard_bool(json_child_bool(stale_exception, "cex_clean"))
+    ));
+    lines.push(format!(
+        "Entry Quality Stale Policy: late_entry={} chainlink_age_ms={} normal_late_skip_threshold_ms={} exception_passed={} action={} stale_penalty_applied={}",
+        format_optional_guard_bool(json_child_bool(stale_policy, "late_entry")),
+        format_optional_guard_i64(json_child_i64(stale_policy, "chainlink_age_ms")),
+        format_optional_guard_i64(json_child_i64(stale_policy, "normal_late_skip_threshold_ms")),
+        format_optional_guard_bool(json_child_bool(stale_policy, "chainlink_stale_exception_passed")),
+        format_optional_guard_text(json_child_text(stale_policy, "action")),
+        format_optional_guard_bool(json_child_bool(stale_policy, "stale_penalty_applied"))
     ));
     append_eq77_risk_cap_summary(debug, &mut lines);
 
@@ -838,6 +1212,12 @@ pub(super) fn build_price_to_beat_guard_blocked_notification_message(
         "price_to_beat_unavailable" => {
             "Polymarket Price to Beat verisi alinamadigi icin emir engellendi."
         }
+        "chainlink_provider_stale_global" => {
+            "Chainlink provider age global IV limitini astigi icin emir engellendi."
+        }
+        "chainlink_provider_stale_entry_quality" => {
+            "Chainlink provider age gec entry kalite limitini astigi icin emir engellendi."
+        }
         "current_price_unavailable" => "Current price verisi alinamadigi icin emir engellendi.",
         "unsupported_market" => "Bu market Price to Beat guard tarafindan desteklenmiyor.",
         "unsupported_outcome_label" => {
@@ -860,10 +1240,11 @@ pub(super) fn build_price_to_beat_guard_blocked_notification_message(
         .unwrap_or_default();
     let summary_block = build_price_to_beat_summary_block(evaluation);
     let execution_summary = build_iv_mismatch_execution_summary(evaluation);
+    let entry_current_source_summary = build_entry_current_source_debug_summary(evaluation);
     let entry_quality_summary = build_iv_entry_quality_debug_summary(evaluation);
 
     format!(
-        "{}\nSebep: {}{}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Status: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}{}\nLimit: {:.8} {} (~{:.8} USD){}{}{}",
+        "{}\nSebep: {}{}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Status: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}{}\nLimit: {:.8} {} (~{:.8} USD){}{}{}{}",
         "Price to Beat Korumasi Engelledi",
         reason,
         detail_line,
@@ -884,6 +1265,7 @@ pub(super) fn build_price_to_beat_guard_blocked_notification_message(
         evaluation.threshold_usd,
         summary_block,
         execution_summary,
+        entry_current_source_summary,
         entry_quality_summary,
     )
 }
@@ -903,9 +1285,10 @@ pub(super) fn build_price_to_beat_guard_recovered_notification_message(
 ) -> String {
     let summary_block = build_price_to_beat_summary_block(evaluation);
     let execution_summary = build_iv_mismatch_execution_summary(evaluation);
+    let entry_current_source_summary = build_entry_current_source_debug_summary(evaluation);
     let entry_quality_summary = build_iv_entry_quality_debug_summary(evaluation);
     format!(
-        "{}\nDurum: Price to Beat yeniden uygun hale geldi.\nOnceki Sebep: {}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Status: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}\nLimit: {:.8} {} (~{:.8} USD){}{}{}",
+        "{}\nDurum: Price to Beat yeniden uygun hale geldi.\nOnceki Sebep: {}\nYon: {}\nMarket: {}\nAsset: {}\nTimeframe: {}\nPrice to Beat: {}\nPrice to Beat Status: {}\nPrice to Beat Source: {}\n{}: {}\nYonsel Fark: {}\nMutlak Fark: {}\nLimit: {:.8} {} (~{:.8} USD){}{}{}{}",
         "Price to Beat Korumasi Gecti",
         recovered_from_reason_code,
         format_optional_direction(evaluation.direction.as_deref()),
@@ -924,6 +1307,7 @@ pub(super) fn build_price_to_beat_guard_recovered_notification_message(
         evaluation.threshold_usd,
         summary_block,
         execution_summary,
+        entry_current_source_summary,
         entry_quality_summary,
     )
 }

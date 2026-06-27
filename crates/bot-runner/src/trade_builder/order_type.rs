@@ -30,6 +30,18 @@ fn trade_builder_flow_created_order_type(payload: Option<&Value>) -> Option<&'st
         .and_then(normalize_trade_builder_clob_order_type)
 }
 
+fn trade_builder_flow_created_post_only(payload: Option<&Value>, order_type: &str) -> bool {
+    let Some(payload) = payload else {
+        return false;
+    };
+    let requested = payload
+        .get("post_only")
+        .or_else(|| payload.get("postOnly"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    requested && matches!(order_type, "GTC" | "GTD")
+}
+
 async fn resolve_trade_builder_submit_order_type(
     repo: &PostgresRepository,
     order: &TradeBuilderOrder,
@@ -40,6 +52,17 @@ async fn resolve_trade_builder_submit_order_type(
         .await?;
     Ok(trade_builder_flow_created_order_type(payload.as_ref())
         .unwrap_or_else(|| clob_order_type_for_execution_mode(normalized_execution_mode)))
+}
+
+async fn resolve_trade_builder_submit_post_only(
+    repo: &PostgresRepository,
+    order: &TradeBuilderOrder,
+    order_type: &str,
+) -> Result<bool> {
+    let payload = repo
+        .load_trade_builder_order_flow_created_payload(order.id)
+        .await?;
+    Ok(trade_builder_flow_created_post_only(payload.as_ref(), order_type))
 }
 
 #[cfg(test)]
@@ -71,5 +94,12 @@ mod action_place_order_order_type_tests {
             action_place_order_clob_order_type(&node(json!({"orderType": "IOC"})), "market");
 
         assert_eq!(order_type, "FAK");
+    }
+
+    #[test]
+    fn flow_created_post_only_only_applies_to_resting_orders() {
+        let payload = json!({"post_only": true});
+        assert!(trade_builder_flow_created_post_only(Some(&payload), "GTC"));
+        assert!(!trade_builder_flow_created_post_only(Some(&payload), "FAK"));
     }
 }

@@ -7,8 +7,7 @@ fn should_send_guard_transition_notification(
     candidate_reason: &str,
     notify_flag: bool,
 ) -> bool {
-    notify_flag
-        && order.last_guard_notification_reason.as_deref() != Some(candidate_reason)
+    notify_flag && order.last_guard_notification_reason.as_deref() != Some(candidate_reason)
 }
 
 async fn build_trade_builder_flow_identity(
@@ -126,58 +125,54 @@ async fn send_trade_builder_notification_with_payload(
     .await;
 
     if send_result.sent {
-            let mut event_payload = json!({
-                "notification_type": notification_type,
-                "message": message.as_str(),
-                "chat_id": chat_id,
-                "flow_identity": flow_identity.as_ref().map(|(_, payload)| payload.clone()),
-            });
-            if let (Some(target), Some(extra)) =
-                (event_payload.as_object_mut(), extra_payload.and_then(|payload| payload.as_object().cloned()))
-            {
-                for (key, value) in extra {
-                    target.insert(key, value);
-                }
+        let mut event_payload = json!({
+            "notification_type": notification_type,
+            "message": message.as_str(),
+            "chat_id": chat_id,
+            "flow_identity": flow_identity.as_ref().map(|(_, payload)| payload.clone()),
+        });
+        if let (Some(target), Some(extra)) = (
+            event_payload.as_object_mut(),
+            extra_payload.and_then(|payload| payload.as_object().cloned()),
+        ) {
+            for (key, value) in extra {
+                target.insert(key, value);
             }
-            if let Err(err) = repo
-                .append_trade_builder_order_event(
-                    order.id,
-                    "notification_sent",
-                    &event_payload,
-                )
-                .await
-            {
-                warn!(
-                    builder_order_id = order.id,
-                    notification_type,
-                    error = %err,
-                    "TRADE_BUILDER_NOTIFICATION_EVENT_WRITE_FAILED"
-                );
-            }
-            info!(
+        }
+        if let Err(err) = repo
+            .append_trade_builder_order_event(order.id, "notification_sent", &event_payload)
+            .await
+        {
+            warn!(
                 builder_order_id = order.id,
                 notification_type,
-                "TRADE_BUILDER_NOTIFICATION_SENT"
+                error = %err,
+                "TRADE_BUILDER_NOTIFICATION_EVENT_WRITE_FAILED"
             );
-            true
+        }
+        info!(
+            builder_order_id = order.id,
+            notification_type, "TRADE_BUILDER_NOTIFICATION_SENT"
+        );
+        true
     } else if send_result.skipped_by_backoff {
-            warn!(
-                builder_order_id = order.id,
-                notification_type,
-                backoff_until_ms = send_result.backoff_until_ms,
-                "TRADE_BUILDER_NOTIFICATION_SKIPPED_TELEGRAM_BACKOFF"
-            );
-            false
+        warn!(
+            builder_order_id = order.id,
+            notification_type,
+            backoff_until_ms = send_result.backoff_until_ms,
+            "TRADE_BUILDER_NOTIFICATION_SKIPPED_TELEGRAM_BACKOFF"
+        );
+        false
     } else {
-            warn!(
-                builder_order_id = order.id,
-                notification_type,
-                http_status = send_result.http_status,
-                retry_after_sec = send_result.retry_after_sec,
-                error = ?send_result.error_message,
-                "TRADE_BUILDER_NOTIFICATION_FAILED"
-            );
-            false
+        warn!(
+            builder_order_id = order.id,
+            notification_type,
+            http_status = send_result.http_status,
+            retry_after_sec = send_result.retry_after_sec,
+            error = ?send_result.error_message,
+            "TRADE_BUILDER_NOTIFICATION_FAILED"
+        );
+        false
     }
 }
 
@@ -221,33 +216,31 @@ async fn send_trade_flow_notification(
     .await;
 
     if send_result.sent {
-            info!(
-                flow_run_id = run.id,
-                notification_type,
-                node_key,
-                "TRADE_FLOW_NOTIFICATION_SENT"
-            );
-            true
+        info!(
+            flow_run_id = run.id,
+            notification_type, node_key, "TRADE_FLOW_NOTIFICATION_SENT"
+        );
+        true
     } else if send_result.skipped_by_backoff {
-            warn!(
-                flow_run_id = run.id,
-                notification_type,
-                node_key,
-                backoff_until_ms = send_result.backoff_until_ms,
-                "TRADE_FLOW_NOTIFICATION_SKIPPED_TELEGRAM_BACKOFF"
-            );
-            false
+        warn!(
+            flow_run_id = run.id,
+            notification_type,
+            node_key,
+            backoff_until_ms = send_result.backoff_until_ms,
+            "TRADE_FLOW_NOTIFICATION_SKIPPED_TELEGRAM_BACKOFF"
+        );
+        false
     } else {
-            warn!(
-                flow_run_id = run.id,
-                notification_type,
-                node_key,
-                http_status = send_result.http_status,
-                retry_after_sec = send_result.retry_after_sec,
-                error = ?send_result.error_message,
-                "TRADE_FLOW_NOTIFICATION_FAILED"
-            );
-            false
+        warn!(
+            flow_run_id = run.id,
+            notification_type,
+            node_key,
+            http_status = send_result.http_status,
+            retry_after_sec = send_result.retry_after_sec,
+            error = ?send_result.error_message,
+            "TRADE_FLOW_NOTIFICATION_FAILED"
+        );
+        false
     }
 }
 
@@ -297,7 +290,8 @@ async fn maybe_send_order_not_filled_notification(
             Vec::new()
         }
     };
-    let guard_summary = build_order_not_filled_guard_summary(order, &events);
+    let guard_summary =
+        build_order_not_filled_guard_summary(order, &events, reason_code, reason_message);
     let message = build_order_not_filled_notification_message_with_guard(
         order,
         reason_code,
@@ -404,9 +398,12 @@ fn build_trade_builder_fill_notification_with_position_summary(
             exit_position_summary,
         ));
     }
-    if let Some(block) =
-        trade_builder_iv_mismatch_fill_formula_block(flow_created_payload, execution_price)
-    {
+    if let Some(block) = trade_builder_iv_mismatch_fill_formula_block(
+        flow_created_payload,
+        submitted_payload,
+        execution_price,
+        fill_execution_analysis,
+    ) {
         message.push_str(&block);
     }
 
@@ -473,7 +470,9 @@ fn build_max_price_waiting_notification_message(
         | "pair_counter_best_ask_unavailable" => {
             "Best ask verisi bekleniyor. Max fiyat degerlendirmesi ask verisi gelince yeniden yapilacak."
         }
-        _ => "Referans fiyat max fiyat limitini asiyor. Kosullar duzelince order yeniden denenecek.",
+        _ => {
+            "Referans fiyat max fiyat limitini asiyor. Kosullar duzelince order yeniden denenecek."
+        }
     };
     format!(
         "Max Fiyat Korumasi Bekleme Modu
@@ -538,9 +537,7 @@ fn build_execution_floor_waiting_notification_message(
     best_ask: Option<f64>,
 ) -> String {
     let reason = match (best_ask, order.best_ask_floor_price) {
-        (None, _) => {
-            "Best ask verisi alinamadi. Kosullar duzelince order yeniden denenecek."
-        }
+        (None, _) => "Best ask verisi alinamadi. Kosullar duzelince order yeniden denenecek.",
         (Some(best_ask), Some(floor)) if best_ask < floor => {
             "Best ask floor seviyesinin altinda. Kosullar duzelince order yeniden denenecek."
         }
@@ -591,7 +588,12 @@ fn pair_lock_primary_candidate_reason_summary(candidate: &Value) -> String {
 
 fn pair_lock_primary_secondary_reason_line(secondary_candidate: Option<&Value>) -> String {
     secondary_candidate
-        .map(|candidate| format!("\nDiger Aday: {}", pair_lock_primary_candidate_reason_summary(candidate)))
+        .map(|candidate| {
+            format!(
+                "\nDiger Aday: {}",
+                pair_lock_primary_candidate_reason_summary(candidate)
+            )
+        })
         .unwrap_or_default()
 }
 

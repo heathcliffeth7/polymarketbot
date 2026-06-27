@@ -1,9 +1,30 @@
+#![recursion_limit = "256"]
+
 mod dca;
+mod trade_builder_inventory_observation_timing {
+    include!("trade_builder/inventory_observation_timing.rs");
+}
+mod trade_builder_inventory_observation_due_gate {
+    include!("trade_builder/inventory_observation_due_gate.rs");
+}
+mod trade_builder_inventory_observation_terminal {
+    include!("trade_builder/inventory_observation_terminal.rs");
+}
+mod trade_builder_fill_sync_timing {
+    include!("trade_builder/fill_sync_timing.rs");
+}
+mod trade_builder_fill_sync_throttle {
+    include!("trade_builder/fill_sync_throttle.rs");
+}
+mod trade_builder_order_housekeeping_timing {
+    include!("trade_builder/order_housekeeping_timing.rs");
+}
 mod trade_flow;
 
 include!("lib_parts/part_000.rs");
 include!("telegram_notification.rs");
 include!("lib_parts/part_001.rs");
+include!("trade_flow/housekeeping_slow_log.rs");
 include!("trade_builder/clob_order_warmup.rs");
 include!("lib_parts/part_002.rs");
 include!("lib_parts/part_003.rs");
@@ -16,6 +37,7 @@ include!("lib_parts/part_009.rs");
 include!("lib_parts/part_010.rs");
 include!("lib_parts/part_011.rs");
 include!("trade_flow/repeat_step_input.rs");
+include!("trade_flow/deferred_once_lock.rs");
 include!("lib_parts/part_012.rs");
 include!("trade_flow/cycle_window_timers.rs");
 include!("trade_flow/missed_market_timeline.rs");
@@ -27,7 +49,10 @@ mod auto_tune {
     include!("trade_flow/auto_tune/advice_engine.rs");
     include!("trade_flow/auto_tune/summary_builder.rs");
 }
+include!("trade_flow/ws_fast_path_refresh.rs");
+include!("trade_flow/ws_fast_path_price_to_beat.rs");
 include!("trade_flow/ws_fast_path.rs");
+include!("trade_flow/ws_fast_path_selection.rs");
 include!("trade_flow/overlap_audit.rs");
 include!("lib_parts/part_013.rs");
 include!("trade_flow/triggers/market_price_entry_timing.rs");
@@ -40,6 +65,7 @@ include!("lib_parts/part_017.rs");
 include!("trade_builder/staged_sl_behavior.rs");
 include!("trade_builder/place_order_exit_config.rs");
 include!("trade_builder/action_place_order_stale_market.rs");
+include!("trade_builder/action_place_order_upstream_error.rs");
 include!("trade_builder/scout_lock.rs");
 include!("trade_builder/buy_fill_lock.rs");
 include!("trade_builder/order_type.rs");
@@ -67,6 +93,7 @@ include!("trade_builder/pre_buy_collapse_notifications.rs");
 #[cfg(test)]
 include!("trade_builder/pre_buy_submit_revalidation_tests.rs");
 include!("trade_builder/node_snapshot.rs");
+include!("trade_builder/action_place_order_payload_macros.rs");
 include!("lib_parts/part_018.rs");
 include!("lib_parts/part_019.rs");
 include!("lib_parts/part_020.rs");
@@ -91,6 +118,19 @@ include!("trade_builder/revenge_flip_config.rs");
 include!("trade_builder/action_place_order_source_trade.rs");
 include!("trade_builder/revenge_flip_nodes.rs");
 include!("trade_builder/revenge_flip.rs");
+include!("trade_builder/fill_finalize_ptb_stop_loss.rs");
+include!("trade_builder/avg_rebound_pairlock_rescue/config.rs");
+include!("trade_builder/avg_rebound_pairlock_rescue/state.rs");
+include!("trade_builder/avg_rebound_pairlock_rescue/vwap.rs");
+include!("trade_builder/avg_rebound_pairlock_rescue/pnl.rs");
+include!("trade_builder/avg_rebound_pairlock_rescue/decision.rs");
+include!("trade_builder/avg_rebound_pairlock_rescue/orders.rs");
+#[cfg(test)]
+include!("trade_builder/avg_rebound_pairlock_rescue/tests.rs");
+include!("trade_builder/confidence_ladder.rs");
+include!("trade_builder/confidence_ladder_loss_cap.rs");
+#[cfg(test)]
+include!("trade_builder/confidence_ladder_tests.rs");
 #[cfg(test)]
 include!("trade_builder/positive_quantity_flip_grid_test_helpers.rs");
 #[cfg(test)]
@@ -104,10 +144,17 @@ include!("trade_builder/positive_quantity_flip_grid_pairlock_tests.rs");
 #[cfg(test)]
 include!("trade_builder/revenge_flip_tests.rs");
 #[cfg(test)]
+include!("trade_builder/revenge_flip_target_pnl_tests.rs");
+#[cfg(test)]
+include!("trade_builder/revenge_flip_mid_chop_tests.rs");
+#[cfg(test)]
+include!("trade_builder/revenge_flip_fill_tests.rs");
+#[cfg(test)]
 include!("trade_builder/positive_quantity_flip_grid_min_notional_tests.rs");
 #[cfg(test)]
 include!("trade_builder/positive_quantity_flip_grid_entry_ptb_tests.rs");
 include!("trade_builder/pair_lock_notifications.rs");
+include!("trade_builder/pair_lock_modes.rs");
 include!("trade_builder/pair_lock.rs");
 include!("trade_builder/pair_lock_child_nodes.rs");
 include!("trade_builder/pair_lock_edge_strategy.rs");
@@ -130,6 +177,7 @@ include!("lib_parts/part_021.rs");
 include!("lib_parts/part_022.rs");
 include!("trade_builder/parent_inventory.rs");
 include!("trade_builder/ptb_stop_loss.rs");
+include!("trade_builder/ptb_stop_loss_oracle_lag_book_lead.rs");
 include!("trade_builder/ptb_stop_loss_bump.rs");
 include!("trade_builder/ptb_stop_loss_bump_support.rs");
 include!("trade_builder/exit_math.rs");
@@ -143,6 +191,7 @@ include!("trade_builder/analysis_snapshot.rs");
 include!("trade_builder/analysis_diagnostics.rs");
 include!("trade_builder/runtime_price.rs");
 include!("trade_builder/fill_resolution.rs");
+include!("trade_builder/fill_backfill.rs");
 include!("trade_builder/exit_retry.rs");
 include!("trade_builder/iv_mismatch_fill_notification.rs");
 include!("trade_builder/order_not_filled_reason.rs");
@@ -158,8 +207,10 @@ include!("trade_builder/exit_fast_submit.rs");
 include!("trade_builder/submit_fast_lane.rs");
 include!("trade_builder/deferred_submit_events.rs");
 include!("trade_builder/sell_submit_prefetch.rs");
+include!("trade_builder/pre_submit_book_recheck.rs");
 include!("trade_builder/stop_loss_fast_retry.rs");
 include!("trade_builder/config_versioning.rs");
+include!("trade_builder/ml_entry_quality_shadow.rs");
 include!("trade_builder/decision_logs.rs");
 include!("trade_builder/live_gap_adaptive_low_gap_guard_miss.rs");
 include!("trade_builder/order_submit.rs");
@@ -171,6 +222,7 @@ include!("trade_builder/fill_finalize.rs");
 include!("trade_builder/price_resolution.rs");
 include!("trade_builder/market_second_snapshot.rs");
 include!("trade_builder/market_trade_volume.rs");
+include!("trade_builder/trade_flow_events_prune.rs");
 include!("trade_builder/armed_ws_eval.rs");
 include!("trade_builder/guarded_buy_ws_eval.rs");
 include!("trade_builder/tick_trigger_eval.rs");

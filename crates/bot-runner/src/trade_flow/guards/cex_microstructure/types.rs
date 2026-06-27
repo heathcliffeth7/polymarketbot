@@ -6,6 +6,8 @@ pub(crate) enum CexVenue {
     Coinbase,
     Hyperliquid,
     Bybit,
+    Okx,
+    Gateio,
 }
 
 impl CexVenue {
@@ -15,6 +17,8 @@ impl CexVenue {
             Self::Coinbase => "coinbase",
             Self::Hyperliquid => "hyperliquid",
             Self::Bybit => "bybit",
+            Self::Okx => "okx",
+            Self::Gateio => "gateio",
         }
     }
 }

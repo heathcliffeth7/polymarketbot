@@ -853,7 +853,7 @@ test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard, staged, an
           ptbStopLossEnabled: true,
           ptbStopLossGapUsd: 0,
           ptbStopLossGapUnit: 'usd',
-          ptbStopLossCurrentPriceSource: 'cex_consensus',
+          ptbStopLossCurrentPriceSource: 'chainlink_cex_consensus',
           ptbStopLossTimeDecayMode: 'relax',
           ptbStopLossRules: [
             { gapUsd: 7, sizePct: 60 },
@@ -866,7 +866,7 @@ test('validateActionPlaceOrderConfig accepts pair_lock lead-leg hard, staged, an
           counterLegPtbStopLossEnabled: true,
           counterLegPtbStopLossGapUsd: -2,
           counterLegPtbStopLossGapUnit: 'cent',
-          counterLegPtbStopLossCurrentPriceSource: 'cex_consensus',
+          counterLegPtbStopLossCurrentPriceSource: 'chainlink_cex_consensus',
           counterLegPtbStopLossTimeDecayMode: 'relax',
           counterLegNotifyOnSlHit: true,
           reenterOnSlHit: true,

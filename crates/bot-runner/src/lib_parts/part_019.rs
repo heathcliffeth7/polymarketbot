@@ -992,3 +992,35 @@ async fn resolve_action_place_order_window_end_auto_sell_sizing(
         action_place_order_window_end_auto_sell_sizing_from_parent_qty(position_qty, reference_price)
     }))
 }
+
+#[cfg(test)]
+mod part_019_tests {
+    use super::*;
+
+    #[test]
+    fn step_input_f64_reads_ws_quote_aliases() {
+        let step = TradeFlowRunStep {
+            id: 1,
+            run_id: 42,
+            node_key: "action_1".to_string(),
+            node_type: "action.place_order".to_string(),
+            status: "queued".to_string(),
+            attempt: 1,
+            input_json: Some(json!({
+                "wsBestBidFromStep": 0.61,
+                "ws_best_ask_from_step": 0.62
+            })),
+            output_json: None,
+            error_text: None,
+            started_at: None,
+            ended_at: None,
+            available_at: Utc::now(),
+            parent_step_id: Some(7),
+            idempotency_key: None,
+            created_at: Utc::now(),
+        };
+
+        assert_eq!(step_input_f64(&step, &["wsBestBid", "wsBestBidFromStep"]), Some(0.61));
+        assert_eq!(step_input_f64(&step, &["wsBestAsk", "ws_best_ask_from_step"]), Some(0.62));
+    }
+}

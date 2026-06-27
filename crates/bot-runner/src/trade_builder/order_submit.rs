@@ -119,6 +119,7 @@ async fn submit_trade_builder_trigger_order(
         .map(|resolution| resolution.desired_price)
         .or_else(|| market_buy_execution_price.map(|resolution| resolution.price))
         .unwrap_or_else(|| trade_builder_submit_desired_price(order, current_price));
+    desired_price = trade_builder_clamp_buy_limit_price(order, desired_price);
     let uncapped_desired_price = sell_submit_price
         .map(|resolution| resolution.uncapped_desired_price)
         .or_else(|| market_buy_execution_price.map(|resolution| resolution.price))
@@ -840,6 +841,7 @@ async fn submit_trade_builder_trigger_order(
     let normalized_execution_mode = normalize_trade_builder_execution_mode(&order.execution_mode);
     let order_type =
         resolve_trade_builder_submit_order_type(repo, order, normalized_execution_mode).await?;
+    let post_only = resolve_trade_builder_submit_post_only(repo, order, order_type).await?;
     let mut client_order_id = format!("tb-{}", Uuid::new_v4());
     let market_spec = match cached_market_spec {
         Some(spec) => Some(spec),
@@ -853,6 +855,29 @@ async fn submit_trade_builder_trigger_order(
             .await
         }
     };
+    if maybe_apply_trade_builder_pre_submit_book_recheck(
+        repo,
+        client,
+        ws,
+        order,
+        current_price,
+        best_ask,
+        order_type,
+        size_basis,
+        retry_on_trigger_guard_block,
+        retry_on_execution_floor_guard_block,
+        retry_on_max_price_block,
+        &mut desired_price,
+        &mut submit_size,
+        &mut submit_remaining_usdc,
+        &mut submit_remaining_qty,
+        &mut deferred_submit_events,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    desired_price = trade_builder_clamp_buy_limit_price(order, desired_price);
     let min_notional_cap_usdc = order
         .size_usdc
         .max(submit_remaining_usdc.unwrap_or(0.0))
@@ -940,6 +965,7 @@ async fn submit_trade_builder_trigger_order(
         size: submit_size,
         intent: intent.to_string(),
         order_type: order_type.to_string(),
+        post_only,
         client_order_id: client_order_id.clone(),
         leg_side: None,
         fee_rate_bps,
@@ -1410,35 +1436,27 @@ async fn submit_trade_builder_trigger_order(
     .await;
 
     if normalized_status == "filled" {
-        if let Err(err) = sync_recent_trade_builder_fills(repo, client).await {
-            warn!(
-                builder_order_id = order.id,
-                exchange_order_id = %exchange_order_id,
-                error = %err,
-                "TRADE_BUILDER_IMMEDIATE_FILL_SYNC_FAILED"
-            );
-        }
+        let fill_backfill =
+            match backfill_trade_builder_fills_for_order(repo, client, order.id, &exchange_order_id)
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(err) => {
+                    warn!(
+                        builder_order_id = order.id,
+                        exchange_order_id = %exchange_order_id,
+                        error = %err,
+                        "TRADE_BUILDER_IMMEDIATE_FILL_BACKFILL_FAILED"
+                    );
+                    TradeBuilderFillBackfillOutcome::default()
+                }
+            };
         let (
             canonical_entry_qty,
             canonical_entry_qty_source,
             actual_fill_qty,
             actual_fill_qty_source,
-        ) = if trade_builder_should_track_buy_inventory_observation(order) {
-            let (canonical_entry_qty, canonical_entry_qty_source) =
-                trade_builder_canonical_entry_qty(order, Some(submit_size)).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "builder order canonical fill qty unresolved for exchange_order_id={exchange_order_id}"
-                    )
-                })?;
-            (canonical_entry_qty, canonical_entry_qty_source, None, None)
-        } else {
-            (
-                submit_size,
-                "actual_fill_qty",
-                Some(submit_size),
-                Some("submitted_order_size"),
-            )
-        };
+        ) = resolve_trade_builder_immediate_fill_quantities(order, submit_size, &fill_backfill)?;
         finalize_builder_fill(
             repo,
             cfg,

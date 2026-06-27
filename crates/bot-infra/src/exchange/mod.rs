@@ -21,7 +21,9 @@ mod clob;
 mod data_api;
 mod gamma;
 mod http;
+mod inventory_snapshot;
 mod models;
+mod order_egress;
 mod parse;
 #[cfg(test)]
 mod tests;
@@ -29,13 +31,14 @@ mod tests;
 pub use clob::ClobHttpClient;
 pub use data_api::PolymarketDataApiClient;
 pub use gamma::GammaHttpClient;
-pub(crate) use http::build_http_client;
+pub(crate) use http::{build_http_client, build_order_http_client};
 pub use models::{
     ClobMarketFeeDetails, ClobMarketInfo, ClobMarketToken, ClobRestClient, DataApiActivity,
-    FillInfo, GammaClient, GammaMarket, OrderAck, OrderBookLevel, OrderBookSnapshot, OrderInfo,
-    PlaceOrderRequest, PriceHistoryPoint, PriceSnapshot,
+    FillInfo, FillPage, GammaClient, GammaMarket, OrderAck, OrderBookFetchResult, OrderBookLevel,
+    OrderBookSnapshot, OrderInfo, PlaceOrderRequest, PriceHistoryPoint, PriceSnapshot,
+    TokenInventorySnapshot, TradeQuery,
 };
 pub(crate) use parse::{
-    data_api_position_matches_token, parse_f64_value, parse_gamma_market, parse_gamma_market_any,
-    parse_json_f64, DataApiInventoryPosition,
+    parse_f64_value, parse_gamma_market, parse_gamma_market_any, parse_json_f64,
+    DataApiInventoryPosition,
 };

@@ -139,7 +139,7 @@ export async function ensureDualDcaSourceTrade(
 ): Promise<TradeFlowEnsureDualDcaSourceTradeResult> {
   const asset = normalizeDualDcaAsset(input.asset);
   if (!asset) {
-    throw new Error('asset must be one of: btc, eth, sol, xrp.');
+    throw new Error('asset must be one of: btc, eth, sol, xrp, doge, bnb, hype.');
   }
   const timeframe = normalizeDualDcaTimeframe(input.timeframe);
   if (!timeframe) {

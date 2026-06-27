@@ -1,11 +1,14 @@
+import { useState } from 'react';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { draftAllPublishedTradeFlowDefinitions } from '@/hooks/use-trade-flow';
 import { createEmptyKeyValueDraft, type ContextFormState, type PrimitiveValueType } from '@/lib/trade-flow-config-mappers';
 import type { TradeFlowCustomRangeSnapshot, TradeFlowDefinition, TradeFlowDefinitionDetail, TradeFlowGraph, TradeFlowValidationResult } from '@/lib/types';
 import { buildGraphFingerprint, summarizeTradeFlowGraph } from './flow-engine-utils';
-import type { BusyAction, TemplateKind } from './flow-engine-types';
+import type { BusyAction, DefinitionSwitchState, TemplateKind } from './flow-engine-types';
 
 interface FlowContextEditorProps {
   contextForm: ContextFormState;
@@ -334,6 +337,7 @@ interface CreateFlowSlotProps {
   definitionsLoading: boolean;
   filteredDefinitions: TradeFlowDefinition[];
   selectedDefinitionId: number | null;
+  definitionSwitchState?: DefinitionSwitchState | null;
   deletingDefinitionId: number | null;
   onCreateNameChange: (v: string) => void;
   onCreateDescriptionChange: (v: string) => void;
@@ -374,6 +378,7 @@ export function CreateFlowSlot({
   definitionsLoading,
   filteredDefinitions,
   selectedDefinitionId,
+  definitionSwitchState = null,
   deletingDefinitionId,
   onCreateNameChange,
   onCreateDescriptionChange,
@@ -403,6 +408,39 @@ export function CreateFlowSlot({
   autoClaimEnabled = false,
   onAutoClaimEnabledChange,
 }: CreateFlowSlotProps) {
+  const [draftingPublishedFlows, setDraftingPublishedFlows] = useState(false);
+  const getDefinitionStatusLabel = (definition: TradeFlowDefinition) => {
+    if (definitionSwitchState?.targetId !== definition.id) return definition.status;
+    return definitionSwitchState.phase === 'saving_current' ? 'Kaydediliyor...' : 'Aciliyor...';
+  };
+  const knownPublishedCount = filteredDefinitions.filter(
+    (definition) => definition.status === 'published'
+  ).length;
+  const handleDraftPublishedFlows = async () => {
+    const knownCountLabel =
+      knownPublishedCount > 0
+        ? `${knownPublishedCount} gorunen published workflow`
+        : 'bu kullaniciya ait published workflowlar';
+    if (
+      !window.confirm(
+        `${knownCountLabel} drafta dusurulsun mu?\n\nAktif run/order/job akisi iptal edilir; draft ve publish gecmisi korunur.`
+      )
+    ) {
+      return;
+    }
+    setDraftingPublishedFlows(true);
+    try {
+      const result = await draftAllPublishedTradeFlowDefinitions();
+      toast.success(`${result.data.draftedCount} workflow drafta alindi.`);
+      window.setTimeout(() => window.location.reload(), 600);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Workflowlar drafta alinamadi.';
+      toast.error(message);
+    } finally {
+      setDraftingPublishedFlows(false);
+    }
+  };
+
   return (
     <div className="space-y-2 overflow-hidden rounded-md border border-slate-200 bg-white p-2">
       {showWorkflowActions && (
@@ -464,6 +502,16 @@ export function CreateFlowSlot({
                 {stoppingFlow ? 'Durduruluyor...' : "Workflow'u Durdur"}
               </Button>
             )}
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8 w-full border-amber-300 text-amber-700 hover:bg-amber-50"
+              disabled={workflowActionsDisabled || draftingPublishedFlows}
+              onClick={handleDraftPublishedFlows}
+            >
+              {draftingPublishedFlows ? 'Drafta aliniyor...' : 'Publishedlari Drafta Al'}
+            </Button>
             {onAutoClaimEnabledChange && (
               <label className="flex cursor-pointer items-start gap-3 rounded-md border border-emerald-200 bg-emerald-50 p-2">
                 <input
@@ -506,6 +554,9 @@ export function CreateFlowSlot({
         <option value="position_monitor">Pozisyon Izleme + Bildirim</option>
         <option value="multi_leg_hedge">Multi-Leg Hedge</option>
         <option value="revenge_flip_10_80">RevengeFlip 10/80</option>
+        <option value="confidence_ladder_hedge_lock">BTC 5m Confidence Ladder + Hedge Lock</option>
+        <option value="avg_rebound_pairlock_rescue_50usdc">Avg-Rebound Pairlock Rescue 50 USDC</option>
+        <option value="avg_rebound_pairlock_rescue_micro_20usdc">Avg-Rebound Micro 23 USDC</option>
         <option value="pairlock_hyperliquid_70_80">PairLock 70-80 Hyperliquid</option>
         <option value="positive_quantity_flip_grid_1usdc">Positive Quantity Flip Grid 1 USDC</option>
         <option value="positive_quantity_flip_grid_inventory_balance">Positive Grid Inventory Balance</option>
@@ -563,13 +614,16 @@ export function CreateFlowSlot({
                   )}
                   <button
                     type="button"
+                    disabled={definitionSwitchState != null}
                     onClick={() => onSelectDefinition(def.id)}
-                    className={`min-w-0 flex-1 rounded-md border px-2 py-1.5 text-left ${selectedDefinitionId === def.id ? 'border-sky-300 bg-sky-100' : 'border-slate-300 bg-white hover:bg-slate-100'}`}
+                    className={`min-w-0 flex-1 rounded-md border px-2 py-1.5 text-left disabled:cursor-wait disabled:opacity-75 ${selectedDefinitionId === def.id ? 'border-sky-300 bg-sky-100' : 'border-slate-300 bg-white hover:bg-slate-100'}`}
                   >
                     <p className="truncate text-[11px] font-medium text-slate-800">
                       #{def.id} - {def.name}
                     </p>
-                    <p className="text-[10px] text-slate-500">{def.status}</p>
+                    <p className="text-[10px] text-slate-500">
+                      {getDefinitionStatusLabel(def)}
+                    </p>
                   </button>
                   <Button
                     type="button"

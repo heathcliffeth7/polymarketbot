@@ -17,6 +17,7 @@ export {
   updateTradeFlowDefinitionDraft,
   publishTradeFlowDefinition,
   stopTradeFlowDefinition,
+  draftAllPublishedTradeFlowDefinitions,
   hardDeleteTradeFlowDefinition,
   getTradeFlowDefinitionById,
   getTradeFlowDefinitions,

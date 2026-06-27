@@ -688,6 +688,8 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
     if (decision == "passed" || adaptive_max_price_probe || manual_self_tune_probe)
         && node_config_bool(node, "priceToBeatGuardEnabled").unwrap_or(false)
     {
+        let action_yes_token_id = step_input_string(step, &["yesTokenId", "yes_token_id"]);
+        let action_no_token_id = step_input_string(step, &["noTokenId", "no_token_id"]);
         let evaluation =
             crate::trade_flow::guards::price_to_beat::evaluate_action_place_order_price_to_beat_guard_state(
                 ptb_runtime,
@@ -696,6 +698,9 @@ async fn evaluate_action_place_order_pair_lock_primary_candidate(
                 run.id,
                 Some(run.definition_id),
                 market_slug,
+                Some(token_id),
+                action_yes_token_id.as_deref(),
+                action_no_token_id.as_deref(),
                 outcome_label,
                 Some(crate::trade_flow::guards::price_to_beat::PriceToBeatSignalFormulaMarketInput {
                     best_bid,

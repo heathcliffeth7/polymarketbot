@@ -410,6 +410,9 @@ export function resolveMarketNodeLabel(config: Record<string, unknown>): string 
     sol_15m_updown: { asset: 'SOL', timeframe: '15m' },
     xrp_5m_updown: { asset: 'XRP', timeframe: '5m' },
     xrp_15m_updown: { asset: 'XRP', timeframe: '15m' },
+    doge_5m_updown: { asset: 'DOGE', timeframe: '5m' },
+    bnb_5m_updown: { asset: 'BNB', timeframe: '5m' },
+    hype_5m_updown: { asset: 'HYPE', timeframe: '5m' },
   };
   const legacy = marketScope ? legacyScopeMap[marketScope] : undefined;
   const asset = assetRaw || legacy?.asset || 'BTC';

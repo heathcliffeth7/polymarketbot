@@ -16,6 +16,9 @@ const SUPPORTED_MARKET_SCOPES = [
   'sol_15m_updown',
   'xrp_5m_updown',
   'xrp_15m_updown',
+  'doge_5m_updown',
+  'bnb_5m_updown',
+  'hype_5m_updown',
 ] as const;
 const SUPPORTED_MARKET_SLUG_PREFIXES = [
   'btc-updown-5m-',
@@ -26,6 +29,9 @@ const SUPPORTED_MARKET_SLUG_PREFIXES = [
   'sol-updown-15m-',
   'xrp-updown-5m-',
   'xrp-updown-15m-',
+  'doge-updown-5m-',
+  'bnb-updown-5m-',
+  'hype-updown-5m-',
 ] as const;
 
 export function isValidTelegramChatTarget(rawValue: string): boolean {
@@ -251,7 +257,7 @@ export function validateConfigShape(
       )
     ) {
       errors.push(
-        'market_slug_override must contain a supported slug prefix (e.g. btc-updown-5m-, eth-updown-15m-)'
+        'market_slug_override must contain a supported slug prefix (e.g. btc-updown-5m-, doge-updown-5m-)'
       );
     }
     if (data.market_selection !== 'latest_by_slug')

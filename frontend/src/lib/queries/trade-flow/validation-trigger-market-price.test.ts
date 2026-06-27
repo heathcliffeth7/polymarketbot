@@ -2,8 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { normalizeTradeFlowGraph } from '@/lib/queries/trade-flow/graph';
+import { validateTradeFlowGraph } from '@/lib/queries/trade-flow/validation';
 import { validateTriggerMarketPriceNodeConfig } from '@/lib/queries/trade-flow/validation-trigger-market-price';
 import type { TradeFlowGraph, TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
+
+const MARKET_PRICE_BRANCH_CONDITION_WARNING = 'market_price_branch_condition_missing';
 
 function collectTriggerIssues(graph: TradeFlowGraph, nodeKey: string): TradeFlowValidationIssue[] {
   const node = graph.nodes.find((item) => item.key === nodeKey);
@@ -42,6 +45,95 @@ function buildAutoScopeTrigger(
     },
   };
 }
+
+function branchWarningCount(graph: TradeFlowGraph): number {
+  return validateTradeFlowGraph(graph).issues.filter(
+    (issue) => issue.code === MARKET_PRICE_BRANCH_CONDITION_WARNING
+  ).length;
+}
+
+function buildBranchWarningGraph(
+  outcomeConditions: Record<string, unknown>[],
+  edges: TradeFlowGraph['edges']
+): TradeFlowGraph {
+  return normalizeTradeFlowGraph({
+    context: {},
+    nodes: [
+      buildAutoScopeTrigger('trigger_branch', 'btc_5m_updown', 'manual', {
+        outcomeConditions,
+      }),
+      {
+        key: 'notify_one',
+        type: 'action.notify',
+        positionX: 220,
+        positionY: 0,
+        config: { channel: 'ui', message: 'one' },
+      },
+      {
+        key: 'notify_two',
+        type: 'action.notify',
+        positionX: 220,
+        positionY: 80,
+        config: { channel: 'ui', message: 'two' },
+      },
+    ],
+    edges,
+  });
+}
+
+test('validateTradeFlowGraph allows single outcome trigger fan-out without branch warning', () => {
+  const graph = buildBranchWarningGraph(
+    [{ tokenId: 'token-up', outcomeLabel: 'Up', triggerCondition: 'cross_above', triggerPriceCent: 50 }],
+    [
+      { key: 'edge_notify_one', source: 'trigger_branch', target: 'notify_one', type: 'default', condition: null },
+      { key: 'edge_notify_two', source: 'trigger_branch', target: 'notify_two', type: 'default', condition: null },
+    ]
+  );
+
+  assert.equal(branchWarningCount(graph), 0);
+});
+
+test('validateTradeFlowGraph warns for multi-outcome trigger fan-out without branch conditions', () => {
+  const graph = buildBranchWarningGraph(
+    [
+      { tokenId: 'token-up', outcomeLabel: 'Up', triggerCondition: 'cross_above', triggerPriceCent: 50 },
+      { tokenId: 'token-down', outcomeLabel: 'Down', triggerCondition: 'cross_above', triggerPriceCent: 50 },
+    ],
+    [
+      { key: 'edge_notify_one', source: 'trigger_branch', target: 'notify_one', type: 'default', condition: null },
+      { key: 'edge_notify_two', source: 'trigger_branch', target: 'notify_two', type: 'default', condition: null },
+    ]
+  );
+
+  assert.equal(branchWarningCount(graph), 2);
+});
+
+test('validateTradeFlowGraph accepts multi-outcome trigger fan-out with branch conditions', () => {
+  const graph = buildBranchWarningGraph(
+    [
+      { tokenId: 'token-up', outcomeLabel: 'Up', triggerCondition: 'cross_above', triggerPriceCent: 50 },
+      { tokenId: 'token-down', outcomeLabel: 'Down', triggerCondition: 'cross_above', triggerPriceCent: 50 },
+    ],
+    [
+      {
+        key: 'edge_notify_one',
+        source: 'trigger_branch',
+        target: 'notify_one',
+        type: 'default',
+        condition: { outcomeLabel: 'Up' },
+      },
+      {
+        key: 'edge_notify_two',
+        source: 'trigger_branch',
+        target: 'notify_two',
+        type: 'default',
+        condition: { outcomeLabel: 'Down' },
+      },
+    ]
+  );
+
+  assert.equal(branchWarningCount(graph), 0);
+});
 
 test('validateTriggerMarketPriceNodeConfig accepts auto_vol_pct on supported auto_scope asset', () => {
   const graph = normalizeTradeFlowGraph({

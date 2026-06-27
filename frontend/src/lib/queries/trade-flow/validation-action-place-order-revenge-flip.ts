@@ -271,7 +271,7 @@ function validatePtbStopLoss(
       issues,
       node,
       'invalid_revenge_flip_ptb_stop_loss_current_source',
-      'action.place_order revenge_flip_v1 ptbStopLossCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, binance_hyperliquid, or cex_consensus.'
+      'action.place_order revenge_flip_v1 ptbStopLossCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, binance_hyperliquid, cex_consensus, chainlink_cex_consensus, chainlink_cex_consensus_confirmed, or cex_median_fast.'
     );
   }
   if (timeMode && timeMode !== 'tighten' && timeMode !== 'relax' && timeMode !== 'none') {
@@ -320,12 +320,12 @@ export function validateActionPlaceOrderRevengeFlipConfig(
     nestedNumber(config, revenge, 'initialOrderUsdc')
   );
   const profitTargetUsdc = nestedNumber(config, revenge, 'profitTargetUsdc');
-  if (profitTargetUsdc == null || profitTargetUsdc < 0) {
+  if (profitTargetUsdc == null) {
     pushNodeError(
       issues,
       node,
       'invalid_revenge_flip_profit_target_usdc',
-      'action.place_order revenge_flip_v1 profitTargetUsdc must be >= 0.'
+      'action.place_order revenge_flip_v1 profitTargetUsdc must be finite.'
     );
   }
   const classicStopLossEnabled =
@@ -361,6 +361,16 @@ export function validateActionPlaceOrderRevengeFlipConfig(
       node,
       'invalid_revenge_flip_reentry_side_mode',
       'action.place_order revenge_flip_v1 reentrySideMode must be opposite or rule_match.'
+    );
+  }
+  const postStopLossIvMismatch =
+    revenge.postStopLossIvMismatchEnabled ?? config.postStopLossIvMismatchEnabled;
+  if (postStopLossIvMismatch != null && toBooleanish(postStopLossIvMismatch) == null) {
+    pushNodeError(
+      issues,
+      node,
+      'invalid_revenge_flip_post_stop_loss_iv_mismatch',
+      'action.place_order revenge_flip_v1 postStopLossIvMismatchEnabled must be boolean.'
     );
   }
   validatePtbStopLoss(issues, node, config, revenge);

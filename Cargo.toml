@@ -36,3 +36,4 @@ axum = { version = "0.7", features = ["ws"] }
 aes-gcm = "0.10"
 ethers = { version = "2", default-features = false, features = ["abigen", "rustls"] }
 parking_lot = "0.12"
+rust_decimal = { version = "1", features = ["serde"] }

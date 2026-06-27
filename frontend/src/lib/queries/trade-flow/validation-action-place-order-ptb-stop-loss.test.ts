@@ -83,7 +83,7 @@ test('validateActionPlaceOrderConfig accepts ptb stop-loss current source overri
           sizeUsdc: 10,
           ptbStopLossEnabled: true,
           ptbStopLossGapUsd: 0,
-          ptbStopLossCurrentPriceSource: 'hyperliquid',
+          ptbStopLossCurrentPriceSource: 'cex_median_fast',
         },
       },
     ],

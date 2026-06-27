@@ -16,6 +16,7 @@ import {
   REVENGE_FLIP_LOT_LIMIT_PCT_FIELD,
   REVENGE_FLIP_MAX_FLIP_FIELD,
   REVENGE_FLIP_MIN_REENTRY_SHARES_FIELD,
+  REVENGE_FLIP_POST_STOP_LOSS_IV_MISMATCH_ENABLED_FIELD,
   REVENGE_FLIP_PROFIT_TARGET_USDC_FIELD,
   REVENGE_FLIP_PTB_BUMP_AMOUNT_FIELD,
   REVENGE_FLIP_PTB_BUMP_ENABLED_FIELD,
@@ -88,10 +89,9 @@ export function RevengeFlipSection({
           />
         </div>
         <div className="space-y-1">
-          <Label className="text-[11px] font-medium text-slate-600">Profit USDC</Label>
+          <Label className="text-[11px] font-medium text-slate-600">Target PnL USDC</Label>
           <Input
             type="number"
-            min={0}
             step={0.01}
             value={fields[REVENGE_FLIP_PROFIT_TARGET_USDC_FIELD] || '0.25'}
             onChange={(event) =>
@@ -177,6 +177,20 @@ export function RevengeFlipSection({
               onUpdateField(REVENGE_FLIP_MIN_REENTRY_SHARES_FIELD, event.target.value)
             }
             className="h-8 border-slate-200 bg-white text-xs"
+          />
+        </div>
+        <div className="flex items-center justify-between gap-2 rounded border border-rose-100 bg-white/80 px-2 py-1.5">
+          <Label className="text-[11px] font-medium text-slate-600">
+            Stop-loss sonrası IV mismatch
+          </Label>
+          <Switch
+            checked={fields[REVENGE_FLIP_POST_STOP_LOSS_IV_MISMATCH_ENABLED_FIELD] !== 'false'}
+            onCheckedChange={(checked) =>
+              onUpdateField(
+                REVENGE_FLIP_POST_STOP_LOSS_IV_MISMATCH_ENABLED_FIELD,
+                checked ? 'true' : 'false',
+              )
+            }
           />
         </div>
         <div className="space-y-1">

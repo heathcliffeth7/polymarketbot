@@ -5,6 +5,7 @@ pub mod contracts;
 pub mod db;
 pub mod exchange;
 pub mod market_data;
+pub mod proxy;
 pub mod reconcile;
 pub mod signer;
 pub mod ws;

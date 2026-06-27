@@ -79,9 +79,10 @@ async fn process_trade_builder_workflows(
             );
         }
         if trade_flow_ws_fast_path_cache_requires_refresh_now().await {
-            if let Err(e) = refresh_trade_flow_ws_fast_path_for_boundary(
-                repo, run_id, ws, &mut user_cfg_cache,
-            ).await {
+            if let Err(e) =
+                refresh_trade_flow_ws_fast_path_for_boundary(repo, run_id, ws, &mut user_cfg_cache)
+                    .await
+            {
                 warn!(run_id, error = %e, "TRADE_FLOW_BOUNDARY_REFRESH_FAILED");
             }
         }
@@ -601,44 +602,28 @@ pub(crate) async fn sync_recent_trade_builder_fills(
     repo: &PostgresRepository,
     client: &dyn OrderExecutor,
 ) -> Result<usize> {
-    let fills = client.list_fills(None).await?;
-    let mut synced = 0usize;
-
-    for fill in fills {
-        if fill.fill_id.is_empty() || fill.order_id.is_empty() {
-            continue;
-        }
-        let Some(internal_order_id) = repo
-            .internal_order_id_by_exchange_order_id(&fill.order_id)
+    Ok(
+        sync_trade_builder_fill_pages(repo, client, TradeQuery::default(), None, 1)
             .await?
-        else {
-            continue;
-        };
+            .synced_count,
+    )
+}
 
-        let raw_fill = json!({
-            "fill_id": fill.fill_id,
-            "order_id": fill.order_id,
-            "price": fill.price,
-            "size": fill.size,
-            "fee": fill.fee,
-            "timestamp": fill.ts
-        });
-
-        repo.upsert_fill_by_exchange_fill_id(
-            internal_order_id,
-            &fill.fill_id,
-            fill.price,
-            fill.size,
-            fill.fee.unwrap_or_default(),
-            fill.ts,
-            &raw_fill,
-        )
-        .await?;
-
-        synced = synced.saturating_add(1);
-    }
-
-    Ok(synced)
+pub(crate) async fn sync_recent_trade_builder_fills_with_timing(
+    repo: &PostgresRepository,
+    client: &dyn OrderExecutor,
+    stats: &mut crate::trade_builder_fill_sync_timing::FinalFillSyncTimingStats,
+) -> Result<usize> {
+    Ok(sync_trade_builder_fill_pages_with_stats(
+        repo,
+        client,
+        TradeQuery::default(),
+        None,
+        1,
+        Some(stats),
+    )
+    .await?
+    .synced_count)
 }
 
 fn is_trade_builder_order_processable_status(status: &str) -> bool {

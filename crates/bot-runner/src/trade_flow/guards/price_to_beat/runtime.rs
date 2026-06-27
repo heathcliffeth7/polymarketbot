@@ -1,7 +1,13 @@
+use super::block_event_coalescing::coalesce_pre_order_price_to_beat_block_event;
+use super::iv_depth_diagnostics::{
+    annotate_price_to_beat_iv_book_not_requested_for_early_block,
+    hydrate_action_place_order_iv_mismatch_book_quotes, price_to_beat_iv_early_block_can_skip_book,
+    price_to_beat_iv_mismatch_needs_book_hydration,
+};
 use super::iv_mismatch_adaptive::{
     PriceToBeatIvAdaptiveVolumeInput, PriceToBeatIvVolumeBaselineMode,
 };
-use super::iv_mismatch_protection::{PriceToBeatIvBookQuotes, PriceToBeatIvProtectionMode};
+use super::iv_mismatch_protection::PriceToBeatIvProtectionMode;
 use super::notification::{
     build_price_to_beat_guard_blocked_notification_message,
     build_price_to_beat_guard_recovered_notification_message,
@@ -10,15 +16,18 @@ use super::notification::{
 use super::notification_state::{
     clear_price_to_beat_guard_waiting_context, price_to_beat_guard_notification_phase,
     price_to_beat_guard_waiting_state, set_price_to_beat_guard_notification_phase,
-    set_price_to_beat_guard_notification_seed, set_price_to_beat_guard_waiting_state,
-    PriceToBeatGuardNotificationPhase,
+    set_price_to_beat_guard_notification_seed, set_price_to_beat_guard_waiting_state_with_snapshot,
+    PriceToBeatGuardNotificationPhase, PriceToBeatGuardWaitingSnapshot,
 };
 use super::retry_policy::{
     clear_early_stale_side_guard_retry_count, early_stale_side_guard_retry_limit_reached,
-    early_stale_side_retry_limit_execution, price_to_beat_guard_retry_delay_ms,
+    early_stale_side_retry_limit_execution, price_to_beat_guard_retry_delay_ms_for_reason,
+};
+use super::wait_reprice_guard::{
+    maybe_apply_wait_reprice_guard, wait_reprice_reason_disables_retry,
+    wait_reprice_snapshot_from_evaluation,
 };
 use super::*;
-use bot_infra::exchange::OrderBookSnapshot;
 use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use serde_json::{json, Value};
 
@@ -98,6 +107,8 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
     context: &mut Value,
     market_slug: &str,
     token_id: &str,
+    action_yes_token_id: Option<&str>,
+    action_no_token_id: Option<&str>,
     outcome_label: &str,
     side: &str,
     execution_mode: &str,
@@ -138,17 +149,22 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
         PriceToBeatGuardRuntimeContext::standard_action_place_order(repo, run.user_id, cfg, client);
     let retry_on_guard_block =
         crate::node_config_bool(node, "retryOnPriceToBeatGuardBlock").unwrap_or(true);
-    let evaluation = evaluate_action_place_order_price_to_beat_guard_state(
+    let mut evaluation = evaluate_action_place_order_price_to_beat_guard_state(
         Some(runtime),
         context,
         node,
         run.id,
         Some(run.definition_id),
         market_slug,
+        Some(token_id),
+        action_yes_token_id,
+        action_no_token_id,
         outcome_label,
         signal_market,
     )
     .await?;
+    let guard_evaluated_at_ms = Utc::now().timestamp_millis();
+    maybe_apply_wait_reprice_guard(node, context, &mut evaluation, guard_evaluated_at_ms);
     let evaluation_output = evaluation.to_value();
     crate::set_flow_context(context, "priceToBeatGuard", evaluation_output.clone());
     maybe_emit_action_place_order_iv_mismatch_edge_decision_event(
@@ -195,7 +211,8 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
             .await?;
 
             if should_notify
-                && notification_phase == Some(PriceToBeatGuardNotificationPhase::BlockedNotified)
+                && notification_phase.as_ref().map(|entry| entry.phase)
+                    == Some(PriceToBeatGuardNotificationPhase::BlockedNotified)
             {
                 let message = build_price_to_beat_guard_recovered_notification_message(
                     &evaluation,
@@ -217,29 +234,63 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
         return Ok(None);
     }
 
-    repo.append_trade_flow_event(
-        Some(run.id),
-        run.definition_id,
-        Some(run.version_id),
-        "pre_order_price_to_beat_blocked",
-        &json!({
-            "node_key": node.key,
-            "node_type": node.node_type,
-            "market_slug": market_slug,
-            "token_id": token_id,
-            "outcome_label": outcome_label,
-            "side": side,
-            "execution_mode": execution_mode,
-            "price_to_beat_guard": evaluation_output.clone(),
-        }),
-    )
-    .await?;
-
     let candidate_reason =
         crate::build_guard_notification_reason("price_to_beat", &evaluation.reason_code);
-    if retry_on_guard_block {
-        let retry_delay_ms = price_to_beat_guard_retry_delay_ms(node);
-        if early_stale_side_guard_retry_limit_reached(context, node, market_slug) {
+    let should_retry_guard_block = retry_on_guard_block
+        && !wait_reprice_reason_disables_retry(&evaluation.reason_code)
+        && !price_to_beat_retry_window_elapsed(&evaluation);
+    let early_stale_retry_limit_reached = if should_retry_guard_block {
+        early_stale_side_guard_retry_limit_reached(context, node, market_slug)
+    } else {
+        false
+    };
+    let mut blocked_event_payload = json!({
+        "node_key": node.key,
+        "node_type": node.node_type,
+        "market_slug": market_slug,
+        "token_id": token_id,
+        "outcome_label": outcome_label,
+        "side": side,
+        "execution_mode": execution_mode,
+        "price_to_beat_guard": evaluation_output.clone(),
+    });
+    let block_event_coalescing = if should_retry_guard_block && !early_stale_retry_limit_reached {
+        coalesce_pre_order_price_to_beat_block_event(
+            context,
+            run.id,
+            &node.key,
+            market_slug,
+            token_id,
+            "price_to_beat",
+            &evaluation.reason_code,
+            &blocked_event_payload,
+            guard_evaluated_at_ms,
+        )
+    } else {
+        super::block_event_coalescing::BlockEventCoalescingOutcome {
+            emit: true,
+            summary: None,
+        }
+    };
+    if let Some(summary) = block_event_coalescing.summary {
+        if let Some(payload) = blocked_event_payload.as_object_mut() {
+            payload.insert("coalesced_summary".to_string(), summary);
+        }
+    }
+    if block_event_coalescing.emit {
+        repo.append_trade_flow_event(
+            Some(run.id),
+            run.definition_id,
+            Some(run.version_id),
+            "pre_order_price_to_beat_blocked",
+            &blocked_event_payload,
+        )
+        .await?;
+    }
+    if should_retry_guard_block {
+        let retry_delay_ms =
+            price_to_beat_guard_retry_delay_ms_for_reason(node, &evaluation.reason_code);
+        if early_stale_retry_limit_reached {
             return Ok(Some(early_stale_side_retry_limit_execution(
                 node,
                 market_slug,
@@ -256,8 +307,25 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
             }
             None => true,
         };
-        set_price_to_beat_guard_waiting_state(context, market_slug, &evaluation.reason_code);
-        if entered_waiting && notification_phase.is_none() && should_notify {
+        let wait_snapshot = wait_reprice_snapshot_from_evaluation(&evaluation);
+        set_price_to_beat_guard_waiting_state_with_snapshot(
+            context,
+            market_slug,
+            &evaluation.reason_code,
+            PriceToBeatGuardWaitingSnapshot {
+                now_ms: Some(guard_evaluated_at_ms),
+                execution_ask_cent: wait_snapshot.execution_ask_cent,
+                gap_strength: wait_snapshot.gap_strength,
+                q_final_cent: wait_snapshot.q_final_cent,
+            },
+        );
+        if entered_waiting
+            && notification_phase
+                .as_ref()
+                .map(|entry| entry.reason_code != evaluation.reason_code)
+                .unwrap_or(true)
+            && should_notify
+        {
             let message = build_price_to_beat_guard_waiting_notification_message(&evaluation);
             if send_price_to_beat_guard_notification(repo, runtime.user_id, &message).await {
                 set_price_to_beat_guard_notification_seed(
@@ -306,7 +374,13 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
             repeat_idempotency_key: None,
         }));
     }
-    if should_notify && notification_phase.is_none() {
+    // Dedup: aynı reason_code için tekrar bildirme. Terminal wait-reprice reason'ları
+    // dahil tüm blocklar için tek bildirim yeterli; reason değiştiğinde tekrar bildir.
+    let notification_reason_changed = notification_phase
+        .as_ref()
+        .map(|entry| entry.reason_code != evaluation.reason_code)
+        .unwrap_or(true);
+    if should_notify && notification_reason_changed {
         let message = build_price_to_beat_guard_blocked_notification_message(&evaluation);
         if send_price_to_beat_guard_notification(repo, runtime.user_id, &message).await {
             set_price_to_beat_guard_notification_seed(
@@ -348,6 +422,15 @@ pub(crate) async fn maybe_block_action_place_order_price_to_beat_guard(
     }))
 }
 
+fn price_to_beat_retry_window_elapsed(evaluation: &PriceToBeatGuardEvaluation) -> bool {
+    evaluation
+        .iv_mismatch_edge
+        .as_ref()
+        .and_then(|value| value.get("seconds_left"))
+        .and_then(Value::as_f64)
+        .is_some_and(|seconds_left| seconds_left <= 0.0)
+}
+
 async fn maybe_emit_action_place_order_iv_mismatch_edge_decision_event(
     repo: &crate::PostgresRepository,
     run: &crate::TradeFlowRun,
@@ -385,6 +468,14 @@ async fn maybe_emit_action_place_order_iv_mismatch_edge_decision_event(
         PRICE_TO_BEAT_IV_MISMATCH_EVENT_TYPE,
         &json!({
             "source": "action_place_order_guard",
+            "run_id": run.id,
+            "package_version": env!("CARGO_PKG_VERSION"),
+            "git_sha": crate::bot_build_git_sha(),
+            "build_time": crate::bot_build_time(),
+            "config_hash": crate::bot_runtime_run_config_hash(),
+            "strategy_config_hash": crate::bot_runtime_config_hash(&node.config),
+            "node_config_hash": crate::bot_runtime_config_hash(&node.config),
+            "feature_flags_hash": crate::bot_runtime_config_hash(&node.config),
             "node_key": node.key,
             "node_type": node.node_type,
             "market_slug": market_slug,
@@ -395,6 +486,10 @@ async fn maybe_emit_action_place_order_iv_mismatch_edge_decision_event(
             "passed": evaluation.passed,
             "reason_code": evaluation.reason_code,
             "threshold_mode": evaluation.threshold_mode,
+            "block_summary": super::iv_mismatch_decision_summary::build_iv_mismatch_block_summary(
+                evaluation,
+                iv_mismatch_edge,
+            ),
             "iv_mismatch_edge": iv_mismatch_edge,
             "price_to_beat_guard": evaluation_output,
         }),
@@ -438,6 +533,14 @@ pub(crate) async fn maybe_emit_pair_lock_primary_iv_mismatch_edge_decision_event
         PRICE_TO_BEAT_IV_MISMATCH_EVENT_TYPE,
         &json!({
             "source": "pair_lock_primary_selection",
+            "run_id": run.id,
+            "package_version": env!("CARGO_PKG_VERSION"),
+            "git_sha": crate::bot_build_git_sha(),
+            "build_time": crate::bot_build_time(),
+            "config_hash": crate::bot_runtime_run_config_hash(),
+            "strategy_config_hash": crate::bot_runtime_config_hash(&node.config),
+            "node_config_hash": crate::bot_runtime_config_hash(&node.config),
+            "feature_flags_hash": crate::bot_runtime_config_hash(&node.config),
             "node_key": node.key,
             "node_type": node.node_type,
             "market_slug": market_slug,
@@ -705,140 +808,6 @@ fn action_place_order_iv_mismatch_edge_config(
     config
 }
 
-async fn hydrate_action_place_order_iv_mismatch_book_quotes(
-    runtime: Option<&PriceToBeatGuardRuntimeContext<'_>>,
-    context: &Value,
-    node: &crate::TradeFlowNode,
-    outcome_label: &str,
-    signal_market: Option<PriceToBeatSignalFormulaMarketInput>,
-    config: &mut PriceToBeatIvMismatchEdgeConfig,
-) {
-    if !config.protection_mode.is_active()
-        || (!config.book_lead_guard_enabled && !config.depth_guard_enabled)
-    {
-        return;
-    }
-    let Some((_, selected_direction)) = normalize_outcome_direction(outcome_label) else {
-        return;
-    };
-    let opposite_outcome = if selected_direction == "up" {
-        "Down"
-    } else {
-        "Up"
-    };
-    let selected_token_id =
-        crate::resolve_token_id_for_outcome_label_for_node(&node.key, outcome_label, context)
-            .or_else(|| crate::resolve_token_id_for_outcome_label(outcome_label, context));
-    let opposite_token_id =
-        crate::resolve_token_id_for_outcome_label_for_node(&node.key, opposite_outcome, context)
-            .or_else(|| crate::resolve_token_id_for_outcome_label(opposite_outcome, context));
-    let selected_order_book = fetch_iv_order_book(runtime, selected_token_id.as_deref()).await;
-    if config.depth_guard_enabled {
-        config.depth_intended_qty = resolve_action_place_order_iv_mismatch_intended_qty(
-            node,
-            context,
-            config.market.best_ask,
-        );
-        config.depth_order_book = selected_order_book.clone();
-    }
-
-    let selected_quote = signal_market
-        .and_then(|market| normalize_iv_book_quote(market.best_bid, market.best_ask))
-        .or_else(|| {
-            selected_order_book
-                .as_ref()
-                .and_then(iv_order_book_best_quote)
-        })
-        .or_else(|| config.market.best_bid.zip(config.market.best_ask))
-        .and_then(|(bid, ask)| normalize_iv_book_quote(Some(bid), Some(ask)));
-    let selected_quote = match selected_quote {
-        Some(quote) => Some(quote),
-        None => fetch_iv_book_quote(runtime, selected_token_id.as_deref()).await,
-    };
-    let opposite_quote = fetch_iv_book_quote(runtime, opposite_token_id.as_deref()).await;
-    config.book_quotes = match (selected_direction, selected_quote, opposite_quote) {
-        ("up", Some((up_bid, up_ask)), Some((down_bid, down_ask))) => {
-            Some(PriceToBeatIvBookQuotes {
-                up_bid: Some(up_bid),
-                up_ask: Some(up_ask),
-                down_bid: Some(down_bid),
-                down_ask: Some(down_ask),
-            })
-        }
-        ("down", Some((down_bid, down_ask)), Some((up_bid, up_ask))) => {
-            Some(PriceToBeatIvBookQuotes {
-                up_bid: Some(up_bid),
-                up_ask: Some(up_ask),
-                down_bid: Some(down_bid),
-                down_ask: Some(down_ask),
-            })
-        }
-        _ => None,
-    };
-}
-
-async fn fetch_iv_order_book(
-    runtime: Option<&PriceToBeatGuardRuntimeContext<'_>>,
-    token_id: Option<&str>,
-) -> Option<OrderBookSnapshot> {
-    let client = runtime.and_then(|runtime| runtime.client)?;
-    let token_id = token_id?.trim();
-    if token_id.is_empty() {
-        return None;
-    }
-    client.order_book(token_id).await.ok().flatten()
-}
-
-async fn fetch_iv_book_quote(
-    runtime: Option<&PriceToBeatGuardRuntimeContext<'_>>,
-    token_id: Option<&str>,
-) -> Option<(f64, f64)> {
-    let client = runtime.and_then(|runtime| runtime.client)?;
-    let token_id = token_id?.trim();
-    if token_id.is_empty() {
-        return None;
-    }
-    let (bid, ask) = client.best_bid_ask(token_id).await.ok()?;
-    normalize_iv_book_quote(bid, ask)
-}
-
-fn iv_order_book_best_quote(snapshot: &OrderBookSnapshot) -> Option<(f64, f64)> {
-    let best_bid = snapshot
-        .bids
-        .iter()
-        .filter(|level| level.price.is_finite() && level.price > 0.0 && level.price < 1.0)
-        .map(|level| level.price)
-        .max_by(f64::total_cmp);
-    let best_ask = snapshot
-        .asks
-        .iter()
-        .filter(|level| level.price.is_finite() && level.price > 0.0 && level.price < 1.0)
-        .map(|level| level.price)
-        .min_by(f64::total_cmp);
-    normalize_iv_book_quote(best_bid, best_ask)
-}
-
-fn resolve_action_place_order_iv_mismatch_intended_qty(
-    node: &crate::TradeFlowNode,
-    context: &Value,
-    best_ask: Option<f64>,
-) -> Option<f64> {
-    let size_mode = crate::node_config_string(node, "sizeMode")
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| "usdc".to_string());
-    if size_mode == "shares" {
-        return crate::node_config_f64(node, "targetQty")
-            .or_else(|| crate::node_config_f64(node, "target_qty"))
-            .filter(|value| value.is_finite() && *value > 0.0);
-    }
-
-    let size_usdc = crate::flow_context_f64(context, "selectedEntrySizeUsdc")
-        .or_else(|| crate::node_config_f64(node, "sizeUsdc"))
-        .or_else(|| crate::node_config_f64(node, "targetNotionalUsdc"))?;
-    let best_ask = best_ask.filter(|value| value.is_finite() && *value > 0.0)?;
-    Some(size_usdc / best_ask)
-}
-
 async fn hydrate_action_place_order_iv_mismatch_adaptive_volume(
     runtime: Option<&PriceToBeatGuardRuntimeContext<'_>>,
     market_slug: &str,
@@ -1024,12 +993,6 @@ fn smooth_hourly_volume_baseline(
     }
 }
 
-fn normalize_iv_book_quote(bid: Option<f64>, ask: Option<f64>) -> Option<(f64, f64)> {
-    let bid = bid.filter(|value| value.is_finite() && *value > 0.0 && *value < 1.0)?;
-    let ask = ask.filter(|value| value.is_finite() && *value > 0.0 && *value < 1.0)?;
-    (ask >= bid).then_some((bid, ask))
-}
-
 fn parse_iv_time_rule(value: &Value) -> Option<PriceToBeatIvMismatchTimeRule> {
     let obj = value.as_object()?;
     let start_remaining_secs =
@@ -1083,11 +1046,16 @@ fn sync_price_to_beat_iv_selected_max_price(
     let max_price = evaluation
         .passed
         .then(|| {
-            evaluation
-                .iv_mismatch_edge
-                .as_ref()
-                .and_then(|value| value.get("time_rule_max_price"))
+            let iv_mismatch_edge = evaluation.iv_mismatch_edge.as_ref()?;
+            iv_mismatch_edge
+                .get("submit_limit_price_cent")
                 .and_then(crate::value_as_f64)
+                .map(|value| value / 100.0)
+                .or_else(|| {
+                    iv_mismatch_edge
+                        .get("time_rule_max_price")
+                        .and_then(crate::value_as_f64)
+                })
         })
         .flatten()
         .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0);
@@ -1098,6 +1066,10 @@ fn sync_price_to_beat_iv_selected_max_price(
     );
 }
 
+fn price_to_beat_guard_can_skip_book_recheck(evaluation: &PriceToBeatGuardEvaluation) -> bool {
+    !evaluation.passed && price_to_beat_iv_early_block_can_skip_book(&evaluation.reason_code)
+}
+
 pub(crate) async fn evaluate_action_place_order_price_to_beat_guard_state(
     runtime: Option<PriceToBeatGuardRuntimeContext<'_>>,
     context: &mut Value,
@@ -1105,6 +1077,9 @@ pub(crate) async fn evaluate_action_place_order_price_to_beat_guard_state(
     run_id: i64,
     flow_definition_id: Option<i64>,
     market_slug: &str,
+    action_token_id: Option<&str>,
+    action_yes_token_id: Option<&str>,
+    action_no_token_id: Option<&str>,
     outcome_label: &str,
     signal_market: Option<PriceToBeatSignalFormulaMarketInput>,
 ) -> Result<PriceToBeatGuardEvaluation> {
@@ -1151,10 +1126,54 @@ pub(crate) async fn evaluate_action_place_order_price_to_beat_guard_state(
     let mut iv_mismatch_config = None;
     if resolution.effective_mode == PriceToBeatMode::IvMismatchEdge {
         let mut config = action_place_order_iv_mismatch_edge_config(node, signal_market);
+        hydrate_action_place_order_iv_mismatch_adaptive_volume(
+            runtime.as_ref(),
+            market_slug,
+            &mut config,
+        )
+        .await;
+        super::iv_mismatch_participation::hydrate_price_to_beat_iv_participation(
+            runtime.as_ref().map(|runtime| runtime.repo),
+            flow_definition_id,
+            &mut config,
+        )
+        .await;
+        iv_mismatch_config = Some(config);
+    }
+    let iv_mismatch_needs_book_hydration = iv_mismatch_config
+        .as_ref()
+        .map(price_to_beat_iv_mismatch_needs_book_hydration)
+        .unwrap_or(false);
+    let current_price_source = PriceToBeatCurrentPriceSource::parse(
+        crate::node_config_string(node, "priceToBeatCurrentPriceSource").as_deref(),
+    );
+    let cex_entry_consensus_config =
+        super::entry_current_hybrid::CexEntryConsensusConfig::from_node(node);
+    let mut evaluation = evaluate_price_to_beat_guard_with_current_source(
+        market_slug,
+        resolution.effective_mode,
+        resolution.threshold_value,
+        resolution.threshold_unit,
+        outcome_label,
+        signal_config.clone(),
+        current_price_source,
+        cex_entry_consensus_config.clone(),
+        iv_mismatch_config,
+    )
+    .await;
+    if resolution.effective_mode == PriceToBeatMode::IvMismatchEdge
+        && iv_mismatch_needs_book_hydration
+        && !price_to_beat_guard_can_skip_book_recheck(&evaluation)
+    {
+        let mut config = action_place_order_iv_mismatch_edge_config(node, signal_market);
         hydrate_action_place_order_iv_mismatch_book_quotes(
             runtime.as_ref(),
             context,
             node,
+            market_slug,
+            action_token_id,
+            action_yes_token_id,
+            action_no_token_id,
             outcome_label,
             signal_market,
             &mut config,
@@ -1172,22 +1191,24 @@ pub(crate) async fn evaluate_action_place_order_price_to_beat_guard_state(
             &mut config,
         )
         .await;
-        iv_mismatch_config = Some(config);
+        evaluation = evaluate_price_to_beat_guard_with_current_source(
+            market_slug,
+            resolution.effective_mode,
+            resolution.threshold_value,
+            resolution.threshold_unit,
+            outcome_label,
+            signal_config,
+            current_price_source,
+            cex_entry_consensus_config,
+            Some(config),
+        )
+        .await;
+    } else if resolution.effective_mode == PriceToBeatMode::IvMismatchEdge
+        && iv_mismatch_needs_book_hydration
+        && price_to_beat_guard_can_skip_book_recheck(&evaluation)
+    {
+        annotate_price_to_beat_iv_book_not_requested_for_early_block(&mut evaluation);
     }
-    let current_price_source = PriceToBeatCurrentPriceSource::parse(
-        crate::node_config_string(node, "priceToBeatCurrentPriceSource").as_deref(),
-    );
-    let mut evaluation = evaluate_price_to_beat_guard_with_current_source(
-        market_slug,
-        resolution.effective_mode,
-        resolution.threshold_value,
-        resolution.threshold_unit,
-        outcome_label,
-        signal_config,
-        current_price_source,
-        iv_mismatch_config,
-    )
-    .await;
     resolution.apply_metadata(&mut evaluation);
     sync_price_to_beat_iv_selected_max_price(context, &evaluation);
     if matches!(
@@ -1208,6 +1229,11 @@ pub(crate) async fn evaluate_action_place_order_price_to_beat_guard_state(
         outcome_label,
         &mut evaluation,
     );
+    super::entry_quality_policy::apply_action_place_order_entry_quality_policy(
+        node,
+        &mut evaluation,
+    );
+    sync_price_to_beat_iv_selected_max_price(context, &evaluation);
     if let Some(runtime) = runtime {
         if !runtime.cfg.strategy.max_price_relax_enabled || !node_max_price_relax_enabled {
             let disabled_reason = if !runtime.cfg.strategy.max_price_relax_enabled {

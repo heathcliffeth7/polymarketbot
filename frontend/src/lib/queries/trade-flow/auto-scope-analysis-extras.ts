@@ -283,7 +283,11 @@ export function buildAutoScopeRiskFlagsFromGuard(
   const reasons: string[] = [];
 
   const highPrice = highPricePenalty > 0;
-  const stale = stalePenalty > 0 || decisionReason === 'blocked_rtds_stale';
+  const stale =
+    stalePenalty > 0 ||
+    decisionReason === 'blocked_rtds_stale' ||
+    decisionReason === 'chainlink_provider_stale_global' ||
+    decisionReason === 'chainlink_provider_stale_entry_quality';
   const fallingKnife =
     dropPenalty > 0 ||
     decisionReason === 'blocked_falling_knife_drop' ||

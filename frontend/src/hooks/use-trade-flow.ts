@@ -304,6 +304,26 @@ export async function stopTradeFlowDefinition(definitionId: number) {
   );
 }
 
+export async function draftAllPublishedTradeFlowDefinitions() {
+  return requestJson<{
+    data: {
+      draftedCount: number;
+      results: Array<{
+        definitionId: number;
+        previousStatus: 'published';
+        nextStatus: 'draft';
+        canceledRunCount: number;
+        canceledDualDcaJobCount: number;
+        canceledBuilderOrderCount: number;
+      }>;
+    };
+  }>(
+    '/api/trade-flow/definitions/draft-all',
+    { method: 'POST' },
+    { timeoutMs: 60_000 }
+  );
+}
+
 export async function deleteTradeFlowDefinition(definitionId: number) {
   return requestJson<{ success: boolean; data: null }>(
     `/api/trade-flow/definitions/${definitionId}`,

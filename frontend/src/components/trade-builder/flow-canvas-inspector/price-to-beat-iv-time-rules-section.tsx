@@ -302,6 +302,23 @@ export function PriceToBeatIvTimeRulesSection({
             placeholder="10"
             onChange={(value) => onUpdateField('priceToBeatIvCexConflictRiskPoints', value)}
           />
+          <IvRuleCheckbox
+            label="Low quality recheck"
+            value={fields.priceToBeatIvLowQualityEdgeRecheckEnabled}
+            onChange={(value) => onUpdateField('priceToBeatIvLowQualityEdgeRecheckEnabled', value)}
+          />
+          <IvRuleInput
+            label="Low quality gap"
+            value={fields.priceToBeatIvLowQualityGapMargin ?? ''}
+            placeholder="0.10"
+            onChange={(value) => onUpdateField('priceToBeatIvLowQualityGapMargin', value)}
+          />
+          <IvRuleInput
+            label="Low quality margin c"
+            value={fields.priceToBeatIvLowQualityEdgeMarginCent ?? ''}
+            placeholder="5"
+            onChange={(value) => onUpdateField('priceToBeatIvLowQualityEdgeMarginCent', value)}
+          />
           <IvRuleInput
             label="Passive TTL ms"
             value={fields.priceToBeatIvPassiveBidTtlMs ?? ''}
@@ -425,6 +442,23 @@ export function PriceToBeatIvTimeRulesSection({
               label="Late needs fail"
               value={fields.priceToBeatIvLateExpensiveMixedCexRequireGapFailOrLagHigh}
               onChange={(value) => onUpdateField('priceToBeatIvLateExpensiveMixedCexRequireGapFailOrLagHigh', value)}
+            />
+            <IvRuleCheckbox
+              label="CEX magnitude"
+              value={fields.priceToBeatIvCexMagnitudeGuardEnabled}
+              onChange={(value) => onUpdateField('priceToBeatIvCexMagnitudeGuardEnabled', value)}
+            />
+            <IvRuleInput
+              label="Shallow ratio"
+              value={fields.priceToBeatIvCexMagnitudeShallowRatio ?? ''}
+              placeholder="0.50"
+              onChange={(value) => onUpdateField('priceToBeatIvCexMagnitudeShallowRatio', value)}
+            />
+            <IvRuleInput
+              label="Moderate ratio"
+              value={fields.priceToBeatIvCexMagnitudeModerateRatio ?? ''}
+              placeholder="1.00"
+              onChange={(value) => onUpdateField('priceToBeatIvCexMagnitudeModerateRatio', value)}
             />
           </div>
         </div>
@@ -717,6 +751,46 @@ export function PriceToBeatIvTimeRulesSection({
           value={fields.priceToBeatIvMinAdjustedMargin ?? ''}
           placeholder="0.02"
           onChange={(value) => onUpdateField('priceToBeatIvMinAdjustedMargin', value)}
+        />
+        <IvRuleInput
+          label="Med chop min"
+          value={fields.priceToBeatIvMediumChopMinAdjMargin ?? ''}
+          placeholder="0.045"
+          onChange={(value) => onUpdateField('priceToBeatIvMediumChopMinAdjMargin', value)}
+        />
+        <IvRuleInput
+          label="Med chop high"
+          value={fields.priceToBeatIvMediumChopHighPriceMinAdjMargin ?? ''}
+          placeholder="0.050"
+          onChange={(value) =>
+            onUpdateField('priceToBeatIvMediumChopHighPriceMinAdjMargin', value)
+          }
+        />
+        <IvRuleInput
+          label="Med chop ref"
+          value={fields.priceToBeatIvMediumChopHighPriceRefCent ?? ''}
+          placeholder="82"
+          onChange={(value) => onUpdateField('priceToBeatIvMediumChopHighPriceRefCent', value)}
+        />
+        <IvRuleInput
+          label="Med chop Binance"
+          value={fields.priceToBeatIvMediumChopBinanceFailOpenMarginAdd ?? ''}
+          placeholder="0.005"
+          onChange={(value) =>
+            onUpdateField('priceToBeatIvMediumChopBinanceFailOpenMarginAdd', value)
+          }
+        />
+        <IvRuleInput
+          label="Med chop stale ms"
+          value={fields.priceToBeatIvMediumChopStaleMs ?? ''}
+          placeholder="1500"
+          onChange={(value) => onUpdateField('priceToBeatIvMediumChopStaleMs', value)}
+        />
+        <IvRuleInput
+          label="Med chop stale"
+          value={fields.priceToBeatIvMediumChopStaleMarginAdd ?? ''}
+          placeholder="0.005"
+          onChange={(value) => onUpdateField('priceToBeatIvMediumChopStaleMarginAdd', value)}
         />
         <IvRuleInput
           label="Min final q"

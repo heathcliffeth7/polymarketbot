@@ -4,6 +4,9 @@ import { formatClientRequestError, hasClientRequestErrorCode } from '@/lib/http-
 import { FLOW_DEFINITION_BUSY_CODE, FLOW_DEFINITION_BUSY_MESSAGE } from '@/lib/queries/trade-flow/mutation-errors';
 import { buildContextFromForm, type ContextFormState } from '@/lib/trade-flow-config-mappers';
 import {
+  createAvgReboundPairlockRescueGraph,
+  createAvgReboundPairlockRescueMicro20Graph,
+  createConfidenceLadderHedgeLockGraph,
   createDcaTradeFlowGraph,
   createMultiLegHedgeGraph,
   createPairLockHyperliquid70To80Graph,
@@ -40,6 +43,9 @@ export function createTemplateGraph(kind: TemplateKind, defaultMarketSlug: strin
     position_monitor: () => createPositionMonitorNotifyGraph(defaultMarketSlug, defaultOutcome),
     multi_leg_hedge: () => createMultiLegHedgeGraph(defaultMarketSlug, defaultOutcome),
     revenge_flip_10_80: () => createRevengeFlip10_80Graph(defaultMarketSlug, defaultOutcome),
+    confidence_ladder_hedge_lock: () => createConfidenceLadderHedgeLockGraph(defaultMarketSlug, defaultOutcome),
+    avg_rebound_pairlock_rescue_50usdc: () => createAvgReboundPairlockRescueGraph(defaultMarketSlug, defaultOutcome),
+    avg_rebound_pairlock_rescue_micro_20usdc: () => createAvgReboundPairlockRescueMicro20Graph(defaultMarketSlug, defaultOutcome),
     pairlock_hyperliquid_70_80: () => createPairLockHyperliquid70To80Graph(defaultMarketSlug, defaultOutcome),
     positive_quantity_flip_grid_1usdc: () => createPositiveQuantityFlipGrid1UsdcGraph(defaultMarketSlug, defaultOutcome),
     positive_quantity_flip_grid_inventory_balance: () => createPositiveQuantityFlipGridInventoryBalanceGraph(defaultMarketSlug, defaultOutcome),
@@ -69,6 +75,9 @@ export function getTemplateCreatedMessage(kind: TemplateKind): string {
     position_monitor: 'Pozisyon Izleme + Bildirim sablonu olusturuldu.',
     multi_leg_hedge: 'Multi-Leg Hedge sablonu olusturuldu.',
     revenge_flip_10_80: 'RevengeFlip 10/80 sablonu olusturuldu.',
+    confidence_ladder_hedge_lock: 'BTC 5m Confidence Ladder + Hedge Lock sablonu olusturuldu.',
+    avg_rebound_pairlock_rescue_50usdc: 'Avg-Rebound Pairlock Rescue 50 USDC sablonu olusturuldu.',
+    avg_rebound_pairlock_rescue_micro_20usdc: 'Avg-Rebound Micro 23 USDC sablonu olusturuldu.',
     pairlock_hyperliquid_70_80: 'PairLock 70-80 Hyperliquid sablonu olusturuldu.',
     positive_quantity_flip_grid_1usdc: 'Positive Quantity Flip Grid 1 USDC sablonu olusturuldu.',
     positive_quantity_flip_grid_inventory_balance: 'Positive Grid Inventory Balance sablonu olusturuldu.',

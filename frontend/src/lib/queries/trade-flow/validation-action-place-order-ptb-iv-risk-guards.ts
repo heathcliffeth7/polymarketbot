@@ -73,6 +73,16 @@ export function validateEq77RiskCap(
     'priceToBeatIvWaitRepriceGuardEnabled',
     'invalid_price_to_beat_iv_wait_reprice_guard_enabled'
   );
+  validateOptionalBoolean(
+    issues,
+    node,
+    config.priceToBeatIvLowQualityEdgeRecheckEnabled,
+    'priceToBeatIvLowQualityEdgeRecheckEnabled',
+    'invalid_price_to_beat_iv_low_quality_edge_recheck_enabled'
+  );
+  for (const key of ['priceToBeatIvLowQualityGapMargin', 'priceToBeatIvLowQualityEdgeMarginCent']) {
+    validateOptionalNonNegativeNumber(issues, node, config[key], key, `invalid_${toSnakeCase(key)}`);
+  }
   for (const key of [
     'priceToBeatIvWaitMaxAgeMsEarly',
     'priceToBeatIvWaitMaxAgeMsMid',

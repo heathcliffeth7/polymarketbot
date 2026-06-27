@@ -402,6 +402,7 @@ fn pair_lock_primary_ptb_evaluation_log_snapshot_captures_key_fields() {
         iv_mismatch_edge: None,
         early_stale_side: None,
         cex_direction_guard: None,
+        entry_current_source_debug: None,
     };
 
     let snapshot = pair_lock_primary_ptb_evaluation_log_snapshot(

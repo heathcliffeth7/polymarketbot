@@ -175,6 +175,13 @@ export function FlowCanvasEditorLayout({
   edgeInspectorTab,
   edgeInspectorActions,
 }: FlowCanvasEditorLayoutProps) {
+  const isCanvasLoading =
+    readOnly &&
+    Boolean(
+      readOnlyReason &&
+        /yukleniyor|aciliyor|kaydediliyor/i.test(readOnlyReason)
+    );
+
   return (
     <div
       ref={editorRootRef}
@@ -306,10 +313,20 @@ export function FlowCanvasEditorLayout({
 
         <div
           ref={canvasWrapperRef}
-          className="flow-canvas h-[60svh] min-h-[420px] min-w-0 rounded-xl border border-slate-200 bg-white xl:h-[calc(100vh-12rem)] xl:min-h-[500px]"
+          className="relative flow-canvas h-[60svh] min-h-[420px] min-w-0 rounded-xl border border-slate-200 bg-white xl:h-[calc(100vh-12rem)] xl:min-h-[500px]"
           onMouseDown={(event) => onCanvasPointerMove(event.clientX, event.clientY)}
           onMouseMove={(event) => onCanvasPointerMove(event.clientX, event.clientY)}
         >
+          {isCanvasLoading && (
+            <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center rounded-xl bg-slate-100/80">
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-center text-sm text-amber-900 shadow-sm">
+                <p className="font-medium">Workflow canvas yukleniyor...</p>
+                <p className="mt-1 text-xs text-amber-800">
+                  {readOnlyReason ?? 'Detay API yaniti bekleniyor.'}
+                </p>
+              </div>
+            </div>
+          )}
           <ReactFlow<FlowNode, FlowEdge>
             nodes={canvasNodes}
             edges={canvasEdges}

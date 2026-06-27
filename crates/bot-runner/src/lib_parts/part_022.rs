@@ -78,7 +78,8 @@ fn trade_builder_observed_submit_qty(
     order: &TradeBuilderOrder,
     submitted_dynamic_qty: Option<f64>,
 ) -> Option<(f64, &'static str)> {
-    if let Some(cumulative_fill_qty) = trade_builder_cumulative_fill_qty(order, submitted_dynamic_qty)
+    if let Some(cumulative_fill_qty) =
+        trade_builder_cumulative_fill_qty(order, submitted_dynamic_qty)
     {
         return Some((cumulative_fill_qty, "cumulative_fill_qty"));
     }
@@ -485,29 +486,50 @@ async fn maybe_record_trade_builder_buy_fill_observation(
     }
 }
 
-async fn observe_trade_builder_first_visible_inventory(
-    repo: &PostgresRepository,
-    run_id: i64,
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TradeBuilderFirstVisibleInventoryApplyOutcome {
+    Applied,
+    NotVisible,
+}
+
+async fn read_trade_builder_first_visible_inventory(
     client: &dyn OrderExecutor,
     observation: &PendingTradeBuilderFirstVisibleInventoryObservation,
-) -> Result<()> {
-    let actual_visible_qty = match client.available_token_qty(&observation.token_id).await {
-        Ok(quantity) => normalize_trade_builder_visible_inventory_read(quantity),
-        Err(err) => {
-            warn!(
-                run_id,
-                builder_order_id = observation.parent_builder_order_id,
-                token_id = %observation.token_id,
-                error = %err,
-                "TRADE_BUILDER_FIRST_VISIBLE_INVENTORY_READ_FAILED"
-            );
-            return Ok(());
+) -> Result<crate::trade_builder_inventory_observation_timing::InventoryObservationReadResult> {
+    let quantity = client.available_token_qty(&observation.token_id).await?;
+    Ok(trade_builder_first_visible_inventory_read_result(quantity))
+}
+
+fn trade_builder_first_visible_inventory_read_result(
+    quantity: Option<f64>,
+) -> crate::trade_builder_inventory_observation_timing::InventoryObservationReadResult {
+    let actual_visible_qty = normalize_trade_builder_visible_inventory_read(quantity);
+    match actual_visible_qty {
+        Some(qty) if qty > 0.0 => {
+            crate::trade_builder_inventory_observation_timing::InventoryObservationReadResult::Visible {
+                qty,
+            }
         }
-    };
-    let Some(actual_visible_qty) = actual_visible_qty else {
-        return Ok(());
+        Some(_) => {
+            crate::trade_builder_inventory_observation_timing::InventoryObservationReadResult::NotVisible
+        }
+        None => {
+            crate::trade_builder_inventory_observation_timing::InventoryObservationReadResult::ReadError
+        }
+    }
+}
+
+async fn apply_trade_builder_first_visible_inventory(
+    repo: &PostgresRepository,
+    observation: &PendingTradeBuilderFirstVisibleInventoryObservation,
+    actual_visible_qty: f64,
+    timing: &mut crate::trade_builder_inventory_observation_timing::InventoryObservationTimingStats,
+) -> Result<TradeBuilderFirstVisibleInventoryApplyOutcome> {
+    use crate::trade_builder_inventory_observation_timing::{
+        InventoryObservationPhase, InventoryObservationTimer,
     };
 
+    let apply_prepare_timer = InventoryObservationTimer::start();
     let baseline_visible_qty =
         normalize_trade_builder_visible_inventory_qty(observation.baseline_visible_qty);
     let visible_delta_qty = baseline_visible_qty
@@ -518,7 +540,8 @@ async fn observe_trade_builder_first_visible_inventory(
         actual_visible_qty > 0.0
     };
     if !is_ready {
-        return Ok(());
+        timing.record_apply_prepare_ms(apply_prepare_timer.elapsed_ms());
+        return Ok(TradeBuilderFirstVisibleInventoryApplyOutcome::NotVisible);
     }
 
     let expectation = trade_builder_visible_inventory_expectation(
@@ -584,13 +607,208 @@ async fn observe_trade_builder_first_visible_inventory(
             "fill_reference_price": observation.fill_reference_price,
         }),
     };
+    timing.record_apply_prepare_ms(apply_prepare_timer.elapsed_ms());
 
-    repo.insert_trade_builder_inventory_observation_if_absent(&observation_row)
-        .await?;
-    let _ = maybe_rebase_trade_builder_parent_position_from_first_visible_inventory(
+    let insert_timer = InventoryObservationTimer::start();
+    let insert_result = repo
+        .insert_trade_builder_inventory_observation_if_absent(&observation_row)
+        .await;
+    timing.add_phase_ms(
+        InventoryObservationPhase::DbObservationInsert,
+        insert_timer.elapsed_ms(),
+    );
+    if let Err(err) = insert_result {
+        timing.record_db_insert_error();
+        return Err(err);
+    }
+
+    let rebase_timer = InventoryObservationTimer::start();
+    let rebase_result = maybe_rebase_trade_builder_parent_position_from_first_visible_inventory(
         repo,
         observation.parent_builder_order_id,
     )
     .await;
+    timing.add_phase_ms(
+        InventoryObservationPhase::ParentRebase,
+        rebase_timer.elapsed_ms(),
+    );
+    if rebase_result.is_err() {
+        timing.record_parent_rebase_error();
+    }
+    Ok(TradeBuilderFirstVisibleInventoryApplyOutcome::Applied)
+}
+
+async fn record_trade_builder_terminal_not_visible_inventory(
+    repo: &PostgresRepository,
+    observation: &PendingTradeBuilderFirstVisibleInventoryObservation,
+    terminal_reason: &str,
+    actual_visible_qty: Option<f64>,
+    timing: &mut crate::trade_builder_inventory_observation_timing::InventoryObservationTimingStats,
+) -> Result<()> {
+    use crate::trade_builder_inventory_observation_timing::{
+        InventoryObservationPhase, InventoryObservationTimer,
+    };
+
+    let baseline_visible_qty =
+        normalize_trade_builder_visible_inventory_qty(observation.baseline_visible_qty);
+    let actual_visible_qty = actual_visible_qty.map(round_trade_builder_share_qty);
+    let visible_delta_qty =
+        baseline_visible_qty
+            .zip(actual_visible_qty)
+            .map(|(baseline_qty, actual_qty)| {
+                round_trade_builder_signed_qty(actual_qty - baseline_qty)
+            });
+    let fill_to_inventory_ms = Utc::now()
+        .signed_duration_since(observation.fill_observed_at)
+        .num_milliseconds()
+        .max(0);
+    let observation_row = TradeBuilderInventoryObservationInput {
+        parent_builder_order_id: observation.parent_builder_order_id,
+        observer_builder_order_id: observation.observer_builder_order_id,
+        user_id: observation.user_id,
+        market_slug: observation.market_slug.clone(),
+        token_id: observation.token_id.clone(),
+        outcome_label: observation.outcome_label.clone(),
+        exchange_order_id: observation.exchange_order_id.clone(),
+        observation_kind: TRADE_BUILDER_OBSERVATION_KIND_FIRST_VISIBLE_TERMINAL_NOT_VISIBLE
+            .to_string(),
+        qty_source: Some("terminal_not_visible".to_string()),
+        baseline_visible_qty,
+        submitted_dynamic_qty: normalize_trade_builder_terminal_fill_qty_candidate(
+            observation.submitted_dynamic_qty,
+        ),
+        resolved_fill_qty: normalize_trade_builder_terminal_fill_qty_candidate(
+            observation.resolved_fill_qty,
+        ),
+        expected_fee_qty: None,
+        expected_net_qty: None,
+        expected_visible_qty: None,
+        actual_visible_qty,
+        visible_delta_qty,
+        gap_vs_submit_qty: None,
+        gap_vs_fill_qty: None,
+        gap_vs_expected_qty: None,
+        reference_price: observation
+            .fill_reference_price
+            .or(observation.submit_reference_price),
+        fee_rate_bps: Some(observation.fee_rate_bps),
+        fill_to_inventory_ms: Some(fill_to_inventory_ms),
+        payload_json: json!({
+            "terminal_reason": terminal_reason,
+            "fill_observed_at": observation.fill_observed_at,
+            "parent_order_status": observation.parent_order_status,
+            "parent_order_filled_qty": observation.parent_order_filled_qty,
+        }),
+    };
+
+    let insert_timer = InventoryObservationTimer::start();
+    let insert_result = repo
+        .insert_trade_builder_inventory_observation_if_absent(&observation_row)
+        .await;
+    timing.add_phase_ms(
+        InventoryObservationPhase::DbObservationInsert,
+        insert_timer.elapsed_ms(),
+    );
+    if let Err(err) = insert_result {
+        timing.record_db_insert_error();
+        return Err(err);
+    }
+    Ok(())
+}
+
+async fn record_trade_builder_terminal_not_visible_inventory_result(
+    repo: &PostgresRepository,
+    observation: &PendingTradeBuilderFirstVisibleInventoryObservation,
+    terminal_reason: &str,
+    actual_visible_qty: Option<f64>,
+    timing: &mut crate::trade_builder_inventory_observation_timing::InventoryObservationTimingStats,
+    record_timing: &mut crate::trade_builder_inventory_observation_timing::InventoryObservationRecordTiming,
+) -> Result<crate::trade_builder_inventory_observation_due_gate::InventoryObservationDueResult> {
+    use crate::trade_builder_inventory_observation_timing::{
+        InventoryObservationPhase, InventoryObservationTimer,
+    };
+
+    let apply_timer = InventoryObservationTimer::start();
+    record_trade_builder_terminal_not_visible_inventory(
+        repo,
+        observation,
+        terminal_reason,
+        actual_visible_qty,
+        timing,
+    )
+    .await?;
+    let apply_total_ms = apply_timer.elapsed_ms();
+    timing.record_apply_total_ms(apply_total_ms);
+    record_timing.add_phase_ms(InventoryObservationPhase::ApplyTotal, apply_total_ms);
+    timing.record_not_visible();
+    Ok(crate::trade_builder_inventory_observation_due_gate::InventoryObservationDueResult::NotVisible)
+}
+
+async fn maybe_sync_trade_builder_inventory_initial_fills(
+    repo: &PostgresRepository,
+    client: &dyn OrderExecutor,
+    user_id: i64,
+    builder_timing: &mut crate::trade_builder_order_housekeeping_timing::TradeBuilderOrderHousekeepingTimingStats,
+    record_timing: &mut crate::trade_builder_inventory_observation_timing::InventoryObservationRecordTiming,
+    synced_user_ids: &mut HashSet<i64>,
+    final_fill_sync_required_user_ids: &mut HashSet<i64>,
+    throttled_user_ids: &mut HashSet<i64>,
+) -> Result<()> {
+    use crate::trade_builder_inventory_observation_timing::{
+        InventoryObservationPhase, InventoryObservationTimer,
+    };
+
+    if synced_user_ids.contains(&user_id) {
+        return Ok(());
+    }
+    if !crate::trade_builder_fill_sync_throttle::inventory_initial_fill_sync_due(
+        user_id,
+        Instant::now(),
+    ) {
+        if throttled_user_ids.insert(user_id) {
+            let mut skipped_stats =
+                crate::trade_builder_fill_sync_timing::FinalFillSyncTimingStats::default();
+            skipped_stats.record_skipped_fresh(user_id);
+            builder_timing
+                .inventory_observation
+                .initial_fill_sync_detail
+                .merge(skipped_stats);
+        }
+        return Ok(());
+    }
+
+    synced_user_ids.insert(user_id);
+    builder_timing.fill_sync_user_count = builder_timing.fill_sync_user_count.saturating_add(1);
+    builder_timing.fill_sync_call_count = builder_timing.fill_sync_call_count.saturating_add(1);
+    let mut initial_fill_sync_stats =
+        crate::trade_builder_fill_sync_timing::FinalFillSyncTimingStats::default();
+    initial_fill_sync_stats.record_call(user_id);
+    let initial_sync_timer = InventoryObservationTimer::start();
+    let sync_result =
+        sync_recent_trade_builder_fills_with_timing(repo, client, &mut initial_fill_sync_stats)
+            .await;
+    let initial_fill_sync_ms = initial_sync_timer.elapsed_ms();
+    initial_fill_sync_stats.total_ms = initial_fill_sync_ms;
+    initial_fill_sync_stats.record_user_ms(user_id, initial_fill_sync_ms);
+    builder_timing
+        .inventory_observation
+        .record_initial_fill_sync(initial_fill_sync_ms);
+    record_timing.add_phase_ms(
+        InventoryObservationPhase::InitialFillSync,
+        initial_fill_sync_ms,
+    );
+    if sync_result.is_err() {
+        initial_fill_sync_stats.record_error();
+        builder_timing.fill_sync_error_count =
+            builder_timing.fill_sync_error_count.saturating_add(1);
+        final_fill_sync_required_user_ids.insert(user_id);
+    } else {
+        initial_fill_sync_stats.record_success();
+    }
+    builder_timing
+        .inventory_observation
+        .initial_fill_sync_detail
+        .merge(initial_fill_sync_stats);
+    sync_result?;
     Ok(())
 }

@@ -2,7 +2,16 @@ import type { TradeFlowNode, TradeFlowValidationIssue } from '@/lib/types';
 import type { PtbMode } from '@/lib/trade-flow-config-mappers/ptb-modes';
 import { isRecord, toFiniteNumber } from './shared';
 import { pushNodeError } from './validation-core';
+import { validatePtbIvChainlinkStaleConfig } from './validation-action-place-order-ptb-iv-chainlink-stale';
 import { validateEq77RiskCap } from './validation-action-place-order-ptb-iv-risk-guards';
+import {
+  hasPtbIvHighPriceEarlyConfig,
+  validatePtbIvHighPriceEarlyConfig,
+} from './validation-action-place-order-ptb-iv-high-price-early';
+import {
+  hasPtbIvPriceBandGuardConfig,
+  validatePtbIvPriceBandGuardConfig,
+} from './validation-action-place-order-ptb-iv-price-bands';
 
 interface ParsedIvTimeRule {
   startRemainingSec: number;
@@ -48,6 +57,7 @@ export function validateActionPlaceOrderPtbIvTimeRulesConfig(
     config.priceToBeatIvSpikeRetraceRatio != null ||
     config.priceToBeatIvPremiumMaxSpreadCent != null ||
     config.priceToBeatIvPremiumMaxChainlinkAgeMs != null ||
+    config.priceToBeatIvChainlinkStaleMs != null ||
     config.priceToBeatIvCexAlignMaxUsd != null ||
     config.priceToBeatIvCexAlignMaxBps != null ||
     config.priceToBeatIvCexOpenGapConsensusGuardEnabled != null ||
@@ -55,8 +65,20 @@ export function validateActionPlaceOrderPtbIvTimeRulesConfig(
     config.priceToBeatIvCexOpenGapMinZ != null ||
     config.priceToBeatIvCexOpenGapMaxStaleMs != null ||
     config.priceToBeatIvCexOpenGapApplyNegativeConservativeCap != null ||
+    config.priceToBeatIvCexLeadOverrideEnabled != null ||
+    config.priceToBeatIvCexMagnitudeGuardEnabled != null ||
+    config.priceToBeatIvCexMagnitudeShallowRatio != null ||
+    config.priceToBeatIvCexMagnitudeModerateRatio != null ||
+    config.priceToBeatIvChainlinkStaleStrongGapExceptionEnabled != null ||
+    config.priceToBeatIvChainlinkStaleStrongGapMinGapStrength != null ||
+    config.priceToBeatIvChainlinkStaleStrongGapMaxOracleAgeMs != null ||
+    config.priceToBeatIvChainlinkStaleStrongGapRequireCexConfirmed != null ||
+    config.priceToBeatIvChainlinkStaleStrongGapRequireBybitHit != null ||
+    config.priceToBeatIvChainlinkStaleStrongGapRequireSecondaryCex != null ||
     config.priceToBeatIvChainlinkCexLagGuardEnabled != null ||
     config.priceToBeatIvChainlinkCexDiffZBlock != null ||
+    config.priceToBeatIvOracleCexDivergenceBlockZ != null ||
+    config.priceToBeatIvOracleTickJumpCooldownMs != null ||
     config.priceToBeatIvChainlinkCexMaxDiffUsd != null ||
     config.priceToBeatIvChainlinkCexMaxDiffBps != null ||
     config.priceToBeatIvChainlinkCexBookMismatchDislocationCent != null ||
@@ -82,6 +104,9 @@ export function validateActionPlaceOrderPtbIvTimeRulesConfig(
     config.priceToBeatIvOddsMaxSpreadCent != null ||
     config.priceToBeatIvCexUnconfirmedRiskPoints != null ||
     config.priceToBeatIvCexConflictRiskPoints != null ||
+    config.priceToBeatIvLowQualityEdgeRecheckEnabled != null ||
+    config.priceToBeatIvLowQualityGapMargin != null ||
+    config.priceToBeatIvLowQualityEdgeMarginCent != null ||
     config.priceToBeatIvPassiveBidEnabled != null ||
     config.priceToBeatIvPassiveBidTtlMs != null ||
     config.priceToBeatIvWaitRepriceGuardEnabled != null ||
@@ -111,6 +136,13 @@ export function validateActionPlaceOrderPtbIvTimeRulesConfig(
     config.priceToBeatIvBinanceMissingAskThresholdCent != null ||
     config.priceToBeatIvBinanceMissingPenalty != null ||
     config.priceToBeatIvMinAdjustedMargin != null ||
+    config.priceToBeatIvMediumChopMinAdjMargin != null ||
+    config.priceToBeatIvMediumChopHighPriceMinAdjMargin != null ||
+    config.priceToBeatIvMediumChopHighPriceRefCent != null ||
+    config.priceToBeatIvMediumChopBinanceFailOpenMarginAdd != null ||
+    config.priceToBeatIvMediumChopStaleMs != null ||
+    config.priceToBeatIvMediumChopStaleMarginAdd != null ||
+    hasPtbIvHighPriceEarlyConfig(config) ||
     config.priceToBeatIvMinFinalQ != null ||
     config.priceToBeatIvBinanceDisagreementThreshold != null ||
     config.priceToBeatIvBinanceDisagreementPenalty != null ||
@@ -158,6 +190,7 @@ export function validateActionPlaceOrderPtbIvTimeRulesConfig(
     config.priceToBeatIvParticipationLongCredit != null ||
     config.priceToBeatIvParticipationMinThreshold != null ||
     config.priceToBeatIvRequireBinanceFreshUnderSec != null ||
+    config.priceToBeatIvChainlinkStaleMs != null ||
     config.priceToBeatIvBinanceMaxStaleMs != null ||
     config.priceToBeatIvRequireBinanceSameDirection != null ||
     config.priceToBeatIvMomentumProtectionEnabled != null ||
@@ -177,7 +210,8 @@ export function validateActionPlaceOrderPtbIvTimeRulesConfig(
     config.priceToBeatIvAdaptiveOrangeEdgeDelta != null ||
     config.priceToBeatIvAdaptiveOrangeGapStrengthDelta != null ||
     config.priceToBeatIvAdaptiveOrangeGapUsdMarginDelta != null ||
-    config.priceToBeatIvAdaptiveRedBlock != null;
+    config.priceToBeatIvAdaptiveRedBlock != null ||
+    hasPtbIvPriceBandGuardConfig(config);
   if (!hasIvConfig) return;
 
   if (priceToBeatGuardEnabled !== true) {
@@ -198,6 +232,7 @@ export function validateActionPlaceOrderPtbIvTimeRulesConfig(
   }
 
   validateIvTimeRules(issues, node, config.priceToBeatIvTimeRules);
+  validatePtbIvPriceBandGuardConfig(issues, node, config);
   validateOptionalNonNegativeInteger(
     issues,
     node,
@@ -241,6 +276,53 @@ export function validateActionPlaceOrderPtbIvTimeRulesConfig(
     'invalid_price_to_beat_iv_min_adjusted_margin',
     true
   );
+  validateOptionalProbability(
+    issues,
+    node,
+    config.priceToBeatIvMediumChopMinAdjMargin,
+    'priceToBeatIvMediumChopMinAdjMargin',
+    'invalid_price_to_beat_iv_medium_chop_min_adj_margin',
+    true
+  );
+  validateOptionalProbability(
+    issues,
+    node,
+    config.priceToBeatIvMediumChopHighPriceMinAdjMargin,
+    'priceToBeatIvMediumChopHighPriceMinAdjMargin',
+    'invalid_price_to_beat_iv_medium_chop_high_price_min_adj_margin',
+    true
+  );
+  validateOptionalCentPrice(
+    issues,
+    node,
+    config.priceToBeatIvMediumChopHighPriceRefCent,
+    'priceToBeatIvMediumChopHighPriceRefCent',
+    'invalid_price_to_beat_iv_medium_chop_high_price_ref'
+  );
+  validateOptionalProbability(
+    issues,
+    node,
+    config.priceToBeatIvMediumChopBinanceFailOpenMarginAdd,
+    'priceToBeatIvMediumChopBinanceFailOpenMarginAdd',
+    'invalid_price_to_beat_iv_medium_chop_binance_fail_open_margin_add',
+    true
+  );
+  validateOptionalNonNegativeNumber(
+    issues,
+    node,
+    config.priceToBeatIvMediumChopStaleMs,
+    'priceToBeatIvMediumChopStaleMs',
+    'invalid_price_to_beat_iv_medium_chop_stale_ms'
+  );
+  validateOptionalProbability(
+    issues,
+    node,
+    config.priceToBeatIvMediumChopStaleMarginAdd,
+    'priceToBeatIvMediumChopStaleMarginAdd',
+    'invalid_price_to_beat_iv_medium_chop_stale_margin_add',
+    true
+  );
+  validatePtbIvHighPriceEarlyConfig(issues, node, config);
   validateOptionalProbability(
     issues,
     node,
@@ -579,6 +661,7 @@ export function validateActionPlaceOrderPtbIvTimeRulesConfig(
     'priceToBeatIvRequireBinanceFreshUnderSec',
     'invalid_price_to_beat_iv_require_binance_fresh_under_sec'
   );
+  validatePtbIvChainlinkStaleConfig(issues, node, config);
   validateOptionalNonNegativeInteger(
     issues,
     node,
@@ -765,6 +848,48 @@ function validateEntryQualityV2(
     'priceToBeatIvMinExpectedMoveUsd',
     'invalid_price_to_beat_iv_min_expected_move_usd'
   );
+  validateOptionalBoolean(
+    issues,
+    node,
+    config.priceToBeatIvChainlinkStaleStrongGapExceptionEnabled,
+    'priceToBeatIvChainlinkStaleStrongGapExceptionEnabled',
+    'invalid_price_to_beat_iv_chainlink_stale_strong_gap_exception_enabled'
+  );
+  validateOptionalNonNegativeNumber(
+    issues,
+    node,
+    config.priceToBeatIvChainlinkStaleStrongGapMinGapStrength,
+    'priceToBeatIvChainlinkStaleStrongGapMinGapStrength',
+    'invalid_price_to_beat_iv_chainlink_stale_strong_gap_min_gap_strength'
+  );
+  validateOptionalNonNegativeInteger(
+    issues,
+    node,
+    config.priceToBeatIvChainlinkStaleStrongGapMaxOracleAgeMs,
+    'priceToBeatIvChainlinkStaleStrongGapMaxOracleAgeMs',
+    'invalid_price_to_beat_iv_chainlink_stale_strong_gap_max_oracle_age_ms'
+  );
+  validateOptionalBoolean(
+    issues,
+    node,
+    config.priceToBeatIvChainlinkStaleStrongGapRequireCexConfirmed,
+    'priceToBeatIvChainlinkStaleStrongGapRequireCexConfirmed',
+    'invalid_price_to_beat_iv_chainlink_stale_strong_gap_require_cex_confirmed'
+  );
+  validateOptionalBoolean(
+    issues,
+    node,
+    config.priceToBeatIvChainlinkStaleStrongGapRequireBybitHit,
+    'priceToBeatIvChainlinkStaleStrongGapRequireBybitHit',
+    'invalid_price_to_beat_iv_chainlink_stale_strong_gap_require_bybit_hit'
+  );
+  validateOptionalBoolean(
+    issues,
+    node,
+    config.priceToBeatIvChainlinkStaleStrongGapRequireSecondaryCex,
+    'priceToBeatIvChainlinkStaleStrongGapRequireSecondaryCex',
+    'invalid_price_to_beat_iv_chainlink_stale_strong_gap_require_secondary_cex'
+  );
   validateAdaptiveExpectedMoveFloor(issues, node, config);
   for (const key of [
     'priceToBeatIvGapStrengthMin60To45',
@@ -846,31 +971,22 @@ function validateEntryQualityV2(
     'priceToBeatIvCexAlignMaxBps',
     'invalid_price_to_beat_iv_cex_align_max_bps'
   );
-  validateOptionalBoolean(
-    issues,
-    node,
-    config.priceToBeatIvCexOpenGapConsensusGuardEnabled,
+  for (const key of [
     'priceToBeatIvCexOpenGapConsensusGuardEnabled',
-    'invalid_price_to_beat_iv_cex_open_gap_consensus_guard_enabled'
-  );
-  validateOptionalBoolean(
-    issues,
-    node,
-    config.priceToBeatIvCexOpenGapApplyNegativeConservativeCap,
     'priceToBeatIvCexOpenGapApplyNegativeConservativeCap',
-    'invalid_price_to_beat_iv_cex_open_gap_apply_negative_cap'
-  );
-  validateOptionalBoolean(
-    issues,
-    node,
-    config.priceToBeatIvChainlinkCexLagGuardEnabled,
+    'priceToBeatIvCexLeadOverrideEnabled',
+    'priceToBeatIvCexMagnitudeGuardEnabled',
     'priceToBeatIvChainlinkCexLagGuardEnabled',
-    'invalid_price_to_beat_iv_chainlink_cex_lag_guard_enabled'
-  );
+  ]) {
+    validateOptionalBoolean(issues, node, config[key], key, `invalid_${toSnakeCase(key)}`);
+  }
   for (const key of [
     'priceToBeatIvCexOpenGapMinUsd',
     'priceToBeatIvCexOpenGapMinZ',
+    'priceToBeatIvCexMagnitudeShallowRatio',
+    'priceToBeatIvCexMagnitudeModerateRatio',
     'priceToBeatIvChainlinkCexDiffZBlock',
+    'priceToBeatIvOracleCexDivergenceBlockZ',
     'priceToBeatIvChainlinkCexMaxDiffUsd',
     'priceToBeatIvChainlinkCexMaxDiffBps',
   ]) {
@@ -882,6 +998,13 @@ function validateEntryQualityV2(
     config.priceToBeatIvCexOpenGapMaxStaleMs,
     'priceToBeatIvCexOpenGapMaxStaleMs',
     'invalid_price_to_beat_iv_cex_open_gap_max_stale_ms'
+  );
+  validateOptionalNonNegativeInteger(
+    issues,
+    node,
+    config.priceToBeatIvOracleTickJumpCooldownMs,
+    'priceToBeatIvOracleTickJumpCooldownMs',
+    'invalid_price_to_beat_iv_oracle_tick_jump_cooldown_ms'
   );
   validateOptionalCentPriceAllowZero(
     issues,

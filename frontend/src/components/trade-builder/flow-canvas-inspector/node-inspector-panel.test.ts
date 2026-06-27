@@ -4,7 +4,10 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { parseNodeConfigToForm, type NodeConfigFormState } from '@/lib/trade-flow-config-mappers';
-import { PTB_CURRENT_PRICE_SOURCE_OPTIONS } from '@/lib/trade-flow-config-mappers/ptb-modes';
+import {
+  PTB_CURRENT_PRICE_SOURCE_OPTIONS,
+  PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_OPTIONS,
+} from '@/lib/trade-flow-config-mappers/ptb-modes';
 import { NodeInspectorPanel } from './node-inspector-panel';
 import type { NodeInspectorActions, NodeInspectorPanelProps } from './types';
 
@@ -171,7 +174,7 @@ test('NodeInspectorPanel renders RevengeFlip mode fields', () => {
   );
 
   assert.match(html, /Initial USDC/);
-  assert.match(html, /Profit USDC/);
+  assert.match(html, /Target PnL USDC/);
   assert.match(html, /Classic Stop-Loss/);
   assert.match(html, /Stop Loss Rules/);
   assert.match(html, /Kural Ekle/);
@@ -179,7 +182,11 @@ test('NodeInspectorPanel renders RevengeFlip mode fields', () => {
   assert.match(html, /PTB Source/);
   assert.deepEqual(
     PTB_CURRENT_PRICE_SOURCE_OPTIONS.map((option) => option.value),
-    ['chainlink', 'binance', 'coinbase', 'hyperliquid', 'bybit'],
+    ['chainlink', 'binance', 'coinbase', 'hyperliquid', 'bybit', 'chainlink_cex_consensus'],
+  );
+  assert.ok(!PTB_CURRENT_PRICE_SOURCE_OPTIONS.some((option) => option.value === 'cex_median_fast'));
+  assert.ok(
+    PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_OPTIONS.some((option) => option.value === 'cex_median_fast'),
   );
   assert.match(html, /PTB Kurali Ekle/);
   assert.match(html, /Min PTB Diff/);

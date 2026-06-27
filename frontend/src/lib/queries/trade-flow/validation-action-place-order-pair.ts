@@ -1040,7 +1040,7 @@ export function validateActionPlaceOrderPairLockConfig(
       issues,
       node,
       'invalid_counter_leg_ptb_stop_loss_current_price_source',
-      'action.place_order counterLegPtbStopLossCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, binance_hyperliquid, or cex_consensus.'
+      'action.place_order counterLegPtbStopLossCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, binance_hyperliquid, cex_consensus, chainlink_cex_consensus, chainlink_cex_consensus_confirmed, or cex_median_fast.'
     );
   }
   if (

@@ -29,6 +29,7 @@ export function FlowEnginePanel({
           data.detail.definition.id === state.selectedDefinitionId
         ? [data.detail.definition]
         : [];
+  const draftSwitchRecovery = state.draftSwitchRecovery;
 
   return (
     <Card className="min-w-0 overflow-hidden border-zinc-800 bg-zinc-900">
@@ -174,6 +175,39 @@ export function FlowEnginePanel({
                 Publish gecici olarak kilitlendi. Once biraz bekleyip `Draft Kaydet` ile tekrar dene.
                 Sorun surerse `Taslagi Sunucudan Yukle` ile server draft&apos;ina don.
               </p>
+              {draftSwitchRecovery && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-amber-500/50 text-amber-100 hover:bg-amber-500/10"
+                    disabled={state.isActionBusy}
+                    onClick={() => {
+                      void actions.requestDefinitionSwitch(draftSwitchRecovery.targetDefinitionId);
+                    }}
+                  >
+                    Tekrar Dene
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-amber-500/50 text-amber-100 hover:bg-amber-500/10"
+                    disabled={state.isActionBusy}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          'Kaydedilmemis yerel degisiklikler birakilacak; sunucudaki son draft korunacak. Kaydetmeden gecilsin mi?'
+                        )
+                      ) {
+                        void actions.skipDraftSaveAndSwitch();
+                      }
+                    }}
+                  >
+                    Kaydetmeden Gec
+                  </Button>
+                  <p className="text-xs text-amber-200">{draftSwitchRecovery.message}</p>
+                </div>
+              )}
             </div>
           )}
           {state.isEditorReadOnly && state.readOnlyReason && (
@@ -209,6 +243,7 @@ export function FlowEnginePanel({
               definitionsLoading={data.definitionsLoading}
               filteredDefinitions={data.filteredDefinitions}
               selectedDefinitionId={state.selectedDefinitionId}
+              definitionSwitchState={state.definitionSwitchState}
               deletingDefinitionId={state.deletingDefinitionId}
               onCreateNameChange={actions.setCreateName}
               onCreateDescriptionChange={actions.setCreateDescription}

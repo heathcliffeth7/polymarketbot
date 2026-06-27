@@ -13,6 +13,9 @@ pub(crate) fn hyperliquid_coin(asset: &str) -> Option<&'static str> {
         "btc" => Some("BTC"),
         "eth" => Some("ETH"),
         "sol" => Some("SOL"),
+        "doge" | "dogecoin" => Some("DOGE"),
+        "bnb" => Some("BNB"),
+        "hype" | "hyperliquid" => Some("HYPE"),
         _ => None,
     }
 }
@@ -101,6 +104,15 @@ mod tests {
         assert_eq!(message["method"], "subscribe");
         assert_eq!(message["subscription"]["type"], "l2Book");
         assert_eq!(message["subscription"]["coin"], "BTC");
+    }
+
+    #[test]
+    fn hyperliquid_coin_supports_bnb_hype_and_doge() {
+        assert_eq!(hyperliquid_coin("doge"), Some("DOGE"));
+        assert_eq!(hyperliquid_coin("dogecoin"), Some("DOGE"));
+        assert_eq!(hyperliquid_coin("bnb"), Some("BNB"));
+        assert_eq!(hyperliquid_coin("hype"), Some("HYPE"));
+        assert_eq!(hyperliquid_coin("hyperliquid"), Some("HYPE"));
     }
 
     #[test]

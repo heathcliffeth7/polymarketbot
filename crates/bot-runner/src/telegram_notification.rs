@@ -66,7 +66,12 @@ fn telegram_backoff_until_ms_at(user_id: i64, chat_id: &str, now_ms: i64) -> Opt
     None
 }
 
-fn record_telegram_backoff_at(user_id: i64, chat_id: &str, retry_after_sec: i64, now_ms: i64) -> i64 {
+fn record_telegram_backoff_at(
+    user_id: i64,
+    chat_id: &str,
+    retry_after_sec: i64,
+    now_ms: i64,
+) -> i64 {
     let until_ms = now_ms.saturating_add((retry_after_sec + 1).saturating_mul(1_000));
     if let Ok(mut guard) = TELEGRAM_SEND_BACKOFF_UNTIL_MS.lock() {
         guard.insert(telegram_send_backoff_key(user_id, chat_id), until_ms);
@@ -78,6 +83,50 @@ fn clear_telegram_backoff(user_id: i64, chat_id: &str) {
     if let Ok(mut guard) = TELEGRAM_SEND_BACKOFF_UNTIL_MS.lock() {
         guard.remove(&telegram_send_backoff_key(user_id, chat_id));
     }
+}
+
+const TELEGRAM_MAX_TEXT_CHARS: usize = 4096;
+const TELEGRAM_CONTINUATION_PREFIX: &str = "(devam)\n";
+const TELEGRAM_CONTINUATION_SUFFIX: &str = "\n...(devam var)";
+
+fn telegram_text_chunks(text: &str) -> Vec<String> {
+    if text.chars().count() <= TELEGRAM_MAX_TEXT_CHARS {
+        return vec![text.to_string()];
+    }
+
+    let first_body_limit = TELEGRAM_MAX_TEXT_CHARS - TELEGRAM_CONTINUATION_SUFFIX.chars().count();
+    let continuation_body_limit = TELEGRAM_MAX_TEXT_CHARS
+        - TELEGRAM_CONTINUATION_PREFIX.chars().count()
+        - TELEGRAM_CONTINUATION_SUFFIX.chars().count();
+    let mut chars = text.chars().peekable();
+    let mut chunks = Vec::new();
+    let mut first = true;
+
+    while chars.peek().is_some() {
+        let mut chunk = String::new();
+        if !first {
+            chunk.push_str(TELEGRAM_CONTINUATION_PREFIX);
+        }
+
+        let body_limit = if first {
+            first_body_limit
+        } else {
+            continuation_body_limit
+        };
+        for _ in 0..body_limit {
+            let Some(ch) = chars.next() else {
+                break;
+            };
+            chunk.push(ch);
+        }
+        if chars.peek().is_some() {
+            chunk.push_str(TELEGRAM_CONTINUATION_SUFFIX);
+        }
+        chunks.push(chunk);
+        first = false;
+    }
+
+    chunks
 }
 
 async fn send_telegram_message(
@@ -102,77 +151,112 @@ async fn send_telegram_message(
     }
 
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-    let mut body = serde_json::json!({
-        "chat_id": chat_id,
-        "text": text,
-    });
-    if let Some(parse_mode) = parse_mode.filter(|value| !value.trim().is_empty()) {
-        if let Some(obj) = body.as_object_mut() {
-            obj.insert("parse_mode".to_string(), serde_json::json!(parse_mode));
+    // Telegram sendMessage text limiti 4096 karakter; asimi 400 ile reddediliyor.
+    let chunks = telegram_text_chunks(text);
+    let parse_mode = parse_mode
+        .filter(|_| chunks.len() == 1)
+        .filter(|value| !value.trim().is_empty());
+    for chunk in chunks {
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": chunk,
+        });
+        if let Some(parse_mode) = parse_mode {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("parse_mode".to_string(), serde_json::json!(parse_mode));
+            }
+        }
+
+        let result = TELEGRAM_HTTP_CLIENT
+            .post(&url)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                let retry_after_sec = telegram_retry_after_or_default(status, &body);
+                let backoff_until_ms = retry_after_sec
+                    .map(|seconds| record_telegram_backoff_at(user_id, chat_id, seconds, now_ms));
+                warn!(
+                    user_id,
+                    purpose,
+                    http_status = status,
+                    retry_after_sec,
+                    backoff_until_ms,
+                    "TELEGRAM_NOTIFICATION_FAILED"
+                );
+                return TelegramSendResult {
+                    sent: false,
+                    skipped_by_backoff: false,
+                    http_status: Some(status),
+                    error_body: Some(body),
+                    error_message: None,
+                    retry_after_sec,
+                    backoff_until_ms,
+                };
+            }
+            Err(err) => {
+                warn!(user_id, purpose, error = %err, "TELEGRAM_NOTIFICATION_FAILED");
+                return TelegramSendResult {
+                    sent: false,
+                    skipped_by_backoff: false,
+                    http_status: None,
+                    error_body: None,
+                    error_message: Some(err.to_string()),
+                    retry_after_sec: None,
+                    backoff_until_ms: None,
+                };
+            }
         }
     }
-    let result = TELEGRAM_HTTP_CLIENT
-        .post(&url)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await;
 
-    match result {
-        Ok(resp) if resp.status().is_success() => {
-            clear_telegram_backoff(user_id, chat_id);
-            TelegramSendResult {
-                sent: true,
-                skipped_by_backoff: false,
-                http_status: Some(resp.status().as_u16()),
-                error_body: None,
-                error_message: None,
-                retry_after_sec: None,
-                backoff_until_ms: None,
-            }
-        }
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let retry_after_sec = telegram_retry_after_or_default(status, &body);
-            let backoff_until_ms =
-                retry_after_sec.map(|seconds| record_telegram_backoff_at(user_id, chat_id, seconds, now_ms));
-            warn!(
-                user_id,
-                purpose,
-                http_status = status,
-                retry_after_sec,
-                backoff_until_ms,
-                "TELEGRAM_NOTIFICATION_FAILED"
-            );
-            TelegramSendResult {
-                sent: false,
-                skipped_by_backoff: false,
-                http_status: Some(status),
-                error_body: Some(body),
-                error_message: None,
-                retry_after_sec,
-                backoff_until_ms,
-            }
-        }
-        Err(err) => {
-            warn!(user_id, purpose, error = %err, "TELEGRAM_NOTIFICATION_FAILED");
-            TelegramSendResult {
-                sent: false,
-                skipped_by_backoff: false,
-                http_status: None,
-                error_body: None,
-                error_message: Some(err.to_string()),
-                retry_after_sec: None,
-                backoff_until_ms: None,
-            }
-        }
+    clear_telegram_backoff(user_id, chat_id);
+    TelegramSendResult {
+        sent: true,
+        skipped_by_backoff: false,
+        http_status: Some(200),
+        error_body: None,
+        error_message: None,
+        retry_after_sec: None,
+        backoff_until_ms: None,
     }
 }
 
 #[cfg(test)]
 mod telegram_notification_tests {
     use super::*;
+
+    #[test]
+    fn telegram_text_chunks_keep_short_and_split_long() {
+        let short = "kisa mesaj";
+        assert_eq!(telegram_text_chunks(short), vec![short.to_string()]);
+        let long: String = "x".repeat(5000);
+        let chunks = telegram_text_chunks(&long);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= TELEGRAM_MAX_TEXT_CHARS));
+        assert!(chunks[0].ends_with(TELEGRAM_CONTINUATION_SUFFIX));
+        assert!(chunks[1].starts_with(TELEGRAM_CONTINUATION_PREFIX));
+        let reconstructed: String = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| {
+                let without_prefix = if index == 0 {
+                    chunk.as_str()
+                } else {
+                    chunk.trim_start_matches(TELEGRAM_CONTINUATION_PREFIX)
+                };
+                without_prefix.trim_end_matches(TELEGRAM_CONTINUATION_SUFFIX)
+            })
+            .collect();
+        assert_eq!(reconstructed, long);
+    }
 
     #[test]
     fn telegram_retry_after_parses_json_body() {

@@ -83,21 +83,17 @@ fn positive_quantity_flip_grid_parse_ptb_current_price_source(
 ) -> Result<crate::trade_flow::guards::price_to_beat::PriceToBeatCurrentPriceSource> {
     let raw = positive_quantity_flip_grid_string(map, node, "ptbCurrentPriceSource")
         .unwrap_or_else(|| "chainlink".to_string());
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "chainlink" => {
-            Ok(crate::trade_flow::guards::price_to_beat::PriceToBeatCurrentPriceSource::Chainlink)
-        }
-        "binance" => {
-            Ok(crate::trade_flow::guards::price_to_beat::PriceToBeatCurrentPriceSource::Binance)
-        }
-        "coinbase" => {
-            Ok(crate::trade_flow::guards::price_to_beat::PriceToBeatCurrentPriceSource::Coinbase)
-        }
-        "hyperliquid" => Ok(
-            crate::trade_flow::guards::price_to_beat::PriceToBeatCurrentPriceSource::Hyperliquid,
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" => Ok(crate::trade_flow::guards::price_to_beat::PriceToBeatCurrentPriceSource::Chainlink),
+        "chainlink" | "binance" | "coinbase" | "hyperliquid" | "bybit"
+        | "chainlink_cex_consensus" => Ok(
+            crate::trade_flow::guards::price_to_beat::PriceToBeatCurrentPriceSource::parse(Some(
+                normalized.as_str(),
+            )),
         ),
         _ if enabled => Err(anyhow::anyhow!(
-            "positiveQuantityFlipGrid ptbCurrentPriceSource must be chainlink, binance, coinbase, or hyperliquid"
+            "positiveQuantityFlipGrid ptbCurrentPriceSource must be chainlink, binance, coinbase, hyperliquid, bybit, or chainlink_cex_consensus"
         )),
         _ => Ok(crate::trade_flow::guards::price_to_beat::PriceToBeatCurrentPriceSource::Chainlink),
     }
@@ -1347,6 +1343,7 @@ async fn positive_quantity_flip_grid_ptb_guard_report(
             &quote.outcome_label,
             None,
             config.ptb_current_price_source,
+            Default::default(),
             None,
         )
         .await;

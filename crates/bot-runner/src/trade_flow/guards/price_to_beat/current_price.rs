@@ -3,6 +3,8 @@ use crate::trade_flow::guards::cex_microstructure::{
     get_cex_current_price_snapshot, CexMicrostructureSnapshotConfig, CexVenue,
 };
 use crate::trade_flow::guards::chainlink_price::parse_chainlink_stale_price_details;
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub(super) const CURRENT_PRICE_SOURCE_CHAINLINK: &str = "chainlink_live_data_ws";
 pub(super) const CURRENT_PRICE_SOURCE_BINANCE: &str = "binance_cex_ws_mid";
@@ -11,6 +13,11 @@ pub(super) const CURRENT_PRICE_SOURCE_HYPERLIQUID: &str = "hyperliquid_l2book_mi
 pub(super) const CURRENT_PRICE_SOURCE_BYBIT: &str = "bybit_orderbook_mid";
 pub(super) const CURRENT_PRICE_SOURCE_BINANCE_HYPERLIQUID: &str = "binance_hyperliquid_ptb_stop";
 pub(super) const CURRENT_PRICE_SOURCE_CEX_CONSENSUS: &str = "cex_consensus_bybit_plus_one";
+pub(super) const CURRENT_PRICE_SOURCE_CHAINLINK_CEX_CONSENSUS: &str =
+    "chainlink_cex_consensus_or_hybrid";
+pub(super) const CURRENT_PRICE_SOURCE_CHAINLINK_CEX_CONSENSUS_CONFIRMED: &str =
+    "chainlink_cex_consensus_confirmed";
+pub(super) const CURRENT_PRICE_SOURCE_CEX_MEDIAN_FAST: &str = "cex_median_fast_delta";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PriceToBeatCurrentPriceSource {
@@ -21,6 +28,9 @@ pub(crate) enum PriceToBeatCurrentPriceSource {
     Bybit,
     BinanceHyperliquid,
     CexConsensus,
+    ChainlinkCexConsensus,
+    ChainlinkCexConsensusConfirmed,
+    CexMedianFast,
 }
 
 impl PriceToBeatCurrentPriceSource {
@@ -39,6 +49,13 @@ impl PriceToBeatCurrentPriceSource {
                 Self::BinanceHyperliquid
             }
             "cex_consensus" | "bybit_plus_one" | "bybit+one" => Self::CexConsensus,
+            "chainlink_cex_consensus" | "chainlink+cex_consensus" | "chainlink_cex" => {
+                Self::ChainlinkCexConsensus
+            }
+            "chainlink_cex_consensus_confirmed" | "chainlink+cex_consensus_confirmed" => {
+                Self::ChainlinkCexConsensusConfirmed
+            }
+            "cex_median_fast" => Self::CexMedianFast,
             _ => Self::Chainlink,
         }
     }
@@ -52,6 +69,9 @@ impl PriceToBeatCurrentPriceSource {
             Self::Bybit => "bybit",
             Self::BinanceHyperliquid => "binance_hyperliquid",
             Self::CexConsensus => "cex_consensus",
+            Self::ChainlinkCexConsensus => "chainlink_cex_consensus",
+            Self::ChainlinkCexConsensusConfirmed => "chainlink_cex_consensus_confirmed",
+            Self::CexMedianFast => "cex_median_fast",
         }
     }
 
@@ -64,7 +84,21 @@ impl PriceToBeatCurrentPriceSource {
             Self::Bybit => CURRENT_PRICE_SOURCE_BYBIT,
             Self::BinanceHyperliquid => CURRENT_PRICE_SOURCE_BINANCE_HYPERLIQUID,
             Self::CexConsensus => CURRENT_PRICE_SOURCE_CEX_CONSENSUS,
+            Self::ChainlinkCexConsensus => CURRENT_PRICE_SOURCE_CHAINLINK_CEX_CONSENSUS,
+            Self::ChainlinkCexConsensusConfirmed => {
+                CURRENT_PRICE_SOURCE_CHAINLINK_CEX_CONSENSUS_CONFIRMED
+            }
+            Self::CexMedianFast => CURRENT_PRICE_SOURCE_CEX_MEDIAN_FAST,
         }
+    }
+
+    pub(crate) fn normalize_for_asset(self, asset: &str) -> Self {
+        if asset.trim().eq_ignore_ascii_case("hype")
+            && matches!(self, Self::Binance | Self::BinanceHyperliquid)
+        {
+            return Self::Hyperliquid;
+        }
+        self
     }
 
     fn cex_venue(self) -> Option<CexVenue> {
@@ -74,13 +108,94 @@ impl PriceToBeatCurrentPriceSource {
             Self::Coinbase => Some(CexVenue::Coinbase),
             Self::Hyperliquid => Some(CexVenue::Hyperliquid),
             Self::Bybit => Some(CexVenue::Bybit),
-            Self::BinanceHyperliquid | Self::CexConsensus => None,
+            Self::BinanceHyperliquid
+            | Self::CexConsensus
+            | Self::ChainlinkCexConsensus
+            | Self::ChainlinkCexConsensusConfirmed
+            | Self::CexMedianFast => None,
         }
     }
 }
 
 fn is_retryable_chainlink_current_price_error(detail: &str) -> bool {
     detail.starts_with("stale price for ") || detail.starts_with("no cached price for ")
+}
+
+#[cfg(test)]
+const CHAINLINK_CURRENT_WARMUP_RETRY_TIMEOUT_MS: u64 = 0;
+#[cfg(not(test))]
+const CHAINLINK_CURRENT_WARMUP_RETRY_TIMEOUT_MS: u64 = 2_500;
+const CHAINLINK_CURRENT_WARMUP_RETRY_STEP_MS: u64 = 250;
+
+fn get_chainlink_price_cached_with_warmup(asset: &str) -> std::result::Result<f64, String> {
+    get_chainlink_price_cached_with_warmup_timeout(asset, CHAINLINK_CURRENT_WARMUP_RETRY_TIMEOUT_MS)
+}
+
+fn get_chainlink_price_cached_with_warmup_timeout(
+    asset: &str,
+    timeout_ms: u64,
+) -> std::result::Result<f64, String> {
+    match get_chainlink_price_cached(asset) {
+        Ok(price) => return Ok(price),
+        Err(error) if error.to_string().starts_with("no cached price for ") && timeout_ms > 0 => {
+            tracing::warn!(
+                asset,
+                retry_timeout_ms = timeout_ms,
+                "CHAINLINK_CURRENT_WARMUP_RETRY_REQUESTED"
+            );
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+
+    let started_at = Instant::now();
+    let deadline = started_at + Duration::from_millis(timeout_ms);
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        let now = Instant::now();
+        let sleep_ms = CHAINLINK_CURRENT_WARMUP_RETRY_STEP_MS
+            .min(deadline.saturating_duration_since(now).as_millis() as u64);
+        if sleep_ms == 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(sleep_ms));
+        match get_chainlink_price_cached(asset) {
+            Ok(price) => {
+                let waited_ms = started_at.elapsed().as_millis() as u64;
+                tracing::info!(asset, waited_ms, "CHAINLINK_CURRENT_WARMUP_RETRY_READY");
+                return Ok(price);
+            }
+            Err(error) if error.to_string().starts_with("no cached price for ") => {
+                last_error = Some(error.to_string());
+            }
+            Err(error) => {
+                let waited_ms = started_at.elapsed().as_millis() as u64;
+                let final_error = error.to_string();
+                tracing::warn!(
+                    asset,
+                    waited_ms,
+                    final_error,
+                    "CHAINLINK_CURRENT_WARMUP_RETRY_NON_RETRY_ERROR"
+                );
+                return Err(format!(
+                    "{final_error}; chainlink_current_warmup_requested=true waited_ms={waited_ms} result=non_retry_error final_error={final_error}"
+                ));
+            }
+        }
+    }
+
+    let waited_ms = started_at.elapsed().as_millis() as u64;
+    let final_error = last_error.unwrap_or_else(|| {
+        format!("chainlink current warmup retry exhausted for {asset} after {timeout_ms}ms")
+    });
+    tracing::warn!(
+        asset,
+        waited_ms,
+        final_error,
+        "CHAINLINK_CURRENT_WARMUP_RETRY_EXHAUSTED"
+    );
+    Err(format!(
+        "{final_error}; chainlink_current_warmup_requested=true waited_ms={waited_ms} result=timeout final_error={final_error}"
+    ))
 }
 
 fn format_chainlink_rtds_pending_detail(
@@ -185,10 +300,15 @@ pub(crate) fn resolve_price_to_beat_current_price_snapshot(
     asset: &str,
     snapshot_gap_ms: Option<i64>,
 ) -> std::result::Result<(f64, &'static str), (&'static str, String)> {
+    let current_source = current_source.normalize_for_asset(asset);
+
     if matches!(
         current_source,
         PriceToBeatCurrentPriceSource::BinanceHyperliquid
             | PriceToBeatCurrentPriceSource::CexConsensus
+            | PriceToBeatCurrentPriceSource::ChainlinkCexConsensus
+            | PriceToBeatCurrentPriceSource::ChainlinkCexConsensusConfirmed
+            | PriceToBeatCurrentPriceSource::CexMedianFast
     ) {
         return Err((
             "current_price_unavailable",
@@ -218,7 +338,7 @@ pub(crate) fn resolve_price_to_beat_current_price_snapshot(
         );
     }
 
-    let chainlink_result = get_chainlink_price_cached(asset).map_err(|err| err.to_string());
+    let chainlink_result = get_chainlink_price_cached_with_warmup(asset);
     resolve_current_price_result_for_source(
         current_source,
         snapshot_source,
@@ -257,6 +377,10 @@ pub(super) fn format_current_price_label(source: &str) -> String {
         CURRENT_PRICE_SOURCE_BYBIT => "Current (Bybit)".to_string(),
         CURRENT_PRICE_SOURCE_BINANCE_HYPERLIQUID => "Current (Binance + Hyperliquid)".to_string(),
         CURRENT_PRICE_SOURCE_CEX_CONSENSUS => "Current (CEX consensus)".to_string(),
+        CURRENT_PRICE_SOURCE_CHAINLINK_CEX_CONSENSUS => {
+            "Current (Chainlink + CEX consensus)".to_string()
+        }
+        CURRENT_PRICE_SOURCE_CEX_MEDIAN_FAST => "Current (CEX median fast)".to_string(),
         other => format!("Current ({other})"),
     }
 }
@@ -265,15 +389,21 @@ pub(super) fn format_current_price_label(source: &str) -> String {
 mod tests {
     use super::*;
     use crate::trade_flow::guards::cex_microstructure::{
-        clear_cex_microstructure_test_state, seed_cex_book_test_sample, CexBookSample,
+        clear_cex_microstructure_test_state, lock_cex_microstructure_test_state,
+        seed_cex_book_test_sample, CexBookSample,
+    };
+    use crate::trade_flow::guards::chainlink_price::{
+        clear_chainlink_price_test_state, seed_chainlink_price_test_ticks,
     };
     use chrono::Utc;
+    use std::thread;
+    use std::time::Duration;
 
-    fn seed_current_book(venue: CexVenue, mid: f64) {
+    fn seed_current_book_for_asset(asset: &str, venue: CexVenue, mid: f64) {
         let now_ms = Utc::now().timestamp_millis();
         seed_cex_book_test_sample(CexBookSample {
             venue,
-            asset: "btc".to_string(),
+            asset: asset.to_string(),
             timestamp_ms: now_ms,
             bid: mid - 1.0,
             ask: mid + 1.0,
@@ -281,6 +411,37 @@ mod tests {
             ask_size: Some(1.0),
             source: "ticker",
         });
+    }
+
+    #[tokio::test]
+    async fn chainlink_current_warmup_uses_price_seeded_during_retry() {
+        clear_chainlink_price_test_state();
+        thread::spawn(|| {
+            thread::sleep(Duration::from_millis(50));
+            seed_chainlink_price_test_ticks("doge", &[(Utc::now().timestamp_millis(), 0.142)])
+                .expect("seed doge chainlink price");
+        });
+
+        let price = get_chainlink_price_cached_with_warmup_timeout("doge", 250)
+            .expect("warmup should pick up seeded doge price");
+
+        assert_eq!(price, 0.142);
+    }
+
+    #[tokio::test]
+    async fn chainlink_current_warmup_timeout_preserves_unavailable_error() {
+        clear_chainlink_price_test_state();
+
+        let error = get_chainlink_price_cached_with_warmup_timeout("bnb", 1)
+            .expect_err("warmup should preserve no-cache failure after timeout");
+
+        assert!(error.contains("chainlink_current_warmup_requested=true"));
+        assert!(error.contains("result=timeout"));
+        assert!(error.contains("final_error="));
+    }
+
+    fn seed_current_book(venue: CexVenue, mid: f64) {
+        seed_current_book_for_asset("btc", venue, mid);
     }
 
     #[test]
@@ -305,10 +466,27 @@ mod tests {
             PriceToBeatCurrentPriceSource::parse(Some("hyperliquid")),
             PriceToBeatCurrentPriceSource::Hyperliquid
         );
+        assert_eq!(
+            PriceToBeatCurrentPriceSource::parse(Some("chainlink_cex_consensus")),
+            PriceToBeatCurrentPriceSource::ChainlinkCexConsensus
+        );
+        assert_eq!(
+            PriceToBeatCurrentPriceSource::ChainlinkCexConsensus.as_config_str(),
+            "chainlink_cex_consensus"
+        );
+        assert_eq!(
+            PriceToBeatCurrentPriceSource::parse(Some("cex_median_fast")),
+            PriceToBeatCurrentPriceSource::CexMedianFast
+        );
+        assert_eq!(
+            PriceToBeatCurrentPriceSource::CexMedianFast.as_config_str(),
+            "cex_median_fast"
+        );
     }
 
     #[test]
     fn resolves_binance_current_price_from_fresh_book_ticker() {
+        let _guard = lock_cex_microstructure_test_state();
         clear_cex_microstructure_test_state();
         seed_current_book(CexVenue::Binance, 67_500.0);
 
@@ -326,6 +504,7 @@ mod tests {
 
     #[test]
     fn resolves_coinbase_current_price_from_fresh_book_ticker() {
+        let _guard = lock_cex_microstructure_test_state();
         clear_cex_microstructure_test_state();
         seed_current_book(CexVenue::Coinbase, 67_480.0);
 
@@ -343,6 +522,7 @@ mod tests {
 
     #[test]
     fn selected_cex_missing_blocks_without_chainlink_fallback() {
+        let _guard = lock_cex_microstructure_test_state();
         clear_cex_microstructure_test_state();
 
         let error = resolve_price_to_beat_current_price_snapshot(
@@ -361,6 +541,7 @@ mod tests {
 
     #[test]
     fn resolves_hyperliquid_current_price_from_fresh_l2_book() {
+        let _guard = lock_cex_microstructure_test_state();
         clear_cex_microstructure_test_state();
         seed_current_book(CexVenue::Hyperliquid, 67_455.0);
 
@@ -374,5 +555,23 @@ mod tests {
         .expect("hyperliquid current price");
 
         assert_eq!(resolved, (67_455.0, CURRENT_PRICE_SOURCE_HYPERLIQUID));
+    }
+
+    #[test]
+    fn hype_binance_current_source_uses_hyperliquid() {
+        let _guard = lock_cex_microstructure_test_state();
+        clear_cex_microstructure_test_state();
+        seed_current_book_for_asset("hype", CexVenue::Hyperliquid, 32.0);
+
+        let resolved = resolve_price_to_beat_current_price_snapshot(
+            PriceToBeatCurrentPriceSource::Binance,
+            PriceToBeatSource::Polymarket,
+            "hype-updown-5m-1774013100",
+            "hype",
+            None,
+        )
+        .expect("hype should use hyperliquid when binance is selected");
+
+        assert_eq!(resolved, (32.0, CURRENT_PRICE_SOURCE_HYPERLIQUID));
     }
 }

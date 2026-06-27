@@ -84,7 +84,7 @@ fn log_trigger_ws_cache_node_skipped(
     reason: &str,
     fields: &TriggerWsCacheNodeLogFields,
 ) {
-    debug!(
+    tracing::trace!(
         run_id,
         flow_run_id,
         reason,
@@ -113,7 +113,7 @@ fn log_trigger_ws_cache_node_indexed(
     flow_run_id: i64,
     fields: &TriggerWsCacheNodeLogFields,
 ) {
-    debug!(
+    tracing::trace!(
         run_id,
         flow_run_id,
         node_key = %fields.node_key,
@@ -206,7 +206,7 @@ fn log_trigger_ws_execute_begin(
     flow_run_id: i64,
     fields: &TriggerWsExecuteBeginLogFields,
 ) {
-    debug!(
+    tracing::trace!(
         run_id,
         flow_run_id,
         node_key = %fields.node_key,
@@ -251,7 +251,7 @@ fn log_trigger_ws_target_selected(
     flow_run_id: i64,
     fields: &TriggerWsTargetLogFields,
 ) {
-    debug!(
+    tracing::trace!(
         run_id,
         flow_run_id,
         node_key = %fields.node_key,
@@ -271,7 +271,7 @@ fn log_trigger_ws_target_selected(
 }
 
 fn log_trigger_ws_target_started(run_id: i64, flow_run_id: i64, fields: &TriggerWsTargetLogFields) {
-    debug!(
+    tracing::trace!(
         run_id,
         flow_run_id,
         node_key = %fields.node_key,
@@ -296,7 +296,7 @@ fn log_trigger_ws_target_skipped(
     reason: &str,
     fields: &TriggerWsTargetLogFields,
 ) {
-    debug!(
+    tracing::trace!(
         run_id,
         flow_run_id,
         reason,
@@ -322,7 +322,7 @@ fn log_trigger_ws_target_dropped(
     reason: &str,
     fields: &TriggerWsTargetLogFields,
 ) {
-    debug!(
+    tracing::trace!(
         run_id,
         flow_run_id = ?flow_run_id,
         reason,
@@ -397,7 +397,7 @@ fn log_trigger_ws_condition_not_met(
     flow_run_id: i64,
     fields: TriggerWsConditionNotMetLogFields,
 ) {
-    debug!(
+    tracing::trace!(
         run_id,
         flow_run_id,
         node_key = %fields.node_key,
@@ -1003,6 +1003,7 @@ fn build_trigger_market_price_output(
         "ws_ignored_reason": ws_ignore_reason,
         "once_mode": once_mode,
         "once_scope": if once_scope_market { "market" } else { "run" },
+        "defer_once_until_order_accepted": trade_flow_defer_once_until_order_accepted(node),
         "queued_at": queued_at_from_step,
     });
     append_json_object_fields(
@@ -1149,26 +1150,49 @@ fn finish_trigger_market_price_execution(
         cycle_window_open_at,
         cycle_window_end_at,
     );
-    info!(
-        flow_run_id = run.id,
-        node_key = %node.key,
-        pass,
-        trigger_evaluation_mode,
-        ?current_price,
-        ?effective_previous_price,
-        price_mode = price_mode.as_str(),
-        once_mode,
-        ws_sourced,
-        ws_price_source = ws_price_source_from_step,
-        ws_price_source_detail = ws_price_source_detail_from_step,
-        ws_best_bid = ?ws_best_bid_from_step,
-        ws_best_ask = ?ws_best_ask_from_step,
-        ws_last_trade_price = ?ws_last_trade_price_from_step,
-        ws_snapshot_age_ms = ?ws_snapshot_age_ms_from_step,
-        ws_site_display_mode_decision = ws_site_display_mode_decision_from_step,
-        routes_count = routes.len(),
-        "TRIGGER_MARKET_PRICE_EVALUATED"
-    );
+    if pass {
+        info!(
+            flow_run_id = run.id,
+            node_key = %node.key,
+            pass,
+            trigger_evaluation_mode,
+            ?current_price,
+            ?effective_previous_price,
+            price_mode = price_mode.as_str(),
+            once_mode,
+            ws_sourced,
+            ws_price_source = ws_price_source_from_step,
+            ws_price_source_detail = ws_price_source_detail_from_step,
+            ws_best_bid = ?ws_best_bid_from_step,
+            ws_best_ask = ?ws_best_ask_from_step,
+            ws_last_trade_price = ?ws_last_trade_price_from_step,
+            ws_snapshot_age_ms = ?ws_snapshot_age_ms_from_step,
+            ws_site_display_mode_decision = ws_site_display_mode_decision_from_step,
+            routes_count = routes.len(),
+            "TRIGGER_MARKET_PRICE_EVALUATED"
+        );
+    } else {
+        debug!(
+            flow_run_id = run.id,
+            node_key = %node.key,
+            pass,
+            trigger_evaluation_mode,
+            ?current_price,
+            ?effective_previous_price,
+            price_mode = price_mode.as_str(),
+            once_mode,
+            ws_sourced,
+            ws_price_source = ws_price_source_from_step,
+            ws_price_source_detail = ws_price_source_detail_from_step,
+            ws_best_bid = ?ws_best_bid_from_step,
+            ws_best_ask = ?ws_best_ask_from_step,
+            ws_last_trade_price = ?ws_last_trade_price_from_step,
+            ws_snapshot_age_ms = ?ws_snapshot_age_ms_from_step,
+            ws_site_display_mode_decision = ws_site_display_mode_decision_from_step,
+            routes_count = routes.len(),
+            "TRIGGER_MARKET_PRICE_EVALUATED"
+        );
+    }
     TradeFlowNodeExecution {
         output,
         routes,

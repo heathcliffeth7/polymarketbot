@@ -34,6 +34,92 @@ fn revenge_flip_child_node(
     }
 }
 
+fn revenge_flip_default_iv_time_rules() -> Value {
+    json!([
+        {
+            "startRemainingSec": 45,
+            "endRemainingSec": 30,
+            "minEdge": 0.03,
+            "minGapStrength": 0.50,
+            "maxPriceCent": 92
+        },
+        {
+            "startRemainingSec": 30,
+            "endRemainingSec": 15,
+            "minEdge": 0.05,
+            "minGapStrength": 0.75,
+            "maxPriceCent": 92
+        },
+        {
+            "startRemainingSec": 15,
+            "endRemainingSec": 8,
+            "minEdge": 0.07,
+            "minGapStrength": 1.00,
+            "maxPriceCent": 92
+        }
+    ])
+}
+
+fn revenge_flip_insert_default(
+    config: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Value,
+) {
+    if !config.contains_key(key) {
+        config.insert(key.to_string(), value);
+    }
+}
+
+fn revenge_flip_apply_entry_quality_defaults(config: &mut serde_json::Map<String, Value>) {
+    revenge_flip_insert_default(
+        config,
+        "priceToBeatIvTimeRules",
+        revenge_flip_default_iv_time_rules(),
+    );
+    revenge_flip_insert_default(config, "priceToBeatIvEntryQualityPolicy", json!(true));
+    revenge_flip_insert_default(
+        config,
+        "priceToBeatIvEntryQualityChainlinkMaxAgeMs",
+        json!(2500),
+    );
+    revenge_flip_insert_default(
+        config,
+        "priceToBeatIvEntryQualityHighRiskUnderSec",
+        json!(30),
+    );
+    revenge_flip_insert_default(
+        config,
+        "priceToBeatIvEntryQualityHighRiskAskCent",
+        json!(85),
+    );
+    revenge_flip_insert_default(
+        config,
+        "priceToBeatIvEntryQualityHighPriceMaxSpreadCent",
+        json!(2),
+    );
+    revenge_flip_insert_default(config, "priceToBeatIvEntryQualityMaxSpreadCent", json!(3));
+    revenge_flip_insert_default(
+        config,
+        "priceToBeatIvEntryQualityNeutralEdgePenalty",
+        json!(0.03),
+    );
+    revenge_flip_insert_default(
+        config,
+        "priceToBeatIvEntryQualityNeutralGapStrengthPenalty",
+        json!(0.25),
+    );
+    revenge_flip_insert_default(
+        config,
+        "priceToBeatIvEntryQualityStaleEdgePenalty",
+        json!(0.03),
+    );
+    revenge_flip_insert_default(
+        config,
+        "priceToBeatIvEntryQualityStaleGapStrengthPenalty",
+        json!(0.25),
+    );
+}
+
 fn revenge_flip_buy_node(
     node: &TradeFlowNode,
     config: &RevengeFlipConfig,
@@ -73,7 +159,12 @@ fn revenge_flip_buy_node(
         json!(effective_ptb.enabled),
     );
     next.insert("priceToBeatGuard".to_string(), json!(effective_ptb.enabled));
-    next.insert("priceToBeatMode".to_string(), json!(effective_ptb.mode));
+    let ptb_mode = if intent == "flip_buy" && !config.post_stop_loss_iv_mismatch_enabled {
+        "manual"
+    } else {
+        config.ptb.mode.as_str()
+    };
+    next.insert("priceToBeatMode".to_string(), json!(ptb_mode));
     next.insert(
         "priceToBeatMaxDiff".to_string(),
         json!(effective_ptb.max_diff),
@@ -84,8 +175,17 @@ fn revenge_flip_buy_node(
     );
     next.insert(
         "priceToBeatCurrentPriceSource".to_string(),
-        json!(effective_ptb.current_price_source),
+        json!(effective_ptb.current_price_source.as_str()),
     );
+    next.insert("cexDirectionGuardEnabled".to_string(), json!(true));
+    next.insert("cexDirectionGuardMode".to_string(), json!("bybit_plus_one"));
+    next.insert("cexDirectionGuardFailClosed".to_string(), json!(false));
+    if ptb_mode == "iv_mismatch_edge" {
+        revenge_flip_apply_entry_quality_defaults(&mut next);
+    } else {
+        next.remove("priceToBeatIvTimeRules");
+        next.insert("priceToBeatIvEntryQualityPolicy".to_string(), json!(false));
+    }
     next.insert("retryOnPriceToBeatGuardBlock".to_string(), json!(true));
     if let Some(max_price_cent) = effective_max_price_cent {
         next.insert("maxPriceCent".to_string(), json!(max_price_cent));
@@ -152,6 +252,8 @@ fn revenge_flip_stop_loss_sell_node(
     next.insert("slEnabled".to_string(), json!(false));
     next.insert("priceToBeatGuardEnabled".to_string(), json!(false));
     next.insert("priceToBeatGuard".to_string(), json!(false));
+    next.insert("cexDirectionGuardEnabled".to_string(), json!(false));
+    next.insert("priceToBeatIvEntryQualityPolicy".to_string(), json!(false));
     if let Some(best_bid) = quote.best_bid {
         next.insert(
             "minPriceCent".to_string(),

@@ -480,6 +480,7 @@ async fn process_trade_flow_dual_dca_job(
             size,
             intent: "dca_direct".to_string(),
             order_type: "GTC".to_string(),
+            post_only: false,
             client_order_id: client_order_id.clone(),
             leg_side: None,
             fee_rate_bps: fee_rate,

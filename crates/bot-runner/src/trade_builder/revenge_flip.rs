@@ -150,6 +150,120 @@ fn revenge_flip_quote_payload(quotes: &[RevengeFlipSideQuote]) -> Value {
     )
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct RevengeFlipPostStopLossMidEvaluation {
+    up_mid: Option<f64>,
+    down_mid: Option<f64>,
+    min_mid: Option<f64>,
+    max_mid: Option<f64>,
+    quote_available: bool,
+    in_chop_zone: bool,
+    strong_trend: bool,
+}
+
+fn revenge_flip_side_quote_mid(quote: &RevengeFlipSideQuote) -> Option<f64> {
+    let best_bid = quote.best_bid?;
+    let best_ask = quote.best_ask?;
+    if !best_bid.is_finite() || !best_ask.is_finite() {
+        return None;
+    }
+    Some((best_bid + best_ask) / 2.0)
+}
+
+fn revenge_flip_post_stop_loss_mid_evaluation(
+    config: &RevengeFlipConfig,
+    quotes: &[RevengeFlipSideQuote],
+) -> RevengeFlipPostStopLossMidEvaluation {
+    let up_mid = revenge_flip_find_quote(quotes, "up").and_then(revenge_flip_side_quote_mid);
+    let down_mid = revenge_flip_find_quote(quotes, "down").and_then(revenge_flip_side_quote_mid);
+    let (min_mid, max_mid) = match (up_mid, down_mid) {
+        (Some(up), Some(down)) => (Some(up.min(down)), Some(up.max(down))),
+        _ => (None, None),
+    };
+    let quote_available = min_mid.is_some() && max_mid.is_some();
+    let in_chop_zone = min_mid.zip(max_mid).is_some_and(|(min_mid, max_mid)| {
+        min_mid >= config.post_stop_loss_mid_chop_guard.chop_mid_low
+            && max_mid <= config.post_stop_loss_mid_chop_guard.chop_mid_high
+    });
+    let strong_trend = max_mid
+        .is_some_and(|max_mid| max_mid >= config.post_stop_loss_strong_trend_flip.strong_trend_mid);
+    RevengeFlipPostStopLossMidEvaluation {
+        up_mid,
+        down_mid,
+        min_mid,
+        max_mid,
+        quote_available,
+        in_chop_zone,
+        strong_trend,
+    }
+}
+
+fn revenge_flip_post_stop_loss_mid_payload(
+    config: &RevengeFlipConfig,
+    evaluation: &RevengeFlipPostStopLossMidEvaluation,
+    entry_side: Option<&str>,
+    strong_trend_max_price_override: Option<f64>,
+) -> Value {
+    json!({
+        "entry_side": entry_side,
+        "quote_available": evaluation.quote_available,
+        "up_mid": evaluation.up_mid,
+        "down_mid": evaluation.down_mid,
+        "min_mid": evaluation.min_mid,
+        "max_mid": evaluation.max_mid,
+        "in_chop_zone": evaluation.in_chop_zone,
+        "chop_mid_low": config.post_stop_loss_mid_chop_guard.chop_mid_low,
+        "chop_mid_high": config.post_stop_loss_mid_chop_guard.chop_mid_high,
+        "fail_closed": config.post_stop_loss_mid_chop_guard.fail_closed,
+        "strong_trend": evaluation.strong_trend,
+        "strong_trend_mid": config.post_stop_loss_strong_trend_flip.strong_trend_mid,
+        "strong_trend_max_price_cent": config.post_stop_loss_strong_trend_flip.max_price_cent,
+        "strong_trend_max_price_override": strong_trend_max_price_override,
+    })
+}
+
+fn revenge_flip_post_stop_loss_mid_chop_skip_reason(
+    config: &RevengeFlipConfig,
+    is_flip: bool,
+    evaluation: &RevengeFlipPostStopLossMidEvaluation,
+) -> Option<&'static str> {
+    if !is_flip || !config.post_stop_loss_mid_chop_guard.enabled {
+        return None;
+    }
+    if !evaluation.quote_available {
+        return config
+            .post_stop_loss_mid_chop_guard
+            .fail_closed
+            .then_some("mid_chop_quote_unavailable");
+    }
+    evaluation.in_chop_zone.then_some("blocked_mid_chop")
+}
+
+fn revenge_flip_post_stop_loss_strong_trend_max_price_override(
+    config: &RevengeFlipConfig,
+    is_flip: bool,
+    evaluation: &RevengeFlipPostStopLossMidEvaluation,
+) -> Option<f64> {
+    if is_flip && config.post_stop_loss_strong_trend_flip.enabled && evaluation.strong_trend {
+        Some(config.post_stop_loss_strong_trend_flip.max_price_cent)
+    } else {
+        None
+    }
+}
+
+fn revenge_flip_effective_entry_price_with_max_override(
+    effective_entry_price: RevengeFlipEffectiveEntryPrice,
+    max_price_override: Option<f64>,
+) -> RevengeFlipEffectiveEntryPrice {
+    match max_price_override {
+        Some(max_cent) => RevengeFlipEffectiveEntryPrice {
+            max_cent: Some(max_cent),
+            max_source: "post_stop_loss_strong_trend_flip".to_string(),
+        },
+        None => effective_entry_price,
+    }
+}
+
 fn revenge_flip_ptb_stop_loss_payload(evaluation: &TradeBuilderPtbStopLossEvaluation) -> Value {
     json!({
         "asset": evaluation.asset,
@@ -259,6 +373,11 @@ struct RevengeFlipEntrySizing {
 enum RevengeFlipEntrySizingDecision {
     Ready(RevengeFlipEntrySizing),
     Unavailable,
+    TargetPnlAlreadySatisfied {
+        total_loss_usdc: f64,
+        target_pnl_usdc: f64,
+        required_recovery_usdc: f64,
+    },
     ReentryMinSharesExceedsLotLimit {
         formula_target_shares: f64,
         min_reentry_shares: f64,
@@ -400,11 +519,12 @@ fn revenge_flip_last_stopped_side(state: &TradeBuilderRevengeFlipState) -> Optio
     })
 }
 
-fn revenge_flip_rule_match_candidate<'a>(
+fn revenge_flip_rule_match_candidate_with_max_price_override<'a>(
     config: &RevengeFlipConfig,
     state: &TradeBuilderRevengeFlipState,
     quote: &'a RevengeFlipSideQuote,
     remaining_sec: Option<i64>,
+    max_price_override: Option<f64>,
 ) -> Option<RevengeFlipEntryCandidate<'a>> {
     let best_ask = revenge_flip_valid_best_ask(quote)?;
     let entry_flip_index = revenge_flip_entry_flip_index(state);
@@ -422,6 +542,10 @@ fn revenge_flip_rule_match_candidate<'a>(
         remaining_sec,
         Some(&quote.revenge_side),
         last_stopped_side,
+    );
+    let effective_entry_price = revenge_flip_effective_entry_price_with_max_override(
+        effective_entry_price,
+        max_price_override,
     );
     if !revenge_flip_entry_price_passes(config, &effective_entry_price, best_ask) {
         return None;
@@ -505,11 +629,12 @@ fn revenge_flip_initial_rule_order_candidate<'a>(
     None
 }
 
-fn revenge_flip_select_entry_candidate<'a>(
+fn revenge_flip_select_entry_candidate_with_max_price_override<'a>(
     config: &RevengeFlipConfig,
     state: &TradeBuilderRevengeFlipState,
     quotes: &'a [RevengeFlipSideQuote],
     remaining_sec: Option<i64>,
+    max_price_override: Option<f64>,
 ) -> Option<RevengeFlipEntryCandidate<'a>> {
     let entry_flip_index = revenge_flip_entry_flip_index(state);
     let last_stopped_side = revenge_flip_last_stopped_side(state);
@@ -532,12 +657,15 @@ fn revenge_flip_select_entry_candidate<'a>(
             quote,
             best_ask,
             effective_ptb,
-            effective_entry_price: revenge_flip_effective_entry_price(
-                config,
-                entry_flip_index,
-                remaining_sec,
-                Some(&quote.revenge_side),
-                last_stopped_side,
+            effective_entry_price: revenge_flip_effective_entry_price_with_max_override(
+                revenge_flip_effective_entry_price(
+                    config,
+                    entry_flip_index,
+                    remaining_sec,
+                    Some(&quote.revenge_side),
+                    last_stopped_side,
+                ),
+                max_price_override,
             ),
             entry_ptb_guard,
             selection_mode: "fixed_or_lowest_ask",
@@ -548,8 +676,32 @@ fn revenge_flip_select_entry_candidate<'a>(
     }
     quotes
         .iter()
-        .filter_map(|quote| revenge_flip_rule_match_candidate(config, state, quote, remaining_sec))
+        .filter_map(|quote| {
+            revenge_flip_rule_match_candidate_with_max_price_override(
+                config,
+                state,
+                quote,
+                remaining_sec,
+                max_price_override,
+            )
+        })
         .min_by(|left, right| left.best_ask.total_cmp(&right.best_ask))
+}
+
+#[cfg(test)]
+fn revenge_flip_select_entry_candidate<'a>(
+    config: &RevengeFlipConfig,
+    state: &TradeBuilderRevengeFlipState,
+    quotes: &'a [RevengeFlipSideQuote],
+    remaining_sec: Option<i64>,
+) -> Option<RevengeFlipEntryCandidate<'a>> {
+    revenge_flip_select_entry_candidate_with_max_price_override(
+        config,
+        state,
+        quotes,
+        remaining_sec,
+        None,
+    )
 }
 
 fn revenge_flip_entry_candidate_payload(
@@ -637,8 +789,18 @@ fn revenge_flip_entry_notional(
     if denominator <= 0.0 || !denominator.is_finite() {
         return Ok(RevengeFlipEntrySizingDecision::Unavailable);
     }
+    let required_recovery_usdc = state.total_loss_usdc + config.profit_target_usdc;
+    if required_recovery_usdc <= 0.0 {
+        return Ok(
+            RevengeFlipEntrySizingDecision::TargetPnlAlreadySatisfied {
+                total_loss_usdc: state.total_loss_usdc,
+                target_pnl_usdc: config.profit_target_usdc,
+                required_recovery_usdc,
+            },
+        );
+    }
     let formula_target_shares = positive_quantity_flip_grid_round_up_share_qty(
-        (state.total_loss_usdc + config.profit_target_usdc) / denominator,
+        required_recovery_usdc / denominator,
     );
     let min_reentry_shares =
         positive_quantity_flip_grid_round_up_share_qty(config.min_reentry_shares);
@@ -967,9 +1129,24 @@ async fn execute_action_place_order_revenge_flip(
         ));
     }
 
-    let Some(entry_candidate) =
-        revenge_flip_select_entry_candidate(&config, &state, &quotes, remaining_sec)
-    else {
+    let is_flip =
+        state.flip_count > 0 || state.total_loss_usdc > 0.000001 || state.next_entry_side.is_some();
+    let post_stop_loss_mid_evaluation =
+        revenge_flip_post_stop_loss_mid_evaluation(&config, &quotes);
+    let post_stop_loss_max_price_override =
+        revenge_flip_post_stop_loss_strong_trend_max_price_override(
+            &config,
+            is_flip,
+            &post_stop_loss_mid_evaluation,
+        );
+
+    let Some(entry_candidate) = revenge_flip_select_entry_candidate_with_max_price_override(
+        &config,
+        &state,
+        &quotes,
+        remaining_sec,
+        post_stop_loss_max_price_override,
+    ) else {
         return Ok(revenge_flip_output_skipped(
             node,
             &market_slug,
@@ -994,6 +1171,23 @@ async fn execute_action_place_order_revenge_flip(
     let best_ask = entry_candidate.best_ask;
     let entry_flip_index = revenge_flip_entry_flip_index(&state);
     let effective_entry_price = entry_candidate.effective_entry_price;
+    if let Some(reason) = revenge_flip_post_stop_loss_mid_chop_skip_reason(
+        &config,
+        is_flip,
+        &post_stop_loss_mid_evaluation,
+    ) {
+        return Ok(revenge_flip_output_skipped(
+            node,
+            &market_slug,
+            reason,
+            revenge_flip_post_stop_loss_mid_payload(
+                &config,
+                &post_stop_loss_mid_evaluation,
+                Some(&entry_quote.revenge_side),
+                post_stop_loss_max_price_override,
+            ),
+        ));
+    }
     if !revenge_flip_entry_price_passes(&config, &effective_entry_price, best_ask) {
         return Ok(revenge_flip_output_skipped(
             node,
@@ -1012,8 +1206,6 @@ async fn execute_action_place_order_revenge_flip(
     }
 
     let entry_stop_loss_pct = revenge_flip_stop_loss_pct_for_entry(&config, entry_flip_index);
-    let is_flip =
-        state.flip_count > 0 || state.total_loss_usdc > 0.000001 || state.next_entry_side.is_some();
     let available_collateral = if is_flip {
         match client.available_collateral_usdc().await {
             Ok(value) => value,
@@ -1047,6 +1239,27 @@ async fn execute_action_place_order_revenge_flip(
                         "available_collateral_usdc": available_collateral,
                         "total_loss_usdc": state.total_loss_usdc,
                         "profit_target_usdc": config.profit_target_usdc,
+                        "min_reentry_shares": config.min_reentry_shares,
+                    }),
+                ));
+            }
+            RevengeFlipEntrySizingDecision::TargetPnlAlreadySatisfied {
+                total_loss_usdc,
+                target_pnl_usdc,
+                required_recovery_usdc,
+            } => {
+                return Ok(revenge_flip_output_skipped(
+                    node,
+                    &market_slug,
+                    "target_pnl_already_satisfied",
+                    json!({
+                        "entry_side": entry_quote.revenge_side,
+                        "best_ask": best_ask,
+                        "available_collateral_usdc": available_collateral,
+                        "total_loss_usdc": total_loss_usdc,
+                        "target_pnl_usdc": target_pnl_usdc,
+                        "profit_target_usdc": config.profit_target_usdc,
+                        "required_recovery_usdc": required_recovery_usdc,
                         "min_reentry_shares": config.min_reentry_shares,
                     }),
                 ));
@@ -1153,6 +1366,14 @@ async fn execute_action_place_order_revenge_flip(
             "remaining_sec": remaining_sec,
             "effective_max_price_cent": effective_entry_price.max_cent,
             "effective_max_price_source": effective_entry_price.max_source,
+            "post_stop_loss_mid_chop_guard": is_flip.then(|| {
+                revenge_flip_post_stop_loss_mid_payload(
+                    &config,
+                    &post_stop_loss_mid_evaluation,
+                    Some(&entry_quote.revenge_side),
+                    post_stop_loss_max_price_override,
+                )
+            }),
             "entry_ptb_guard": entry_candidate.entry_ptb_guard.to_value(),
             "effective_ptb": {
                 "enabled": effective_ptb.enabled,

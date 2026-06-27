@@ -495,9 +495,10 @@ fn evaluate_armed_builder_ptb_dirty_orders(orders: &[TradeBuilderOrder]) -> Hash
     orders
         .iter()
         .filter_map(|order| {
-            trade_builder_evaluate_ptb_stop_loss(order)
-                .filter(|evaluation| evaluation.should_trigger)
-                .map(|_| order.id)
+            let evaluation = trade_builder_evaluate_ptb_stop_loss(order)?;
+            (evaluation.should_trigger
+                || trade_builder_ptb_oracle_lag_stop_dirty_candidate(order, &evaluation))
+            .then_some(order.id)
         })
         .collect()
 }
@@ -840,10 +841,7 @@ mod armed_ws_eval_tests {
         sync_armed_builder_order_to_cache(order.clone()).await;
 
         let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
-        let bucket = cache
-            .price_by_token
-            .get(&order.token_id)
-            .expect("bucket");
+        let bucket = cache.price_by_token.get(&order.token_id).expect("bucket");
         assert_eq!(bucket.len(), 1);
         assert_eq!(bucket[0].last_seen_price, Some(0.77));
     }
@@ -879,10 +877,7 @@ mod armed_ws_eval_tests {
         rearm_builder_order_to_cache(order.clone()).await;
 
         let cache = ARMED_BUILDER_ORDER_CACHE.read().await;
-        let bucket = cache
-            .price_by_token
-            .get(&order.token_id)
-            .expect("bucket");
+        let bucket = cache.price_by_token.get(&order.token_id).expect("bucket");
         assert_eq!(bucket.len(), 1);
         assert_eq!(bucket[0].id, order.id);
     }
@@ -907,6 +902,8 @@ mod armed_ws_eval_tests {
         let snapshot = MarketDataSnapshot {
             best_bid: Some(0.76),
             best_ask: Some(0.79),
+            best_bid_size: None,
+            best_ask_size: None,
             last_trade_price: Some(0.77),
             updated_at_ms: 1,
             last_source: "book".to_string(),

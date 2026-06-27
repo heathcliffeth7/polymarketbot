@@ -4,6 +4,17 @@ import {
   PTB_MODE_OPTIONS,
   PTB_STOP_LOSS_CURRENT_PRICE_SOURCE_OPTIONS,
 } from './ptb-modes';
+import {
+  CONFIDENCE_LADDER_ACTION_FIELDS,
+  CONFIDENCE_LADDER_MODE,
+} from './confidence-ladder';
+import {
+  AVG_REBOUND_PAIRLOCK_RESCUE_ACTION_FIELDS,
+  AVG_REBOUND_PAIRLOCK_RESCUE_MODE,
+} from './avg-rebound-pairlock-rescue';
+import { ACTION_PLACE_ORDER_ENTRY_QUALITY_FIELDS } from './action-place-order-entry-quality-fields';
+import { ACTION_PLACE_ORDER_HIGH_PRICE_EARLY_FIELDS } from './action-place-order-high-price-early-fields';
+import { CEX_ENTRY_CONSENSUS_FIELDS } from './cex-entry-consensus';
 
 export const ACTION_PLACE_ORDER_FIELD_SCHEMA: NodeFieldSchema[] = [
     { key: 'sourceTradeId', label: 'Source Trade ID', input: 'number' },
@@ -19,10 +30,14 @@ export const ACTION_PLACE_ORDER_FIELD_SCHEMA: NodeFieldSchema[] = [
         { label: 'Positive Quantity Flip Grid', value: 'positive_quantity_flip_grid_v1' },
         { label: 'Positive Flip Pairlock Compression', value: 'positive_flip_pairlock_compression_v1' },
         { label: 'RevengeFlip v1', value: 'revenge_flip_v1' },
+        { label: 'Confidence Ladder + Hedge Lock', value: CONFIDENCE_LADDER_MODE },
+        { label: 'Avg-Rebound Pairlock Rescue', value: AVG_REBOUND_PAIRLOCK_RESCUE_MODE },
       ],
       help: 'single tek-bacak davranisidir. pair_lock binary iki bacak toplar. dca_live_v1 generic Polymarket slug/outcome DCA modudur. live_gap_collector_v1 PTB beklemeden live BTC gap + depth ile single collector entry arar. positive_quantity_flip_grid_v1 50-60c bandinda dinamik quantity grid uygular. positive_flip_pairlock_compression_v1 Positive Flip + Pairlock Compression, revenge_flip_v1 ise stop-loss sonrasi karsi yonde toparlama stratejisidir.',
     },
     { key: 'positiveQuantityFlipGrid', label: 'Positive Flip Grid JSON', input: 'textarea' },
+    ...CONFIDENCE_LADDER_ACTION_FIELDS,
+    ...AVG_REBOUND_PAIRLOCK_RESCUE_ACTION_FIELDS,
     { key: 'liveGapCollectorEnabled', label: 'Live Gap Collector', input: 'checkbox' },
     { key: 'liveGapCollectorWindowStartSec', label: 'Live Gap Start (sn)', input: 'number' },
     { key: 'liveGapCollectorWindowEndSec', label: 'Live Gap End (sn)', input: 'number' },
@@ -428,20 +443,24 @@ export const ACTION_PLACE_ORDER_FIELD_SCHEMA: NodeFieldSchema[] = [
       key: 'cexDirectionGuardEnabled',
       label: 'CEX Yon Guard',
       input: 'checkbox',
-      help: 'Bybit + Binance/Coinbase pencere ici hareketi secilen outcome yonune tersse buy emrini engeller.',
+      help: 'Secili anchor + Binance/Coinbase pencere ici hareketi outcome yonune tersse buy emrini engeller.',
     },
     {
       key: 'cexDirectionGuardMode',
       label: 'CEX Yon Modu',
       input: 'select',
-      options: [{ label: 'Bybit + 1 onay', value: 'bybit_plus_one' }],
-      help: 'Bybit ana sinyaldir; Binance veya Coinbase ayni yonu onaylarsa consensus olusur.',
+      options: [
+        { label: 'OKX + 1 onay', value: 'okx_plus_one' },
+        { label: 'Gate.io + 1 onay', value: 'gate_plus_one' },
+        { label: 'Bybit + 1 onay', value: 'bybit_plus_one' },
+      ],
+      help: 'Secili anchor ana sinyaldir; Binance veya Coinbase ayni yonu onaylarsa consensus olusur.',
     },
     {
       key: 'cexDirectionGuardMaxStaleMs',
       label: 'CEX Max Stale (ms)',
       input: 'number',
-      help: 'Bybit/Binance/Coinbase book verisi bu yas ustundeyse stale sayilir.',
+      help: 'Anchor/Binance/Coinbase book verisi bu yas ustundeyse stale sayilir.',
     },
     {
       key: 'cexDirectionGuardMinMoveUsd',
@@ -453,8 +472,10 @@ export const ACTION_PLACE_ORDER_FIELD_SCHEMA: NodeFieldSchema[] = [
       key: 'cexDirectionGuardFailClosed',
       label: 'CEX Missing Block',
       input: 'checkbox',
-      help: 'Acikken guard aktif ama Bybit yok/stale ise order engellenir.',
+      help: 'Acikken guard aktif ama secili anchor yok/stale ise order engellenir.',
     },
+    ...CEX_ENTRY_CONSENSUS_FIELDS,
+    ...ACTION_PLACE_ORDER_ENTRY_QUALITY_FIELDS,
     {
       key: 'priceToBeatMaxDiff',
       label: 'Minimum Fark',
@@ -507,6 +528,43 @@ export const ACTION_PLACE_ORDER_FIELD_SCHEMA: NodeFieldSchema[] = [
       input: 'number',
       help: 'Edge adjusted dynamic threshold uzerine bu kadar ek marj birakmazsa trade bloklanir.',
     },
+    {
+      key: 'priceToBeatIvMediumChopMinAdjMargin',
+      label: 'IV Medium Chop Min Adj Margin',
+      input: 'number',
+      help: 'PTB movement medium_chop iken gereken minimum adjusted margin.',
+    },
+    {
+      key: 'priceToBeatIvMediumChopHighPriceMinAdjMargin',
+      label: 'IV Medium Chop Pahali Min Margin',
+      input: 'number',
+      help: 'Medium chop ve pahali decision ref durumunda gereken minimum adjusted margin.',
+    },
+    {
+      key: 'priceToBeatIvMediumChopHighPriceRefCent',
+      label: 'IV Medium Chop Pahali Ref',
+      input: 'number',
+      help: 'Medium chop pahali entry esigi cent olarak.',
+    },
+    {
+      key: 'priceToBeatIvMediumChopBinanceFailOpenMarginAdd',
+      label: 'IV Medium Chop Binance Add',
+      input: 'number',
+      help: 'Medium chop ve Binance fail-open durumunda minimum margin uzerine eklenir.',
+    },
+    {
+      key: 'priceToBeatIvMediumChopStaleMs',
+      label: 'IV Medium Chop Stale Ms',
+      input: 'number',
+      help: 'Medium chop stale margin add icin Chainlink yas esigi.',
+    },
+    {
+      key: 'priceToBeatIvMediumChopStaleMarginAdd',
+      label: 'IV Medium Chop Stale Add',
+      input: 'number',
+      help: 'Medium chop ve stale durumda minimum margin uzerine eklenir.',
+    },
+    ...ACTION_PLACE_ORDER_HIGH_PRICE_EARLY_FIELDS,
     {
       key: 'priceToBeatIvMinFinalQ',
       label: 'IV Min Final Q',
@@ -614,6 +672,12 @@ export const ACTION_PLACE_ORDER_FIELD_SCHEMA: NodeFieldSchema[] = [
       label: 'IV Depth Koruma',
       input: 'checkbox',
       help: 'Secilen token ask ladder VWAP maliyeti best ask uzerinden kontrol edilir.',
+    },
+    {
+      key: 'priceToBeatIvDepthGuardHardBlockEnabled',
+      label: 'IV Depth Hard Block',
+      input: 'checkbox',
+      help: 'Depth guard block reason uretirse IV mismatch entry emrini durdurur.',
     },
     {
       key: 'priceToBeatIvDepthMaxSlippage',

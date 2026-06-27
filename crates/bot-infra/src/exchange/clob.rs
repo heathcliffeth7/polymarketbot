@@ -7,6 +7,7 @@ pub struct ClobHttpClient {
     positions_page_size: i64,
     positions_max_pages: i64,
     http: Client,
+    order_http: Client,
     signer: Arc<dyn HeaderSigner>,
     wallet: LocalWallet,
     exchange_address: Address,
@@ -68,6 +69,7 @@ impl ClobHttpClient {
             positions_page_size,
             positions_max_pages,
             http: build_http_client(),
+            order_http: build_order_http_client(),
             signer: Arc::new(ClobHeaderSigner { creds }),
             wallet,
             exchange_address,
@@ -114,7 +116,12 @@ impl ClobHttpClient {
             .map_err(|err| anyhow::anyhow!("build signed headers: {err:#}"))?;
         let header_sign_ms = header_sign_started.elapsed().as_millis() as i64;
 
-        let mut req = self.http.request(method, url);
+        let http = if method == Method::POST && request_path == "/order" {
+            &self.order_http
+        } else {
+            &self.http
+        };
+        let mut req = http.request(method, url);
         for (k, v) in headers {
             req = req.header(k, v);
         }
@@ -331,6 +338,7 @@ pub(super) fn build_place_order_body(
     signature: &str,
     owner: &str,
     normalized_order_type: &str,
+    post_only: bool,
 ) -> serde_json::Value {
     json!({
         "order": {
@@ -350,6 +358,7 @@ pub(super) fn build_place_order_body(
         },
         "owner": owner,
         "orderType": normalized_order_type,
+        "postOnly": post_only,
         "deferExec": false,
     })
 }
@@ -388,6 +397,272 @@ pub(super) fn parse_fee_rate_bps_response(raw: &serde_json::Value) -> Option<u64
         .or_else(|| raw.get("base_fee"))
         .or_else(|| raw.get("baseFee"))
         .and_then(parse_fee_rate_bps_value)
+}
+
+fn parse_i64_value(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(v) => v
+            .as_i64()
+            .or_else(|| v.as_f64().map(|value| value.round() as i64)),
+        Value::String(v) => v.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn parse_string_vec_value(value: Option<&Value>) -> Vec<String> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    if let Some(items) = value.as_array() {
+        return items
+            .iter()
+            .filter_map(|item| item.as_str().map(ToString::to_string))
+            .collect();
+    }
+    if let Some(raw) = value.as_str() {
+        if let Ok(items) = serde_json::from_str::<Vec<String>>(raw) {
+            return items;
+        }
+    }
+    Vec::new()
+}
+
+pub(super) fn parse_order_info_response(raw: &Value) -> OrderInfo {
+    OrderInfo {
+        order_id: raw
+            .get("orderID")
+            .or_else(|| raw.get("order_id"))
+            .or_else(|| raw.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        client_order_id: raw
+            .get("clientOrderId")
+            .or_else(|| raw.get("client_order_id"))
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+        status: raw
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        price: raw.get("price").and_then(parse_f64_value),
+        size: raw
+            .get("size")
+            .or_else(|| raw.get("original_size"))
+            .or_else(|| raw.get("originalSize"))
+            .and_then(parse_f64_value),
+        filled_size: raw
+            .get("filledSize")
+            .or_else(|| raw.get("filled_size"))
+            .or_else(|| raw.get("size_matched"))
+            .or_else(|| raw.get("sizeMatched"))
+            .and_then(parse_f64_value),
+        associated_trade_ids: parse_string_vec_value(
+            raw.get("associate_trades")
+                .or_else(|| raw.get("associated_trades"))
+                .or_else(|| raw.get("associatedTradeIds"))
+                .or_else(|| raw.get("associateTrades")),
+        ),
+    }
+}
+
+fn value_string(raw: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| raw.get(*key).and_then(|value| value.as_str()))
+        .map(ToString::to_string)
+}
+
+fn trade_row_timestamp(raw: &Value) -> Option<i64> {
+    [
+        raw.get("timestamp"),
+        raw.get("match_time"),
+        raw.get("matchTime"),
+        raw.get("last_update"),
+        raw.get("lastUpdate"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(parse_i64_value)
+}
+
+fn push_fill_if_target_matches(
+    fills: &mut Vec<FillInfo>,
+    fill: FillInfo,
+    target_order_id: Option<&str>,
+) {
+    if target_order_id
+        .map(|target| fill.order_id == target)
+        .unwrap_or(true)
+    {
+        fills.push(fill);
+    }
+}
+
+fn parse_clob_trade_row_to_fills(raw: &Value, target_order_id: Option<&str>) -> Vec<FillInfo> {
+    let mut fills = Vec::new();
+    let trade_id = value_string(raw, &["id", "fillID", "fill_id"]).unwrap_or_default();
+    let price = raw
+        .get("price")
+        .and_then(parse_f64_value)
+        .unwrap_or_default();
+    let fee = raw.get("fee").and_then(parse_f64_value);
+    let ts = trade_row_timestamp(raw);
+
+    if let Some(order_id) = value_string(raw, &["orderID", "order_id"]) {
+        push_fill_if_target_matches(
+            &mut fills,
+            FillInfo {
+                fill_id: trade_id.clone(),
+                order_id,
+                price,
+                size: raw
+                    .get("size")
+                    .and_then(parse_f64_value)
+                    .unwrap_or_default(),
+                fee,
+                ts,
+                raw_payload: Some(raw.clone()),
+            },
+            target_order_id,
+        );
+        return fills;
+    }
+
+    if let Some(order_id) = value_string(raw, &["taker_order_id", "takerOrderId"]) {
+        let fill_id = if trade_id.is_empty() {
+            order_id.clone()
+        } else {
+            format!("{trade_id}:{order_id}")
+        };
+        push_fill_if_target_matches(
+            &mut fills,
+            FillInfo {
+                fill_id,
+                order_id,
+                price,
+                size: raw
+                    .get("size")
+                    .and_then(parse_f64_value)
+                    .unwrap_or_default(),
+                fee,
+                ts,
+                raw_payload: Some(raw.clone()),
+            },
+            target_order_id,
+        );
+    }
+
+    for maker_order in raw
+        .get("maker_orders")
+        .or_else(|| raw.get("makerOrders"))
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(order_id) = value_string(maker_order, &["order_id", "orderID", "id"]) else {
+            continue;
+        };
+        let fill_id = if trade_id.is_empty() {
+            order_id.clone()
+        } else {
+            format!("{trade_id}:{order_id}")
+        };
+        let maker_price = maker_order
+            .get("price")
+            .and_then(parse_f64_value)
+            .unwrap_or(price);
+        let maker_size = maker_order
+            .get("matched_amount")
+            .or_else(|| maker_order.get("matchedAmount"))
+            .or_else(|| maker_order.get("size"))
+            .and_then(parse_f64_value)
+            .unwrap_or_default();
+        push_fill_if_target_matches(
+            &mut fills,
+            FillInfo {
+                fill_id,
+                order_id,
+                price: maker_price,
+                size: maker_size,
+                fee: maker_order.get("fee").and_then(parse_f64_value).or(fee),
+                ts,
+                raw_payload: Some(raw.clone()),
+            },
+            target_order_id,
+        );
+    }
+
+    fills
+}
+
+pub(super) fn parse_clob_trade_page(raw: &Value, target_order_id: Option<&str>) -> FillPage {
+    let rows = raw
+        .get("data")
+        .or_else(|| raw.get("trades"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let first_row_keys = rows
+        .first()
+        .and_then(|row| row.as_object())
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default();
+    let fills = rows
+        .iter()
+        .flat_map(|row| parse_clob_trade_row_to_fills(row, target_order_id))
+        .collect::<Vec<_>>();
+
+    FillPage {
+        fills,
+        next_cursor: raw
+            .get("next_cursor")
+            .or_else(|| raw.get("nextCursor"))
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string),
+        count: raw
+            .get("count")
+            .and_then(|value| value.as_u64())
+            .map(|value| value as usize),
+        raw_count: rows.len(),
+        first_row_keys,
+    }
+}
+
+fn clob_query_escape(raw: &str) -> String {
+    let mut escaped = String::new();
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                escaped.push(byte as char)
+            }
+            _ => escaped.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    escaped
+}
+
+fn push_trade_query_param(params: &mut Vec<String>, key: &str, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    params.push(format!("{key}={}", clob_query_escape(value)));
+}
+
+fn clob_trades_path(query: &TradeQuery) -> String {
+    let mut params = Vec::new();
+    push_trade_query_param(
+        &mut params,
+        "next_cursor",
+        query.next_cursor.as_deref().or(Some("MA==")),
+    );
+    push_trade_query_param(&mut params, "id", query.id.as_deref());
+    push_trade_query_param(&mut params, "maker_address", query.maker_address.as_deref());
+    push_trade_query_param(&mut params, "market", query.market.as_deref());
+    push_trade_query_param(&mut params, "asset_id", query.asset_id.as_deref());
+    push_trade_query_param(&mut params, "before", query.before.as_deref());
+    push_trade_query_param(&mut params, "after", query.after.as_deref());
+    format!("/data/trades?{}", params.join("&"))
 }
 
 fn parse_clob_token(raw: &Value) -> Option<ClobMarketToken> {
@@ -537,8 +812,14 @@ pub(crate) fn parse_collateral_balance_usdc(raw: &serde_json::Value) -> Result<f
 
     let balance = balance_raw
         .and_then(parse_f64_value)
-        .or_else(|| balance_raw.and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()))
-        .ok_or_else(|| anyhow::anyhow!("collateral balance missing from balance-allowance response"))?;
+        .or_else(|| {
+            balance_raw
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("collateral balance missing from balance-allowance response")
+        })?;
 
     Ok(normalize_collateral_balance_usdc(balance))
 }
@@ -598,19 +879,40 @@ impl ClobRestClient for ClobHttpClient {
     }
 
     async fn get_order_book(&self, token_id: &str) -> Result<Option<OrderBookSnapshot>> {
+        Ok(self
+            .get_order_book_with_diagnostics(token_id)
+            .await?
+            .snapshot)
+    }
+
+    async fn get_order_book_with_diagnostics(
+        &self,
+        token_id: &str,
+    ) -> Result<OrderBookFetchResult> {
         if token_id.trim().is_empty() {
-            return Ok(None);
+            return Ok(OrderBookFetchResult::failed(
+                "missing_token",
+                None,
+                "token_id_missing",
+            ));
         }
 
         let request_path = format!("/book?token_id={token_id}");
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), request_path);
         let response = self.http.get(url).send().await?;
-        if !response.status().is_success() {
-            return Ok(None);
+        let status = response.status();
+        if !status.is_success() {
+            return Ok(OrderBookFetchResult::failed(
+                "http_status",
+                Some(status.as_u16()),
+                format!("http_{}", status.as_u16()),
+            ));
         }
 
         let raw: serde_json::Value = response.json().await?;
-        Ok(Some(extract_order_book_from_book(&raw)))
+        Ok(OrderBookFetchResult::ok(Some(
+            extract_order_book_from_book(&raw),
+        )))
     }
 
     async fn get_last_trade_price(&self, token_id: &str) -> Result<Option<f64>> {
@@ -758,6 +1060,7 @@ impl ClobRestClient for ClobHttpClient {
             req.client_order_id.clone()
         };
         let normalized_order_type = normalize_clob_order_type(&req.order_type);
+        let post_only = req.post_only && matches!(normalized_order_type, "GTC" | "GTD");
 
         let token_id_str = req.token_id.as_deref().unwrap_or("");
         let token_id = U256::from_dec_str(token_id_str).unwrap_or(U256::zero());
@@ -842,6 +1145,7 @@ impl ClobRestClient for ClobHttpClient {
             &signature,
             &self.api_key,
             normalized_order_type,
+            post_only,
         );
         let prepare_ms = (prepare_started.elapsed().as_millis() as i64 - sign_ms).max(0);
 
@@ -870,6 +1174,7 @@ impl ClobRestClient for ClobHttpClient {
         }
 
         let http_started = std::time::Instant::now();
+        order_egress::ensure_order_egress_allowed(&self.order_http).await?;
         let (response, header_sign_ms) =
             match self.signed_json(Method::POST, "/order", Some(body)).await {
                 Ok(response) => response,
@@ -994,29 +1299,7 @@ impl ClobRestClient for ClobHttpClient {
             .json()
             .await?;
 
-        Ok(OrderInfo {
-            order_id: raw
-                .get("orderID")
-                .or_else(|| raw.get("id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            client_order_id: raw
-                .get("clientOrderId")
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string),
-            status: raw
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            price: raw.get("price").and_then(|v| v.as_f64()),
-            size: raw.get("size").and_then(|v| v.as_f64()),
-            filled_size: raw
-                .get("filledSize")
-                .or_else(|| raw.get("filled_size"))
-                .and_then(|v| v.as_f64()),
-        })
+        Ok(parse_order_info_response(&raw))
     }
 
     async fn list_open_orders(&self, market: Option<&str>) -> Result<Vec<OrderInfo>> {
@@ -1040,35 +1323,22 @@ impl ClobRestClient for ClobHttpClient {
 
         Ok(rows
             .into_iter()
-            .map(|r| OrderInfo {
-                order_id: r
-                    .get("orderID")
-                    .or_else(|| r.get("id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                client_order_id: r
-                    .get("clientOrderId")
-                    .and_then(|v| v.as_str())
-                    .map(ToString::to_string),
-                status: r
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
-                price: r.get("price").and_then(|v| v.as_f64()),
-                size: r.get("size").and_then(|v| v.as_f64()),
-                filled_size: r
-                    .get("filledSize")
-                    .or_else(|| r.get("filled_size"))
-                    .and_then(|v| v.as_f64()),
-            })
+            .map(|r| parse_order_info_response(&r))
             .collect())
     }
 
     async fn list_fills(&self, next_cursor: Option<&str>) -> Result<Vec<FillInfo>> {
-        let cursor = next_cursor.unwrap_or("MA==");
-        let path = format!("/data/trades?next_cursor={cursor}");
+        Ok(self
+            .list_fills_page(TradeQuery {
+                next_cursor: next_cursor.map(ToString::to_string),
+                ..TradeQuery::default()
+            })
+            .await?
+            .fills)
+    }
+
+    async fn list_fills_page(&self, query: TradeQuery) -> Result<FillPage> {
+        let path = clob_trades_path(&query);
 
         let raw: serde_json::Value = self
             .signed_json(Method::GET, &path, None)
@@ -1077,33 +1347,7 @@ impl ClobRestClient for ClobHttpClient {
             .json()
             .await?;
 
-        let rows = raw
-            .get("data")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        Ok(rows
-            .into_iter()
-            .map(|r| FillInfo {
-                fill_id: r
-                    .get("id")
-                    .or_else(|| r.get("fillID"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                order_id: r
-                    .get("orderID")
-                    .or_else(|| r.get("order_id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                price: r.get("price").and_then(|v| v.as_f64()).unwrap_or_default(),
-                size: r.get("size").and_then(|v| v.as_f64()).unwrap_or_default(),
-                fee: r.get("fee").and_then(|v| v.as_f64()),
-                ts: r.get("timestamp").and_then(|v| v.as_i64()),
-            })
-            .collect())
+        Ok(parse_clob_trade_page(&raw, None))
     }
 
     async fn get_balance(&self) -> Result<f64> {
@@ -1117,62 +1361,24 @@ impl ClobRestClient for ClobHttpClient {
     }
 
     async fn get_token_inventory(&self, token_id: &str) -> Result<Option<f64>> {
-        let Some(base_url) = self.positions_base_url.as_deref() else {
+        if token_id.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let Some(snapshot) = self.get_token_inventory_snapshot().await? else {
             return Ok(None);
         };
-        if base_url.trim().is_empty() || token_id.trim().is_empty() {
-            return Ok(None);
-        }
+        Ok(snapshot.token_qty(token_id))
+    }
 
-        let limit = self.positions_page_size.max(1);
-        let max_pages = self.positions_max_pages.max(1);
-        let user = self.inventory_lookup_address();
-        let url = format!("{}/positions", base_url.trim_end_matches('/'));
-        let limit_str = limit.to_string();
-
-        let mut total_qty = 0.0_f64;
-        let mut saw_any_page = false;
-
-        for page in 0..max_pages {
-            let offset = page * limit;
-            let offset_str = offset.to_string();
-            let rows = self
-                .http
-                .get(url.clone())
-                .query(&[
-                    ("user", user.as_str()),
-                    ("sizeThreshold", "0"),
-                    ("limit", limit_str.as_str()),
-                    ("offset", offset_str.as_str()),
-                ])
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Vec<DataApiInventoryPosition>>()
-                .await?;
-
-            if rows.is_empty() {
-                break;
-            }
-            saw_any_page = true;
-
-            for row in &rows {
-                if !data_api_position_matches_token(row, token_id) {
-                    continue;
-                }
-                total_qty += parse_json_f64(row.size.as_ref())
-                    .or_else(|| parse_json_f64(row.balance.as_ref()))
-                    .unwrap_or_default();
-            }
-
-            if rows.len() < limit as usize {
-                break;
-            }
-        }
-
-        if !saw_any_page {
-            return Ok(Some(0.0));
-        }
-        Ok(Some(total_qty.max(0.0)))
+    async fn get_token_inventory_snapshot(&self) -> Result<Option<TokenInventorySnapshot>> {
+        inventory_snapshot::fetch_token_inventory_snapshot(
+            self.positions_base_url.as_deref(),
+            self.positions_page_size,
+            self.positions_max_pages,
+            &self.inventory_lookup_address(),
+            &self.http,
+        )
+        .await
     }
 }

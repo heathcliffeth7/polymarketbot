@@ -128,6 +128,7 @@ async fn place_live_leg_order(
         size,
         intent: intent.to_string(),
         order_type: "GTC".to_string(),
+        post_only: false,
         client_order_id: client_order_id.clone(),
         leg_side: Some(leg_side_label(leg.side).to_string()),
         fee_rate_bps,

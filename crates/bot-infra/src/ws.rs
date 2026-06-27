@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -10,9 +11,18 @@ use std::{
 use tokio::{
     sync::{Mutex, Notify, RwLock},
     task::JoinHandle,
+    net::TcpStream,
     time::{sleep, timeout, Duration},
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    client_async_tls_with_config,
+    tungstenite::{
+        client::IntoClientRequest,
+        handshake::client::Response,
+        Message,
+    },
+    MaybeTlsStream, WebSocketStream,
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -49,6 +59,8 @@ pub enum WsEventType {
 pub struct MarketDataSnapshot {
     pub best_bid: Option<f64>,
     pub best_ask: Option<f64>,
+    pub best_bid_size: Option<f64>,
+    pub best_ask_size: Option<f64>,
     pub last_trade_price: Option<f64>,
     pub updated_at_ms: i64,
     pub last_source: String,
@@ -288,7 +300,7 @@ impl ClobWsClient {
         let msg_timeout = Duration::from_secs(5);
 
         for attempt in 0..=self.inner.max_retries {
-            let (mut socket, _) = match connect_async(&connect_url).await {
+            let (mut socket, _) = match connect_ws(&connect_url).await {
                 Ok(v) => v,
                 Err(e) => {
                     if attempt >= self.inner.max_retries {
@@ -335,7 +347,7 @@ impl ClobWsClient {
                 return;
             }
 
-            let (mut socket, _) = match connect_async(&connect_url).await {
+            let (mut socket, _) = match connect_ws(&connect_url).await {
                 Ok(v) => v,
                 Err(err) => {
                     tracing::warn!(error = %err, tokens = subscribed_tokens.len(), "MARKET_STREAM_CONNECT_FAILED");
@@ -446,6 +458,12 @@ impl ClobWsClient {
             if update.best_ask.is_some() {
                 entry.best_ask = update.best_ask;
             }
+            if update.best_bid_size.is_some() {
+                entry.best_bid_size = update.best_bid_size;
+            }
+            if update.best_ask_size.is_some() {
+                entry.best_ask_size = update.best_ask_size;
+            }
             if update.last_trade_price.is_some() {
                 entry.last_trade_price = update.last_trade_price;
             }
@@ -484,6 +502,8 @@ struct MarketSnapshotUpdate {
     token_id: String,
     best_bid: Option<f64>,
     best_ask: Option<f64>,
+    best_bid_size: Option<f64>,
+    best_ask_size: Option<f64>,
     last_trade_price: Option<f64>,
     updated_at_ms: i64,
     source: String,
@@ -495,6 +515,52 @@ fn normalize_market_tokens(ids: &[String]) -> BTreeSet<String> {
         .filter(|id| !id.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+async fn connect_ws(
+    connect_url: &str,
+) -> Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, Response)> {
+    let url = Url::parse(connect_url).context("parsing CLOB websocket url")?;
+    let target_host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("CLOB websocket url missing host"))?
+        .to_string();
+    let target_port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!("CLOB websocket url missing port"))?;
+    let request = connect_url
+        .into_client_request()
+        .context("building CLOB websocket request")?;
+    let (stream, proxy_info) =
+        crate::proxy::connect_tcp_with_optional_socks5_proxy(&target_host, target_port)
+            .await
+            .with_context(|| {
+                format!(
+                    "clob_ws_connect_failed target_host={target_host} target_port={target_port}"
+                )
+            })?;
+    stream
+        .set_nodelay(true)
+        .context("setting CLOB websocket TCP_NODELAY")?;
+    let result = client_async_tls_with_config(request, stream, None, None)
+        .await
+        .with_context(|| {
+            format!(
+                "clob_ws_handshake_failed proxy_mode={} target_host={target_host} target_port={target_port}",
+                proxy_info.proxy_mode
+            )
+        });
+    if result.is_ok() {
+        tracing::info!(
+            proxy_mode = proxy_info.proxy_mode,
+            proxy_configured = proxy_info.proxy_configured,
+            proxy = proxy_info.proxy_redacted.as_deref().unwrap_or("direct"),
+            target_host = %target_host,
+            target_port,
+            "CLOB_WS_CONNECTED"
+        );
+    }
+    result
 }
 
 fn subscribe_message(channel: WsChannel, ids: &[String]) -> Value {
@@ -610,6 +676,26 @@ fn extract_snapshot_update(
             .or_else(|| payload.get("bestAsk"))
             .or_else(|| payload.get("ask")),
     );
+    let (book_best_bid, book_best_bid_size) = parse_book_top_level(payload.get("bids"));
+    let (book_best_ask, book_best_ask_size) = parse_book_top_level(payload.get("asks"));
+    let best_bid = best_bid.or(book_best_bid);
+    let best_ask = best_ask.or(book_best_ask);
+    let best_bid_size = parse_number(
+        payload
+            .get("best_bid_size")
+            .or_else(|| payload.get("bestBidSize"))
+            .or_else(|| payload.get("bid_size"))
+            .or_else(|| payload.get("bidSize")),
+    )
+    .or(book_best_bid_size);
+    let best_ask_size = parse_number(
+        payload
+            .get("best_ask_size")
+            .or_else(|| payload.get("bestAskSize"))
+            .or_else(|| payload.get("ask_size"))
+            .or_else(|| payload.get("askSize")),
+    )
+    .or(book_best_ask_size);
     let raw_price = parse_number(payload.get("price"));
     let event_name = payload_event_name(payload);
     let last_trade_price = if event_name == "last_trade_price"
@@ -622,7 +708,12 @@ fn extract_snapshot_update(
         None
     };
 
-    if best_bid.is_none() && best_ask.is_none() && last_trade_price.is_none() {
+    if best_bid.is_none()
+        && best_ask.is_none()
+        && best_bid_size.is_none()
+        && best_ask_size.is_none()
+        && last_trade_price.is_none()
+    {
         return None;
     }
 
@@ -636,6 +727,8 @@ fn extract_snapshot_update(
         token_id,
         best_bid,
         best_ask,
+        best_bid_size,
+        best_ask_size,
         last_trade_price,
         updated_at_ms,
         source: if event_name == "unknown" {
@@ -700,6 +793,31 @@ fn parse_number(value: Option<&Value>) -> Option<f64> {
     }
 }
 
+fn parse_book_top_level(value: Option<&Value>) -> (Option<f64>, Option<f64>) {
+    let Some(Value::Array(levels)) = value else {
+        return (None, None);
+    };
+    let Some(first) = levels.first() else {
+        return (None, None);
+    };
+    match first {
+        Value::Array(items) => (
+            items.first().and_then(|value| parse_number(Some(value))),
+            items.get(1).and_then(|value| parse_number(Some(value))),
+        ),
+        Value::Object(map) => (
+            map.get("price")
+                .or_else(|| map.get("p"))
+                .and_then(|value| parse_number(Some(value))),
+            map.get("size")
+                .or_else(|| map.get("s"))
+                .or_else(|| map.get("quantity"))
+                .and_then(|value| parse_number(Some(value))),
+        ),
+        _ => (None, None),
+    }
+}
+
 fn parse_i64(value: Option<&Value>) -> Option<i64> {
     match value {
         Some(Value::Number(n)) => n.as_i64(),
@@ -719,8 +837,8 @@ mod tests {
         ws.update_market_cache_from_payload(&json!({
             "event_type": "book",
             "asset_id": "tok-yes",
-            "best_bid": "0.77",
-            "best_ask": "0.81",
+            "bids": [{"price": "0.77", "size": "11.5"}],
+            "asks": [["0.81", "7.25"]],
             "timestamp": 12345
         }))
         .await;
@@ -735,6 +853,8 @@ mod tests {
         let snapshot = ws.get_market_snapshot("tok-yes").await.unwrap();
         assert_eq!(snapshot.best_bid, Some(0.77));
         assert_eq!(snapshot.best_ask, Some(0.81));
+        assert_eq!(snapshot.best_bid_size, Some(11.5));
+        assert_eq!(snapshot.best_ask_size, Some(7.25));
         assert_eq!(snapshot.last_trade_price, Some(0.79));
         assert_eq!(snapshot.updated_at_ms, 12346);
         assert_eq!(snapshot.last_source, "last_trade_price");

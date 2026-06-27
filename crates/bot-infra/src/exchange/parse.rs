@@ -1,6 +1,6 @@
 use super::*;
 
-const SUPPORTED_UPDOWN_SLUG_PREFIXES: [&str; 8] = [
+const SUPPORTED_UPDOWN_SLUG_PREFIXES: [&str; 11] = [
     "btc-updown-5m-",
     "btc-updown-15m-",
     "eth-updown-5m-",
@@ -9,6 +9,9 @@ const SUPPORTED_UPDOWN_SLUG_PREFIXES: [&str; 8] = [
     "sol-updown-15m-",
     "xrp-updown-5m-",
     "xrp-updown-15m-",
+    "doge-updown-5m-",
+    "bnb-updown-5m-",
+    "hype-updown-5m-",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,25 +48,6 @@ pub(crate) fn parse_json_f64(value: Option<&Value>) -> Option<f64> {
         Some(Value::String(v)) => v.parse::<f64>().ok(),
         _ => None,
     }
-}
-
-pub(crate) fn data_api_position_matches_token(
-    position: &DataApiInventoryPosition,
-    token_id: &str,
-) -> bool {
-    let normalized_token_id = token_id.trim();
-    if normalized_token_id.is_empty() {
-        return false;
-    }
-
-    [
-        position.asset.as_deref(),
-        position.token_id.as_deref(),
-        position.clob_token_id.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|candidate| candidate.trim() == normalized_token_id)
 }
 
 pub(crate) fn parse_gamma_market(item: &serde_json::Value) -> Option<GammaMarket> {

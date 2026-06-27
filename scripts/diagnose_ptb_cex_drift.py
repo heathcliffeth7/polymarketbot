@@ -79,6 +79,12 @@ class NormalizedEvent:
     cost: float | None = None
     execution_vwap_cent: float | None = None
     execution_vwap_edge_margin: float | None = None
+    depth_guard_reason: str = ""
+    depth_block_kind: str = ""
+    depth_vwap_slippage: float | None = None
+    depth_intended_qty: float | None = None
+    depth_visible_ask_qty: float | None = None
+    depth_slippage_deferred: bool | None = None
     venues: list[VenueGap] = field(default_factory=list)
 
 
@@ -293,6 +299,12 @@ def normalize_event(row: dict[str, Any], args: argparse.Namespace) -> Normalized
         execution_vwap_edge_margin=as_float(
             block_summary.get("execution_vwap_edge_margin") or iv.get("execution_vwap_edge_margin")
         ),
+        depth_guard_reason=str(iv.get("depth_guard_reason") or ""),
+        depth_block_kind=str(iv.get("depth_block_kind") or ""),
+        depth_vwap_slippage=as_float(iv.get("vwap_slippage")),
+        depth_intended_qty=as_float(iv.get("intended_qty")),
+        depth_visible_ask_qty=as_float(iv.get("visible_ask_qty")),
+        depth_slippage_deferred=as_bool(iv.get("depth_slippage_deferred_to_execution_vwap")),
         venues=venues,
     )
     event.classification, event.classification_notes = classify_event(event, args)
@@ -324,6 +336,13 @@ def classify_event(event: NormalizedEvent, args: argparse.Namespace) -> tuple[st
     reason_text = " ".join([event.reason, event.cex_reason]).lower()
     if any("open_drift_ms" in item or "current_age_ms" in item or item.endswith(":stale") for item in notes):
         return "data_suspect", notes
+    if event.depth_block_kind == "qty_insufficient" or "blocked_depth_qty_insufficient" in reason_text:
+        return "real_depth_insufficient", notes
+    if event.depth_block_kind == "slippage_too_high" or "blocked_depth_slippage_too_high" in reason_text:
+        if event.depth_slippage_deferred:
+            notes.append("slippage_deferred_to_execution_vwap")
+            return "depth_slippage_deferred", notes
+        return "depth_slippage_too_high", notes
     if "execution_vwap" in reason_text or event.execution_vwap_edge_margin is not None:
         return "execution_too_expensive", notes
     if "opposite_venue" in reason_text or "no_clean_pair" in reason_text or venue_signs_disagree(event.venues):
@@ -439,6 +458,17 @@ def summarize(events: list[NormalizedEvent], detail_count: int) -> None:
         [[name, count] for name, count in source_counter.most_common(8)],
     )
 
+    depth_counter = Counter(
+        (event.depth_block_kind or "-", event.depth_guard_reason or "-", event.depth_slippage_deferred)
+        for event in events
+        if event.depth_block_kind or event.depth_guard_reason
+    )
+    print_table(
+        "Depth guard dagilimi",
+        ["kind", "reason", "deferred", "count"],
+        [[kind, reason, deferred, count] for (kind, reason, deferred), count in depth_counter.most_common(12)],
+    )
+
     grouped: dict[tuple[str, str, str], list[NormalizedEvent]] = defaultdict(list)
     for event in events:
         grouped[(event.asset, event.outcome, event.reason)].append(event)
@@ -455,11 +485,25 @@ def summarize(events: list[NormalizedEvent], detail_count: int) -> None:
                 mean(event.chainlink_cex_diff_bps for event in group),
                 mean(event.gap_strength for event in group),
                 mean(event.required_gap_strength for event in group),
+                ",".join(sorted({event.depth_block_kind for event in group if event.depth_block_kind})) or "-",
+                mean(event.depth_vwap_slippage for event in group),
             ]
         )
     print_table(
         "Chainlink/CEX ve gap metrikleri",
-        ["asset", "outcome", "reason", "n", "avg_diff_usd", "max_abs_diff", "avg_bps", "avg_gap", "avg_req"],
+        [
+            "asset",
+            "outcome",
+            "reason",
+            "n",
+            "avg_diff_usd",
+            "max_abs_diff",
+            "avg_bps",
+            "avg_gap",
+            "avg_req",
+            "depth_kind",
+            "avg_depth_slip",
+        ],
         metric_rows,
     )
 
@@ -494,6 +538,13 @@ def summarize(events: list[NormalizedEvent], detail_count: int) -> None:
             f"  id={event.event_id} {event.created_at} {event.asset}/{event.outcome} "
             f"reason={event.reason} class={event.classification} notes={note}"
         )
+        if event.depth_block_kind or event.depth_guard_reason:
+            print(
+                "    "
+                f"depth: kind={event.depth_block_kind or '-'} reason={event.depth_guard_reason or '-'} "
+                f"slip={fmt(event.depth_vwap_slippage, 8)} intended={fmt(event.depth_intended_qty, 8)} "
+                f"visible={fmt(event.depth_visible_ask_qty, 8)} deferred={event.depth_slippage_deferred}"
+            )
         for venue in event.venues:
             print(
                 "    "
@@ -529,6 +580,12 @@ def write_csv(path: str, events: list[NormalizedEvent]) -> None:
         "cost",
         "execution_vwap_cent",
         "execution_vwap_edge_margin",
+        "depth_guard_reason",
+        "depth_block_kind",
+        "depth_vwap_slippage",
+        "depth_intended_qty",
+        "depth_visible_ask_qty",
+        "depth_slippage_deferred",
     ]
     with Path(path).open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -565,6 +622,12 @@ def event_to_dict(event: NormalizedEvent) -> dict[str, Any]:
         "cost": event.cost,
         "execution_vwap_cent": event.execution_vwap_cent,
         "execution_vwap_edge_margin": event.execution_vwap_edge_margin,
+        "depth_guard_reason": event.depth_guard_reason,
+        "depth_block_kind": event.depth_block_kind,
+        "depth_vwap_slippage": event.depth_vwap_slippage,
+        "depth_intended_qty": event.depth_intended_qty,
+        "depth_visible_ask_qty": event.depth_visible_ask_qty,
+        "depth_slippage_deferred": event.depth_slippage_deferred,
         "venues": [venue.__dict__ for venue in event.venues],
     }
 

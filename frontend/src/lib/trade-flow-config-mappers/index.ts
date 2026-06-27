@@ -13,6 +13,8 @@ export * from './edge-config';
 export * from './context';
 export * from './cycle-window';
 export * from './revenge-flip';
+export * from './confidence-ladder';
+export * from './avg-rebound-pairlock-rescue';
 export {
   isRecord,
   isSupportedMarketPriceTriggerCondition,

@@ -5,6 +5,7 @@ import { AppShell } from "@/components/layout/app-shell";
 import { NotificationProvider } from "@/contexts/notification-context";
 import { TradeFlowRealtimeProvider } from "@/contexts/trade-flow-realtime-context";
 import { Toaster } from "@/components/ui/sonner";
+import { ChunkLoadRecovery } from "@/components/chunk-load-recovery";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -31,6 +32,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-zinc-950 text-zinc-100`}
       >
+        <ChunkLoadRecovery />
         <TradeFlowRealtimeProvider>
           <NotificationProvider>
             <AppShell>{children}</AppShell>

@@ -196,6 +196,7 @@ fn fast_sl_retry_request(order: &TradeBuilderOrder, price: f64) -> PlaceOrderReq
         size: 5.0,
         intent: "exit".to_string(),
         order_type: "FAK".to_string(),
+        post_only: false,
         client_order_id: "base-client-order".to_string(),
         leg_side: None,
         fee_rate_bps: 0,
@@ -1154,6 +1155,7 @@ fn share_basis_remaining_qty_does_not_expand_at_low_price() {
         price: Some(0.01),
         size: Some(5.10),
         filled_size: Some(0.0),
+        associated_trade_ids: Vec::new(),
     };
 
     let (remaining_usdc, remaining_qty) =

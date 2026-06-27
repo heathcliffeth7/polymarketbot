@@ -10,9 +10,43 @@ async fn refresh_trade_flow_ws_fast_path_cache(
             let mut cache = TRADE_FLOW_WS_FAST_PATH_CACHE.write().await;
             *cache = TradeFlowWsFastPathCache::default();
         }
+        trade_flow_ws_fast_path_note_cleared();
         if let Err(err) = ensure_fast_path_market_stream_union(ws).await {
             warn!(run_id, error = %err, "TRADE_FLOW_WS_STREAM_UNION_CLEAR_FAILED");
         }
+        return Ok(());
+    }
+
+    let refresh_required_now = trade_flow_ws_fast_path_cache_requires_refresh_now().await;
+    let cache_snapshot = {
+        let cache = TRADE_FLOW_WS_FAST_PATH_CACHE.read().await;
+        cache.clone()
+    };
+    if trade_flow_ws_fast_path_should_skip_rebuild(
+        definitions,
+        &cache_snapshot,
+        refresh_required_now,
+    ) {
+        let token_count = cache_snapshot.token_targets.len();
+        let ensure_stream_union =
+            trade_flow_ws_fast_path_note_skip_should_ensure(&cache_snapshot);
+        if ensure_stream_union {
+            if let Err(err) = ensure_fast_path_market_stream_union(ws).await {
+                warn!(
+                    run_id,
+                    token_count,
+                    error = %err,
+                    "TRADE_FLOW_WS_STREAM_UNION_ENSURE_FAILED"
+                );
+            }
+        }
+        debug!(
+            run_id,
+            runs = cache_snapshot.run_specs.len(),
+            tokens = token_count,
+            ensure_stream_union,
+            "TRADE_FLOW_WS_FAST_PATH_CACHE_REFRESH_SKIPPED"
+        );
         return Ok(());
     }
 
@@ -21,22 +55,28 @@ async fn refresh_trade_flow_ws_fast_path_cache(
     persist_trade_flow_ws_run_specs_contexts(repo, &mut fast_path_cache.run_specs).await?;
     let run_count = fast_path_cache.run_specs.len();
     let token_count = fast_path_cache.token_targets.len();
+    let ensure_stream_union =
+        trade_flow_ws_fast_path_note_rebuilt(definitions, &fast_path_cache);
     {
         let mut cache = TRADE_FLOW_WS_FAST_PATH_CACHE.write().await;
         *cache = fast_path_cache;
     }
-    if let Err(err) = ensure_fast_path_market_stream_union(ws).await {
-        warn!(
-            run_id,
-            token_count,
-            error = %err,
-            "TRADE_FLOW_WS_STREAM_UNION_ENSURE_FAILED"
-        );
+    if ensure_stream_union {
+        if let Err(err) = ensure_fast_path_market_stream_union(ws).await {
+            warn!(
+                run_id,
+                token_count,
+                error = %err,
+                "TRADE_FLOW_WS_STREAM_UNION_ENSURE_FAILED"
+            );
+        }
     }
     info!(
         run_id,
         runs = run_count,
         tokens = token_count,
+        ensure_stream_union,
+        refresh_required_now,
         "TRADE_FLOW_WS_FAST_PATH_CACHE_REFRESHED"
     );
     Ok(())
@@ -1297,93 +1337,20 @@ async fn build_trade_flow_ws_fast_path_cache(
                 if let Some(scope) = crate::find_updown_scope_by_slug(&rotation.new_market_slug) {
                     if matches!(scope.timeframe, "5m" | "15m") {
                         prefetch_cex_window_opens_for_auto_scope_market(&rotation.new_market_slug);
-                        match crate::trade_flow::guards::chainlink_price::get_chainlink_price_start_tick(
-                            &scope.asset,
-                            expected_market_start.timestamp_millis(),
-                        ) {
-                            Ok(snapshot) => {
-                                let source_latency_ms = Some(
-                                    (snapshot.timestamp_ms
-                                        - expected_market_start.timestamp_millis())
-                                    .abs(),
-                                );
-                                let seeded = crate::trade_flow::guards::polymarket_price_to_beat::seed_price_to_beat_from_chainlink(
-                                    &rotation.new_market_slug,
-                                    &scope.asset,
-                                    scope.timeframe,
-                                    snapshot.price,
-                                    source_latency_ms,
-                                );
-                                if seeded {
-                                    warm_market_slugs.remove(&rotation.new_market_slug);
-                                    info!(
-                                        run_id,
-                                        flow_run_id = run.id,
-                                        market_slug = %rotation.new_market_slug,
-                                        asset = %scope.asset,
-                                        chainlink_price = snapshot.price,
-                                        chainlink_tick_ts = snapshot.timestamp_ms,
-                                        source_latency_ms,
-                                        "PRICE_TO_BEAT_SEEDED_FROM_CHAINLINK"
-                                    );
-                                }
-                                crate::trade_flow::guards::polymarket_price_to_beat::schedule_price_to_beat_promotion(
-                                    &rotation.new_market_slug,
-                                );
-                            }
-                            Err(err) => {
-                                let err_text = err.to_string();
-                                warn!(
-                                    run_id,
-                                    flow_run_id = run.id,
-                                    market_slug = %rotation.new_market_slug,
-                                    asset = %scope.asset,
-                                    error = %err,
-                                    "PRICE_TO_BEAT_CHAINLINK_SEED_FAILED"
-                                );
-                                if let Some(details) = crate::trade_flow::guards::chainlink_price::parse_chainlink_near_timestamp_rejection_details(&err_text) {
-                                    let expected_market_start_text = expected_market_start.to_rfc3339();
-                                    warn!(
-                                        run_id,
-                                        flow_run_id = run.id,
-                                        market_slug = %rotation.new_market_slug,
-                                        asset = %scope.asset,
-                                        timeframe = %scope.timeframe,
-                                        expected_market_start = %expected_market_start_text,
-                                        gap_ms = details.gap_ms,
-                                        provider_age_ms = details.provider_age_ms,
-                                        candidate_timestamp_ms = details.candidate_timestamp_ms,
-                                        candidate_received_at_ms = details.candidate_received_at_ms,
-                                        "CHAINLINK_SEED_REJECTED_TOO_OLD"
-                                    );
-                                    let payload = build_chainlink_seed_rejected_too_old_payload(
-                                        &rotation.new_market_slug,
-                                        scope.asset,
-                                        scope.timeframe,
-                                        expected_market_start,
-                                        &details,
-                                    );
-                                    if let Err(event_err) = repo
-                                        .append_trade_flow_event(
-                                            Some(run.id),
-                                            run.definition_id,
-                                            Some(run.version_id),
-                                            "chainlink_seed_rejected_too_old",
-                                            &payload,
-                                        )
-                                        .await
-                                    {
-                                        warn!(
-                                            run_id,
-                                            flow_run_id = run.id,
-                                            market_slug = %rotation.new_market_slug,
-                                            asset = %scope.asset,
-                                            error = %event_err,
-                                            "CHAINLINK_SEED_REJECTED_TOO_OLD_EVENT_FAILED"
-                                        );
-                                    }
-                                }
-                            }
+                        if seed_price_to_beat_for_auto_scope_rotation(
+                            repo,
+                            run_id,
+                            run.id,
+                            run.definition_id,
+                            run.version_id,
+                            &rotation.new_market_slug,
+                            scope.asset,
+                            scope.timeframe,
+                            expected_market_start,
+                        )
+                        .await
+                        {
+                            warm_market_slugs.remove(&rotation.new_market_slug);
                         }
                     }
                 }
@@ -1404,6 +1371,9 @@ async fn build_trade_flow_ws_fast_path_cache(
     }
 
     for warm_slug in warm_market_slugs {
+        if seed_price_to_beat_previous_close_for_warm_slug(repo, run_id, &warm_slug).await {
+            continue;
+        }
         crate::trade_flow::guards::polymarket_price_to_beat::warm_price_to_beat_cache_bg(
             &warm_slug,
         );
@@ -1430,88 +1400,4 @@ async fn persist_trade_flow_ws_run_specs_contexts(
         run_spec.context_dirty = false;
     }
     Ok(())
-}
-
-fn select_ws_fast_path_targets(
-    run_id: i64,
-    cache: &TradeFlowWsFastPathCache,
-    dirty_token_ids: Option<&[String]>,
-) -> Vec<SelectedWsFastPathTarget> {
-    match dirty_token_ids {
-        Some(token_ids) => {
-            let mut selected = Vec::new();
-            let mut seen_targets = HashSet::new();
-            let mut seen_market_pairs = HashSet::new();
-            let mut dirty_markets = Vec::new();
-
-            for dirty_token_id in token_ids {
-                let Some(targets) = cache.token_targets.get(dirty_token_id.as_str()) else {
-                    log_trigger_ws_dirty_token_unmapped(run_id, dirty_token_id);
-                    continue;
-                };
-
-                for &(run_index, node_index) in targets {
-                    let Some(node_spec) = cache
-                        .run_specs
-                        .get(run_index)
-                        .and_then(|run_spec| run_spec.nodes.get(node_index))
-                    else {
-                        continue;
-                    };
-
-                    if seen_targets.insert((run_index, node_index)) {
-                        selected.push(SelectedWsFastPathTarget {
-                            run_index,
-                            node_index,
-                            dirty_token_id: Some(dirty_token_id.clone()),
-                            reevaluation_reason: "dirty_token_match",
-                        });
-                    }
-
-                    if let Some(market_slug) = node_spec.market_slug.as_ref() {
-                        dirty_markets.push((market_slug.clone(), dirty_token_id.clone()));
-                    }
-                }
-            }
-
-            for (market_slug, dirty_token_id) in dirty_markets {
-                if !seen_market_pairs.insert((market_slug.clone(), dirty_token_id.clone())) {
-                    continue;
-                }
-                let Some(targets) = cache.market_targets.get(&market_slug) else {
-                    continue;
-                };
-                for &(run_index, node_index) in targets {
-                    if !seen_targets.insert((run_index, node_index)) {
-                        continue;
-                    }
-                    selected.push(SelectedWsFastPathTarget {
-                        run_index,
-                        node_index,
-                        dirty_token_id: Some(dirty_token_id.clone()),
-                        reevaluation_reason: "market_dirty_fanout",
-                    });
-                }
-            }
-
-            selected
-        }
-        None => cache
-            .run_specs
-            .iter()
-            .enumerate()
-            .flat_map(|(run_index, run_spec)| {
-                run_spec
-                    .nodes
-                    .iter()
-                    .enumerate()
-                    .map(move |(node_index, _)| SelectedWsFastPathTarget {
-                        run_index,
-                        node_index,
-                        dirty_token_id: None,
-                        reevaluation_reason: "full_refresh",
-                    })
-            })
-            .collect(),
-    }
 }

@@ -1,6 +1,6 @@
 use super::iv_cex_open_gap::{CexOpenGapConsensus, PriceToBeatIvCexOpenGapEvaluation};
 use super::iv_execution_vwap::PriceToBeatIvExecutionVwapEvaluation;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 const DEFAULT_BOOK_MAX_EXECUTION_REF: f64 = 0.70;
 const DEFAULT_RAW_BOOK_DISLOCATION: f64 = 0.20;
@@ -285,30 +285,31 @@ pub(crate) fn evaluate_price_to_beat_iv_gap_fail_cex_book_guard(
         && execution_ref_for_late
             .map(|value| value >= input.config.late_expensive_mixed_cex_min_vwap)
             .unwrap_or(false);
-    let late_expensive_mixed_cex_triggered =
-        input.config.late_expensive_mixed_cex_guard_enabled
-            && late_expensive_entry
-            && non_strong_cex
-            && !cex_against
-            && (!input
-                .config
-                .late_expensive_mixed_cex_require_gap_fail_or_lag_high
-                || below_required
-                || cex_lag_high);
+    let late_expensive_mixed_cex_triggered = input.config.late_expensive_mixed_cex_guard_enabled
+        && late_expensive_entry
+        && non_strong_cex
+        && !cex_against
+        && (!input
+            .config
+            .late_expensive_mixed_cex_require_gap_fail_or_lag_high
+            || below_required
+            || cex_lag_high);
     let book_confirmation_available = input.book_confirmation_available;
     let book_confirmation_missing = !book_confirmation_available;
-    let no_book_cex_ok = if input.config.chainlink_cex_lag_no_book_require_non_strong_cex {
+    let no_book_cex_ok = if input
+        .config
+        .chainlink_cex_lag_no_book_require_non_strong_cex
+    {
         non_strong_cex && !cex_against
     } else {
         !cex_against
     };
-    let chainlink_cex_lag_no_book_triggered =
-        input.config.chainlink_cex_lag_no_book_guard_enabled
-            && input.seconds_left <= input.config.chainlink_cex_lag_no_book_max_seconds.max(0.0)
-            && cex_lag_high
-            && no_book_cex_ok
-            && book_confirmation_missing
-            && (below_required || late_expensive_entry);
+    let chainlink_cex_lag_no_book_triggered = input.config.chainlink_cex_lag_no_book_guard_enabled
+        && input.seconds_left <= input.config.chainlink_cex_lag_no_book_max_seconds.max(0.0)
+        && cex_lag_high
+        && no_book_cex_ok
+        && book_confirmation_missing
+        && (below_required || late_expensive_entry);
     let mut all_reasons = Vec::new();
     if mixed_cex_triggered {
         all_reasons.push(MIXED_CEX_GAP_FAIL_BLOCK_REASON);

@@ -80,7 +80,11 @@ mod revenge_flip_tests {
         assert_eq!(cfg.reentry_side_mode, "opposite");
         assert!(!cfg.ptb_stop_loss.enabled);
         assert_eq!(cfg.min_reentry_shares, 0.0);
+        assert!(cfg.post_stop_loss_iv_mismatch_enabled);
         assert_eq!(cfg.lot_limit_pct, 0.98);
+        assert_eq!(cfg.close_only_sec, 12);
+        assert_eq!(cfg.ptb.mode, "iv_mismatch_edge");
+        assert_eq!(cfg.ptb.current_price_source, "chainlink");
         assert!(resolve_revenge_flip_config(&revenge_node(json!({
             "mode": "revenge_flip_v1",
             "revengeFlip": { "stopLossPct": 1.2 }
@@ -138,6 +142,22 @@ mod revenge_flip_tests {
         assert!(ptb_only.ptb_stop_loss.enabled);
         assert_eq!(ptb_only.ptb_stop_loss.gap_usd, Some(1.0));
         assert_eq!(ptb_only.ptb_stop_loss.current_price_source, "cex_consensus");
+        let hybrid_ptb_only = resolve_revenge_flip_config(&revenge_node(json!({
+            "mode": "revenge_flip_v1",
+            "revengeFlip": {
+                "classicStopLossEnabled": false,
+                "stopLossPct": 1.2,
+                "ptbStopLossEnabled": true,
+                "ptbStopLossGapUsd": 1,
+                "ptbStopLossCurrentPriceSource": "chainlink_cex_consensus",
+                "ptbStopLossTimeDecayMode": "none"
+            }
+        })))
+        .expect("valid chainlink + cex ptb-only config");
+        assert_eq!(
+            hybrid_ptb_only.ptb_stop_loss.current_price_source,
+            "chainlink_cex_consensus"
+        );
         assert!(resolve_revenge_flip_config(&revenge_node(json!({
             "mode": "revenge_flip_v1",
             "revengeFlip": {
@@ -177,6 +197,36 @@ mod revenge_flip_tests {
             }
         })))
         .is_err());
+    }
+
+    #[test]
+    fn revenge_flip_close_only_boundary_keeps_thirteen_seconds_eligible() {
+        let cfg = resolve_revenge_flip_config(&revenge_node(json!({
+            "mode": "revenge_flip_v1",
+            "revengeFlip": {
+                "closeOnlySec": 12,
+                "entryPtbRules": [
+                    {
+                        "minFlip": 0,
+                        "maxFlip": 0,
+                        "remainingSecMin": 13,
+                        "remainingSecMax": 14,
+                        "sideMode": "any",
+                        "priceToBeatMinDiff": 10,
+                        "priceToBeatMinDiffUnit": "usd"
+                    }
+                ]
+            }
+        })))
+        .expect("valid config");
+
+        assert!(12 <= cfg.close_only_sec);
+        assert!(
+            revenge_flip_matching_entry_ptb_rule(&cfg, 0, Some(12), Some("up"), None).is_none()
+        );
+        assert!(
+            revenge_flip_matching_entry_ptb_rule(&cfg, 0, Some(13), Some("up"), None).is_some()
+        );
     }
 
     #[test]
@@ -823,6 +873,182 @@ mod revenge_flip_tests {
             node.config.get("maxPriceCent").and_then(Value::as_f64),
             Some(80.0)
         );
+        assert_revenge_flip_buy_entry_guard_config(&node, "initial_buy", "chainlink");
+    }
+
+    fn assert_revenge_flip_buy_entry_guard_config(
+        node: &TradeFlowNode,
+        intent: &str,
+        current_source: &str,
+    ) {
+        assert_revenge_flip_buy_entry_guard_config_with_mode(node, intent, current_source, "iv_mismatch_edge");
+    }
+    fn assert_revenge_flip_buy_entry_guard_config_with_mode(
+        node: &TradeFlowNode,
+        intent: &str,
+        current_source: &str,
+        mode: &str,
+    ) {
+        assert_eq!(
+            node.config.get("revengeFlipIntent").and_then(Value::as_str),
+            Some(intent)
+        );
+        assert_eq!(
+            node.config.get("priceToBeatMode").and_then(Value::as_str),
+            Some(mode)
+        );
+        assert_eq!(
+            node.config
+                .get("priceToBeatCurrentPriceSource")
+                .and_then(Value::as_str),
+            Some(current_source)
+        );
+        assert_eq!(
+            node.config
+                .get("cexDirectionGuardEnabled")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            node.config
+                .get("cexDirectionGuardMode")
+                .and_then(Value::as_str),
+            Some("bybit_plus_one")
+        );
+        assert_eq!(
+            node.config
+                .get("cexDirectionGuardFailClosed")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        if mode == "iv_mismatch_edge" {
+            assert_eq!(
+                node.config
+                    .get("priceToBeatIvEntryQualityPolicy")
+                    .and_then(Value::as_bool),
+                Some(true)
+            );
+            let rules = node.config["priceToBeatIvTimeRules"]
+                .as_array()
+                .expect("default IV time rules");
+            assert_eq!(rules.len(), 3);
+            assert_eq!(rules[0].get("startRemainingSec").and_then(value_as_i64), Some(45));
+            assert_eq!(rules[0].get("endRemainingSec").and_then(value_as_i64), Some(30));
+            assert_eq!(rules[0].get("minEdge").and_then(value_as_f64), Some(0.03));
+            assert_eq!(
+                rules[0].get("minGapStrength").and_then(value_as_f64),
+                Some(0.50)
+            );
+            assert_eq!(rules[0].get("maxPriceCent").and_then(value_as_f64), Some(92.0));
+            assert_eq!(rules[2].get("startRemainingSec").and_then(value_as_i64), Some(15));
+            assert_eq!(rules[2].get("endRemainingSec").and_then(value_as_i64), Some(8));
+        } else {
+            assert_eq!(
+                node.config
+                    .get("priceToBeatIvEntryQualityPolicy")
+                    .and_then(Value::as_bool),
+                Some(false)
+            );
+            assert!(node.config.get("priceToBeatIvTimeRules").is_none());
+        }
+    }
+
+    #[test]
+    fn revenge_flip_flip_buy_node_carries_iv_cex_config_by_default() {
+        let cfg = resolve_revenge_flip_config(&revenge_node(json!({
+            "mode": "revenge_flip_v1",
+            "priceToBeatCurrentPriceSource": "hyperliquid"
+        })))
+        .expect("valid config");
+        let state = TradeBuilderRevengeFlipState {
+            flip_count: 1,
+            ..TradeBuilderRevengeFlipState::default()
+        };
+        let effective_ptb = revenge_flip_effective_ptb(&cfg, &state, 1, Some(20), None, None);
+
+        let node = revenge_flip_buy_node(
+            &revenge_node(json!({
+                "mode": "revenge_flip_v1",
+                "priceToBeatCurrentPriceSource": "hyperliquid"
+            })),
+            &cfg,
+            &effective_ptb,
+            Some(92.0),
+            &quote("down", 0.61, 0.60),
+            5.0,
+            0.20,
+            "flip_buy",
+            2,
+        );
+
+        assert_revenge_flip_buy_entry_guard_config(&node, "flip_buy", "hyperliquid");
+    }
+    #[test]
+    fn revenge_flip_flip_buy_node_can_disable_post_stop_loss_iv_mismatch() {
+        let cfg = resolve_revenge_flip_config(&revenge_node(json!({
+            "mode": "revenge_flip_v1",
+            "priceToBeatMode": "iv_mismatch_edge",
+            "priceToBeatCurrentPriceSource": "chainlink_cex_consensus",
+            "revengeFlip": { "postStopLossIvMismatchEnabled": false }
+        })))
+        .expect("valid config");
+        let state = TradeBuilderRevengeFlipState {
+            flip_count: 1,
+            ..TradeBuilderRevengeFlipState::default()
+        };
+        let effective_ptb = revenge_flip_effective_ptb(&cfg, &state, 1, Some(20), None, None);
+
+        let node = revenge_flip_buy_node(
+            &revenge_node(json!({
+                "mode": "revenge_flip_v1",
+                "priceToBeatMode": "iv_mismatch_edge",
+                "priceToBeatCurrentPriceSource": "chainlink_cex_consensus",
+                "priceToBeatIvTimeRules": [],
+                "revengeFlip": { "postStopLossIvMismatchEnabled": false }
+            })),
+            &cfg,
+            &effective_ptb,
+            Some(92.0),
+            &quote("down", 0.61, 0.60),
+            5.0,
+            0.20,
+            "flip_buy",
+            2,
+        );
+
+        assert_revenge_flip_buy_entry_guard_config_with_mode(&node, "flip_buy", "chainlink_cex_consensus", "manual");
+    }
+
+    #[test]
+    fn revenge_flip_buy_node_can_carry_chainlink_cex_entry_source() {
+        let cfg = resolve_revenge_flip_config(&revenge_node(json!({
+            "mode": "revenge_flip_v1",
+            "priceToBeatCurrentPriceSource": "chainlink_cex_consensus"
+        })))
+        .expect("valid config");
+        let effective_ptb =
+            revenge_flip_effective_ptb(&cfg, &TradeBuilderRevengeFlipState::default(), 0, None, None, None);
+
+        let node = revenge_flip_buy_node(
+            &revenge_node(json!({
+                "mode": "revenge_flip_v1",
+                "priceToBeatCurrentPriceSource": "chainlink_cex_consensus"
+            })),
+            &cfg,
+            &effective_ptb,
+            Some(92.0),
+            &quote("up", 0.55, 0.54),
+            5.0,
+            0.20,
+            "initial_buy",
+            3,
+        );
+
+        assert_revenge_flip_buy_entry_guard_config(
+            &node,
+            "initial_buy",
+            "chainlink_cex_consensus",
+        );
     }
 
     #[test]
@@ -1101,6 +1327,24 @@ mod revenge_flip_tests {
                 .and_then(Value::as_bool),
             Some(true)
         );
+        assert_eq!(
+            sell.config
+                .get("priceToBeatGuardEnabled")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            sell.config
+                .get("cexDirectionGuardEnabled")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            sell.config
+                .get("priceToBeatIvEntryQualityPolicy")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]
@@ -1129,9 +1373,7 @@ mod revenge_flip_tests {
         assert!(buy.config.get("sourceTradeId").is_none());
         assert!(buy.config.get("source_trade_id").is_none());
         assert_eq!(
-            buy.config
-                .get("revengeFlipIntent")
-                .and_then(Value::as_str),
+            buy.config.get("revengeFlipIntent").and_then(Value::as_str),
             Some("initial_buy")
         );
     }

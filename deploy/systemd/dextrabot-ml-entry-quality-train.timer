@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Dextrabot ML Entry Quality training every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=dextrabot-ml-entry-quality-train.service
+
+[Install]
+WantedBy=timers.target

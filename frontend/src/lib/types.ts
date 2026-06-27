@@ -58,7 +58,7 @@ export type BuyTriggerMode =
   | 'sell_progress_only'
   | 'price_only'
   | 'sell_progress_and_price';
-export type TradeFlowDefinitionStatus = 'draft' | 'published' | 'archived';
+export type TradeFlowDefinitionStatus = 'draft' | 'published' | 'stopped' | 'archived';
 export type TradeFlowVersionStatus = 'draft' | 'published' | 'archived';
 export type TradeFlowRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'canceled';
 export type TradeFlowStepStatus = 'queued' | 'running' | 'completed' | 'failed' | 'skipped' | 'canceled';
@@ -504,7 +504,7 @@ export interface TradeFlowEnsureSourceTradeResult {
 }
 
 export interface TradeFlowEnsureDualDcaSourceTradeRequest {
-  asset: 'btc' | 'eth' | 'sol' | 'xrp';
+  asset: 'btc' | 'eth' | 'sol' | 'xrp' | 'doge' | 'bnb' | 'hype';
   timeframe: '5m' | '15m';
   definitionId?: number | null;
   nodeKey?: string | null;

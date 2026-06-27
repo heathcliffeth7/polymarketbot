@@ -1,6 +1,8 @@
 import type { NodeFieldSchema } from './types';
 import { PTB_MODE_OPTIONS } from './ptb-modes';
 import { ACTION_PLACE_ORDER_FIELD_SCHEMA } from './action-place-order-schema';
+import { CONFIDENCE_LADDER_BINDING_MODE } from './confidence-ladder';
+import { AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE } from './avg-rebound-pairlock-rescue';
 
 export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
   'trigger.market_price': [
@@ -23,8 +25,10 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'DCA Live', value: 'dca_live_only' },
         { label: 'Positive Flip Grid', value: 'positive_quantity_flip_grid_only' },
         { label: 'RevengeFlip', value: 'revenge_flip_only' },
+        { label: 'Confidence Ladder', value: CONFIDENCE_LADDER_BINDING_MODE },
+        { label: 'Avg-Rebound Rescue', value: AVG_REBOUND_PAIRLOCK_RESCUE_BINDING_MODE },
       ],
-      help: 'Pair Lock icin downstream mode=pair_lock; DCA Live icin mode=dca_live_v1; Positive Flip Grid icin grid modlari; RevengeFlip icin mode=revenge_flip_v1 gerekir. Ek olarak action.notify/action.telegram_notify baglanabilir.',
+      help: 'Pair Lock icin downstream mode=pair_lock; DCA Live icin mode=dca_live_v1; Positive Flip Grid icin grid modlari; RevengeFlip icin mode=revenge_flip_v1; Confidence Ladder icin mode=confidence_ladder_hedge_lock_v1; Avg-Rebound icin mode=avg_rebound_pairlock_rescue_v1 gerekir. Ek olarak action.notify/action.telegram_notify baglanabilir.',
     },
     { key: 'marketSlug', label: 'Market Slug', input: 'text' },
     {
@@ -40,6 +44,9 @@ export const NODE_FIELD_SCHEMAS: Record<string, NodeFieldSchema[]> = {
         { label: 'SOL 15m', value: 'sol_15m_updown' },
         { label: 'XRP 5m', value: 'xrp_5m_updown' },
         { label: 'XRP 15m', value: 'xrp_15m_updown' },
+        { label: 'DOGE 5m', value: 'doge_5m_updown' },
+        { label: 'BNB 5m', value: 'bnb_5m_updown' },
+        { label: 'HYPE 5m', value: 'hype_5m_updown' },
       ],
     },
     {

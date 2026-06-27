@@ -8,6 +8,9 @@ use chrono::Duration as ChronoDuration;
 use serde_json::{json, Value};
 
 const DEFAULT_MODE: &str = "bybit_plus_one";
+const OKX_MODE: &str = "okx_plus_one";
+const GATE_MODE: &str = "gate_plus_one";
+const BINANCE_COINBASE_MODE: &str = "binance_coinbase";
 const DEFAULT_MAX_BOOK_STALE_MS: i64 = 2_500;
 const DEFAULT_MIN_MOVE_USD: f64 = 1.0;
 
@@ -26,7 +29,12 @@ impl CexDirectionGuardConfig {
             enabled: crate::node_config_bool(node, "cexDirectionGuardEnabled").unwrap_or(false),
             mode: crate::node_config_string(node, "cexDirectionGuardMode")
                 .map(|value| value.trim().to_ascii_lowercase())
-                .filter(|value| value == DEFAULT_MODE)
+                .filter(|value| {
+                    matches!(
+                        value.as_str(),
+                        DEFAULT_MODE | OKX_MODE | GATE_MODE | BINANCE_COINBASE_MODE
+                    )
+                })
                 .unwrap_or_else(|| DEFAULT_MODE.to_string()),
             max_book_stale_ms: cfg_i64(
                 node,
@@ -226,32 +234,135 @@ pub(crate) fn evaluate_cex_direction_guard(
 
     ensure_cex_microstructure_started(scope.asset);
     let window_start_ms = window_start.timestamp_millis();
-    let bybit = load_delta(scope.asset, CexVenue::Bybit, window_start_ms, config);
+    if config.mode.as_str() == BINANCE_COINBASE_MODE {
+        let binance = load_delta(scope.asset, CexVenue::Binance, window_start_ms, config);
+        let coinbase = load_delta(scope.asset, CexVenue::Coinbase, window_start_ms, config);
+        let value = base_value(market_slug, outcome_label, config)
+            .with_scope(scope.asset, scope.timeframe, window_start_ms)
+            .with_delta("binance", &binance)
+            .with_delta("coinbase", &coinbase);
+
+        let Some(binance_delta) = binance.snapshot.as_ref() else {
+            return pass(
+                "cex_direction_guard_unconfirmed",
+                Some(format!(
+                    "mode={BINANCE_COINBASE_MODE}; venue=binance unavailable: {}",
+                    binance
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "missing".to_string())
+                )),
+                value.with_consensus(None, None, Vec::new(), selected_side),
+                None,
+                None,
+            );
+        };
+        let Some(coinbase_delta) = coinbase.snapshot.as_ref() else {
+            return pass(
+                "cex_direction_guard_unconfirmed",
+                Some(format!(
+                    "mode={BINANCE_COINBASE_MODE}; venue=coinbase unavailable: {}",
+                    coinbase
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "missing".to_string())
+                )),
+                value.with_consensus(None, None, Vec::new(), selected_side),
+                None,
+                Some(binance_delta.delta_usd),
+            );
+        };
+        let Some(binance_side) = binance_delta.side else {
+            return pass(
+                "cex_direction_guard_neutral",
+                Some(format!("{BINANCE_COINBASE_MODE}; venue=binance")),
+                value.with_consensus(None, None, Vec::new(), selected_side),
+                None,
+                Some(binance_delta.delta_usd),
+            );
+        };
+        let Some(coinbase_side) = coinbase_delta.side else {
+            return pass(
+                "cex_direction_guard_neutral",
+                Some(format!("{BINANCE_COINBASE_MODE}; venue=coinbase")),
+                value.with_consensus(None, None, Vec::new(), selected_side),
+                None,
+                Some(binance_delta.delta_usd),
+            );
+        };
+        if binance_side != coinbase_side {
+            return pass(
+                "cex_direction_guard_unconfirmed",
+                Some(format!(
+                    "mode={BINANCE_COINBASE_MODE}; binance_side={binance_side}; coinbase_side={coinbase_side}"
+                )),
+                value.with_consensus(None, None, Vec::new(), selected_side),
+                None,
+                Some(binance_delta.delta_usd),
+            );
+        }
+
+        let consensus_side = binance_side;
+        let value = value.with_consensus(
+            Some(consensus_side),
+            Some(consensus_side),
+            vec!["binance", "coinbase"],
+            selected_side,
+        );
+        if consensus_side == opposite_side(selected_side) {
+            return block(
+                "cex_direction_guard_opposite",
+                Some(format!(
+                    "selected_side={selected_side}; consensus_side={consensus_side}; mode={BINANCE_COINBASE_MODE}; binance_delta_usd={:.8}; coinbase_delta_usd={:.8}",
+                    binance_delta.delta_usd,
+                    coinbase_delta.delta_usd
+                )),
+                value,
+                Some(consensus_side),
+                Some(binance_delta.delta_usd),
+            );
+        }
+        return pass(
+            "cex_direction_guard_passed",
+            None,
+            value,
+            Some(consensus_side),
+            Some(binance_delta.delta_usd),
+        );
+    }
+
+    let anchor_venue = match config.mode.as_str() {
+        OKX_MODE => CexVenue::Okx,
+        GATE_MODE => CexVenue::Gateio,
+        _ => CexVenue::Bybit,
+    };
+    let anchor_name = anchor_venue.as_str();
+    let anchor = load_delta(scope.asset, anchor_venue, window_start_ms, config);
     let binance = load_delta(scope.asset, CexVenue::Binance, window_start_ms, config);
     let coinbase = load_delta(scope.asset, CexVenue::Coinbase, window_start_ms, config);
     let value = base_value(market_slug, outcome_label, config)
         .with_scope(scope.asset, scope.timeframe, window_start_ms)
-        .with_delta("bybit", &bybit)
+        .with_delta(anchor_name, &anchor)
         .with_delta("binance", &binance)
         .with_delta("coinbase", &coinbase);
 
-    let Some(bybit_delta) = bybit.snapshot.as_ref() else {
+    let Some(anchor_delta) = anchor.snapshot.as_ref() else {
         return unavailable_or_pass(
             config,
             "cex_direction_guard_unavailable",
-            bybit.error.clone(),
+            anchor.error.clone(),
             value,
             None,
             None,
         );
     };
-    let Some(bybit_side) = bybit_delta.side else {
+    let Some(anchor_side) = anchor_delta.side else {
         return pass(
             "cex_direction_guard_neutral",
-            None,
+            Some(format!("anchor_venue={anchor_name}")),
             value.with_consensus(None, Some("neutral"), Vec::new(), selected_side),
             None,
-            Some(bybit_delta.delta_usd),
+            Some(anchor_delta.delta_usd),
         );
     };
 
@@ -261,13 +372,13 @@ pub(crate) fn evaluate_cex_direction_guard(
             delta
                 .snapshot
                 .as_ref()
-                .and_then(|snapshot| (snapshot.side == Some(bybit_side)).then_some(venue))
+                .and_then(|snapshot| (snapshot.side == Some(anchor_side)).then_some(venue))
         })
         .collect::<Vec<_>>();
-    let consensus_side = (!confirming_venues.is_empty()).then_some(bybit_side);
+    let consensus_side = (!confirming_venues.is_empty()).then_some(anchor_side);
     let value = value.with_consensus(
         consensus_side,
-        Some(bybit_side),
+        Some(anchor_side),
         confirming_venues.clone(),
         selected_side,
     );
@@ -277,20 +388,20 @@ pub(crate) fn evaluate_cex_direction_guard(
             None,
             value,
             None,
-            Some(bybit_delta.delta_usd),
+            Some(anchor_delta.delta_usd),
         );
     };
     if consensus_side == opposite_side(selected_side) {
         return block(
             "cex_direction_guard_opposite",
             Some(format!(
-                "selected_side={selected_side}; consensus_side={consensus_side}; bybit_delta_usd={:.8}; confirming_venues={}",
-                bybit_delta.delta_usd,
+                "selected_side={selected_side}; consensus_side={consensus_side}; anchor_venue={anchor_name}; anchor_delta_usd={:.8}; confirming_venues={}",
+                anchor_delta.delta_usd,
                 confirming_venues.join(",")
             )),
             value,
             Some(consensus_side),
-            Some(bybit_delta.delta_usd),
+            Some(anchor_delta.delta_usd),
         );
     }
     pass(
@@ -298,7 +409,7 @@ pub(crate) fn evaluate_cex_direction_guard(
         None,
         value,
         Some(consensus_side),
-        Some(bybit_delta.delta_usd),
+        Some(anchor_delta.delta_usd),
     )
 }
 
@@ -364,7 +475,7 @@ impl GuardValue {
     fn with_consensus(
         mut self,
         consensus_side: Option<&str>,
-        bybit_side: Option<&str>,
+        anchor_side: Option<&str>,
         confirming_venues: Vec<&str>,
         selected_side: &str,
     ) -> Value {
@@ -375,7 +486,8 @@ impl GuardValue {
                 json!(opposite_side(selected_side)),
             );
             obj.insert("consensus_side".to_string(), json!(consensus_side));
-            obj.insert("bybit_side".to_string(), json!(bybit_side));
+            obj.insert("anchor_side".to_string(), json!(anchor_side));
+            obj.insert("bybit_side".to_string(), json!(anchor_side));
             obj.insert("confirming_venues".to_string(), json!(confirming_venues));
         }
         self.0
@@ -506,30 +618,29 @@ fn cfg_i64(node: &crate::TradeFlowNode, key: &str, default: i64) -> i64 {
 mod tests {
     use super::*;
     use crate::trade_flow::guards::cex_microstructure::{
-        clear_cex_microstructure_test_state, seed_cex_book_test_sample,
-        seed_cex_open_test_sample, CexBookSample,
+        clear_cex_microstructure_test_state, lock_cex_microstructure_test_state,
+        seed_cex_book_test_sample, seed_cex_open_test_sample, CexBookSample,
     };
     use chrono::Utc;
-    use std::sync::{Mutex, MutexGuard};
-
-    static CEX_DIRECTION_GUARD_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn lock_cex_direction_guard_test_state() -> MutexGuard<'static, ()> {
-        CEX_DIRECTION_GUARD_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 
     fn market_slug() -> (String, i64) {
+        market_slug_for("btc")
+    }
+
+    fn market_slug_for(asset: &str) -> (String, i64) {
         let now = Utc::now().timestamp();
         let start = now - (now % 300);
-        (format!("btc-updown-5m-{start}"), start * 1_000)
+        (format!("{asset}-updown-5m-{start}"), start * 1_000)
     }
 
     fn seed_book(venue: CexVenue, ts: i64, mid: f64) {
+        seed_book_for("btc", venue, ts, mid);
+    }
+
+    fn seed_book_for(asset: &str, venue: CexVenue, ts: i64, mid: f64) {
         seed_cex_book_test_sample(CexBookSample {
             venue,
-            asset: "btc".to_string(),
+            asset: asset.to_string(),
             timestamp_ms: ts,
             bid: mid - 0.5,
             ask: mid + 0.5,
@@ -540,9 +651,13 @@ mod tests {
     }
 
     fn seed_open(venue: CexVenue, ts: i64, mid: f64) {
+        seed_open_for("btc", venue, ts, mid);
+    }
+
+    fn seed_open_for(asset: &str, venue: CexVenue, ts: i64, mid: f64) {
         seed_cex_open_test_sample(CexBookSample {
             venue,
-            asset: "btc".to_string(),
+            asset: asset.to_string(),
             timestamp_ms: ts,
             bid: mid,
             ask: mid,
@@ -562,9 +677,30 @@ mod tests {
         }
     }
 
+    fn okx_config() -> CexDirectionGuardConfig {
+        CexDirectionGuardConfig {
+            mode: OKX_MODE.to_string(),
+            ..config()
+        }
+    }
+
+    fn gate_config() -> CexDirectionGuardConfig {
+        CexDirectionGuardConfig {
+            mode: GATE_MODE.to_string(),
+            ..config()
+        }
+    }
+
+    fn binance_coinbase_config() -> CexDirectionGuardConfig {
+        CexDirectionGuardConfig {
+            mode: BINANCE_COINBASE_MODE.to_string(),
+            ..config()
+        }
+    }
+
     #[test]
     fn bybit_plus_binance_opposite_blocks_entry() {
-        let _guard = lock_cex_direction_guard_test_state();
+        let _guard = lock_cex_microstructure_test_state();
         clear_cex_microstructure_test_state();
         let (market_slug, start_ms) = market_slug();
         let now_ms = Utc::now().timestamp_millis();
@@ -583,7 +719,7 @@ mod tests {
 
     #[test]
     fn bybit_without_confirmation_passes() {
-        let _guard = lock_cex_direction_guard_test_state();
+        let _guard = lock_cex_microstructure_test_state();
         clear_cex_microstructure_test_state();
         let (market_slug, start_ms) = market_slug();
         let now_ms = Utc::now().timestamp_millis();
@@ -597,8 +733,153 @@ mod tests {
     }
 
     #[test]
+    fn okx_plus_binance_opposite_blocks_entry() {
+        let _guard = lock_cex_microstructure_test_state();
+        clear_cex_microstructure_test_state();
+        let (market_slug, start_ms) = market_slug();
+        let now_ms = Utc::now().timestamp_millis();
+        seed_open(CexVenue::Okx, start_ms, 100.0);
+        seed_book(CexVenue::Okx, now_ms, 90.0);
+        seed_open(CexVenue::Binance, start_ms, 200.0);
+        seed_book(CexVenue::Binance, now_ms, 190.0);
+
+        let evaluation = evaluate_cex_direction_guard(&market_slug, "Up", &okx_config());
+
+        assert!(!evaluation.passed);
+        assert_eq!(evaluation.reason_code, "cex_direction_guard_opposite");
+        assert_eq!(evaluation.consensus_side, Some("down"));
+        assert_eq!(evaluation.bybit_delta_usd, Some(-10.0));
+        assert!(evaluation
+            .reason_detail
+            .unwrap()
+            .contains("anchor_venue=okx"));
+    }
+
+    #[test]
+    fn okx_without_confirmation_passes() {
+        let _guard = lock_cex_microstructure_test_state();
+        clear_cex_microstructure_test_state();
+        let (market_slug, start_ms) = market_slug();
+        let now_ms = Utc::now().timestamp_millis();
+        seed_open(CexVenue::Okx, start_ms, 100.0);
+        seed_book(CexVenue::Okx, now_ms, 90.0);
+
+        let evaluation = evaluate_cex_direction_guard(&market_slug, "Up", &okx_config());
+
+        assert!(evaluation.passed);
+        assert_eq!(evaluation.reason_code, "cex_direction_guard_unconfirmed");
+        assert_eq!(
+            evaluation.value["venue_deltas"]["okx"]["venue"].as_str(),
+            Some("okx")
+        );
+    }
+
+    #[test]
+    fn gate_plus_coinbase_opposite_blocks_entry() {
+        let _guard = lock_cex_microstructure_test_state();
+        clear_cex_microstructure_test_state();
+        let (market_slug, start_ms) = market_slug_for("sol");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_open_for("sol", CexVenue::Gateio, start_ms, 100.0);
+        seed_book_for("sol", CexVenue::Gateio, now_ms, 90.0);
+        seed_open_for("sol", CexVenue::Coinbase, start_ms, 200.0);
+        seed_book_for("sol", CexVenue::Coinbase, now_ms, 190.0);
+
+        let evaluation = evaluate_cex_direction_guard(&market_slug, "Up", &gate_config());
+
+        assert!(!evaluation.passed);
+        assert_eq!(evaluation.reason_code, "cex_direction_guard_opposite");
+        assert_eq!(evaluation.consensus_side, Some("down"));
+        assert_eq!(evaluation.bybit_delta_usd, Some(-10.0));
+        assert!(evaluation
+            .reason_detail
+            .unwrap()
+            .contains("anchor_venue=gateio"));
+        assert_eq!(
+            evaluation.value["venue_deltas"]["gateio"]["venue"].as_str(),
+            Some("gateio")
+        );
+    }
+
+    #[test]
+    fn gate_without_confirmation_passes() {
+        let _guard = lock_cex_microstructure_test_state();
+        clear_cex_microstructure_test_state();
+        let (market_slug, start_ms) = market_slug_for("sol");
+        let now_ms = Utc::now().timestamp_millis();
+        seed_open_for("sol", CexVenue::Gateio, start_ms, 100.0);
+        seed_book_for("sol", CexVenue::Gateio, now_ms, 90.0);
+
+        let evaluation = evaluate_cex_direction_guard(&market_slug, "Up", &gate_config());
+
+        assert!(evaluation.passed);
+        assert_eq!(evaluation.reason_code, "cex_direction_guard_unconfirmed");
+    }
+
+    #[test]
+    fn binance_coinbase_opposite_blocks_entry() {
+        let _guard = lock_cex_microstructure_test_state();
+        clear_cex_microstructure_test_state();
+        let (market_slug, start_ms) = market_slug();
+        let now_ms = Utc::now().timestamp_millis();
+        seed_open(CexVenue::Binance, start_ms, 100.0);
+        seed_book(CexVenue::Binance, now_ms, 90.0);
+        seed_open(CexVenue::Coinbase, start_ms, 200.0);
+        seed_book(CexVenue::Coinbase, now_ms, 190.0);
+
+        let evaluation =
+            evaluate_cex_direction_guard(&market_slug, "Up", &binance_coinbase_config());
+
+        assert!(!evaluation.passed);
+        assert_eq!(evaluation.reason_code, "cex_direction_guard_opposite");
+        assert_eq!(evaluation.consensus_side, Some("down"));
+        assert_eq!(evaluation.value["mode"].as_str(), Some("binance_coinbase"));
+        assert!(evaluation.value["venue_deltas"]["bybit"].is_null());
+        assert!(evaluation
+            .reason_detail
+            .unwrap()
+            .contains("mode=binance_coinbase"));
+    }
+
+    #[test]
+    fn binance_coinbase_single_missing_passes_unconfirmed() {
+        let _guard = lock_cex_microstructure_test_state();
+        clear_cex_microstructure_test_state();
+        let (market_slug, start_ms) = market_slug();
+        let now_ms = Utc::now().timestamp_millis();
+        seed_open(CexVenue::Binance, start_ms, 100.0);
+        seed_book(CexVenue::Binance, now_ms, 90.0);
+
+        let evaluation =
+            evaluate_cex_direction_guard(&market_slug, "Up", &binance_coinbase_config());
+
+        assert!(evaluation.passed);
+        assert_eq!(evaluation.reason_code, "cex_direction_guard_unconfirmed");
+        assert_eq!(evaluation.consensus_side, None);
+    }
+
+    #[test]
+    fn binance_coinbase_disagreement_passes_unconfirmed() {
+        let _guard = lock_cex_microstructure_test_state();
+        clear_cex_microstructure_test_state();
+        let (market_slug, start_ms) = market_slug();
+        let now_ms = Utc::now().timestamp_millis();
+        seed_open(CexVenue::Binance, start_ms, 100.0);
+        seed_book(CexVenue::Binance, now_ms, 90.0);
+        seed_open(CexVenue::Coinbase, start_ms, 200.0);
+        seed_book(CexVenue::Coinbase, now_ms, 210.0);
+
+        let evaluation =
+            evaluate_cex_direction_guard(&market_slug, "Up", &binance_coinbase_config());
+
+        assert!(evaluation.passed);
+        assert_eq!(evaluation.reason_code, "cex_direction_guard_unconfirmed");
+        assert_eq!(evaluation.consensus_side, None);
+    }
+
+    #[test]
     fn ws_only_window_books_do_not_create_consensus() {
-        let _guard = lock_cex_direction_guard_test_state();
+        let _guard = lock_cex_microstructure_test_state();
         clear_cex_microstructure_test_state();
         let (market_slug, start_ms) = market_slug();
         let now_ms = Utc::now().timestamp_millis();

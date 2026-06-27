@@ -202,7 +202,7 @@ export const NODE_HELP_CONTENT: Partial<Record<string, NodeHelpContent>> = {
       },
     ],
     fieldTips: [
-      { field: 'asset', description: 'Hangi coin icin market aranacagini belirler (btc/eth/sol/xrp).' },
+      { field: 'asset', description: 'Hangi coin icin market aranacagini belirler (btc/eth/sol/xrp/doge/bnb/hype).' },
       { field: 'timeframe', description: '5m veya 15m market periyodunu belirler.' },
       {
         field: 'sideMode',
@@ -313,7 +313,7 @@ export const NODE_FIELD_HELP_CONTENT: Partial<Record<string, Record<string, Node
       description: 'Hangi coin icin market aranacagini belirler.',
       example: 'Ornek: btc',
       effect: 'Sistem bu coin\'in aktif marketini bulur ve slug eslemesi yapar.',
-      tips: ['Gecerli degerler: btc, eth, sol, xrp.'],
+      tips: ['Gecerli degerler: btc, eth, sol, xrp, doge, bnb, hype.'],
     },
     timeframe: {
       title: 'Market Period (timeframe)',

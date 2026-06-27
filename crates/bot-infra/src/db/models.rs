@@ -299,6 +299,15 @@ pub struct BotDecisionLogRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct BotRunStartMetadata {
+    pub package_version: String,
+    pub git_sha: String,
+    pub build_time: String,
+    pub process_start_time: DateTime<Utc>,
+    pub config_hash: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct TradeBuilderOrderNodeSnapshotInput {
     pub order_id: i64,
     pub root_order_id: i64,
@@ -608,6 +617,108 @@ pub struct TradeBuilderPositiveQuantityFlipGridActiveBuy {
 }
 
 #[derive(Debug, Clone)]
+pub struct TradeBuilderConfidenceLadderFillInput {
+    pub user_id: i64,
+    pub flow_definition_id: Option<i64>,
+    pub flow_run_id: Option<i64>,
+    pub root_flow_node_key: String,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub ladder_side: String,
+    pub intent: String,
+    pub order_side: String,
+    pub builder_order_id: i64,
+    pub parent_builder_order_id: Option<i64>,
+    pub quantity: f64,
+    pub execution_price: f64,
+    pub notional_usdc: f64,
+    pub model_probability: Option<f64>,
+    pub edge: Option<f64>,
+    pub payload_json: Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TradeBuilderConfidenceLadderState {
+    pub up_qty: f64,
+    pub down_qty: f64,
+    pub total_cost_usdc: f64,
+    pub up_cost_usdc: f64,
+    pub down_cost_usdc: f64,
+    pub up_avg_cost: Option<f64>,
+    pub down_avg_cost: Option<f64>,
+    pub if_up_wins_pnl: f64,
+    pub if_down_wins_pnl: f64,
+    pub worst_case_pnl: f64,
+    pub buy_count: i64,
+    pub side_switch_count: i64,
+    pub last_buy_side: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderAvgReboundPairlockRescueSessionInput {
+    pub user_id: i64,
+    pub flow_definition_id: Option<i64>,
+    pub flow_run_id: Option<i64>,
+    pub root_flow_node_key: String,
+    pub market_slug: String,
+    pub primary_token_id: String,
+    pub primary_outcome_label: String,
+    pub opposite_token_id: String,
+    pub opposite_outcome_label: String,
+    pub payload_json: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderAvgReboundPairlockRescueSession {
+    pub id: i64,
+    pub status: String,
+    pub primary_token_id: String,
+    pub primary_outcome_label: String,
+    pub opposite_token_id: String,
+    pub opposite_outcome_label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeBuilderAvgReboundPairlockRescueFillInput {
+    pub session_id: i64,
+    pub user_id: i64,
+    pub flow_definition_id: Option<i64>,
+    pub flow_run_id: Option<i64>,
+    pub root_flow_node_key: String,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub leg_role: String,
+    pub intent: String,
+    pub stage_id: Option<String>,
+    pub tier_or_leg_id: String,
+    pub decision_id: String,
+    pub order_side: String,
+    pub builder_order_id: i64,
+    pub quantity: f64,
+    pub execution_price: f64,
+    pub notional_usdc: f64,
+    pub payload_json: Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TradeBuilderAvgReboundPairlockRescueState {
+    pub session_id: Option<i64>,
+    pub session_status: Option<String>,
+    pub primary_total_qty: f64,
+    pub primary_total_cost: f64,
+    pub avg_primary_cost: Option<f64>,
+    pub opposite_filled_qty: f64,
+    pub opposite_total_cost: f64,
+    pub open_primary_qty: f64,
+    pub locked_pnl: f64,
+    pub profit_started: bool,
+    pub primary_tier_ids: Vec<String>,
+    pub opposite_leg_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct TradeBuilderRevengeFlipFillInput {
     pub user_id: i64,
     pub flow_definition_id: i64,
@@ -704,6 +815,8 @@ pub struct PendingTradeBuilderFirstVisibleInventoryObservation {
     pub fill_qty_source: Option<String>,
     pub fee_rate_bps: i64,
     pub fill_observed_at: DateTime<Utc>,
+    pub parent_order_status: String,
+    pub parent_order_filled_qty: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -912,6 +1025,43 @@ pub struct TradeFlowRunStep {
     pub parent_step_id: Option<i64>,
     pub idempotency_key: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeFlowDeferredOnceLockInput {
+    pub run_id: i64,
+    pub definition_id: i64,
+    pub version_id: i64,
+    pub trigger_node_key: String,
+    pub action_node_key: String,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub once_scope_market: bool,
+    pub lock_key: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeFlowDeferredOnceLockRecord {
+    pub lock_key: String,
+    pub state: String,
+    pub run_id: i64,
+    pub trigger_node_key: String,
+    pub action_node_key: String,
+    pub market_slug: String,
+    pub token_id: String,
+    pub outcome_label: String,
+    pub once_scope_market: bool,
+    pub expires_at: DateTime<Utc>,
+    pub builder_order_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TradeFlowDeferredOnceLockAcquireResult {
+    pub created: bool,
+    pub record: Option<TradeFlowDeferredOnceLockRecord>,
+    pub expired_count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1164,6 +1314,14 @@ pub struct TradeFlowDualDcaLeg {
     pub filled_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TradeFlowReadyStepBacklogCounts {
+    pub ready_total: i64,
+    pub ready_ptb_retry: i64,
+    pub ready_same_run_ptb_retry: i64,
+    pub ready_non_retry: i64,
 }
 
 #[derive(Debug, Clone)]

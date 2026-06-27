@@ -272,8 +272,11 @@ const RESOLVE_MARKET_SCOPE_TO_ASSET_TIMEFRAME: Record<string, { asset: string; t
   sol_15m_updown: { asset: 'sol', timeframe: '15m' },
   xrp_5m_updown: { asset: 'xrp', timeframe: '5m' },
   xrp_15m_updown: { asset: 'xrp', timeframe: '15m' },
+  doge_5m_updown: { asset: 'doge', timeframe: '5m' },
+  bnb_5m_updown: { asset: 'bnb', timeframe: '5m' },
+  hype_5m_updown: { asset: 'hype', timeframe: '5m' },
 };
-const RESOLVE_MARKET_ALLOWED_ASSETS = new Set(['btc', 'eth', 'sol', 'xrp']);
+const RESOLVE_MARKET_ALLOWED_ASSETS = new Set(['btc', 'eth', 'sol', 'xrp', 'doge', 'bnb', 'hype']);
 const RESOLVE_MARKET_ALLOWED_TIMEFRAMES = new Set(['5m', '15m']);
 
 function toTrimmedString(value: unknown): string {
@@ -282,9 +285,17 @@ function toTrimmedString(value: unknown): string {
   return '';
 }
 
-function normalizeDualDcaAsset(value: unknown): 'btc' | 'eth' | 'sol' | 'xrp' | null {
+function normalizeDualDcaAsset(value: unknown): 'btc' | 'eth' | 'sol' | 'xrp' | 'doge' | 'bnb' | 'hype' | null {
   const normalized = toTrimmedString(value).toLowerCase();
-  if (normalized === 'btc' || normalized === 'eth' || normalized === 'sol' || normalized === 'xrp') {
+  if (
+    normalized === 'btc' ||
+    normalized === 'eth' ||
+    normalized === 'sol' ||
+    normalized === 'xrp' ||
+    normalized === 'doge' ||
+    normalized === 'bnb' ||
+    normalized === 'hype'
+  ) {
     return normalized;
   }
   return null;

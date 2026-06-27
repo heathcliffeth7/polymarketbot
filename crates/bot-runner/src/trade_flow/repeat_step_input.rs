@@ -25,49 +25,99 @@ fn clear_trade_flow_repeat_quote_keys(input_json: &mut serde_json::Map<String, V
     }
 }
 
-fn build_trade_flow_repeat_step_input(step: &TradeFlowRunStep, output: &Value) -> Option<Value> {
+const FLOW_RUNTIME_METADATA_KEY: &str = "__flow_runtime";
+const FLOW_RUNTIME_REPEAT_KIND_PTB_GUARD_RETRY: &str = "ptb_guard_retry";
+
+fn output_is_retrying_price_to_beat_guard_block(output: &Value) -> bool {
+    output.get("reason").and_then(Value::as_str) == Some("price_to_beat_guard_blocked")
+        && output
+            .get("retrying")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn add_ptb_guard_retry_runtime_metadata(
+    input_json: &mut serde_json::Map<String, Value>,
+    output: &Value,
+    step_processing_context: &FlowStepProcessingContext,
+) {
+    input_json.insert(
+        FLOW_RUNTIME_METADATA_KEY.to_string(),
+        json!({
+            "repeat_kind": FLOW_RUNTIME_REPEAT_KIND_PTB_GUARD_RETRY,
+            "guard_name": "price_to_beat",
+            "blocked_reason": output.get("price_to_beat_guard")
+                .and_then(|guard| guard.get("reason_code"))
+                .and_then(Value::as_str)
+                .or_else(|| output.get("reason_code").and_then(Value::as_str)),
+            "created_by_step_processing_run_id": step_processing_context.id.as_str(),
+            "created_by_step_processing_started_at": step_processing_context.started_at.to_rfc3339(),
+        }),
+    );
+}
+
+fn build_trade_flow_repeat_step_input(
+    step: &TradeFlowRunStep,
+    output: &Value,
+    step_processing_context: &FlowStepProcessingContext,
+) -> Option<Value> {
     let input_json = step.input_json.as_ref()?;
     if step.node_type != "action.place_order" {
         return Some(input_json.clone());
     }
-    if output.get("reason").and_then(Value::as_str) != Some("pair_lock_primary_guard_waiting") {
+    let pair_lock_waiting =
+        output.get("reason").and_then(Value::as_str) == Some("pair_lock_primary_guard_waiting");
+    let ptb_guard_retry = output_is_retrying_price_to_beat_guard_block(output);
+    if !pair_lock_waiting && !ptb_guard_retry {
         return Some(input_json.clone());
     }
 
     let mut normalized = input_json.as_object().cloned().unwrap_or_default();
-    if let Some(market_slug) = output
-        .get("market_slug")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        normalized.insert("market_slug".to_string(), json!(market_slug));
-        normalized.insert("marketSlug".to_string(), json!(market_slug));
-        normalized.insert("wsMarketSlug".to_string(), json!(market_slug));
+    if pair_lock_waiting {
+        if let Some(market_slug) = output
+            .get("market_slug")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            normalized.insert("market_slug".to_string(), json!(market_slug));
+            normalized.insert("marketSlug".to_string(), json!(market_slug));
+            normalized.insert("wsMarketSlug".to_string(), json!(market_slug));
+        }
+        if let Some(yes_token_id) = output
+            .get("resolved_yes_token_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            normalized.insert("yesTokenId".to_string(), json!(yes_token_id));
+        }
+        if let Some(no_token_id) = output
+            .get("resolved_no_token_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            normalized.insert("noTokenId".to_string(), json!(no_token_id));
+        }
+        clear_trade_flow_repeat_quote_keys(&mut normalized);
     }
-    if let Some(yes_token_id) = output
-        .get("resolved_yes_token_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        normalized.insert("yesTokenId".to_string(), json!(yes_token_id));
+    if ptb_guard_retry {
+        add_ptb_guard_retry_runtime_metadata(&mut normalized, output, step_processing_context);
     }
-    if let Some(no_token_id) = output
-        .get("resolved_no_token_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        normalized.insert("noTokenId".to_string(), json!(no_token_id));
-    }
-    clear_trade_flow_repeat_quote_keys(&mut normalized);
     Some(Value::Object(normalized))
 }
 
 #[cfg(test)]
 mod repeat_step_input_tests {
     use super::*;
+
+    fn test_processing_context() -> FlowStepProcessingContext {
+        FlowStepProcessingContext {
+            id: "processing-run-1".to_string(),
+            started_at: Utc::now(),
+        }
+    }
 
     #[test]
     fn pair_lock_waiting_repeat_input_uses_latest_market_and_clears_quote_fields() {
@@ -111,8 +161,12 @@ mod repeat_step_input_tests {
             "resolved_no_token_id": "no-new"
         });
 
-        let normalized =
-            build_trade_flow_repeat_step_input(&step, &output).expect("normalized input");
+        let normalized = build_trade_flow_repeat_step_input(
+            &step,
+            &output,
+            &test_processing_context(),
+        )
+        .expect("normalized input");
         assert_eq!(
             normalized.get("market_slug").and_then(Value::as_str),
             Some("btc-updown-5m-new")
@@ -143,5 +197,89 @@ mod repeat_step_input_tests {
         assert!(normalized.get("ws_best_ask_from_step").is_none());
         assert!(normalized.get("ws_price_source_from_step").is_none());
         assert_eq!(normalized.get("unchanged").and_then(Value::as_bool), Some(true));
+        assert!(normalized.get(FLOW_RUNTIME_METADATA_KEY).is_none());
+    }
+
+    #[test]
+    fn ptb_guard_retry_repeat_input_adds_internal_runtime_metadata() {
+        let step = TradeFlowRunStep {
+            id: 1,
+            run_id: 42,
+            node_key: "action_1".to_string(),
+            node_type: "action.place_order".to_string(),
+            status: "queued".to_string(),
+            attempt: 1,
+            input_json: Some(json!({
+                "market_slug": "btc-updown-5m",
+                "token_id": "token-1"
+            })),
+            output_json: None,
+            error_text: None,
+            started_at: None,
+            ended_at: None,
+            available_at: Utc::now(),
+            parent_step_id: None,
+            idempotency_key: None,
+            created_at: Utc::now(),
+        };
+        let context = test_processing_context();
+        let output = json!({
+            "reason": "price_to_beat_guard_blocked",
+            "retrying": true,
+            "price_to_beat_guard": {"reason_code": "price_to_beat_gap_below_threshold"}
+        });
+
+        let normalized =
+            build_trade_flow_repeat_step_input(&step, &output, &context).expect("repeat input");
+        let metadata = normalized
+            .get(FLOW_RUNTIME_METADATA_KEY)
+            .expect("runtime metadata");
+        assert_eq!(
+            metadata.get("repeat_kind").and_then(Value::as_str),
+            Some(FLOW_RUNTIME_REPEAT_KIND_PTB_GUARD_RETRY)
+        );
+        assert_eq!(
+            metadata
+                .get("created_by_step_processing_run_id")
+                .and_then(Value::as_str),
+            Some(context.id.as_str())
+        );
+        assert_eq!(
+            metadata.get("blocked_reason").and_then(Value::as_str),
+            Some("price_to_beat_gap_below_threshold")
+        );
+    }
+
+    #[test]
+    fn terminal_ptb_guard_block_does_not_add_retry_metadata() {
+        let step = TradeFlowRunStep {
+            id: 1,
+            run_id: 42,
+            node_key: "action_1".to_string(),
+            node_type: "action.place_order".to_string(),
+            status: "queued".to_string(),
+            attempt: 1,
+            input_json: Some(json!({"token_id": "token-1"})),
+            output_json: None,
+            error_text: None,
+            started_at: None,
+            ended_at: None,
+            available_at: Utc::now(),
+            parent_step_id: None,
+            idempotency_key: None,
+            created_at: Utc::now(),
+        };
+        let output = json!({
+            "reason": "price_to_beat_guard_blocked",
+            "retrying": false
+        });
+
+        let normalized = build_trade_flow_repeat_step_input(
+            &step,
+            &output,
+            &test_processing_context(),
+        )
+        .expect("repeat input");
+        assert!(normalized.get(FLOW_RUNTIME_METADATA_KEY).is_none());
     }
 }

@@ -14,6 +14,9 @@ pub(crate) fn bybit_symbol(asset: &str) -> Option<&'static str> {
         "eth" => Some("ETHUSDT"),
         "sol" => Some("SOLUSDT"),
         "xrp" => Some("XRPUSDT"),
+        "doge" | "dogecoin" => Some("DOGEUSDT"),
+        "bnb" => Some("BNBUSDT"),
+        "hype" | "hyperliquid" => Some("HYPEUSDT"),
         _ => None,
     }
 }
@@ -98,6 +101,14 @@ mod tests {
 
         assert_eq!(message["op"], "subscribe");
         assert_eq!(message["args"][0], "orderbook.1.BTCUSDT");
+    }
+
+    #[test]
+    fn bybit_symbol_supports_bnb_hype_and_doge() {
+        assert_eq!(bybit_symbol("doge"), Some("DOGEUSDT"));
+        assert_eq!(bybit_symbol("dogecoin"), Some("DOGEUSDT"));
+        assert_eq!(bybit_symbol("bnb"), Some("BNBUSDT"));
+        assert_eq!(bybit_symbol("hype"), Some("HYPEUSDT"));
     }
 
     #[test]

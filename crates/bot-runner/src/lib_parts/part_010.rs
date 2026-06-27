@@ -6,35 +6,52 @@ async fn process_trade_flows(
     ws: &ClobWsClient,
     flow_runtime_caches: &mut FlowRuntimeCaches,
     auto_claim_runtimes: &mut HashMap<i64, FlowAutoClaimRuntime>,
+    flow_timing: &mut crate::trade_flow::housekeeping_timing::FlowHousekeepingTimingStats,
 ) -> Result<()> {
-    let definitions = repo
-        .list_published_trade_flow_definitions(FLOW_DEFINITION_PROCESS_LIMIT)
-        .await?;
+    maybe_recover_stale_running_trade_flow_steps(repo, run_id, flow_runtime_caches).await;
+    let definitions_result = crate::trade_flow::housekeeping_timing::measure_flow_housekeeping_phase(
+        flow_timing,
+        crate::trade_flow::housekeeping_timing::FlowHousekeepingPhase::LoadDefinitions,
+        repo.list_published_trade_flow_definitions(FLOW_DEFINITION_PROCESS_LIMIT),
+    )
+    .await;
+    let definitions = definitions_result?;
     info!(
         run_id,
         count = definitions.len(),
         "TRADE_FLOW_DEFINITIONS_LOADED"
     );
     if definitions.is_empty() {
-        refresh_trade_flow_ws_fast_path_cache(
-            repo,
-            run_id,
-            ws,
-            &definitions,
-            &mut flow_runtime_caches.user_cfg,
-        )
-        .await?;
-        maybe_tick_flow_auto_claims(
-            repo,
-            run_id,
-            &definitions,
-            &mut flow_runtime_caches.user_cfg,
-            auto_claim_runtimes,
+        let refresh_result =
+            crate::trade_flow::housekeeping_timing::measure_flow_housekeeping_phase(
+                flow_timing,
+                crate::trade_flow::housekeeping_timing::FlowHousekeepingPhase::RefreshWsFastPathCache,
+                refresh_trade_flow_ws_fast_path_cache(
+                    repo,
+                    run_id,
+                    ws,
+                    &definitions,
+                    &mut flow_runtime_caches.user_cfg,
+                ),
+            )
+            .await;
+        refresh_result?;
+        crate::trade_flow::housekeeping_timing::measure_flow_housekeeping_phase(
+            flow_timing,
+            crate::trade_flow::housekeeping_timing::FlowHousekeepingPhase::AutoClaim,
+            maybe_tick_flow_auto_claims(
+                repo,
+                run_id,
+                &definitions,
+                &mut flow_runtime_caches.user_cfg,
+                auto_claim_runtimes,
+            ),
         )
         .await;
         return Ok(());
     }
 
+    let sync_started = Instant::now();
     for definition in &definitions {
         flow_runtime_caches.touch(definition.user_id);
         if let Err(err) = sync_trade_flow_definition_run(repo, run_id, definition).await {
@@ -46,35 +63,97 @@ async fn process_trade_flows(
             );
         }
     }
-    refresh_trade_flow_ws_fast_path_cache(
-        repo,
-        run_id,
-        ws,
-        &definitions,
-        &mut flow_runtime_caches.user_cfg,
+    flow_timing.set_phase_ms(
+        crate::trade_flow::housekeeping_timing::FlowHousekeepingPhase::SyncDefinitionRuns,
+        crate::trade_flow::housekeeping_timing::millis_u64(sync_started.elapsed()),
+    );
+    let refresh_result = crate::trade_flow::housekeeping_timing::measure_flow_housekeeping_phase(
+        flow_timing,
+        crate::trade_flow::housekeeping_timing::FlowHousekeepingPhase::RefreshWsFastPathCache,
+        refresh_trade_flow_ws_fast_path_cache(
+            repo,
+            run_id,
+            ws,
+            &definitions,
+            &mut flow_runtime_caches.user_cfg,
+        ),
     )
-    .await?;
-    if let Err(err) =
-        enqueue_trade_flow_ws_open_position_price_steps_from_cache(repo, run_id, ws, client, None)
-            .await
-    {
+    .await;
+    refresh_result?;
+    let enqueue_result = crate::trade_flow::housekeeping_timing::measure_flow_housekeeping_phase(
+        flow_timing,
+        crate::trade_flow::housekeeping_timing::FlowHousekeepingPhase::EnqueueWsOpenPositionSteps,
+        enqueue_trade_flow_ws_open_position_price_steps_from_cache(repo, run_id, ws, client, None),
+    )
+    .await;
+    if let Err(err) = enqueue_result {
         warn!(run_id, error = %err, "TRADE_FLOW_WS_TRIGGER_ENQUEUE_FAILED");
     }
-    if let Err(err) = process_trade_flow_trigger_market_price_timers(repo, run_id, ws, client).await
-    {
+    let timers_result = crate::trade_flow::housekeeping_timing::measure_flow_housekeeping_phase(
+        flow_timing,
+        crate::trade_flow::housekeeping_timing::FlowHousekeepingPhase::ProcessMarketPriceTimers,
+        process_trade_flow_trigger_market_price_timers(repo, run_id, ws, client),
+    )
+    .await;
+    if let Err(err) = timers_result {
         warn!(run_id, error = %err, "TRADE_FLOW_CYCLE_WINDOW_TIMER_FAILED");
     }
 
-    maybe_tick_flow_auto_claims(
-        repo,
-        run_id,
-        &definitions,
-        &mut flow_runtime_caches.user_cfg,
-        auto_claim_runtimes,
+    crate::trade_flow::housekeeping_timing::measure_flow_housekeeping_phase(
+        flow_timing,
+        crate::trade_flow::housekeeping_timing::FlowHousekeepingPhase::AutoClaim,
+        maybe_tick_flow_auto_claims(
+            repo,
+            run_id,
+            &definitions,
+            &mut flow_runtime_caches.user_cfg,
+            auto_claim_runtimes,
+        ),
     )
     .await;
 
-    process_trade_flow_ready_steps(repo, run_id, client, ws, flow_runtime_caches).await
+    crate::trade_flow::housekeeping_timing::measure_flow_housekeeping_phase(
+        flow_timing,
+        crate::trade_flow::housekeeping_timing::FlowHousekeepingPhase::ProcessReadySteps,
+        process_trade_flow_ready_steps(repo, run_id, client, ws, flow_runtime_caches),
+    )
+    .await
+}
+
+async fn maybe_recover_stale_running_trade_flow_steps(
+    repo: &PostgresRepository,
+    run_id: i64,
+    flow_runtime_caches: &mut FlowRuntimeCaches,
+) {
+    let due = flow_runtime_caches
+        .last_stale_running_step_recovery_at
+        .map(|last| last.elapsed().as_secs() >= FLOW_STALE_RUNNING_STEP_RECOVERY_INTERVAL_SECS)
+        .unwrap_or(true);
+    if !due {
+        return;
+    }
+    flow_runtime_caches.last_stale_running_step_recovery_at = Some(Instant::now());
+    match repo
+        .recover_stale_running_trade_flow_steps(FLOW_STALE_RUNNING_STEP_RECOVERY_AGE_MS, 250)
+        .await
+    {
+        Ok(0) => {}
+        Ok(recovered_count) => {
+            warn!(
+                run_id,
+                recovered_count,
+                stale_after_ms = FLOW_STALE_RUNNING_STEP_RECOVERY_AGE_MS,
+                "TRADE_FLOW_STALE_RUNNING_STEPS_RECOVERED"
+            );
+        }
+        Err(err) => {
+            warn!(
+                run_id,
+                error = %err,
+                "TRADE_FLOW_STALE_RUNNING_STEP_RECOVERY_FAILED"
+            );
+        }
+    }
 }
 
 async fn process_trade_flow_ws_fast_path(
@@ -138,21 +217,49 @@ async fn process_trade_flow_ready_steps(
     ws: &ClobWsClient,
     flow_runtime_caches: &mut FlowRuntimeCaches,
 ) -> Result<()> {
+    crate::trade_flow::guards::price_to_beat::with_price_to_beat_block_event_coalescing_pass_stats(
+        crate::trade_flow::guards::price_to_beat::with_price_to_beat_iv_depth_order_book_pass_cache(
+            process_trade_flow_ready_steps_inner(repo, run_id, client, ws, flow_runtime_caches),
+        ),
+    )
+    .await
+}
+
+async fn process_trade_flow_ready_steps_inner(
+    repo: &PostgresRepository,
+    run_id: i64,
+    client: Option<&dyn OrderExecutor>,
+    ws: &ClobWsClient,
+    flow_runtime_caches: &mut FlowRuntimeCaches,
+) -> Result<()> {
     let policy = DefaultRiskPolicy;
+    let step_processing_context = FlowStepProcessingContext::new();
+    let mut stats = FlowStepProcessingStats {
+        processing_run_id: step_processing_context.id.clone(),
+        ..FlowStepProcessingStats::default()
+    };
     let max_passes: u8 = if is_near_any_auto_scope_boundary(10).await {
         2
     } else {
         8
     };
     let mut claim_pass = 0u8;
+    let mut max_passes_reached = false;
     loop {
         claim_pass += 1;
         let claimed_steps = repo
-            .claim_ready_trade_flow_steps(FLOW_STEP_PROCESS_LIMIT)
+            .claim_ready_trade_flow_steps_for_processing_run(
+                FLOW_STEP_PROCESS_LIMIT,
+                Some(&step_processing_context.id),
+            )
             .await?;
         if claimed_steps.is_empty() {
             break;
         }
+        let last_pass_claimed_steps = claimed_steps.len();
+        stats.claim_passes = claim_pass;
+        stats.last_pass_claimed_steps = last_pass_claimed_steps;
+        stats.claimed_step_count += last_pass_claimed_steps;
         for step in claimed_steps {
             let Some(run) = repo.get_trade_flow_run(step.run_id).await? else {
                 let _ = repo.mark_trade_flow_step_skipped(step.id, None).await;
@@ -189,6 +296,8 @@ async fn process_trade_flow_ready_steps(
                     flow_client,
                     ws,
                     &step,
+                    &step_processing_context,
+                    &mut stats,
                 )
                 .await
             }
@@ -212,20 +321,85 @@ async fn process_trade_flow_ready_steps(
             }
         }
         if claim_pass >= max_passes {
-            if max_passes < 8 {
-                debug!(
-                    run_id,
-                    claim_pass, max_passes, "TRADE_FLOW_STEP_PROCESS_BOUNDARY_THROTTLED"
-                );
-            } else {
-                warn!(
-                    run_id,
-                    claim_pass, "TRADE_FLOW_STEP_PROCESS_MAX_PASSES_REACHED"
-                );
-            }
+            max_passes_reached = true;
             break;
         }
     }
+
+    let backlog = repo
+        .count_ready_trade_flow_step_backlog_for_processing_run(Some(&step_processing_context.id))
+        .await?;
+    stats.ptb_retry_same_run_excluded_count = backlog.ready_same_run_ptb_retry;
+    stats.ready_remaining_total_count = backlog.ready_total;
+    stats.ready_remaining_ptb_retry_count = backlog.ready_ptb_retry;
+    stats.runnable_non_retry_ready_count = backlog.ready_non_retry;
+    let iv_depth_stats =
+        crate::trade_flow::guards::price_to_beat::price_to_beat_iv_depth_order_book_pass_stats();
+    stats.clob_book_fetch_hit_count = iv_depth_stats.cache_hits;
+    stats.clob_book_fetch_pass_cache_hit_count = iv_depth_stats.pass_cache_hits;
+    stats.clob_book_fetch_process_ttl_hit_count = iv_depth_stats.process_ttl_cache_hits;
+    stats.clob_book_fetch_miss_count = iv_depth_stats.cache_misses;
+    stats.clob_book_fetch_error_count = iv_depth_stats.fetch_errors;
+    stats.unique_book_tokens_fetched = iv_depth_stats.unique_tokens_fetched;
+    let coalescing_stats =
+        crate::trade_flow::guards::price_to_beat::price_to_beat_block_event_coalescing_pass_stats();
+    stats.coalesced_event_suppressed_count = coalescing_stats.suppressed_count;
+
+    if max_passes_reached {
+        let retry_only = stats.runnable_non_retry_ready_count == 0;
+        let max_passes_reason = if retry_only {
+            "retry_only_backlog"
+        } else {
+            "runnable_backlog"
+        };
+        if max_passes < 8 {
+            debug!(
+                run_id,
+                claim_pass,
+                max_passes,
+                max_passes_reason,
+                retry_only,
+                claimed_steps_total = stats.claimed_step_count,
+                last_pass_claimed_steps = stats.last_pass_claimed_steps,
+                ready_remaining_total = stats.ready_remaining_total_count,
+                ready_remaining_ptb_retry = stats.ready_remaining_ptb_retry_count,
+                runnable_non_retry_ready = stats.runnable_non_retry_ready_count,
+                ptb_retry_same_run_excluded = stats.ptb_retry_same_run_excluded_count,
+                "TRADE_FLOW_STEP_PROCESS_BOUNDARY_THROTTLED"
+            );
+        } else if retry_only {
+            info!(
+                run_id,
+                claim_pass,
+                max_passes,
+                max_passes_reason,
+                retry_only,
+                claimed_steps_total = stats.claimed_step_count,
+                last_pass_claimed_steps = stats.last_pass_claimed_steps,
+                ready_remaining_total = stats.ready_remaining_total_count,
+                ready_remaining_ptb_retry = stats.ready_remaining_ptb_retry_count,
+                runnable_non_retry_ready = stats.runnable_non_retry_ready_count,
+                ptb_retry_same_run_excluded = stats.ptb_retry_same_run_excluded_count,
+                "TRADE_FLOW_STEP_PROCESS_MAX_PASSES_REACHED"
+            );
+        } else {
+            warn!(
+                run_id,
+                claim_pass,
+                max_passes,
+                max_passes_reason,
+                retry_only,
+                claimed_steps_total = stats.claimed_step_count,
+                last_pass_claimed_steps = stats.last_pass_claimed_steps,
+                ready_remaining_total = stats.ready_remaining_total_count,
+                ready_remaining_ptb_retry = stats.ready_remaining_ptb_retry_count,
+                runnable_non_retry_ready = stats.runnable_non_retry_ready_count,
+                ptb_retry_same_run_excluded = stats.ptb_retry_same_run_excluded_count,
+                "TRADE_FLOW_STEP_PROCESS_MAX_PASSES_REACHED"
+            );
+        }
+    }
+    flow_runtime_caches.last_step_processing_stats = stats;
 
     Ok(())
 }
@@ -1065,7 +1239,26 @@ async fn sync_trigger_market_auto_scope_context(
             cached
         } else {
             let gamma = GammaHttpClient::new(cfg.exchange.gamma_base_url.clone());
-            let fresh = list_markets_for_scope(&gamma, &market_scope).await?;
+            let fresh = match list_markets_for_scope(&gamma, &market_scope).await {
+                Ok(fresh) => fresh,
+                Err(err) => {
+                    if let Some(selected) = selected_live_market_from_trigger_node_state_cache(
+                        context, &node.key, scope_def, now,
+                    ) {
+                        set_trigger_node_auto_scope_context(
+                            context,
+                            &node.key,
+                            scope_def.scope,
+                            scope_def.asset,
+                            scope_def.timeframe,
+                            &selected,
+                            node_config_string(node, "outcomeLabel").as_deref(),
+                        );
+                        return Ok(Some(selected));
+                    }
+                    return Err(err);
+                }
+            };
             AUTO_SCOPE_MARKET_CACHE
                 .lock()
                 .unwrap()
@@ -1090,4 +1283,30 @@ async fn sync_trigger_market_auto_scope_context(
     );
 
     Ok(Some(selected))
+}
+
+fn selected_live_market_from_trigger_node_state_cache(
+    context: &Value,
+    node_key: &str,
+    scope_def: UpdownScopeDef,
+    now: DateTime<Utc>,
+) -> Option<SelectedLiveMarket> {
+    let slug = node_auto_scope_market_slug(context, node_key)?;
+    let yes_token_id = node_auto_scope_yes_token_id(context, node_key)?;
+    let no_token_id = node_auto_scope_no_token_id(context, node_key)?;
+    let slug_scope = find_updown_scope_by_slug(&slug)?;
+    if slug_scope.scope != scope_def.scope
+        || is_auto_scope_market_stale_for_current_window(scope_def, &slug, now)
+    {
+        return None;
+    }
+    Some(SelectedLiveMarket {
+        slug,
+        yes_token_id: Some(yes_token_id),
+        no_token_id: Some(no_token_id),
+        maker_base_fee: 0,
+        starts_at: None,
+        ends_at: None,
+        selection_reason: LiveMarketSelectionReason::TriggerNodeStateCache,
+    })
 }

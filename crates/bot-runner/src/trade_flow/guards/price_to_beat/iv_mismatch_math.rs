@@ -1,3 +1,11 @@
+pub(super) fn root_mean_square(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mean_square = values.iter().map(|value| value * value).sum::<f64>() / values.len() as f64;
+    mean_square.sqrt()
+}
+
 pub(super) fn standard_deviation(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -80,4 +88,20 @@ pub(super) fn inverse_normal_cdf(p: f64) -> Option<f64> {
             / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
     };
     value.is_finite().then_some(value)
+}
+
+pub(super) fn implied_volatility_ratio(
+    q_market: f64,
+    gap_abs: f64,
+    seconds_left: f64,
+    sigma_real: f64,
+) -> Option<f64> {
+    if q_market <= 0.50 || q_market >= 1.0 || gap_abs <= 0.0 || sigma_real <= 0.0 {
+        return None;
+    }
+    let z_market = inverse_normal_cdf(q_market)?;
+    if !z_market.is_finite() || z_market <= 0.0 {
+        return None;
+    }
+    Some(gap_abs / (z_market * seconds_left.sqrt()) / sigma_real)
 }

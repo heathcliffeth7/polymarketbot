@@ -30,8 +30,11 @@ fn resolve_action_place_order_exit_config(
     let ptb_reference_price = ptb_stop_loss.and_then(|config| config.reference_price);
     let ptb_stop_loss_time_decay_mode =
         ptb_stop_loss.and_then(|config| config.time_decay_mode.clone());
-    let ptb_current_price_source =
-        ptb_stop_loss.map(|config| config.current_price_source.as_config_str().to_string());
+    let ptb_current_price_source = Some(
+        ptb_stop_loss
+            .map(|config| config.current_price_source.as_config_str().to_string())
+            .unwrap_or_else(|| "chainlink".to_string()),
+    );
 
     let hard_tp_price = if is_internal_time_exit {
         None

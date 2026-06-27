@@ -144,7 +144,11 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
 
         if live_enabled {
             if let Some(client) = clob_client.as_ref() {
-                if let Err(e) = process_trade_builder_orders(repo, run_id, cfg, client, &ws).await {
+                let mut builder_order_timing =
+                    crate::trade_builder_order_housekeeping_timing::TradeBuilderOrderHousekeepingTimingStats::default();
+                if let Err(e) =
+                    process_trade_builder_orders(repo, run_id, cfg, client, &ws, &mut builder_order_timing).await
+                {
                     warn!(run_id, error = %e, "TRADE_BUILDER_PROCESS_FAILED");
                 }
                 if let Err(e) =
@@ -159,6 +163,8 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
                 }
             }
         }
+        let mut flow_timing =
+            crate::trade_flow::housekeeping_timing::FlowHousekeepingTimingStats::default();
         if let Err(e) = process_trade_flows(
             repo,
             run_id,
@@ -169,6 +175,7 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
             &ws,
             &mut flow_runtime_caches,
             &mut auto_claim_runtimes,
+            &mut flow_timing,
         )
         .await
         {
@@ -217,6 +224,7 @@ async fn run_live_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppConfig) 
                     size: trade.position_size,
                     intent: "entry".to_string(),
                     order_type: "GTC".to_string(),
+                    post_only: false,
                     client_order_id: client_order_id.clone(),
                     leg_side: None,
                     fee_rate_bps: 1000,
@@ -686,6 +694,7 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         snapshot_rx,
     ));
     tokio::spawn(run_market_trade_volume_recorder(repo.clone(), volume_rx));
+    tokio::spawn(run_trade_flow_events_prune_task(repo.clone()));
     ws.set_tick_callback(build_combined_market_tick_callback(vec![
         build_tick_trigger_callback(tick_trigger_tx),
         build_live_gap_history_prewarm_callback(repo.clone()),
@@ -713,42 +722,104 @@ async fn run_flow_only_loop(run_id: i64, repo: &PostgresRepository, cfg: &AppCon
         if now >= next_housekeeping_at {
             loop_count += 1;
             let housekeeping_started = Instant::now();
+            let mut housekeeping_timing =
+                crate::trade_flow::housekeeping_timing::HousekeepingTimingStats::default();
+            let cache_prune_started = Instant::now();
             flow_runtime_caches.prune_stale();
+            housekeeping_timing.set_phase_ms(
+                crate::trade_flow::housekeeping_timing::HousekeepingPhase::FlowCachePrune,
+                crate::trade_flow::housekeeping_timing::millis_u64(
+                    cache_prune_started.elapsed(),
+                ),
+            );
             if loop_count % 20 == 1 {
                 info!(run_id, loop_count, "FLOW_LOOP_TICK_PRE_FLOWS");
             }
-            if let Err(e) = process_trade_flows(
-                repo,
-                run_id,
-                cfg,
-                Some(&client),
-                &ws,
-                &mut flow_runtime_caches,
-                &mut auto_claim_runtimes,
+            let mut flow_timing =
+                crate::trade_flow::housekeeping_timing::FlowHousekeepingTimingStats::default();
+            let flow_result = crate::trade_flow::housekeeping_timing::measure_housekeeping_phase(
+                &mut housekeeping_timing,
+                crate::trade_flow::housekeeping_timing::HousekeepingPhase::ProcessTradeFlows,
+                process_trade_flows(
+                    repo,
+                    run_id,
+                    cfg,
+                    Some(&client),
+                    &ws,
+                    &mut flow_runtime_caches,
+                    &mut auto_claim_runtimes,
+                    &mut flow_timing,
+                ),
             )
-            .await
-            {
+            .await;
+            housekeeping_timing.flow = flow_timing;
+            if let Err(e) = flow_result {
                 warn!(run_id, error = %e, "TRADE_FLOW_PROCESS_FAILED");
             }
             if loop_count % 20 == 1 {
                 info!(run_id, loop_count, "FLOW_LOOP_TICK_POST_FLOWS");
             }
-            if let Err(e) = process_trade_builder_orders(repo, run_id, cfg, &client, &ws).await {
+            let mut builder_order_timing =
+                crate::trade_builder_order_housekeeping_timing::TradeBuilderOrderHousekeepingTimingStats::default();
+            let builder_orders_result =
+                crate::trade_flow::housekeeping_timing::measure_housekeeping_phase(
+                    &mut housekeeping_timing,
+                    crate::trade_flow::housekeeping_timing::HousekeepingPhase::ProcessTradeBuilderOrders,
+                    process_trade_builder_orders(
+                        repo,
+                        run_id,
+                        cfg,
+                        &client,
+                        &ws,
+                        &mut builder_order_timing,
+                    ),
+                )
+                .await;
+            builder_order_timing.total_ms = housekeeping_timing.process_trade_builder_orders_ms;
+            housekeeping_timing.builder_orders = builder_order_timing;
+            if let Err(e) = builder_orders_result {
                 warn!(run_id, error = %e, "TRADE_BUILDER_PROCESS_FAILED");
             }
-            if let Err(e) = process_trade_builder_workflows(repo, run_id, cfg, &client, &ws).await {
+            let builder_workflows_result =
+                crate::trade_flow::housekeeping_timing::measure_housekeeping_phase(
+                    &mut housekeeping_timing,
+                    crate::trade_flow::housekeeping_timing::HousekeepingPhase::ProcessTradeBuilderWorkflows,
+                    process_trade_builder_workflows(repo, run_id, cfg, &client, &ws),
+                )
+                .await;
+            if let Err(e) = builder_workflows_result {
                 warn!(run_id, error = %e, "TRADE_BUILDER_WORKFLOW_PROCESS_FAILED");
             }
-            if let Err(e) =
-                dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws).await
-            {
+            let dual_dca_result =
+                crate::trade_flow::housekeeping_timing::measure_housekeeping_phase(
+                    &mut housekeeping_timing,
+                    crate::trade_flow::housekeeping_timing::HousekeepingPhase::ProcessDualDcaJobs,
+                    dca::process_trade_flow_dual_dca_jobs(repo, run_id, cfg, &client, &ws),
+                )
+                .await;
+            if let Err(e) = dual_dca_result {
                 warn!(run_id, error = %e, "TRADE_FLOW_DUAL_DCA_PROCESS_FAILED");
             }
-            let housekeeping_elapsed_ms = housekeeping_started.elapsed().as_millis();
-            if housekeeping_elapsed_ms >= FLOW_HOUSEKEEPING_SLOW_THRESHOLD_MS {
-                warn!(
+            let housekeeping_elapsed_ms =
+                crate::trade_flow::housekeeping_timing::millis_u64(housekeeping_started.elapsed());
+            housekeeping_timing.housekeeping_total_ms = housekeeping_elapsed_ms;
+            if u128::from(housekeeping_elapsed_ms) >= FLOW_HOUSEKEEPING_SLOW_THRESHOLD_MS {
+                let step_stats = &flow_runtime_caches.last_step_processing_stats;
+                let retry_only_slow = step_stats.claimed_step_count > 0
+                    && step_stats.ptb_retry_blocked_count as usize == step_stats.claimed_step_count
+                    && step_stats.runnable_non_retry_ready_count == 0
+                    && step_stats.clob_book_fetch_error_count == 0;
+                housekeeping_timing.retry_only_slow = retry_only_slow;
+                housekeeping_timing.runnable_non_retry_ready_count =
+                    step_stats.runnable_non_retry_ready_count;
+                housekeeping_timing.clob_book_fetch_error_count =
+                    step_stats.clob_book_fetch_error_count;
+                emit_flow_housekeeping_slow_log(
                     run_id,
-                    loop_count, housekeeping_elapsed_ms, "FLOW_HOUSEKEEPING_SLOW"
+                    loop_count,
+                    housekeeping_elapsed_ms,
+                    &housekeeping_timing,
+                    step_stats,
                 );
             } else if loop_count % 20 == 1 {
                 info!(

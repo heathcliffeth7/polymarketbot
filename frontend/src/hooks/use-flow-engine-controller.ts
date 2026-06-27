@@ -37,6 +37,7 @@ import {
   compareFlowDetailSnapshotMeta,
   getFlowDetailSnapshotMeta,
 } from './flow-detail-snapshot';
+import { buildDraftPersistSignature, buildDraftSwitchFailureMessage, buildDraftSwitchRecovery, buildDefinitionSwitchState, getDefinitionSwitchReadOnlyReason, isLoadingDetailSwitch, saveDraftBeforeDefinitionSwitch, SWITCH_DETAIL_TIMEOUT_MS } from './flow-engine-definition-switch';
 import { isEditorOwned, isGraphContentEqual, isStaleSnapshot } from './flow-engine-draft-sync';
 import {
   buildFlowDraftPersistPayload,
@@ -48,6 +49,7 @@ import {
 } from './flow-engine-controller-helpers';
 import { useDraftSaveQueue } from './flow-engine-draft-save-queue';
 import type {
+  DefinitionSwitchState,
   DraftSaveStatus,
   FlowEngineController,
   FlowEnginePanelProps,
@@ -90,6 +92,10 @@ export function useFlowEngineController({
   const [lastHydratedSnapshotKey, setLastHydratedSnapshotKey] = useState<string | null>(null);
   const [isGraphDirty, setIsGraphDirty] = useState(false);
   const [isSwitchingDefinition, setIsSwitchingDefinition] = useState(false);
+  const [definitionSwitchState, setDefinitionSwitchState] =
+    useState<DefinitionSwitchState | null>(null);
+  const [draftSwitchRecovery, setDraftSwitchRecovery] =
+    useState<FlowEngineController['state']['draftSwitchRecovery']>(null);
   const [hasPendingCanvasNodeDraft, setHasPendingCanvasNodeDraft] = useState(false);
   const [stoppingFlow, setStoppingFlow] = useState(false);
 
@@ -126,6 +132,8 @@ export function useFlowEngineController({
   const autosaveTimeoutRef = useRef<number | null>(null);
   const canvasAutoSaveRevisionRef = useRef(0);
   const latestDetailSnapshotRef = useRef<ReturnType<typeof getFlowDetailSnapshotMeta>>(null);
+  const hydratedDraftSignatureRef = useRef<string | null>(null);
+  const lastDetailErrorKeyRef = useRef<string | null>(null);
   const acknowledgeSuccessRef = useRef<(detail: TradeFlowDefinitionDetail) => void>(
     () => {}
   );
@@ -167,6 +175,8 @@ export function useFlowEngineController({
     setLastHydratedSnapshotKey(null);
     canvasAutoSaveRevisionRef.current = 0;
     latestDetailSnapshotRef.current = null;
+    hydratedDraftSignatureRef.current = null;
+    setDraftSwitchRecovery(null);
   }, [clearScheduledAutosave, setGraphDirtyState, setGraphState]);
   useEffect(() => {
     return () => {
@@ -308,6 +318,9 @@ export function useFlowEngineController({
       });
       if (selectedDefinitionIdRef.current === definitionId) {
         selectionPreferenceRef.current = 'blank';
+        setDefinitionSwitchState((current) =>
+          current?.targetId === definitionId ? null : current
+        );
         setSelectedDefinitionId(null);
         resetEditorToBlankState();
       }
@@ -378,47 +391,18 @@ export function useFlowEngineController({
 
   const saveCurrentDraftBeforeSwitch = useCallback(
     async (definitionId: number) => {
-      clearScheduledAutosave();
-      await waitForQueuedDraftSave();
-
-      const currentDefinition =
-        visibleDefinitions.find((definition) => definition.id === definitionId) ?? null;
-      const graphSnapshot = graphRef.current;
-      const currentContext = isRecord(graphSnapshot.context) ? graphSnapshot.context : {};
-      const { context: resolvedContext, errorMessage } = resolveContextInput();
-      if (!resolvedContext) {
-        throw new Error(errorMessage ?? 'Context JSON hatali.');
-      }
-      const nextName = draftNameRef.current.trim();
-      const nextDescription = draftDescriptionRef.current.trim();
-      const currentName = currentDefinition?.name.trim() ?? '';
-      const currentDescription = (currentDefinition?.description ?? '').trim();
-      const hasMetadataChanges =
-        nextName !== currentName || nextDescription !== currentDescription;
-      const hasContextChanges =
-        JSON.stringify(currentContext) !== JSON.stringify(resolvedContext);
-      if (!isGraphDirtyRef.current && !hasMetadataChanges && !hasContextChanges) return;
-
-      const payload = buildFlowDraftPersistPayload(
-        { ...graphSnapshot, context: resolvedContext },
-        draftNameRef.current,
-        draftDescriptionRef.current
-      );
-      setSaveStatus('pending');
-      setAutoSaveError(null);
       try {
-        await patchTradeFlowDefinitionDraft(
-          definitionId,
-          {
-            ...payload,
-            syncNormalizedTables: false,
-          },
-          { timeoutMs: 60_000, retries: 0 }
-        );
-        if (selectedDefinitionIdRef.current === definitionId) {
-          setSaveStatus('idle');
-          setAutoSaveError(null);
-        }
+        await saveDraftBeforeDefinitionSwitch({
+          buildPayload: buildFlowDraftPersistPayload, clearScheduledAutosave,
+          currentDefinition: visibleDefinitions.find((definition) => definition.id === definitionId) ?? null,
+          definitionId, draftDescriptionRef, draftNameRef, graphRef, hydratedDraftSignatureRef,
+          isGraphDirtyRef, patchDraft: patchTradeFlowDefinitionDraft, resolveContextInput, saveStatus,
+          setAutoSaveError, setGraphDirtyState, setSaveStatus, waitForQueuedDraftSave,
+          revalidate: () => Promise.all([
+            mutateDefinitions(),
+            swrMutate(`/api/trade-flow/definitions/${definitionId}`),
+          ]).then(() => undefined),
+        });
       } catch (err) {
         const reason = formatFlowOperationError(err, 'Draft kaydedilemedi.');
         if (selectedDefinitionIdRef.current === definitionId) {
@@ -427,43 +411,69 @@ export function useFlowEngineController({
         }
         throw new Error(reason);
       }
-      await Promise.all([
-        mutateDefinitions(),
-        swrMutate(`/api/trade-flow/definitions/${definitionId}`),
-      ]);
     },
-    [
-      mutateDefinitions,
-      setAutoSaveError,
-      setSaveStatus,
-      clearScheduledAutosave,
-      resolveContextInput,
-      visibleDefinitions,
-      waitForQueuedDraftSave,
-    ]
+    [mutateDefinitions, setAutoSaveError, setSaveStatus, setGraphDirtyState, clearScheduledAutosave, resolveContextInput, saveStatus, visibleDefinitions, waitForQueuedDraftSave]
   );
 
   const requestDefinitionSwitch = useCallback(
-    async (nextDefinitionId: number) => {
-      if (!Number.isFinite(nextDefinitionId) || nextDefinitionId <= 0) return false;
-      if (switchLockRef.current) return false;
+    async (nextDefinitionId: number, options?: { skipDraftSave?: boolean }) => {
+      if (!Number.isFinite(nextDefinitionId) || nextDefinitionId <= 0) {
+        const reason = 'Gecersiz workflow secimi.';
+        setError(reason);
+        toast.error(reason);
+        return false;
+      }
+      if (
+        switchLockRef.current ||
+        (definitionSwitchState != null && definitionSwitchState.targetId !== nextDefinitionId)
+      ) {
+        const reason = 'Workflow gecisi zaten suruyor.';
+        setError(reason);
+        toast.error(reason);
+        return false;
+      }
       if (hasPendingCanvasNodeDraft) {
         const reason = "Node formunda uygulanmamis degisiklik var. Once 'Node Guncelle' kullanin.";
         setError(reason);
         toast.error(reason);
         return false;
       }
+      const skipDraftSave = options?.skipDraftSave === true;
+      if (!skipDraftSave) {
+        setDraftSwitchRecovery(null);
+      }
       const currentDefinitionId = selectedDefinitionIdRef.current;
-      if (currentDefinitionId === nextDefinitionId) return true;
+      if (currentDefinitionId === nextDefinitionId) {
+        setDraftSwitchRecovery(null);
+        if (graphOwnerDefinitionIdRef.current !== nextDefinitionId) {
+          selectionPreferenceRef.current = nextDefinitionId;
+          setDefinitionSwitchState(buildDefinitionSwitchState(nextDefinitionId, 'loading_detail'));
+          setError(null);
+          setMessage(`Workflow #${nextDefinitionId} yukleniyor...`);
+          setLastHydratedSnapshotKey(null);
+          void swrMutate(`/api/trade-flow/definitions/${nextDefinitionId}`);
+        }
+        return true;
+      }
 
       switchLockRef.current = true;
       selectionPreferenceRef.current = nextDefinitionId;
+      setDefinitionSwitchState(buildDefinitionSwitchState(
+        nextDefinitionId,
+        currentDefinitionId ? 'saving_current' : 'loading_detail'
+      ));
       setIsSwitchingDefinition(true);
       invalidateCanvasAutoSaveRevision();
       setError(null);
-      setMessage(null);
+      setMessage(
+        skipDraftSave && currentDefinitionId
+          ? `Workflow #${currentDefinitionId} kaydi atlanip #${nextDefinitionId} aciliyor...`
+          : currentDefinitionId
+          ? `Workflow #${currentDefinitionId} draft kaydediliyor...`
+          : `Workflow #${nextDefinitionId} aciliyor...`
+      );
       try {
-        if (currentDefinitionId) {
+        if (currentDefinitionId && !skipDraftSave) {
           await saveCurrentDraftBeforeSwitch(currentDefinitionId);
           setAutoSaveError(null);
           setSaveStatus('idle');
@@ -471,13 +481,29 @@ export function useFlowEngineController({
         }
         resetEditorToBlankState();
         setSelectedDefinitionIds(new Set());
+        setDefinitionSwitchState(buildDefinitionSwitchState(nextDefinitionId, 'loading_detail'));
         setSelectedDefinitionId(nextDefinitionId);
         setAutoSaveError(null);
         setLastHydratedSnapshotKey(null);
+        setDraftSwitchRecovery(null);
+        void swrMutate(`/api/trade-flow/definitions/${nextDefinitionId}`);
         return true;
       } catch (err) {
         const reason = err instanceof Error ? err.message : 'Bilinmeyen hata.';
-        setError(`Draft kaydedilemedi, workflow degisikligi iptal edildi. ${reason}`);
+        const message = buildDraftSwitchFailureMessage(reason);
+        selectionPreferenceRef.current = currentDefinitionId ?? null;
+        setDefinitionSwitchState((current) =>
+          current?.targetId === nextDefinitionId ? null : current
+        );
+        if (currentDefinitionId && !skipDraftSave) {
+          setDraftSwitchRecovery(buildDraftSwitchRecovery(
+            currentDefinitionId,
+            nextDefinitionId,
+            `${message} Kaydetmeden gecersen yereldeki kaydedilmemis degisiklikler birakilir; sunucudaki son draft korunur.`
+          ));
+        }
+        setError(message);
+        toast.error(message);
         return false;
       } finally {
         switchLockRef.current = false;
@@ -487,17 +513,77 @@ export function useFlowEngineController({
     [
       hasPendingCanvasNodeDraft,
       invalidateCanvasAutoSaveRevision,
+      definitionSwitchState,
       resetEditorToBlankState,
       saveCurrentDraftBeforeSwitch,
     ]
   );
 
+  const skipDraftSaveAndSwitch = useCallback(async () => {
+    if (!draftSwitchRecovery) return false;
+    if (selectedDefinitionIdRef.current !== draftSwitchRecovery.currentDefinitionId) {
+      setDraftSwitchRecovery(null); return false;
+    }
+    return requestDefinitionSwitch(draftSwitchRecovery.targetDefinitionId, {
+      skipDraftSave: true,
+    });
+  }, [draftSwitchRecovery, requestDefinitionSwitch]);
+
   const { data: detailData, error: detailError, mutate: mutateDetail } = useTradeFlowDefinitionDetail(
     selectedDefinitionId,
-    isGraphDirty || saveStatus === 'pending'
+    false
   );
   const detail = useMemo(() => detailData?.data ?? null, [detailData?.data]);
   const detailFetchSettled = detailData !== undefined || detailError != null;
+
+  useEffect(() => {
+    lastDetailErrorKeyRef.current = null;
+  }, [selectedDefinitionId]);
+
+  useEffect(() => {
+    if (!selectedDefinitionId || !detailError) return;
+    const shouldSurface = isLoadingDetailSwitch(definitionSwitchState, selectedDefinitionId) ||
+      graphOwnerDefinitionIdRef.current !== selectedDefinitionId;
+    if (!shouldSurface) return;
+    const detailErrorMessage =
+      detailError instanceof Error ? detailError.message : String(detailError);
+    const key = `${selectedDefinitionId}:${detailErrorMessage}`;
+    if (lastDetailErrorKeyRef.current === key) return;
+    lastDetailErrorKeyRef.current = key;
+    const isNotFound =
+      /404|not found|bulunamad/i.test(detailErrorMessage) ||
+      (detailError instanceof Error &&
+        'status' in detailError &&
+        Number((detailError as Error & { status?: number }).status) === 404);
+    const ownershipHint = isNotFound
+      ? ' Bu workflow baska kullaniciya ait olabilir (heathcliffeth=#4329, oconner1=#4330). Dogru hesapla giris yap.'
+      : '';
+    const reason = `Workflow #${selectedDefinitionId} yuklenemedi.${ownershipHint} ${detailErrorMessage || 'Sayfayi yenile veya tekrar dene.'}`;
+    switchLockRef.current = false;
+    setIsSwitchingDefinition(false);
+    setDefinitionSwitchState((current) =>
+      current?.targetId === selectedDefinitionId ? null : current
+    );
+    setError(reason);
+    toast.error(reason);
+  }, [definitionSwitchState, detailError, selectedDefinitionId]);
+
+  useEffect(() => {
+    if (definitionSwitchState?.phase !== 'loading_detail') return;
+    const targetDefinitionId = definitionSwitchState.targetId;
+    const timeoutId = window.setTimeout(() => {
+      if (graphOwnerDefinitionIdRef.current !== targetDefinitionId) {
+        const reason = `Workflow #${targetDefinitionId} canvas'a yuklenemedi (timeout). "Taslagi Sunucudan Yukle" veya sayfayi yenile (Ctrl+Shift+R). Eski frontend build ise: sudo bash scripts/setup_frontend_service.sh`;
+        switchLockRef.current = false;
+        setIsSwitchingDefinition(false);
+        setDefinitionSwitchState((current) => current?.targetId === targetDefinitionId ? null : current);
+        setError(reason);
+        toast.error(reason);
+        void swrMutate(`/api/trade-flow/definitions/${targetDefinitionId}`);
+      }
+    }, SWITCH_DETAIL_TIMEOUT_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [definitionSwitchState]);
 
   useEffect(() => {
     if (visibleDefinitions.length === 0) {
@@ -529,6 +615,9 @@ export function useFlowEngineController({
       return;
     }
     if (typeof selectionPreference === 'number') {
+      if (definitionSwitchState?.targetId === selectionPreference) {
+        return;
+      }
       const preferredVisible = visibleDefinitions.some(
         (definition) => definition.id === selectionPreference
       );
@@ -557,6 +646,7 @@ export function useFlowEngineController({
     detailFetchSettled,
     hasResolvedDefinitions,
     definitionsLoading,
+    definitionSwitchState?.targetId,
     requestDefinitionSwitch,
     resetEditorToBlankState,
     selectedDefinitionId,
@@ -579,15 +669,25 @@ export function useFlowEngineController({
     setLastHydratedSnapshotKey(null);
     canvasAutoSaveRevisionRef.current = 0;
     latestDetailSnapshotRef.current = null;
+    hydratedDraftSignatureRef.current = null;
+    setDraftSwitchRecovery(null);
   }, [selectedDefinitionId, setGraphDirtyState]);
 
   useEffect(() => {
-    setSavePaused(isGraphDirty || saveStatus === 'pending');
-  }, [isGraphDirty, saveStatus, setSavePaused]);
+    setSavePaused(
+      isGraphDirty ||
+        saveStatus === 'pending' ||
+        isSwitchingDefinition ||
+        definitionSwitchState != null
+    );
+  }, [definitionSwitchState, isGraphDirty, isSwitchingDefinition, saveStatus, setSavePaused]);
 
   const { data: openPositionsData, isLoading: openPositionsLoading } =
     useTradeFlowOpenPositions(
-      isGraphDirty || saveStatus === 'pending' || isSwitchingDefinition
+      isGraphDirty ||
+        saveStatus === 'pending' ||
+        isSwitchingDefinition ||
+        definitionSwitchState != null
     );
   const openPositions = useMemo(() => openPositionsData?.data ?? [], [openPositionsData?.data]);
   const openPositionsMeta = useMemo(
@@ -614,6 +714,11 @@ export function useFlowEngineController({
     }
     latestDetailSnapshotRef.current = nextSnapshot;
     const normalized = deepCloneGraph(nextDetail.draftVersion.graph_json);
+    hydratedDraftSignatureRef.current = buildDraftPersistSignature(buildFlowDraftPersistPayload(
+      normalized,
+      nextDetail.definition.name,
+      nextDetail.definition.description || ''
+    ));
     graphOwnerDefinitionIdRef.current = nextDetail.definition.id;
     setGraphState(normalized);
     setContextForm(parseContextToForm(normalized.context || {}));
@@ -623,6 +728,12 @@ export function useFlowEngineController({
     setGraphDirtyState(false);
     setAutoSaveError(null);
     setLastHydratedSnapshotKey(buildDetailSnapshotKey(nextDetail));
+    setDefinitionSwitchState((current) =>
+      current?.targetId === nextDetail.definition.id ? null : current
+    );
+    setError((current) =>
+      current?.startsWith(`Workflow #${nextDetail.definition.id} `) ? null : current
+    );
     primeDetailCache(nextDetail);
     return true;
   }, [primeDetailCache, setGraphDirtyState, setGraphState]);
@@ -633,6 +744,7 @@ export function useFlowEngineController({
     setLastHydratedSnapshotKey(buildDetailSnapshotKey(updatedDetail));
 
     if (!updatedDetail.draftVersion) {
+      hydratedDraftSignatureRef.current = null;
       setGraphDirtyState(false);
       setAutoSaveError(null);
       return;
@@ -646,19 +758,33 @@ export function useFlowEngineController({
 
     setGraphDirtyState(false);
     setAutoSaveError(null);
+    hydratedDraftSignatureRef.current = buildDraftPersistSignature(buildFlowDraftPersistPayload(
+      serverGraph,
+      updatedDetail.definition.name,
+      updatedDetail.definition.description || ''
+    ));
   }, [hydrateEditorFromDetail, primeDetailCache, setGraphDirtyState]);
   acknowledgeSuccessRef.current = acknowledgeSuccess;
 
   useEffect(() => {
     if (!detail?.draftVersion || !incomingSnapshotKey) return;
     if (detail.definition.id !== selectedDefinitionId) return;
-    if (isGraphDirtyRef.current) return;
-    if (saveStatus === 'pending') return;
+    const isOpeningSelectedDefinition = isLoadingDetailSwitch(definitionSwitchState, detail.definition.id);
+    if (!isOpeningSelectedDefinition && isGraphDirtyRef.current) return;
+    if (!isOpeningSelectedDefinition && saveStatus === 'pending') return;
     if (incomingSnapshotKey === lastHydratedSnapshotKey) return;
     const incoming = getFlowDetailSnapshotMeta(detail);
     if (isStaleSnapshot(incoming, latestDetailSnapshotRef.current)) return;
     hydrateEditorFromDetail(detail);
-  }, [detail, hydrateEditorFromDetail, incomingSnapshotKey, lastHydratedSnapshotKey, saveStatus, selectedDefinitionId]);
+  }, [
+    detail,
+    hydrateEditorFromDetail,
+    incomingSnapshotKey,
+    lastHydratedSnapshotKey,
+    definitionSwitchState,
+    saveStatus,
+    selectedDefinitionId,
+  ]);
 
   const applyResolvedContext = useCallback(
     (parsed: Record<string, unknown>) => {
@@ -739,7 +865,11 @@ export function useFlowEngineController({
       setError('Once bir flow secin.');
       return;
     }
-    if (!isEditorOwned(selectedDefinitionIdRef.current, graphOwnerDefinitionIdRef.current) || isSwitchingDefinition) {
+    if (
+      !isEditorOwned(selectedDefinitionIdRef.current, graphOwnerDefinitionIdRef.current) ||
+      isSwitchingDefinition ||
+      definitionSwitchState != null
+    ) {
       setError('Flow yuklenmeden duzenleme yapilamaz.');
       return;
     }
@@ -814,7 +944,11 @@ export function useFlowEngineController({
       setError('Once bir flow secin.');
       return;
     }
-    if (!isEditorOwned(selectedDefinitionIdRef.current, graphOwnerDefinitionIdRef.current) || isSwitchingDefinition) {
+    if (
+      !isEditorOwned(selectedDefinitionIdRef.current, graphOwnerDefinitionIdRef.current) ||
+      isSwitchingDefinition ||
+      definitionSwitchState != null
+    ) {
       setError('Flow yuklenmeden duzenleme yapilamaz.');
       return;
     }
@@ -860,7 +994,11 @@ export function useFlowEngineController({
       setError('Once bir flow secin.');
       return;
     }
-    if (!isEditorOwned(selectedDefinitionIdRef.current, graphOwnerDefinitionIdRef.current) || isSwitchingDefinition) {
+    if (
+      !isEditorOwned(selectedDefinitionIdRef.current, graphOwnerDefinitionIdRef.current) ||
+      isSwitchingDefinition ||
+      definitionSwitchState != null
+    ) {
       setError('Flow yuklenmeden duzenleme yapilamaz.');
       return;
     }
@@ -1104,7 +1242,12 @@ export function useFlowEngineController({
     ) => {
       const definitionId = selectedDefinitionIdRef.current;
       const graphOwnerDefinitionId = graphOwnerDefinitionIdRef.current;
-      if (!definitionId || graphOwnerDefinitionId !== definitionId || isSwitchingDefinition) {
+      if (
+        !definitionId ||
+        graphOwnerDefinitionId !== definitionId ||
+        isSwitchingDefinition ||
+        definitionSwitchState != null
+      ) {
         setError('Flow yuklenmeden duzenleme yapilamaz.');
         return;
       }
@@ -1144,7 +1287,8 @@ export function useFlowEngineController({
           if (
             selectedDefinitionIdRef.current !== definitionId ||
             graphOwnerDefinitionIdRef.current !== definitionId ||
-            isSwitchingDefinition
+            isSwitchingDefinition ||
+            definitionSwitchState != null
           ) {
             return;
           }
@@ -1189,29 +1333,37 @@ export function useFlowEngineController({
       closeStream,
       invalidateCanvasAutoSaveRevision,
       isSwitchingDefinition,
+      definitionSwitchState,
       queueDraftSave,
       setGraphDirtyState,
       setGraphState,
     ]
   );
 
-  const isActionBusy = busyAction !== null || isSwitchingDefinition;
+  const isActionBusy = busyAction !== null || isSwitchingDefinition || definitionSwitchState != null;
   const publishDisabled =
     isActionBusy || saveStatus === 'pending' || Boolean(autoSaveError);
   const editorOwned = isEditorOwned(
     selectedDefinitionId,
     graphOwnerDefinitionIdRef.current
   );
-  const isEditorReadOnly = isSwitchingDefinition || !editorOwned;
+  const isEditorReadOnly = isSwitchingDefinition || definitionSwitchState != null || !editorOwned;
   const readOnlyReason = !selectedDefinitionId
     ? 'Once bir flow secin.'
+    : definitionSwitchState != null
+      ? getDefinitionSwitchReadOnlyReason(definitionSwitchState)
     : 'Flow yukleniyor. Yukleme bitmeden duzenleme yapilamaz.';
 
   const applyCanvasContextPatch = useCallback(
     async (patch: Record<string, unknown>, successMessage?: string) => {
       const definitionId = selectedDefinitionIdRef.current;
       const graphOwnerDefinitionId = graphOwnerDefinitionIdRef.current;
-      if (!definitionId || graphOwnerDefinitionId !== definitionId || isSwitchingDefinition) {
+      if (
+        !definitionId ||
+        graphOwnerDefinitionId !== definitionId ||
+        isSwitchingDefinition ||
+        definitionSwitchState != null
+      ) {
         setError('Once bir flow secin.');
         return;
       }
@@ -1256,6 +1408,7 @@ export function useFlowEngineController({
       mutateDefinitions,
       mutateDetail,
       isSwitchingDefinition,
+      definitionSwitchState,
       queueDraftSave,
       setGraphDirtyState,
       setGraphState,
@@ -1289,6 +1442,8 @@ export function useFlowEngineController({
       message,
       error,
       autoSaveError,
+      definitionSwitchState,
+      draftSwitchRecovery,
       stoppingFlow,
       isActionBusy,
       isEditorReadOnly,
@@ -1322,6 +1477,7 @@ export function useFlowEngineController({
       setHasPendingCanvasNodeDraft,
       setError,
       requestDefinitionSwitch,
+      skipDraftSaveAndSwitch,
       createFromTemplate,
       saveDraft,
       validateGraph,

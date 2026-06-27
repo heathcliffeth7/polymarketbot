@@ -11,6 +11,9 @@ const SCOPE_TO_UPDOWN_SLUG_PREFIX: Record<string, string> = {
   sol_15m_updown: 'sol-updown-15m-',
   xrp_5m_updown: 'xrp-updown-5m-',
   xrp_15m_updown: 'xrp-updown-15m-',
+  doge_5m_updown: 'doge-updown-5m-',
+  bnb_5m_updown: 'bnb-updown-5m-',
+  hype_5m_updown: 'hype-updown-5m-',
 }
 const ACTIVE_UPDOWN_MARKETS_CACHE_TTL_MS = 30_000
 

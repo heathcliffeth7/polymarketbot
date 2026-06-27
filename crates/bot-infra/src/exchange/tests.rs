@@ -1,7 +1,8 @@
 use super::clob::{
     build_place_order_body, clob_order_amounts, clob_rounding_config,
     extract_best_bid_ask_from_book, extract_order_book_from_book, normalize_clob_order_type,
-    parse_clob_market_info_response, parse_collateral_balance_usdc, parse_fee_rate_bps_response,
+    parse_clob_market_info_response, parse_clob_trade_page, parse_collateral_balance_usdc,
+    parse_fee_rate_bps_response, parse_order_info_response,
 };
 use super::parse::{parse_gamma_market, parse_gamma_market_any, parse_yes_no_token_ids};
 use super::{ClobHttpClient, ClobRestClient, OrderBookLevel, PlaceOrderRequest};
@@ -57,6 +58,7 @@ async fn place_and_reconcile_against_mock_exchange() -> Result<()> {
             size: 10.0,
             intent: "entry".to_string(),
             order_type: "GTC".to_string(),
+            post_only: false,
             client_order_id: Uuid::new_v4().to_string(),
             leg_side: Some("yes".to_string()),
             fee_rate_bps: 0,
@@ -150,6 +152,126 @@ fn parse_gamma_market_keeps_updown_filter() {
     });
 
     assert!(parse_gamma_market(&market).is_none());
+}
+
+#[test]
+fn parse_gamma_market_accepts_bnb_hype_and_doge_5m_updown_slugs() {
+    for slug in [
+        "bnb-updown-5m-1774013100",
+        "hype-updown-5m-1774013100",
+        "doge-updown-5m-1774013100",
+    ] {
+        let market = json!({
+            "slug": slug,
+            "active": true,
+            "closed": false
+        });
+
+        let parsed = parse_gamma_market(&market).expect("supported market");
+        assert_eq!(parsed.slug, slug);
+    }
+}
+
+#[test]
+fn clob_trade_parser_reads_order_size_matched_and_associated_trades() {
+    let raw = json!({
+        "id": "0xorder",
+        "client_order_id": "client-1",
+        "status": "filled",
+        "price": "0.66",
+        "original_size": "7.58",
+        "size_matched": "7.58",
+        "associate_trades": ["trade-1", "trade-2"]
+    });
+
+    let parsed = parse_order_info_response(&raw);
+
+    assert_eq!(parsed.order_id, "0xorder");
+    assert_eq!(parsed.client_order_id.as_deref(), Some("client-1"));
+    assert_eq!(parsed.filled_size, Some(7.58));
+    assert_eq!(parsed.size, Some(7.58));
+    assert_eq!(parsed.associated_trade_ids, vec!["trade-1", "trade-2"]);
+}
+
+#[test]
+fn clob_trade_parser_supports_modern_taker_trade_rows() {
+    let raw = json!({
+        "data": [{
+            "id": "trade-1",
+            "taker_order_id": "0xtaker",
+            "price": "0.66",
+            "size": "7.58",
+            "match_time": "1780995600",
+            "maker_orders": []
+        }],
+        "next_cursor": "next-page",
+        "count": 1
+    });
+
+    let page = parse_clob_trade_page(&raw, Some("0xtaker"));
+
+    assert_eq!(page.fills.len(), 1);
+    assert_eq!(page.next_cursor.as_deref(), Some("next-page"));
+    assert_eq!(page.count, Some(1));
+    assert_eq!(page.raw_count, 1);
+    assert!(page
+        .first_row_keys
+        .iter()
+        .any(|key| key == "taker_order_id"));
+    assert_eq!(page.fills[0].fill_id, "trade-1:0xtaker");
+    assert_eq!(page.fills[0].order_id, "0xtaker");
+    assert_eq!(page.fills[0].price, 0.66);
+    assert_eq!(page.fills[0].size, 7.58);
+    assert_eq!(page.fills[0].ts, Some(1780995600));
+}
+
+#[test]
+fn clob_trade_parser_supports_modern_maker_trade_rows() {
+    let raw = json!({
+        "data": [{
+            "id": "trade-2",
+            "taker_order_id": "0xother",
+            "price": "0.67",
+            "size": "20",
+            "maker_orders": [{
+                "order_id": "0xmaker",
+                "matched_amount": "4.25",
+                "price": "0.68"
+            }]
+        }]
+    });
+
+    let page = parse_clob_trade_page(&raw, Some("0xmaker"));
+
+    assert_eq!(page.fills.len(), 1);
+    assert_eq!(page.fills[0].fill_id, "trade-2:0xmaker");
+    assert_eq!(page.fills[0].order_id, "0xmaker");
+    assert_eq!(page.fills[0].price, 0.68);
+    assert_eq!(page.fills[0].size, 4.25);
+}
+
+#[test]
+fn clob_trade_parser_keeps_legacy_fill_aliases() {
+    let raw = json!({
+        "data": [{
+            "fillID": "legacy-fill",
+            "orderID": "legacy-order",
+            "price": 0.55,
+            "size": 3.0,
+            "fee": 0.01,
+            "timestamp": 1780995601
+        }]
+    });
+
+    let page = parse_clob_trade_page(&raw, Some("legacy-order"));
+
+    assert_eq!(page.fills.len(), 1);
+    assert_eq!(page.fills[0].fill_id, "legacy-fill");
+    assert_eq!(page.fills[0].order_id, "legacy-order");
+    assert_eq!(page.fills[0].price, 0.55);
+    assert_eq!(page.fills[0].size, 3.0);
+    assert_eq!(page.fills[0].fee, Some(0.01));
+    assert_eq!(page.fills[0].ts, Some(1780995601));
 }
 
 #[test]
@@ -408,6 +530,7 @@ fn place_order_body_uses_clob_v2_wire_fields() {
         "0xsignature",
         "api-key",
         "FAK",
+        false,
     );
 
     let order = body.get("order").expect("order");
@@ -429,6 +552,7 @@ fn place_order_body_uses_clob_v2_wire_fields() {
     assert!(body.get("feeRateBps").is_none());
     assert_eq!(body.get("owner").and_then(Value::as_str), Some("api-key"));
     assert_eq!(body.get("orderType").and_then(Value::as_str), Some("FAK"));
+    assert_eq!(body.get("postOnly").and_then(Value::as_bool), Some(false));
 }
 
 #[test]
